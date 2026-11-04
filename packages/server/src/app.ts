@@ -87,6 +87,9 @@ export interface AppDeps {
   terminalPty?: import("./core/exec/pty-session").PtySessionService
   /** 文件工作台：语言服务器（LSP）服务（组合根注入；缺省或本机无可用服务器时前端静默降级）。 */
   lsp?: import("./core/lsp/service").LspService
+  /** 可用模型配置清单（`GEBAI_LLM_MODELS` 已解析的条目，不含密钥——对外只暴露摘要）：
+   *  前端模型选择器与会话切换的权威清单；未注入时为空（未配置清单 → 只用启动配置，选择器不出现）。 */
+  modelConfigs?: () => import("./core/llm/llm").ModelConfigEntry[]
 }
 
 export type AppEnv = { Variables: { deps: AppDeps; user: AuthUser } }

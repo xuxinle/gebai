@@ -43,6 +43,15 @@ export const sessionHandlers: Record<string, WsHandler> = {
     await d.store.setPinned(String(p.id), p.pinned === true, user.id)
     return reply(true)
   },
+  // 会话模型配置切换（chat.json 持久化）：name 为空/null = 回落清单默认（第一条）
+  "session.model_config.set": async ({ d, user, p, reply }) => {
+    const name = p.name == null || p.name === "" ? undefined : String(p.name)
+    if (name !== undefined && !(d.modelConfigs?.() ?? []).some((c) => c.name === name)) {
+      return reply(false, undefined, `未知模型配置: ${name}`)
+    }
+    await d.store.setModelConfig(String(p.id), name, user.id)
+    return reply(true)
+  },
   "session.switch": async ({ d, user, p, conn, reply }) => {
     // 切换连接级当前会话（校验归属；当前会话持久化到每用户状态，重连/重启自动恢复）
     const s = await d.store.load(String(p.id), user.id)

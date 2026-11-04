@@ -435,12 +435,15 @@ const API_KINDS: ApiKind[] = ["openai", "responses", "anthropic"]
 /**
  * 任务级主模型配置覆盖：从会话/任务 env 提取 `GEBAI_LLM_*` 覆盖启动配置
  * （模型/接口地址/密钥/类型/上下文预算/多模态声明；`GEBAI_LLM_EXTRA_PARAMS` 由引擎单独经 ChatOptions 合并，不在此列）。
+ * `GEBAI_LLM_CONFIG` 指名 `GEBAI_LLM_MODELS` 列表条目时，该条目为完整基准（逐字段覆盖启动配置），
+ * 同环境的散项 `GEBAI_LLM_*` 再覆盖其字段（子会话/任务级显式指向优先）。
  * 无任何覆盖键时返回 null（调用方沿用启动 Provider 实例，避免无谓重建）。
  */
 export function modelEnvOverrides(env: Record<string, string> | undefined): Partial<ProviderConfig> | null {
   if (!env) return null
-  const out: Partial<ProviderConfig> = {}
-  let any = false
+  const named = namedModelConfigOverrides(env)
+  const out: Partial<ProviderConfig> = named ? { ...named } : {}
+  let any = !!named
   if (env.GEBAI_LLM_MODEL) {
     out.model = env.GEBAI_LLM_MODEL
     any = true
@@ -478,6 +481,257 @@ export function modelEnvOverrides(env: Record<string, string> | undefined): Part
 export function applyModelEnvOverrides(base: ProviderConfig, env: Record<string, string> | undefined): ProviderConfig {
   const o = modelEnvOverrides(env)
   return o ? { ...base, ...o } : base
+}
+
+/** 可用模型配置清单环境变量（JSON 数组，每项一份完整模型接入信息）。 */
+export const MODEL_CONFIGS_ENV = "GEBAI_LLM_MODELS"
+/** 会话/任务指名使用清单中哪一条的键（值 = 条目 name）。 */
+export const MODEL_CONFIG_ENV = "GEBAI_LLM_CONFIG"
+
+/**
+ * 清单模式（`GEBAI_LLM_MODELS`）下**进程级失效**的旧散项键：读写一律以清单为准，
+ * 旧写法整体让位（不保留「两套配置各说各话」的歧义）。任务级/子会话显式注入的这些键仍然生效，
+ * 优先级高于清单条目——用于把子会话单独指向另一个模型（见 `runSubSession`）。
+ */
+export const LEGACY_MODEL_ENV_KEYS: readonly string[] = [
+  "GEBAI_LLM_MODEL",
+  "GEBAI_LLM_API_BASE",
+  "GEBAI_LLM_API_KEY",
+  "GEBAI_LLM_API_KIND",
+  "GEBAI_LLM_MAX_CONTEXT",
+  "GEBAI_LLM_MAX_OUTPUT_TOKENS",
+  "GEBAI_LLM_EXTRA_PARAMS",
+  "GEBAI_LLM_MULTIMODAL",
+  "OPENAI_BASE_URL",
+  "OPENAI_API_KEY",
+  "OPENAI_MODEL",
+  "GEBAI_VISION_MODEL",
+  "GEBAI_VISION_API_BASE",
+  "GEBAI_VISION_API_KEY",
+  "GEBAI_VISION_API_KIND",
+  "GEBAI_VISION_MAX_CONTEXT",
+  "GEBAI_VISION_EXTRA_PARAMS",
+]
+
+/** 独立视觉（多模态）模型配置（随所在模型配置条目一起声明，缺省项继承该条目主模型）。 */
+export interface ModelVisionConfig {
+  model: string
+  apiKind?: ApiKind
+  apiBase?: string
+  apiKey?: string
+  maxContextTokens?: number
+  extraParams?: Record<string, unknown>
+}
+
+/**
+ * 一条模型配置（`GEBAI_LLM_MODELS` 的数组条目）：一份**完整自洽**的模型接入信息——
+ * 接口地址/模型名/密钥/多模态能力/（可选）独立视觉模型，切换会话的模型配置即整份切换。
+ *
+ * 字段命名与 `GEBAI_LLM_ROUTES` 同风格（snake_case），`url` 与 `api_base` 等价（前者更口语）。
+ */
+export interface ModelConfigEntry {
+  /** 配置名（会话保存与前端选择用的标识，同一清单内唯一）。 */
+  name: string
+  model: string
+  apiKind: ApiKind
+  apiBase: string
+  apiKey: string
+  maxContextTokens?: number
+  maxOutputTokens?: number
+  /** 主模型是否支持图片输入（附件图片 base64 内联进消息）。 */
+  multimodal: boolean
+  extraParams?: Record<string, unknown>
+  /** 独立视觉模型（配置后 vision 子代理走它；未配则回落到主模型 —— 须 multimodal）。 */
+  vision?: ModelVisionConfig
+}
+
+/** 条目字段读取（JSON 值宽容：类型不符/空串一律当未提供）。 */
+function entryString(r: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = r[k]
+    if (typeof v === "string" && v.trim()) return v.trim()
+  }
+  return undefined
+}
+
+function entryPositive(r: Record<string, unknown>, key: string): number | undefined {
+  const n = Number(r[key])
+  return r[key] !== undefined && Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+function entryObject(r: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const v = r[key]
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined
+  return v as Record<string, unknown>
+}
+
+/**
+ * 解析模型配置清单（`GEBAI_LLM_MODELS`）：JSON **对象数组**，每项一份完整配置。
+ *
+ * 校验口径（坏项静默跳过，不阻断启动——模型配置错不该让服务起不来）：
+ * - 缺 `model` 的项丢弃（没有模型名无法发起请求）；
+ * - `name` 缺省时用模型名；重名只保留首项（前端按名选择，重名无法区分）；
+ * - `api_kind` 非三者之一时按 `openai`；`multimodal` 支持 bool 与 "true"/"false" 字符串；
+ * - 视觉模型键：`vision_model` + 可选 `vision_api_base`/`vision_api_key`/`vision_api_kind`/`vision_max_context`/`vision_extra_params`。
+ *
+ * 未配置/非法 JSON/非数组一律返回空表（调用方回退旧散项环境变量）。
+ */
+export function parseModelConfigs(env: Record<string, string> | undefined): ModelConfigEntry[] {
+  const raw = env?.[MODEL_CONFIGS_ENV]
+  if (!raw || !raw.trim()) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const out: ModelConfigEntry[] = []
+  const seen = new Set<string>()
+  for (const item of parsed) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue
+    const r = item as Record<string, unknown>
+    const model = entryString(r, "model", "model_name")
+    if (!model) continue
+    const name = (entryString(r, "name", "id") ?? model).slice(0, 64)
+    if (seen.has(name)) continue
+    seen.add(name)
+    const kind = entryString(r, "api_kind")
+    const visionModel = entryString(r, "vision_model")
+    out.push({
+      name,
+      model,
+      apiKind: kind && API_KINDS.includes(kind as ApiKind) ? (kind as ApiKind) : "openai",
+      apiBase: entryString(r, "url", "api_base") ?? "",
+      apiKey: entryString(r, "api_key", "key") ?? "",
+      ...(entryPositive(r, "max_context") !== undefined ? { maxContextTokens: entryPositive(r, "max_context") } : {}),
+      ...(entryPositive(r, "max_output_tokens") !== undefined ? { maxOutputTokens: entryPositive(r, "max_output_tokens") } : {}),
+      multimodal: r.multimodal === true || r.multimodal === "true",
+      ...(entryObject(r, "extra_params") ? { extraParams: entryObject(r, "extra_params") } : {}),
+      ...(visionModel
+        ? {
+            vision: {
+              model: visionModel,
+              ...(entryString(r, "vision_api_kind") && API_KINDS.includes(entryString(r, "vision_api_kind") as ApiKind)
+                ? { apiKind: entryString(r, "vision_api_kind") as ApiKind }
+                : {}),
+              ...(entryString(r, "vision_api_base") ? { apiBase: entryString(r, "vision_api_base") } : {}),
+              ...(entryString(r, "vision_api_key") ? { apiKey: entryString(r, "vision_api_key") } : {}),
+              ...(entryPositive(r, "vision_max_context") !== undefined ? { maxContextTokens: entryPositive(r, "vision_max_context") } : {}),
+              ...(entryObject(r, "vision_extra_params") ? { extraParams: entryObject(r, "vision_extra_params") } : {}),
+            },
+          }
+        : {}),
+    })
+  }
+  return out
+}
+
+/** 清单默认配置（列表第一条）：未配置清单时 undefined。 */
+export function defaultModelConfig(env: Record<string, string> | undefined): ModelConfigEntry | undefined {
+  return parseModelConfigs(env)[0]
+}
+
+/** 按名取清单条目（未命中/空名返回 undefined）。 */
+export function modelConfigByName(env: Record<string, string> | undefined, name: string | undefined): ModelConfigEntry | undefined {
+  if (!name || !name.trim()) return undefined
+  return parseModelConfigs(env).find((c) => c.name === name)
+}
+
+/** 清单条目 → 完整 Provider 配置：条目未提供的项沿用基准（缺省 = 空地址/空密钥/128k 窗口）。 */
+export function providerConfigFromEntry(entry: ModelConfigEntry, base: ProviderConfig): ProviderConfig {
+  return {
+    apiKind: entry.apiKind,
+    apiBase: entry.apiBase || base.apiBase,
+    apiKey: entry.apiKey || base.apiKey,
+    model: entry.model,
+    maxContextTokens: entry.maxContextTokens ?? base.maxContextTokens,
+    multimodal: entry.multimodal,
+    ...(entry.maxOutputTokens !== undefined ? { maxOutputTokens: entry.maxOutputTokens } : base.maxOutputTokens !== undefined ? { maxOutputTokens: base.maxOutputTokens } : {}),
+    ...(entry.extraParams ? { extraParams: entry.extraParams } : {}),
+  }
+}
+
+/** 清单条目的独立视觉配置 → Provider 配置；未声明视觉模型返回 null（回落主模型）。 */
+export function visionConfigFromEntry(entry: ModelConfigEntry, main: ProviderConfig): ProviderConfig | null {
+  const v = entry.vision
+  if (!v) return null
+  return {
+    apiKind: v.apiKind ?? main.apiKind,
+    apiBase: v.apiBase ?? main.apiBase,
+    apiKey: v.apiKey ?? main.apiKey,
+    model: v.model,
+    maxContextTokens: v.maxContextTokens ?? main.maxContextTokens,
+    multimodal: true,
+    ...(v.extraParams ? { extraParams: v.extraParams } : {}),
+  }
+}
+
+/**
+ * 指名模型配置（`GEBAI_LLM_CONFIG`）→ 完整覆盖项：命中清单条目时整份生效（模型/地址/密钥/类型/
+ * 窗口/多模态/额外参数一并切换）；未命中（名字写错/清单已改）返回 null，调用方回落默认配置
+ * 并保持旧行为（不因一个错名字把会话变成「无模型」）。
+ */
+function namedModelConfigOverrides(env: Record<string, string> | undefined): Partial<ProviderConfig> | null {
+  const entry = modelConfigByName(env, env?.[MODEL_CONFIG_ENV])
+  if (!entry) return null
+  return {
+    model: entry.model,
+    apiKind: entry.apiKind,
+    ...(entry.apiBase ? { apiBase: entry.apiBase } : {}),
+    ...(entry.apiKey ? { apiKey: entry.apiKey } : {}),
+    ...(entry.maxContextTokens !== undefined ? { maxContextTokens: entry.maxContextTokens } : {}),
+    multimodal: entry.multimodal,
+    ...(entry.maxOutputTokens !== undefined ? { maxOutputTokens: entry.maxOutputTokens } : {}),
+    ...(entry.extraParams ? { extraParams: entry.extraParams } : {}),
+  }
+}
+
+/**
+ * 启动主/视觉模型配置：**首选模型配置清单**（`GEBAI_LLM_MODELS`，默认用第一条），
+ * 清单未配置（或 JSON 非法/为空）时回退旧的多变量写法（`GEBAI_LLM_*`/`OPENAI_*` + `GEBAI_VISION_*`）。
+ *
+ * 为何是「二选一」而非逐字段合并：清单条目的意义是**一份完整且自洽的接入信息**，
+ * 与旧散项混着读会得到谁也没写过的第三种配置（如旧 `GEBAI_LLM_API_BASE` 贴到新条目的模型上）。
+ * 清单一旦配置即整体按清单读，旧散项只在未配置清单时才生效。
+ *
+ * 旧写法的非法 `GEBAI_LLM_EXTRA_PARAMS` 仍在启动时报错（配置错早暴露），清单条目的非法项那么静默忽略。
+ */
+export function startupModelConfig(env: Record<string, string | undefined>): { main: ProviderConfig; vision: ProviderConfig | null; configs: ModelConfigEntry[] } {
+  const configs = parseModelConfigs(env as Record<string, string>)
+  if (configs.length) {
+    const entry = configs[0]
+    const base: ProviderConfig = { apiKind: "openai", apiBase: "", apiKey: "", model: "", maxContextTokens: 128000, multimodal: false }
+    const main = providerConfigFromEntry(entry, base)
+    return { main, vision: visionConfigFromEntry(entry, main), configs }
+  }
+  const apiBase = env.GEBAI_LLM_API_BASE || env.OPENAI_BASE_URL || ""
+  const apiKey = env.GEBAI_LLM_API_KEY || env.OPENAI_API_KEY || ""
+  const model = env.GEBAI_LLM_MODEL || env.OPENAI_MODEL || "deepseek-chat"
+  const apiKind = (env.GEBAI_LLM_API_KIND as ApiKind) || "openai"
+  const maxOutputTokens = env.GEBAI_LLM_MAX_OUTPUT_TOKENS ? Number(env.GEBAI_LLM_MAX_OUTPUT_TOKENS) : undefined
+  const main: ProviderConfig = {
+    apiKind,
+    apiBase,
+    apiKey,
+    model,
+    maxContextTokens: Number(env.GEBAI_LLM_MAX_CONTEXT || 128000),
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    multimodal: env.GEBAI_LLM_MULTIMODAL === "true",
+    extraParams: parseExtraParams(env.GEBAI_LLM_EXTRA_PARAMS),
+  }
+  const vision: ProviderConfig | null = env.GEBAI_VISION_MODEL
+    ? {
+        apiKind: (env.GEBAI_VISION_API_KIND as ApiKind) || apiKind,
+        apiBase: env.GEBAI_VISION_API_BASE || apiBase,
+        apiKey: env.GEBAI_VISION_API_KEY || apiKey,
+        model: env.GEBAI_VISION_MODEL,
+        maxContextTokens: Number(env.GEBAI_VISION_MAX_CONTEXT || 128000),
+        multimodal: true,
+        extraParams: parseExtraParams(env.GEBAI_VISION_EXTRA_PARAMS),
+      }
+    : null
+  return { main, vision, configs }
 }
 
 /**
@@ -537,23 +791,27 @@ export function resolveModelRouteProvider(base: ProviderConfig, env: Record<stri
 
 /**
  * 任务级视觉（多模态）Provider 解析：`GEBAI_VISION_*` env 覆盖启动视觉配置；
+ * 指名模型配置（`GEBAI_LLM_CONFIG`）时优先用该条目的视觉模型。
  * 未配置视觉模型时回落到声明多模态能力的主模型（含任务级 `GEBAI_LLM_MULTIMODAL` 覆盖）。
  * 返回 null 表示视觉不可用。
  */
 export function resolveVisionProvider(mainCfg: ProviderConfig, visionCfg: ProviderConfig | null, env: Record<string, string> | undefined): LLMProvider | null {
   const main = applyModelEnvOverrides(mainCfg, env)
-  const vModel = env?.GEBAI_VISION_MODEL || visionCfg?.model
+  // 指名模型配置的视觉模型（会话选中的配置自带视觉模型时整份切换，与主模型保持同一配置）
+  const namedEntry = modelConfigByName(env, env?.[MODEL_CONFIG_ENV])
+  const namedVision = namedEntry ? visionConfigFromEntry(namedEntry, main) : null
+  const vModel = env?.GEBAI_VISION_MODEL || namedVision?.model || visionCfg?.model
   if (!vModel) return main.multimodal ? createProvider(main) : null
   const maxCtx = Number(env?.GEBAI_VISION_MAX_CONTEXT)
   const extra = parseExtraParamsSafe(env?.GEBAI_VISION_EXTRA_PARAMS)
   const merged: ProviderConfig = {
-    apiKind: (env?.GEBAI_VISION_API_KIND && API_KINDS.includes(env.GEBAI_VISION_API_KIND as ApiKind) ? env.GEBAI_VISION_API_KIND : (visionCfg?.apiKind || main.apiKind)) as ApiKind,
-    apiBase: env?.GEBAI_VISION_API_BASE || visionCfg?.apiBase || main.apiBase,
-    apiKey: env?.GEBAI_VISION_API_KEY || visionCfg?.apiKey || main.apiKey,
+    apiKind: (env?.GEBAI_VISION_API_KIND && API_KINDS.includes(env.GEBAI_VISION_API_KIND as ApiKind) ? env.GEBAI_VISION_API_KIND : (namedVision?.apiKind || visionCfg?.apiKind || main.apiKind)) as ApiKind,
+    apiBase: env?.GEBAI_VISION_API_BASE || namedVision?.apiBase || visionCfg?.apiBase || main.apiBase,
+    apiKey: env?.GEBAI_VISION_API_KEY || namedVision?.apiKey || visionCfg?.apiKey || main.apiKey,
     model: vModel,
-    maxContextTokens: (env?.GEBAI_VISION_MAX_CONTEXT !== undefined && Number.isFinite(maxCtx) && maxCtx > 0 ? maxCtx : visionCfg?.maxContextTokens) || main.maxContextTokens,
+    maxContextTokens: (env?.GEBAI_VISION_MAX_CONTEXT !== undefined && Number.isFinite(maxCtx) && maxCtx > 0 ? maxCtx : namedVision?.maxContextTokens || visionCfg?.maxContextTokens) || main.maxContextTokens,
     multimodal: true,
-    extraParams: extra || visionCfg?.extraParams,
+    extraParams: extra || namedVision?.extraParams || visionCfg?.extraParams,
   }
   return createProvider(merged)
 }

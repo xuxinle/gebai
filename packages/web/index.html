@@ -86,6 +86,9 @@
         </div>
         <span id="header-title" class="header-title"></span>
         <div class="header-right">
+          <!-- 模型配置切换器（标题栏右侧最左）：按当前会话选择 GEBAI_LLM_MODELS 中的哪一条；
+               未配置清单（只有一份启动配置）时整组隐藏，由 model-picker.ts 的 syncModelPicker 决定 -->
+          <div id="model-picker" class="model-picker" hidden></div>
           <!-- 单轮计时器：运行中实时走，结束定格保留，下次运行重启；按时长分级变色，hover 显示累计总运行时（外观 tab 可关） -->
           <div id="turn-timer" class="turn-timer" hidden aria-hidden="true">
             <svg class="tt-ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg>

@@ -40,6 +40,7 @@ const SUMMARIES: Record<string, Record<string, string>> = {
   "/api/v1/env/catalog": { get: "环境变量目录（前端面板白名单）" },
   "/api/v1/tools": { get: "工具集查询", patch: "工具启停" },
   "/api/v1/sub-agents": { get: "子Agent 能力列表" },
+  "/api/v1/models": { get: "可用模型配置清单（GEBAI_LLM_MODELS 摘要，不含密钥）" },
   "/api/v1/feedback": { get: "反馈查询（管理员可全部）", post: "提交反馈" },
   "/api/v1/webhooks": { get: "Webhook 列表", post: "注册 Webhook" },
   "/api/v1/webhooks/{id}": { delete: "删除 Webhook" },

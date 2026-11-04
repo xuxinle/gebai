@@ -69,8 +69,10 @@
 | `GEBAI_PUBLIC_URL` | 对外可访问地址（如 `http://localhost:3000` 或公网域名）：飞书用户授权（user_access_token）自动回调默认取 `{GEBAI_PUBLIC_URL}/api/v1/oauth/feishu/callback`（缺省回落 `http://localhost:{GEBAI_PORT|3000}`），需在开发者后台「安全设置 → 重定向 URL」登记 | 空（回落 localhost） |
 | `GEBAI_SELF_MODIFY` | 是否允许 `self_optimize` 修改服务端源码（`true`/`false`） | `false` |
 | `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：风险能力**降级而非禁用**——`sh` 只读命令白名单 + 重定向限用户目录、`py`/`js` 只读运行时（写/进程/网络屏蔽，仅保留文件读取）、`write`/`edit`/`file` 限定用户目录内、`task_*` 调度类硬阻断、子Agent 工具按 `Tool.safeMode` 自主声明过滤注册（详见「安全模型 → 安全模式」） | `false` |
-| `GEBAI_LLM_MODEL` / `OPENAI_*` | LLM Provider 与模型配置 | - |
-| `GEBAI_LLM_API_BASE` / `GEBAI_LLM_API_KEY` | LLM 服务地址与密钥（等价 `OPENAI_*`） | - |
+| `GEBAI_LLM_MODELS` | **模型配置清单**（JSON 对象数组，**首选**）：每项一份完整自洽的接入信息——`name`（配置名，缺省用模型名，清单内唯一）/ `model`（必填）/ `url`（别名 `api_base`）/ `api_key`（别名 `key`）/ `api_kind` / `max_context` / `max_output_tokens` / `multimodal` / `extra_params`，以及可选的独立视觉模型 `vision_model` + `vision_api_base`/`vision_api_key`/`vision_api_kind`/`vision_max_context`/`vision_extra_params`。启动基准取第一条（列表默认），前端标题栏右侧的模型下拉**按会话切换**（会话选中项持久化在 chat.json 的 `modelConfig`）；配置本项后旧的 `GEBAI_LLM_*`/`OPENAI_*`/`GEBAI_VISION_*` 散项**进程级整体让位**（既不混读，也不会上又写成第三种配置），任务级/子会话显式注入的同名散项仍生效（优先级高于条目） | 空（回退下面的单配置写法） |
+| `GEBAI_LLM_CONFIG` | 指名使用清单中的哪一条（条目 `name`）：由会话选择自动写入任务 env（`EnvManager.resolve` 按会话 `modelConfig` 注入，优先级低于显式环境变量）；名字未命中/未配置清单时回落默认配置（不会变成「无模型」） | 空（= 清单第一条） |
+| `GEBAI_LLM_MODEL` / `OPENAI_*` | LLM Provider 与模型配置（**未配置 `GEBAI_LLM_MODELS` 时生效**） | - |
+| `GEBAI_LLM_API_BASE` / `GEBAI_LLM_API_KEY` | LLM 服务地址与密钥（等价 `OPENAI_*`；未配置 `GEBAI_LLM_MODELS` 时生效） | - |
 | `GEBAI_LLM_API_KIND` | LLM 接口类型：`openai`（兼容 chat/completions）/ `responses`（OpenAI Responses API）/ `anthropic` | `openai` |
 | `GEBAI_LLM_ROUTES` | **命名模型路由表**（JSON 对象，`subsession_run` 多路接口用）：`{"路由名": {"model": "...", "api_base"?: "...", "api_key"?, "api_kind"?, "max_context"?}}`——子会话运行的 `model` 参数按路由名走独立端点/模型（未指定的项沿用主配置基准），多子会话多路并行分摊单路限流；未命中路由名视为字面模型名；非法 JSON 静默忽略；会话/任务级 env 同样生效（见「子会话运行」） | 空（分支沿用任务级模型） |
 | `GEBAI_LLM_EXTRA_PARAMS` | 额外模型接口参数（JSON 对象，如 `{"reasoning_effort":"high"}`），每次请求顶层合并进请求体；非法 JSON 启动即报错 | 空 |
@@ -162,7 +164,7 @@
 - 对外提供双通道 API：**WebSocket**（实时双向流式）与 **REST HTTP**（同步请求，业务系统集成）
 - 服务端内置 Web UI，通过浏览器可直接访问使用
 - LLM 交互、子Agent管理、工具执行等逻辑全部封装在服务端内部
-- 模型配置通过环境变量管理（`GEBAI_*` / `OPENAI_*`）；**服务端可不配置任何模型变量**——前端「设置 → 环境变量」配置（浏览器本地、不落盘），随每次发送消息临时注入，任务启动按合并后 env 重建 Provider（见「环境变量配置」）；未配置接口地址时 Provider 抛配置错误（`LLMConfigError`，不重试直接失败），错误信息给出前端配置入口指引
+- 模型配置通过环境变量管理（`GEBAI_*` / `OPENAI_*`）；首选 `GEBAI_LLM_MODELS` 清单（多份完整配置 + 会话级切换，见「模型配置清单与会话级切换」），未配置清单时回到单配置写法；**服务端可不配置任何模型变量**——前端「设置 → 环境变量」配置（浏览器本地、不落盘），随每次发送消息临时注入，任务启动按合并后 env 重建 Provider（见「环境变量配置」）；未配置接口地址时 Provider 抛配置错误（`LLMConfigError`，不重试直接失败），错误信息给出前端配置入口指引
 - 支持多种 LLM Provider：支持 OpenAI 兼容 `chat/completions`、OpenAI Responses（`/responses`）与 Anthropic `messages` 三类接口（均流式），通过统一的 `provider.chat()` 抽象封装，自行解析 SSE 流，不依赖第三方 AI SDK
 - **额外模型接口参数**：支持自定义非标准请求体参数（如 `reasoning_effort` 推理强度、`temperature`、`thinking` 等），来源两级——Provider 级（`GEBAI_LLM_EXTRA_PARAMS` 环境变量，启动解析失败即报错）+ 任务级（浏览器本地注入同名环境变量，非法 JSON 静默忽略），后者优先，均顶层合并进请求体
 - **任务级模型覆盖**：主模型与视觉模型配置（`GEBAI_LLM_*` 全套与 `GEBAI_VISION_*`）支持会话/任务级覆盖——启动时以进程环境变量固化基准配置（`core/llm/llm.ts` 的 `applyModelEnvOverrides`/`resolveVisionProvider`，boot/compose.ts 组装 `AgentEngineOptions.resolveProvider` 与 env 感知的视觉 getter），每次任务启动按合并后 env 解析 Provider（无覆盖键时沿用启动实例零开销）；覆盖项含模型名、接口地址、密钥、接口类型、上下文预算、多模态声明，未覆盖项继承启动配置；作用域覆盖主循环（含上下文压缩阈值/摘要与附件内联判定——**主动压缩（UI/REST 入口）未显式指定 Provider 时同样按合并后 env 解析**）与 `subsession_run` 子会话运行
@@ -873,6 +875,14 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | 任务级 | 任务定义（`task_add`/`task_update` 的 `env`、REST body、前端任务表单） | **服务端用户目录 `users/{user}/tasks.json`（用户显式保存的配置；敏感键值 AES-256-GCM 加密落盘）** | 仅该任务的每次执行注入（脚本子进程 / prompt 型执行会话），优先级最高；无人值守运行不依赖浏览器发包（见「统一任务管理 → 任务级环境变量」） |
 
 **admin 密码引导**：服务模式不设注册表引导（**不落明文密码**）——启动参数 `GEBAI_ADMIN_PASSWORD_HASH="salt:hash"`（scrypt 加盐哈希，`bun run --cwd packages/server hash-password` 生成）**设置则启用 admin（覆盖其哈希），不设置则 admin 被禁用**——admin 唯一入口即此参数（不可注册创建）；admin 禁用不影响普通用户（登录页可自助注册，注册用户恒为普通角色）。
+
+#### 模型配置清单与会话级切换
+
+- **一个变量管多份配置**：`GEBAI_LLM_MODELS` 是 JSON 对象数组，每项一份**完整自洽**的模型接入信息（配置名 / 模型名 / 接口地址 / 密钥 / 接口类型 / 窗口 / 多模态 / 可选独立视觉模型），解析在 `core/llm/llm.ts` 的 `parseModelConfigs`
+- **读取优先级二选一，不混读**：配置了清单就以清单为准（启动基准 = 第一条，即列表默认），旧的 `GEBAI_LLM_*`/`OPENAI_*`/`GEBAI_VISION_*` 散项在进程级**整体让位**（启动时从环境里摘除）——混读会拼出谁也没写过的一份（如旧接口地址贴到新模型上）；未配置清单时行为与之前完全一致
+- **选择存在会话里**：`SessionData.modelConfig`（chat.json 持久化）记住该会话选的是哪一条；`EnvManager.resolve` 把它以 `GEBAI_LLM_CONFIG` 注入任务 env，任务启动按它重建主/视觉 Provider——**对话/定时任务/飞书桥接/子会话继承都走同一口**。优先级：会话选择 < 显式环境变量（会话 env / 浏览器本地 / 子会话自定义），于是子会话仍可单独指向另一个模型
+- **失效与回落**：名字在清单里已不存在（清单改过、会话从别处导入）时回落默认配置（不报错、不变成「无模型」）；切换/清除模型配置不刷新 `updatedAt`（不动列表排序基线）
+- **对外面**：`GET /api/v1/models` 返回清单摘要（名称/模型/接口地址/窗口/多模态/视觉模型，**密钥永不出站**）、WS `session.model_config.set` 写回会话；前端标题栏右侧最左的模型下拉按会话切换（未配置清单或草稿态时隐藏），上下文圆环分母按当前配置的 `max_context` 算
 
 #### 前端环境变量（浏览器本地，不保存到服务端）
 

@@ -2,6 +2,7 @@ import { readdir, unlink } from "node:fs/promises"
 import { join } from "node:path"
 import type { SessionStore } from "./store"
 import type { EnvVarSource } from "@gebai/sdk"
+import { MODEL_CONFIG_ENV } from "../llm/llm"
 
 /** 敏感判定按「完整结尾单词」匹配（`(^|_)WORD$`），同时覆盖后缀与前缀/裸名形态：
  *  如 GEBAI_ADMIN_PASSWORD_HASH（_HASH 结尾，管理员口令哈希）、AWS_ACCESS_KEY_ID（_KEY_ID）、
@@ -9,8 +10,11 @@ import type { EnvVarSource } from "@gebai/sdk"
 const SENSITIVE_RE =
   /(^|_)(PASSWORD|PASSWD|PASSPHRASE|SECRET|SECRETS|TOKEN|TOKENS|KEY|KEYS|KEY_ID|CREDENTIAL|CREDENTIALS|CRED|AUTH|PAT|HASH|APIKEY|DSN|CONNECTION_STRING|DATABASE_URL)$/i
 
+/** 名字看不出敏感、值内却含密钥的结构化配置（整串脱敏）。 */
+const SENSITIVE_WHOLE = new Set(["GEBAI_LLM_MODELS"])
+
 export function isSensitive(name: string): boolean {
-  return SENSITIVE_RE.test(name)
+  return SENSITIVE_WHOLE.has(name) || SENSITIVE_RE.test(name)
 }
 
 export function mask(value: string): string {
@@ -77,12 +81,17 @@ export class EnvManager {
   constructor(private store: SessionStore) {}
 
   /** 任务 env 解析：进程全局 env（.env/系统注入）+ 会话内存态 env（运行中经 env 接口/飞书命令设置，不落盘）。
-   *  用户环境变量只存浏览器本地（localStorage），随 prompt 注入为任务级 envOverride（覆盖以上两层）。 */
+   *  用户环境变量只存浏览器本地（localStorage），随 prompt 注入为任务级 envOverride（覆盖以上两层）。
+   *  会话选中的模型配置（chat.json 持久化的 `modelConfig`）以 `GEBAI_LLM_CONFIG` 形态并入：后续每次
+   *  运行（对话/定时任务/飞书桥接/子会话继承）都按它解析 Provider。优先级：**会话选择 < 显式环境变量**
+   *  ——会话选择是“这个会话默认用哪份”，显式注入的键（会话 env / 前端本地 / 子会话自定义）是“这一次用另一份”。 */
   async resolve(sessionId: string, user: string): Promise<Record<string, string>> {
-    const global: Record<string, string> = {}
-    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) global[k] = v
-    const sessionEnv = await this.store.getEnv(sessionId, user)
-    return { ...global, ...sessionEnv }
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) out[k] = v
+    const chosen = await this.store.load(sessionId, user).catch(() => null)
+    if (chosen?.modelConfig) out[MODEL_CONFIG_ENV] = chosen.modelConfig
+    Object.assign(out, await this.store.getEnv(sessionId, user))
+    return out
   }
 
   async describe(sessionId: string, user: string): Promise<EnvVarSource[]> {

@@ -390,8 +390,17 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
 
 /** 模型上下文窗口（token）：来自服务端快照/session.list（0=未知/未配置）。 */
 let maxCtxTokens = 0
+/** 会话级窗口覆盖（当前会话选中的模型配置声明的窗口，0=不覆盖）：不同配置的窗口可能差数倍，
+ *  占比分母必须按实际生效的那一份算。与服务端默认值分开存——快照随时会重设默认值，
+ *  写进同一个变量会让刚切好的分母被下一拍快照冲掉。 */
+let sessionCtxWindow = 0
 export function setMaxCtxTokens(v: number): void {
   maxCtxTokens = v
+  renderHeaderCtx()
+}
+/** 设置/清除（0）当前会话的窗口覆盖（模型配置切换时由 model-picker 维护）。 */
+export function setSessionCtxWindow(v: number): void {
+  sessionCtxWindow = v
   renderHeaderCtx()
 }
 
@@ -407,8 +416,9 @@ export function renderHeaderCtx(): void {
   const ctxFillEl = document.querySelector<SVGCircleElement>("#header-ctx .ctx-fill")
   if (!headerCtxEl || !ctxFillEl) return
   const used = currentSession?.ctxTokens ?? 0
-  const hasCtx = used > 0 && maxCtxTokens > 0
-  const pct = hasCtx ? Math.min(100, Math.round((used / maxCtxTokens) * 100)) : 0
+  const window = sessionCtxWindow || maxCtxTokens
+  const hasCtx = used > 0 && window > 0
+  const pct = hasCtx ? Math.min(100, Math.round((used / window) * 100)) : 0
   headerCtxEl.classList.toggle("no-ring", !hasCtx)
   ctxFillEl.style.strokeDashoffset = String(100 - pct)
   headerCtxEl.classList.toggle("warn", hasCtx && pct >= 50 && pct < 80)
@@ -420,7 +430,7 @@ export function renderHeaderCtx(): void {
     const lines: string[] = []
     if (connMsg) lines.push(connMsg) // 断开/异常原因置首（最紧要）
     if (hasCtx) {
-      lines.push(`上下文 ${used.toLocaleString()} / ${maxCtxTokens.toLocaleString()} tokens（${pct}%）`)
+      lines.push(`上下文 ${used.toLocaleString()} / ${window.toLocaleString()} tokens（${pct}%）`)
       if (cached !== undefined) lines.push(`缓存命中 ${cached.toLocaleString()} tokens（${Math.min(100, Math.round((cached / used) * 100))}%）`)
     }
     headerCtxEl.dataset.tip = lines.join("\n")

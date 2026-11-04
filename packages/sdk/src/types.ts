@@ -268,6 +268,27 @@ export interface SessionInfo {
   ctxCachedTokens?: number
   /** 会话置顶标记（置顶会话列表置前展示；置顶/取消不刷新 updatedAt。可选：旧服务端不返回）。 */
   pinned?: boolean
+  /** 会话选中的模型配置名（`GEBAI_LLM_MODELS` 条目的 name；空/缺省 = 列表默认配置）。
+   *  切换不刷新 updatedAt（配置操作不动排序基线）。 */
+  modelConfig?: string
+}
+
+/** 一条可用模型配置的公开概要（`GET /api/v1/models`）：不含密钥，仅用于前端选择与展示。 */
+export interface ModelConfigSummary {
+  /** 配置名（会话保存的就是它）。 */
+  name: string
+  /** 模型名。 */
+  model: string
+  /** 接口类型。 */
+  apiKind: string
+  /** 接口地址。 */
+  apiBase: string
+  /** 上下文窗口（token）：标题栏占比按它算，切换配置即换分母。 */
+  maxContextTokens?: number
+  /** 主模型是否声明多模态能力。 */
+  multimodal: boolean
+  /** 独立视觉（多模态）模型的模型名；无独立视觉模型时缺省。 */
+  visionModel?: string
 }
 
 /** 会话详情（`session.get` / REST GET /sessions/:id 返回）。

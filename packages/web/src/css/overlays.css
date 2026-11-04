@@ -252,6 +252,21 @@
 }
 /* 自绘下拉选择 */
 .sel { display: inline-block; }
+/* 标题栏模型配置切换器（右侧最左）：紧凑化，不抢标题行的高度与宽度；
+   名字长时省略号截断（悬浮 data-tip 给出完整模型/接口信息） */
+.model-picker { display: flex; align-items: center; flex: none; }
+.model-picker[hidden] { display: none; }
+.model-picker .sel-btn {
+  padding: 3px 8px;
+  gap: 6px;
+  font-size: 12px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+}
+.model-picker .sel-btn:hover { color: var(--text); }
+.model-picker .sel-val { min-width: 0; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker .sel-arrow { border-top-color: currentColor; }
 .sel-btn {
   display: inline-flex;
   align-items: center;

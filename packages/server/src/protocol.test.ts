@@ -150,6 +150,32 @@ describe("WS state model (MVC 一致性)", () => {
     await wsCall(single, "session.delete", { id: created.id })
   })
 
+  test("session.model_config.set 切换会话模型配置（列表/详情同步；未知名拒绝；未配置清单时只能清除）", async () => {
+    const created = (await (await fetch(`${base(single)}/api/v1/sessions`, { method: "POST" })).json()) as { id: string }
+    // 本测试实例未配置清单：任何具名配置都不存在 → 拒绝（不写一个永远解析不到的名字）
+    const bad = await wsCall(single, "session.model_config.set", { id: created.id, name: "nope" })
+    expect(bad.ok).toBe(false)
+    expect(bad.error).toContain("未知模型配置")
+    // 清除（name=null）总是允许：回落清单默认配置
+    expect((await wsCall(single, "session.model_config.set", { id: created.id, name: null })).ok).toBe(true)
+    // 直接写入存储层再回读（清单存在的部署里前端走的就是这条持久化路径）
+    await single.store.setModelConfig(created.id, "glm", "admin")
+    const detail = await wsCall(single, "session.get", { id: created.id })
+    expect((detail.payload?.session as { modelConfig?: string }).modelConfig).toBe("glm")
+    const list = await wsCall(single, "session.list")
+    expect((list.payload as { sessions: Array<{ id: string; modelConfig?: string }> }).sessions.find((s) => s.id === created.id)?.modelConfig).toBe("glm")
+    // 畸形 id：入口白名单拒绝（防路径穿越）
+    expect((await wsCall(single, "session.model_config.set", { id: "../escape", name: null })).ok).toBe(false)
+    await wsCall(single, "session.delete", { id: created.id })
+  })
+
+  test("GET /api/v1/models 列出可用配置且永不出站密钥", async () => {
+    // 未注入清单的实例：空表（前端据此隐藏选择器）
+    const res = await fetch(`${base(single)}/api/v1/models`)
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { configs: unknown[] }).configs).toEqual([])
+  })
+
   test("sync.request replays journal events missed while offline (跨连接)", async () => {
     ;(single.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
     const created = (await (await fetch(`${base(single)}/api/v1/sessions`, { method: "POST" })).json()) as { id: string }

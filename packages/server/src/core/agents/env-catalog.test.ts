@@ -25,7 +25,7 @@ describe("环境变量目录（前端配置白名单）", () => {
   test("全局组含模型相关配置（LLM 与视觉）", () => {
     const global = getEnvCatalog(defs).find((g) => g.group === "global")!
     const varNames = global.vars.map((v) => v.name)
-    for (const n of ["GEBAI_LLM_MODEL", "GEBAI_LLM_API_BASE", "GEBAI_LLM_API_KEY", "GEBAI_LLM_API_KIND", "GEBAI_LLM_MAX_CONTEXT", "GEBAI_LLM_EXTRA_PARAMS", "GEBAI_LLM_MULTIMODAL", "GEBAI_VISION_MODEL", "GEBAI_VISION_API_BASE", "GEBAI_VISION_API_KEY", "GEBAI_VISION_API_KIND"]) {
+    for (const n of ["GEBAI_LLM_MODELS", "GEBAI_LLM_CONFIG", "GEBAI_LLM_MODEL", "GEBAI_LLM_API_BASE", "GEBAI_LLM_API_KEY", "GEBAI_LLM_API_KIND", "GEBAI_LLM_MAX_CONTEXT", "GEBAI_LLM_EXTRA_PARAMS", "GEBAI_LLM_MULTIMODAL", "GEBAI_VISION_MODEL", "GEBAI_VISION_API_BASE", "GEBAI_VISION_API_KEY", "GEBAI_VISION_API_KIND"]) {
       expect(varNames).toContain(n)
     }
   })

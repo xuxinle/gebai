@@ -29,4 +29,19 @@ export function registerToolRoutes(rc: RouteCtx): void {
     await d.subAgents.refreshIfChanged()
     return c.json(d.subAgents.list())
   })
+
+  // 可用模型配置清单（`GEBAI_LLM_MODELS` 解析结果）：只出摘要字段，**密钥永不出站**——
+  // 前端选择器只需名字/模型/地址/能力就能展示，不需也不该拿到 key。
+  app.get("/api/v1/models", async (c) => {
+    const configs = (d.modelConfigs?.() ?? []).map((m) => ({
+      name: m.name,
+      model: m.model,
+      apiKind: m.apiKind,
+      apiBase: m.apiBase,
+      ...(m.maxContextTokens !== undefined ? { maxContextTokens: m.maxContextTokens } : {}),
+      multimodal: m.multimodal,
+      ...(m.vision ? { visionModel: m.vision.model } : {}),
+    }))
+    return c.json({ configs })
+  })
 }

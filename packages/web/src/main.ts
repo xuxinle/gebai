@@ -34,6 +34,7 @@ import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, enterSessionView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
+import { initModelPicker } from "./model-picker"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
 import { noteMerge } from "./subsessions"
@@ -246,7 +247,7 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
   bindPersonaPop() // 轮盘「拟人」按钮 → 拟人运行态浮层（未启用时按钮自行隐起）
   bindTasks() // 轮盘「任务」按钮 → 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列）
-bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（消息流里只留一行入口）
+  bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（消息流里只留一行入口）
   bindFilesSplit() // 文件工作台入口：主按钮 = 分屏并列，副按钮 = 全屏打开文件工作台（见 files-split.ts）
   restoreToken()
   // 工具卡片元数据（titleParams/args 模式，须先于历史消息渲染就绪）与外部身份兑换（同源集成，本地无令牌
@@ -410,6 +411,8 @@ bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（
   bindConnectionVerify()
   // 缓存子Agent 名：工具全名（{agent}_{tool}）解析显示用
   setSubAgentNames((await agentsPromise).map((a) => a.name))
+  // 模型配置清单（标题栏下拉）：与会话列表并行拉取，不阻塞首屏渲染
+  void initModelPicker()
   let sessions: SessionInfo[] = []
   try {
     sessions = await client.listSessions()

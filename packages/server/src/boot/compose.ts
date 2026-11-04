@@ -29,7 +29,7 @@ import { LspService } from "../core/lsp/service"
 import { createExternalAuthProvider } from "../external-auth"
 import { defaultCredentialSources, parseCredentialSources } from "../credential-sources"
 import { loadCustomCredentialSources } from "../custom-auth"
-import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
+import { applyModelEnvOverrides, createProvider, LEGACY_MODEL_ENV_KEYS, resolveModelRouteProvider, resolveVisionProvider, startupModelConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
 import { takeoverProcess } from "@gebai/agents"
 import { xiangqiController } from "@gebai/agents"
@@ -299,41 +299,15 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
 
   const store = new SessionStore({ home: config.gebaiHome })
 
-  const apiBase = process.env.GEBAI_LLM_API_BASE || process.env.OPENAI_BASE_URL || ""
-  const apiKey = process.env.GEBAI_LLM_API_KEY || process.env.OPENAI_API_KEY || ""
-  const model = process.env.GEBAI_LLM_MODEL || process.env.OPENAI_MODEL || "deepseek-chat"
-  const apiKind = (process.env.GEBAI_LLM_API_KIND as ApiKind) || "openai"
-  // 额外模型接口参数（如推理强度）：JSON 字符串，非法时启动即报错提示
-  const extraParams = parseExtraParams(process.env.GEBAI_LLM_EXTRA_PARAMS)
-  // 启动主模型配置（Provider 实例随任务级 env 覆盖重建，见 resolveProvider；本配置为缺省基准）
-  const mainConfig: ProviderConfig = {
-    apiKind,
-    apiBase,
-    apiKey,
-    model,
-    maxContextTokens: Number(process.env.GEBAI_LLM_MAX_CONTEXT || 128000),
-    // 单次响应输出 token 上限（大文件生成截断防护）：可选，未配置时 openai/responses 用服务端缺省、anthropic 用 8192
-    ...(process.env.GEBAI_LLM_MAX_OUTPUT_TOKENS ? { maxOutputTokens: Number(process.env.GEBAI_LLM_MAX_OUTPUT_TOKENS) } : {}),
-    // 主模型多模态能力须显式声明（GEBAI_LLM_MULTIMODAL=true）：默认 false，
-    // 避免纯文本模型谎报能力导致图片内联被接口拒绝；视觉能力请配置 GEBAI_VISION_* 外挂模型
-    multimodal: process.env.GEBAI_LLM_MULTIMODAL === "true",
-    extraParams,
+  // 模型配置：首选清单（GEBAI_LLM_MODELS，默认用第一条），未配置时回退旧的多变量写法。
+  // 清单模式下把进程级旧散项从环境里摘掉——节点环境变量会随任务 env 合并到模型解析面，
+  // 留着它们就会出现「清单写了 A、实际被 .env 的 B 篡改」；任务级/子会话显式注入的旧键不受影响（优先级仍高于条目）。
+  const { main: mainConfig, vision: visionConfig, configs: modelConfigs } = startupModelConfig(process.env)
+  if (modelConfigs.length) {
+    for (const k of LEGACY_MODEL_ENV_KEYS) delete process.env[k]
+    log.info(`[gebai] 模型配置清单已生效：${modelConfigs.length} 条，默认「${modelConfigs[0].name}」（${modelConfigs[0].model}）`)
   }
   const provider = createProvider(mainConfig)
-
-  // 额外多模态（视觉）模型：GEBAI_VISION_MODEL 配置后启用独立视觉 Provider（vision 子代理 analyze 使用），
-  // 接口地址/密钥/类型缺省时继承主模型配置；未配置时回落到主模型（须声明多模态能力）
-  const visionConfig: ProviderConfig | null = process.env.GEBAI_VISION_MODEL
-    ? {
-        apiKind: (process.env.GEBAI_VISION_API_KIND as ApiKind) || apiKind,
-        apiBase: process.env.GEBAI_VISION_API_BASE || apiBase,
-        apiKey: process.env.GEBAI_VISION_API_KEY || apiKey,
-        model: process.env.GEBAI_VISION_MODEL,
-        maxContextTokens: Number(process.env.GEBAI_VISION_MAX_CONTEXT || 128000),
-        multimodal: true,
-        extraParams: parseExtraParams(process.env.GEBAI_VISION_EXTRA_PARAMS),
-      }
-    : null
 
   // 安全模式：子Agent 工具按 Tool.safeMode 自主声明过滤（全局风险工具内置降级，不过滤）
   const registry = new ToolRegistry({ safeMode: config.safeMode })
@@ -1376,6 +1350,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     credentialSources,
     tasks,
     todos,
+    // 可用模型配置清单（启动时解析一次即定：清单来自进程环境，重启生效——与会话选择项的生命期一致）
+    modelConfigs: () => modelConfigs,
     // 拟人模式运行态（未启用时 undefined → REST 端点 404）
     ...(personaState ? { personaState } : {}),
     ...(personaSetupError ? { personaSetupError } : {}),

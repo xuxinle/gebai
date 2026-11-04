@@ -10,6 +10,7 @@ import type {
   FeedbackInfo,
   FeedbackInput,
   FileEntry,
+  ModelConfigSummary,
   SessionDetail,
   SessionImportData,
   SessionInfo,
@@ -758,6 +759,14 @@ export class GebaiClient {
   /** 置顶/取消置顶会话（元数据操作，不刷新 updatedAt）。 */
   pinSession(id: string, pinned: boolean): Promise<void> {
     return this.request<void>("session.pin", { id, pinned })
+  }
+  /** 切换会话使用的模型配置（`GEBAI_LLM_MODELS` 条目名；null/空串 = 回落清单默认配置）。 */
+  setSessionModelConfig(id: string, name: string | null): Promise<void> {
+    return this.request<void>("session.model_config.set", { id, name })
+  }
+  /** 可用模型配置清单（不含密钥）：模型选择器与「当前用的是哪一个」展示用。 */
+  listModelConfigs(): Promise<ModelConfigSummary[]> {
+    return this.get<{ configs: ModelConfigSummary[] }>("/api/v1/models").then((r) => r.configs)
   }
   switchSession(id: string): Promise<void> {
     return this.request<void>("session.switch", { id })

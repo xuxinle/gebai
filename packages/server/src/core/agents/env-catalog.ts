@@ -22,7 +22,13 @@ export interface EnvCatalogGroup {
 /** 全局可配置变量（含模型相关配置）。模型相关项为任务级生效：配置后覆盖服务端启动配置（按任务重建 Provider），
  *  未配置的项沿用服务端启动配置。 */
 const GLOBAL_VARS: EnvCatalogVar[] = [
-  { name: "GEBAI_LLM_MODEL", description: "主模型名称（如 deepseek-chat）；配置后本任务使用该模型，未配置用服务端启动配置" },
+  {
+    name: "GEBAI_LLM_MODELS",
+    description:
+      "模型配置清单（JSON 对象数组）：每项一份完整配置 {name?, model, url, api_key, api_kind?, max_context?, multimodal?, vision_model?, vision_api_base?, vision_api_key?}；首选生效、缺省用第一条；配置后旧 GEBAI_LLM_*/GEBAI_VISION_* 散项不再生效",
+  },
+  { name: "GEBAI_LLM_CONFIG", description: "指定使用清单中的哪一条（条目 name）；由会话选择自动写入，缺省为清单第一条" },
+  { name: "GEBAI_LLM_MODEL", description: "主模型名称（如 deepseek-chat）；配置后本任务使用该模型，未配置用服务端启动配置（未配置 GEBAI_LLM_MODELS 时生效）" },
   { name: "GEBAI_LLM_API_BASE", description: "LLM 接口地址（OpenAI 兼容，如 https://api.deepseek.com）；覆盖服务端启动配置" },
   { name: "GEBAI_LLM_API_KEY", description: "LLM 接口密钥（敏感，仅本次任务临时注入，不落盘）" },
   { name: "GEBAI_LLM_API_KIND", description: "接口类型：openai（chat/completions）/ responses（OpenAI Responses）/ anthropic" },

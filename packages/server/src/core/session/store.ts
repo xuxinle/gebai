@@ -56,6 +56,10 @@ export interface SessionData {
   /** 会话置顶标记（chat.json 持久化）：置顶会话在列表置顶分组置前展示；
    *  未定义 = 未置顶（旧格式天然兼容）。置顶/取消不刷新 updatedAt（元数据操作不动排序基线）。 */
   pinned?: boolean
+  /** 会话选中的模型配置名（`GEBAI_LLM_MODELS` 条目的 name；chat.json 持久化）。
+   *  未定义 = 未选（用清单默认配置，即第一条）；名字在清单里已不存在时同样回落默认。
+   *  切换不刷新 updatedAt（配置操作不动排序基线）。 */
+  modelConfig?: string
   /** 超限截断累计（chat.json 持久化）：因消息上限（MAX_CACHE_MESSAGES）被丢弃的历史消息条数与
    *  最近一次时间戳。丢弃只针对最早的非保护消息（用户输入/系统提示词/存档原位保留，见 isProtectedMessage）。
    *  loadHistory 据此在历史最前注入「历史裁剪」提示——模型于是知道更早内容已不在上下文中，
@@ -96,6 +100,7 @@ export function toSessionInfo(s: SessionData): SessionInfo {
     ctxTokens: s.ctxTokens ?? fallback ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
     ctxCachedTokens: s.ctxCachedTokens,
     pinned: s.pinned ?? false,
+    ...(s.modelConfig ? { modelConfig: s.modelConfig } : {}),
   }
 }
 
@@ -115,6 +120,8 @@ interface SessionMeta {
   createdAt: number
   updatedAt: number
   pinned?: boolean
+  /** 会话选中的模型配置名（列表项悬浮/切换时展示；与 chat.json 同值）。 */
+  modelConfig?: string
   /** 列表展示值：真实 usage 真值优先，无真值时为按消息估算的兜底值（与 toSessionInfo 同口径） */
   ctxTokensFallback?: number
   /** 同一次调用的提示词缓存命中 tokens（纯展示口径，列表圆环悬浮命中率） */
@@ -135,6 +142,7 @@ function toSessionMeta(s: SessionData, source: SourceStamp): SessionMeta {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     pinned: s.pinned,
+    ...(s.modelConfig ? { modelConfig: s.modelConfig } : {}),
     ctxTokensFallback: s.ctxTokens ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
     ctxCachedTokens: s.ctxCachedTokens,
     messageCount: s.messages?.length ?? 0,
@@ -153,6 +161,7 @@ function metaToSession(m: SessionMeta): SessionData & { ctxTokensFallback?: numb
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
     pinned: m.pinned,
+    ...(m.modelConfig ? { modelConfig: m.modelConfig } : {}),
     ctxCachedTokens: m.ctxCachedTokens,
     ctxTokensFallback: m.ctxTokensFallback,
   }
@@ -802,6 +811,15 @@ export class SessionStore {
     const session = await this.load(sessionId, userId)
     if (!session) throw new Error(`session not found: ${sessionId}`)
     session.pinned = pinned || undefined
+    await this.save(session, { touch: false })
+  }
+
+  /** 会话模型配置切换（元数据操作）：name 为空/未给出则清除（回落清单默认配置）；
+   *  不刷新 updatedAt（切模型不该把会话跳到列表顶部）。 */
+  async setModelConfig(sessionId: string, name: string | undefined, userId?: string): Promise<void> {
+    const session = await this.load(sessionId, userId)
+    if (!session) throw new Error(`session not found: ${sessionId}`)
+    session.modelConfig = name?.trim() || undefined
     await this.save(session, { touch: false })
   }
 

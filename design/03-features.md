@@ -350,6 +350,7 @@ WebSocket 消息格式（JSON）：
 | `session.delete` | 删除会话 |
 | `session.rename` | 重命名会话 |
 | `session.pin` | 置顶/取消置顶会话（`pinned` 布尔；元数据操作不刷新 `updatedAt`） |
+| `session.model_config.set` | 切换会话使用的模型配置（`name` = `GEBAI_LLM_MODELS` 条目名；`null`/空串 = 回落清单默认配置）；未知名拒绝（不写入一个永远解析不到的配置名）；不刷新 `updatedAt` |
 | `session.switch` | 切换当前会话 |
 | `session.env.get` | 获取会话环境变量（内存态，含来源层级） |
 | `session.env.set` | 设置/覆盖/删除会话环境变量（内存写入，不落盘） |
@@ -475,6 +476,7 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/git/{stage,unstage,discard,commit,branch,tag,checkout,merge,rebase,cherry-pick,revert,reset,stash,remote,fetch,pull,push,init}` | POST | Git 写操作（统一「开关守卫 → 执行 → 审计」；破坏性操作默认先备份并返回可恢复引用；`GEBAI_GIT_WRITE`/`GEBAI_GIT_REMOTE` 可关） |
 | `/api/v1/tools` | GET/PATCH | 工具集查询/启停配置 |
 | `/api/v1/sub-agents` | GET | 子Agent 能力列表（名称、描述、工具、打包状态） |
+| `/api/v1/models` | GET | 可用模型配置清单摘要（`GEBAI_LLM_MODELS` 的名称/模型/接口地址/上下文窗口/多模态/视觉模型；**密钥永不出站**）；未配置清单时返回空表，前端据此隐藏标题栏模型下拉 |
 | `/api/v1/webhooks` | GET/POST/DELETE | Webhook 注册/管理 |
 | `/api/v1/tts` | POST | 语音朗读：`{ text, voice?, rate?, pitch?, volume? }` → `audio/wav` 字节流（不落盘；长文本按句分片合成后拼接，同文同参进程内缓存；平台无内置离线引擎时 503 并说明不做联网合成）；`/api/v1/tts/status` 探测可用性与缓存现状 |
 
