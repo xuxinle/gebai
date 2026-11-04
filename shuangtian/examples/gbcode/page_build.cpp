@@ -464,13 +464,10 @@ namespace gbcode_ui {
             split.set_min_first_size(220.0f);
             // IDEA 新 UI：面板之间的缝（透出外层壳色）——见 `kPanelGap`。
             split.set_gap(kPanelGap);
-            // **缝隙填成面板色**（用户 2026-11-04 要求「面板分隔线要隐藏」）：
-            // 缝还在（布局间距与拖拽手柄不变），但不再透出外层壳色——
-            // 浅色主题下那层壳比面板亮一档，看上去就是一道分隔亮带。
-            //
-            // 用 `Content` 而不是 `Base`：缝两侧是**编辑器与终端**，两者都是
-            // `Surface::Content`（阅读面，亮色下纯白）；填 `Base` 会留下一条更暗的缝。
-            split.set_gap_fill(Element::Surface::Content);
+            // **缝隙填成与标题栏同色**（用户 2026-11-04 指定）：
+            // 不再透出「面板色」那条亮带，也不跟随面板白底——缝的观感与标题栏/
+            // 活动栏/状态栏同一档（都是 `Surface::Alt`），整块外壳的颜色连成一体。
+            split.set_gap_fill(Element::Surface::Alt);
             // 侧栏可见性：**只翻隐藏位**，不重建树（见上方注释）。
             split.set_first_hidden(!sidebar_visible_.value());
             // 比例存档在 `sidebar_ratio_`（非响应式）：拖动回调写它，重组时读它。
@@ -1257,9 +1254,8 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
             split.set_orientation(SplitView::Orientation::Vertical);
             // IDEA 新 UI：上下两个面板之间也用缝分隔（与左右一致）。
             split.set_gap(kPanelGap);
-            // 同侧栏那条：缝隙填成面板色，不再形成分隔亮带。
-            // 上下两侧分别是编辑器与终端，都是 `Surface::Content`（纯白阅读面）。
-            split.set_gap_fill(Element::Surface::Content);
+            // 同侧栏那条：缝隙填成**与标题栏同色**（`Surface::Alt`）。
+            split.set_gap_fill(Element::Surface::Alt);
             split.set_min_ratio(0.05f);
             split.set_ratio(bottom_ratio_, false);
             // 归位目标 = 默认比例（编辑器 2/3 ⇒ 终端 1/3 高）。

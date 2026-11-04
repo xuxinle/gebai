@@ -415,10 +415,38 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
   if (gap_ > 0.0f && gap_fill_.has_value()) {
     const math::Rect handle = handle_rect();
     const float center = horizontal ? handle.center().x : handle.center().y;
-    const math::Rect strip = horizontal
-                                ? math::Rect{center - gap_ * 0.5f, bounds_.y, gap_, bounds_.height}
-                                : math::Rect{bounds_.x, center - gap_ * 0.5f, bounds_.width, gap_};
-    canvas.fill_rect(strip, raster::Paint::solid(gap_fill_color_));
+    const float half = gap_ * 0.5f;
+    const raster::Paint fill = raster::Paint::solid(gap_fill_color_);
+    // **圆角半径取子面板的**（不是本组件的 `style_.radius`——那只是 `radius_sm`，
+    // 而面板通常用更大的圆角，如 gbcode 的 `kPanelRadius = 14`）。
+    // 取两者较大值：两侧面板圆角不一致时以大的为准（宁可多涂，反正会被盖）。
+    float radius = std::max(0.0f, style_.radius);
+    for (std::size_t index = 0; index < child_count(); ++index) {
+      radius = std::max(radius, child_at(index)->style().radius);
+    }
+    // 填充画在**子元素之前**（`paint_impl`: paint_box → paint_content → 孩子），
+    // 所以面板随后会把自己覆盖到的像素完全盖掉，只有「面板没画到的地方」才露出填充色。
+    // 于是圆角带直接填一整块矩形就行——多涂的部分被盖掉，不需要去算弧的形状。
+    const float band = std::min(radius, (horizontal ? bounds_.height : bounds_.width) * 0.5f);
+    if (horizontal) {
+      // 中段（两侧边界是直的）：只填缝。
+      canvas.fill_rect(math::Rect{center - half, bounds_.y, gap_, bounds_.height}, fill);
+      // 上下圆角带：横向加宽到 `gap + 2r`，高度取 `r`。
+      if (band > 0.0f) {
+        const float wide = gap_ + radius * 2.0f;
+        canvas.fill_rect(math::Rect{center - wide * 0.5f, bounds_.y, wide, band}, fill);
+        canvas.fill_rect(math::Rect{center - wide * 0.5f, bounds_.bottom() - band, wide, band},
+                         fill);
+      }
+    } else {
+      canvas.fill_rect(math::Rect{bounds_.x, center - half, bounds_.width, gap_}, fill);
+      if (band > 0.0f) {
+        const float wide = gap_ + radius * 2.0f;
+        canvas.fill_rect(math::Rect{bounds_.x, center - wide * 0.5f, band, wide}, fill);
+        canvas.fill_rect(math::Rect{bounds_.right() - band, center - wide * 0.5f, band, wide},
+                         fill);
+      }
+    }
   }
   // **有缝隙时不画线**（`gap_ > 0`）：缝本身就是分隔（透出外层壳色），
   // 再在缝中间叠一条线会变成“缝里有一条脏线”。仅在悬停/拖拽时画——
