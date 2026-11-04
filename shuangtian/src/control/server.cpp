@@ -1512,6 +1512,15 @@ auto Server::Impl::handle_script([[maybe_unused]] Client& client, [[maybe_unused
                                  [[maybe_unused]] const Json& params,
                                  [[maybe_unused]] bool& deferred) -> Result<Json> {
   [[maybe_unused]] auto& root = host.root();
+// ## `ST_NO_SCRIPT`：按需链接的编译期拆链（见 st.pkg 的 gbcode 目标）
+//
+// 定义了它 = 本产物不携带脚本引擎：调用点全部不编译 → `script_host.cpp` →
+// `ext/script.cpp` → QuickJS 整链不进产物（实测 786KB）。能力清单不会列 `script`，
+// 这里给一句可行动的回复而不是含糊的“未知方法”。
+#ifdef ST_NO_SCRIPT
+  return unexpected(ErrorCode::Unsupported,
+                    "脚本能力未编入本产物（构建时定义了 ST_NO_SCRIPT；如需脚本，去掉该宏重新构建）");
+#else
 // 默认关闭：未开启时明确告知"该能力未启用"（而不是含糊的"未知方法"）
 ui::ScriptHost* script = host.script();
 if (script == nullptr) {
@@ -1582,6 +1591,7 @@ if (!called) return forward_error(called.error());
 Json result = Json::object();
 result["result"] = std::move(*called);
 return result;
+#endif  // ST_NO_SCRIPT
   
 }
 

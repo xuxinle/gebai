@@ -83,8 +83,14 @@ struct TargetSpec {
   /// 写在**目标**上而不是工程级：嵌入集合决定生成的声明头内容，而声明头是按目标隔离的
   /// （不同目标嵌入不同资源，且同名资源在不同目标里标识符不同）。
   std::vector<std::string> embed{};
-  /// 日志代码是否编进本目标（覆盖工程级；`std::optional` 才能区分“未指定”与“显式 false”）。
-  std::optional<bool> log_enabled{};
+   /// 日志代码是否编进本目标（覆盖工程级；`std::optional` 才能区分“未指定”与“显式 false”）。
+ std::optional<bool> log_enabled{};
+ /// 目标专属编译宏（裸名，如 `ST_NO_SCRIPT=1`；构建侧注入 `-D`）。
+ ///
+ /// 与交叉工具链 `defines` 的区别：那个作用于**整条工具链**（所有目标），
+ /// 这个只作用于**本目标**的单元——典型用途是按需链接的拆链开关
+ /// （如 gbcode 定义 `ST_NO_SCRIPT` 后 QuickJS 整链不进产物）。
+ std::vector<std::string> defines{};
   /// 链接子系统：`"console"`（默认）或 `"gui"`。
   ///
   /// 仅 Windows 有区别：`gui` 对应链接器的 `-mwindows`（PE 头的 Subsystem=2

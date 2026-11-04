@@ -1727,11 +1727,91 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   return toolchain.executable_suffix;
 }
 
+/// ## 库级单元打静态库：让“没引用的代码不进产物”在链接侧成立
+///
+/// **为什么需要**（2026-11-04 实测取证，gbcode dev 档）：
+/// GNU ld（PE/COFF 后端）对**直接写在命令行上的 `.o`** 不做段级死代码裁剪——
+/// `--gc-sections` 只对**归档成员**生效（决定性实验：同一对对象，打成 `.a` 链接时
+/// 未引用的 sqlite3.c.o **0 段保留**；直接铺 `.o` 则全量 962KB 进产物）。
+/// 于是“框架+第三方全量铺命令行”的旧路径里，没人引用的 sqlite（962KB）、
+/// QuickJS（786KB）等完整进二进制，gc-sections 形同虚设。
+///
+/// **机制**：库级单元（框架源 + 第三方源 + 工程库源）先 `ar rcs` 成一个归档，
+/// 链接命令传「归档 + 目标级 `.o`」。归档成员按引用拉取：没人引用的成员
+/// 根本不进链接——这比段级裁剪更彻底（整文件粒度），且与 gc-sections 叠加。
+///
+/// **为什么目标级单元不进归档**：目标自带入口（`main`）与仅它引用的生成物，
+/// 进归档后「入口段是否保留」取决于链接器对归档入口符号的扫描策略，
+/// 徒增不确定性。目标单元本来就小（应用源），命令行直传没有裁剪损失。
+///
+/// **增量**：归档重建恒定发生（链接本来就要重跑），`ar` 重打包 188 个成员
+/// 实测 <0.5s，不值得为它单独建指纹。归档路径进 `build/<档位>/obj/` 下，
+/// 与对象同生命周期（换档位自然分开）。
+[[nodiscard]] auto archive_library_units(const Manifest& manifest,
+                                        const std::vector<CompileUnit>& units,
+                                        const ResolvedToolchain& toolchain,
+                                        const std::string& archive_path) -> Status {
+  if (units.empty()) return ok();
+  // 归档器解析：与静态库目标同一套（编译器同目录优先，PATH 兜底）。
+  std::string archiver;
+  if (const auto sibling =
+          fs::join(fs::parent(toolchain.compiler_path), "ar");
+      fs::is_regular_file(sibling + toolchain.executable_suffix)) {
+    archiver = sibling + toolchain.executable_suffix;
+  } else if (const auto found = process::which("ar"); found.has_value()) {
+    archiver = *found;
+  } else {
+    return unexpected(ErrorCode::NotFound,
+                      "未找到静态库归档工具 `ar`（按需链接需要它；"
+                      "请安装 binutils，或确认它与 C++ 编译器在同一目录）");
+  }
+  // 先删旧档：`ar rcs` 是追加/更新语义，不删会留下已移除单元的旧成员
+  //（与静态库目标分支同一坑，同一修法）。
+  (void)fs::remove_file(archive_path);
+  // 分批打包：CreateProcessW 的命令行上限 32767 字符，而对象是绝对路径列表，
+  // 全量测试构建（244+ 单元 × ~100 字符）会超限——报错是「文件名或扩展名太长」，
+  // 完全指向不到命令行长度（与链接侧超长同一家坑，链接侧的解法是响应文件，
+  // 但 GNU ar 不认 `@file`，所以按追加语义分批）。
+  // 首批 `rcs`（建档），后续 `r`（追加）——追加语义正是分批的天然拼接口。
+  constexpr std::size_t kArBatchBytes = 24'000;  // 预留 argv[0]/归档名/引号余量
+  std::vector<std::string> ar_args{"rcs", archive_path};
+  std::size_t batch_bytes = archive_path.size() + 8;
+  std::size_t batches = 0;
+  auto run_ar_batch = [&](std::vector<std::string> args) -> Status {
+    auto archived =
+        process::run(archiver, args,
+                     process::Options{.cwd = manifest.directory, .env = toolchain.env});
+    if (!archived) return forward_error(archived.error());
+    if (archived->exit_code != 0) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("库级归档失败: {}\n{}{}", archive_path,
+                                    archived->stdout_text, archived->stderr_text));
+    }
+    return ok();
+  };
+  for (const auto& unit : units) {
+    if (batch_bytes + unit.object.size() + 3 > kArBatchBytes && ar_args.size() > 2) {
+      if (auto status = run_ar_batch(std::move(ar_args)); !status) return status;
+      ++batches;
+      ar_args = {"r", archive_path};
+      batch_bytes = archive_path.size() + 4;
+    }
+    ar_args.push_back(unit.object);
+    batch_bytes += unit.object.size() + 3;
+  }
+  if (ar_args.size() > 2 || batches == 0) {
+    if (auto status = run_ar_batch(std::move(ar_args)); !status) return status;
+  }
+  return ok();
+}
+
 [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
                         const std::vector<CompileUnit>& units, const std::string& output,
                         const std::vector<std::string>& profile_flags_list,
                         const ResolvedToolchain& toolchain,
-                        const std::vector<std::string>& extra_sources) -> Result<std::string> {
+                        const std::vector<std::string>& extra_sources,
+                        const std::vector<CompileUnit>* target_units = nullptr)
+    -> Result<std::string> {
   if (toolchain.compiler_path.empty()) {
     return unexpected(ErrorCode::Unsupported, "未解析出链接器（见 resolve_toolchain）");
   }
@@ -1770,7 +1850,14 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
                         "未找到静态库归档工具 `ar`（静态库目标需要它；"
                         "请安装 binutils，或确认它与 C++ 编译器在同一目录）");
     }
-    if (units.empty()) {
+    // 静态库目标也把目标级单元并入（`sources` 写在目标上的库）：库的成员面
+    // 必须完整——库没有"引用拉取"问题，它本身就是按引用消费的。
+    std::vector<const CompileUnit*> archive_members;
+    for (const auto& unit : units) archive_members.push_back(&unit);
+    if (target_units != nullptr) {
+      for (const auto& unit : *target_units) archive_members.push_back(&unit);
+    }
+    if (archive_members.empty()) {
       return unexpected(ErrorCode::Invalid,
                         std::format("静态库目标 {} 没有任何对象文件（检查 sources/白名单）",
                                     link_target->name));
@@ -1780,7 +1867,7 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
     (void)fs::remove_file(output);
     std::vector<std::string> ar_args{"rcs"};
     ar_args.push_back(output);
-    for (const auto& unit : units) ar_args.push_back(unit.object);
+    for (const auto* unit : archive_members) ar_args.push_back(unit->object);
     auto archived = process::run(archiver, ar_args,
                                  process::Options{.cwd = manifest.directory, .env = toolchain.env});
     if (!archived) return forward_error(archived.error());
@@ -1895,9 +1982,36 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
     }
   }
 
+  // ## 按需链接：库级单元打归档，目标级单元直传（见 `archive_library_units` 的机制说明）
+  //
+  // 归档放在对象目录（与 .o 同生命周期）；路径进链接命令的 `long_args`。
+  // `target_units` 指向目标级单元（可为空向量 = 纯库级目标）；nullptr = 调用方
+  // 无目标级划分信息（入口位置未知），退田全直传的旧路径。
+  std::string library_archive;
+  std::vector<CompileUnit> direct_units = units;
+  if (!units.empty() && target_units != nullptr) {
+    library_archive = fs::join(fs::parent(units.front().object), "_library_units.a");
+    if (auto status = archive_library_units(manifest, units, toolchain, library_archive);
+        !status) {
+      return forward_error(status.error());
+    }
+    // ⚠ 入口所在单元绝不能进归档：入口符号（main / WinMain）不在“已引入的
+    //   未定义符号”里，归档扫描不会拉它——入口丢了，链接报 undefined reference。
+    //   目标级单元含入口（应用 main / 测试 runner），全部直传。
+    direct_units = *target_units;
+  }
+
   // 对象与额外源："一参数一项"，进响应文件（`long_args`）。
-  for (const auto& unit : units) long_args.push_back(unit.object);
+  for (const auto& unit : direct_units) long_args.push_back(unit.object);
   for (const auto& extra : extra_sources) long_args.push_back(extra);
+  // 归档必须在目标 .o **之后**：单趟链接器先看到目标单元的未定义符号，
+  // 扫到归档时才知道拉哪些成员（放前面 = 一个都拉不进，链接报 undefined）。
+  // 归档成员之间的互引不用担心：ld 对单个归档会反复扫描到拉不出新成员为止。
+  if (!library_archive.empty()) {
+    // 归档代替了库级 .o 的长列表：命令行从“188 项”缩到“1 项 + 目标 .o”，
+    // 响应文件的触发频率也随之下降。
+    long_args.push_back(library_archive);
+  }
   // `tail` = `-o 产物` + 库 + 工具链附加旗标（**库必须在对象之后**，链接器单趟解析）。
   tail.push_back("-o");
   tail.push_back(output);
@@ -2591,6 +2705,12 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   if (auto status = fs::create_directories(object_dir); !status) return forward_error(status.error());
   if (auto status = fs::create_directories(bin_dir); !status) return forward_error(status.error());
 
+  // 第三方源码（third_party/）与库源一起编译：它们不是"可选附加"，而是库的组成部分。
+  // 声明在目标级过滤段**之前**：`exclude_sources` 对第三方的按需排除要在过滤段里
+  // 落地（对未赋值的集合操作是无效的）。路径集合同时交给 make_units——
+  // 这些单元编译时会放宽告警并跳过 PCH。
+  std::set<std::string> third_party_paths = collect_third_party(manifest);
+
   // 目标级源选择：两种语义二选一（`only_sources` 非空时走白名单）。
   //
   // ## 为何要有白名单
@@ -2608,6 +2728,13 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
         // 先摘掉工程级那条，避免同时出现相反的两个定义（裸名，见上方说明）。
         std::erase(effective.defines, std::string("ST_LOG_DISABLED=1"));
         if (!*spec->log_enabled) effective.defines.push_back("ST_LOG_DISABLED=1");
+      }
+      // 目标专属宏（如 `ST_NO_SCRIPT=1`）：只对本目标的单元生效。
+      // 拆链开关的语义就是“这个产物不含这类能力”——同工程里其他目标不受影响。
+      for (const auto& define : spec->defines) {
+        if (std::ranges::find(effective.defines, define) == effective.defines.end()) {
+          effective.defines.push_back(define);
+        }
       }
       if (!spec->include_sources.empty()) {
         // 白名单生效时必须可见：否则“字段写了但没生效”与“生效了”在输出上一模一样。
@@ -2631,23 +2758,43 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
                       library_sources.size(), spec->include_sources.size());
         }
       } else {
+        // ## 黑名单同时作用于库源与第三方源（按需编译）
+        //
+        // `exclude_sources: ["third_party/quickjs/*"]` = 本目标不编译该第三方库的
+        // 任何单元——与链接侧的按需拉取配套：不用 sqlite 的应用既不编（省 20.1s）
+        // 也不链（本来就已裁）。白名单（include_sources）**不**作用于第三方：
+        // 第三方是原子依赖（引用 `src/ext/database.cpp` 就需要整包 sqlite），
+        // 按文件白名单切第三方会切碎到不可用。此时尚未被排除的第三方照常参与。
+        //
+        // ⚠ 排除时必须连带排除引用它的框架层源，否则链接报 undefined：
+        // 如 quickjs 被排除时，`src/ext/script.cpp`（引用 JS_*）也必须排除——
+        // 调用方（清单）自己保证，构建器不做静态分析（那需要真的解析依赖）。
+        // 语义取舍：清单是声明式的，错了链接期立刻可发现（报错指向缺的符号）。
+        //
+        // 剥掉的条目数分开统计：一个模式只命中第三方是**正常**的
+        //（`third_party/*`），不该报“未命中任何源文件”的告警——
+        // 那是给“写错的路径”准备的提示，误报会让人不信这个告警。
         for (const auto& pattern : spec->exclude_sources) {
-          const auto before = library_sources.size();
+          const auto before_lib = library_sources.size();
           std::erase_if(library_sources, [&pattern, &manifest](const std::string& path) {
             // 源文件列表是绝对路径：按「相对清单目录」匹配，模式才符合直觉（如 src/pkg/*）
             return fs::match_glob(pattern, fs::relative_to(path, manifest.directory));
           });
-          if (before == library_sources.size()) {
+          const auto before_third = third_party_paths.size();
+          std::erase_if(third_party_paths, [&pattern, &manifest](const std::string& path) {
+            return fs::match_glob(pattern, fs::relative_to(path, manifest.directory));
+          });
+          if (before_lib == library_sources.size() && before_third == third_party_paths.size()) {
             ST_LOG_WARN("排除模式未命中任何源文件: {}", pattern);
+          } else if (before_third != third_party_paths.size()) {
+            ST_LOG_INFO("按需编译：目标 {} 排除第三方单元 {} 个（{}）", options.target,
+                        before_third - third_party_paths.size(), pattern);
           }
         }
       }
     }
   }
 
-  // 第三方源码（third_party/）与库源一起编译：它们不是"可选附加"，而是库的组成部分。
-  // 同时把路径集合交给 make_units——这些单元编译时会放宽告警并跳过 PCH。
-  std::set<std::string> third_party_paths = collect_third_party(manifest);
   UnitIncludeMap library_includes;
 
   // 嵌入的"模板与运行时"来源：有框架就用框架的（工程不必自己内联一份 battery）；
@@ -2965,8 +3112,6 @@ if (target == nullptr) {
       fs::join(bin_dir, target->name + artifact_suffix(*target, *toolchain));
   const std::string output =
       options.output_override.empty() ? default_output : options.output_override;
-  std::vector<CompileUnit> link_units = units;
-  link_units.insert(link_units.end(), target_units.begin(), target_units.end());
   // ## `inherit_project_embed = false`：把工程级嵌入的**对象**从链接集合里剔除
   //
   // 光在 `target_sources` 上剔除不够：工程级嵌入的生成源已经进了 `library_sources`
@@ -2983,15 +3128,22 @@ if (target == nullptr) {
     // 包含目录（包括普通源），用它剔除会把整个库剔空（实测：44 个成员→剩 5 个，且只剩第三方）。
     // 嵌入产物的路径特征是统一的：在 `build/<subdir>/embed/` 下（含再一层 `lib/`）。
     const std::string embed_marker = fs::normalize(fs::join(build_dir, "embed"));
-    const auto before = link_units.size();
-    std::erase_if(link_units, [&](const CompileUnit& unit) {
+    const auto before_lib = units.size();
+    std::erase_if(units, [&](const CompileUnit& unit) {
       return fs::normalize(unit.source).starts_with(embed_marker);
     });
-    if (link_units.size() != before) {
+    const auto before_target = target_units.size();
+    std::erase_if(target_units, [&](const CompileUnit& unit) {
+      return fs::normalize(unit.source).starts_with(embed_marker);
+    });
+    const std::size_t removed = (before_lib - units.size()) + (before_target - target_units.size());
+    if (removed != 0) {
       ST_LOG_INFO("目标 {}：不继承工程级嵌入，链接集合剔除 {} 个嵌入单元", target->name,
-                  before - link_units.size());
+                  removed);
     }
   }
+  std::vector<CompileUnit> link_units = units;
+  link_units.insert(link_units.end(), target_units.begin(), target_units.end());
 
   // 链接跳过：参与链接的东西**一个都没变**就不重链。
   //
@@ -3002,6 +3154,7 @@ if (target == nullptr) {
   // 时间戳又可能停在旧条目那一刻（内容换了时间却没动，旧实现会静默拿旧产物）。
   const auto link_fingerprint = [&]() -> std::string {
     std::string material(compiler_kind_name(toolchain->kind));
+    material.append("\n#archive");  // 按需链接：链接方式变了必须重链（归档 vs 直铺 .o）
     for (const auto& unit : link_units) {
       material.append("\n").append(unit.object);
       const auto meta = fs::read_text(deps_meta_path(unit.object));
@@ -3054,7 +3207,10 @@ if (target == nullptr) {
   }
 
   const std::int64_t link_start = time::now_ns();
-  auto linked = link(manifest, options, link_units, output, *flags, *toolchain, {});
+  // 按需链接：库级（units）打归档、目标级（target_units）直传——
+  // 机制与实测依据见 `archive_library_units` 的注释。
+  auto linked =
+      link(manifest, options, units, output, *flags, *toolchain, {}, &target_units);
   if (!linked) return forward_error(linked.error());
   if (options.strip_debug && target->kind != "library") {
     // 分离调试信息（默认；`--no-strip` 关）。失败**不算构建失败**——产物已经能跑，
@@ -3398,7 +3554,31 @@ namespace {
   ST_LOG_INFO("测试构建：{} 单元（重编 {}）", units.size(), rebuilt);
 
   const std::string output = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
-  auto linked = link(manifest, options, units, output, *flags, *toolchain, {});
+  // 按需链接同样适用测试二进制：**入口/runner/用例直传**，其余（框架/第三方/库源）归档。
+  //
+  // ⚠ 用例绝不能进归档：`ST_TEST` 宏靠**静态初始化器自注册**，归档成员
+  //   「未被引用则不加载」——注册器不运行，用例凭空消失（实测：0 passed 0 failed）。
+  //   runner（`src/test/`）与用例（清单 `tests` 段展开，如 `tests/*_test.cpp`）都直传。
+  //   直传判据用清单的 `tests` 清单（`*tests`）与路径前缀双口径：清单最准（它就是
+  //   “哪些源是用例”的唯一权威），路径判据兑底（框架自建时 tests 与 src 同根）。
+  std::set<std::string> test_sources_set(tests->begin(), tests->end());
+  std::vector<CompileUnit> test_direct;
+  std::vector<CompileUnit> test_archived;
+  for (const auto& unit : units) {
+    const std::string normalized = fs::normalize(unit.source);
+    const bool is_runner = normalized.find("/src/test/") != std::string::npos ||
+                           normalized.find("\\src\\test\\") != std::string::npos;
+    const bool is_case = test_sources_set.contains(normalized) ||
+                         (normalized.find("/tests/") != std::string::npos ||
+                          normalized.find("\\tests\\") != std::string::npos);
+    if (is_runner || is_case) {
+      test_direct.push_back(unit);
+    } else {
+      test_archived.push_back(unit);
+    }
+  }
+  auto linked = link(manifest, options, test_archived, output, *flags, *toolchain, {},
+                     &test_direct);
   if (!linked) {
     // 链接失败单独报（BACKLOG 3837）：ld.lld「failed to write output … permission denied」
     // 曾被误判为「一堆用例没跑＝测试失败」——产物没出来，用例根本没跑。

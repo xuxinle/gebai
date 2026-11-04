@@ -275,8 +275,16 @@ struct Application::Impl {
   std::unique_ptr<st::text::TextRenderer> renderer{};
   std::unique_ptr<RendererTextPort> text_port{};
   std::unique_ptr<control::Server> server{};
-  /// 脚本宿主（仅 `AppOptions::enable_script` 时创建；协议层通过 `Application::script()` 取用）
+  /// 脚本宿主（仅 `AppOptions::enable_script` 时创建；协议层通过 `Application::script()` 取用）。
+  ///
+  /// `ST_NO_SCRIPT` 时降为裸指针（恒空）：unique_ptr<完整类型> 的删除器会在 Impl 的
+  /// 构造/析构里实例化 `delete` → 引用 `ScriptHost::~` → 整条 quickjs 链被拉回产物
+  ///（实测 318KB，按需链接的拆链就被这一个成员破坏）。裸指针不拥有，也无析构引用。
+#ifdef ST_NO_SCRIPT
+  ui::ScriptHost* script{nullptr};
+#else
   std::unique_ptr<ui::ScriptHost> script{};
+#endif
   RingBuffer frame_times{};
   /// 相邻帧开始时刻之差（墙钟间隔；与 `frame_times` 的帧内耗时对照看）。
   RingBuffer wall_times{};
@@ -483,7 +491,13 @@ auto Application::headless() const -> bool {
   return impl_->backend != nullptr ? impl_->backend->headless() : options_.headless;
 }
 
-auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
+auto Application::script() -> ui::ScriptHost* {
+#ifdef ST_NO_SCRIPT
+  return nullptr;
+#else
+  return impl_->script.get();
+#endif
+}
 
 // —— ui::WindowControl：窗框动作 → 后端（**只做转发**，平台差异全在 `platform_*`）——
 //
@@ -1474,6 +1488,12 @@ auto Application::start() -> Status {
     });
   }
 
+  // ## `ST_NO_SCRIPT`：按需链接的编译期拆链（与 server.cpp 的 handle_script 同一套）
+  //
+  // 定义了它 = 不创建脚本宿主、不 include 其实现：`script()` 恒返 nullptr，
+  // quickjs 整链不进产物。运行期的 `--enable-script` 参数仍会被解析（cli.cpp
+  // 与清单无关），只是没有任何效果——控制协议调它时得到明确的"未编入"回复。
+#ifndef ST_NO_SCRIPT
   if (options_.enable_script) {
     impl_->script = std::make_unique<ui::ScriptHost>(root_, options_.script_limits);
     if (!impl_->script->valid()) {
@@ -1486,6 +1506,7 @@ auto Application::start() -> Status {
               options_.script_limits.memory_bytes / (1024U * 1024U),
               options_.script_limits.timeout.count());
   }
+#endif
 
   control::ServerOptions server_options;
   server_options.bind = options_.control_bind;
@@ -1642,9 +1663,11 @@ void Application::tick() {
   // 标脏后**本帧**重组/绘制即生效（放 render 后则永远慢一帧，与泵的时序教训同源）。
   (void)impl_->tasks.pump();
   if (impl_->repaint || root_.dirty()) render_frame();
-  // 脚本定时器：按帧推进，不额外起线程
+  // 脚本定时器：按帧推进，不额外起线程（ST_NO_SCRIPT 下恒空，编译期消除）
+#ifndef ST_NO_SCRIPT
   if (impl_->script != nullptr) (void)impl_->script->tick(0.0);
   if (impl_->script != nullptr && impl_->script->take_repaint_request()) impl_->repaint = true;
+#endif
   if (impl_->server != nullptr) impl_->server->poll();
   // 排空后端事件。**指针移动走合并**（见 `input_coalescer.hpp`）：拖动时
   // `WM_MOUSEMOVE` 可达 125~1000 次/秒，逐个派发会让绘制类应用在一帧里改几百次文档
@@ -1678,7 +1701,9 @@ Application::~Application() {
     impl_->log_listener_id = 0;
   }
   // 脚本宿主（若启用）在其析构里摘掉事件观察者；此处只需保证它先于 `root_` 销毁
+#ifndef ST_NO_SCRIPT
   impl_->script.reset();
+#endif
 }
 
 void Application::set_content(std::unique_ptr<ui::Element> content) {

@@ -76,6 +76,10 @@ inline constexpr std::array<std::string_view, 22> known_keys{
     return unexpected(ErrorCode::Parse, std::format("目标 {} 的 system 只能是 console 或 gui，得到：{}",
                                                     name, target.system));
   }
+  // 目标专属宏（如 `ST_NO_SCRIPT=1`）：只对本目标的单元生效。
+  // 写法与工程级 `defines` 一致（裸名，不带 `-D`）。交叉工具链的 `defines`
+  // 是另一回事（那个在 toolchains 段，作用是整条工具链）。
+  target.defines = json_get_string_array(json, "defines");
   return target;
 }
 
