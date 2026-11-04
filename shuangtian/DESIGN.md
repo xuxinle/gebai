@@ -1942,7 +1942,7 @@ Shape+holes/InstancedMesh/AnimationMixer）20/20 可用；端到端（three.js �
 |---|---|---|
 | 远平面没跟着距离扩 | 视口里只有背景色 | `far_z` 默认 100，而 `frame_scene()` 对 40mm 直径的表算出距离 122 → **整个场景在远裁剪面之外** |
 | 合成目标矩形与相机视口不一致 | 同上（更难查） | `end_frame` 的 destination 与 `set_camera` 算 aspect 用的尺寸必须同口径 |
-| `lookAt()` 在 QuickJS 里角度减半 | 脚本写的视角完全不起作用 | `Matrix4.lookAt → setFromRotationMatrix` 的数值问题；规避：用 `quaternion.setFromAxisAngle` |
+| ~~`lookAt()` 在 QuickJS 里角度减半~~ | — | **这条是错的，已撑销**：把 `camera.target`（一个点）当成了方向读，`target.z = eye.z + dir.z = 10−0.71 = 9.29`，而我把 9.29 当成了“方向 z 偏小”。哨兵实测三环全对（`tools/lookat_diag_probe.cpp`） |
 | `LatheGeometry` 轴向 | 表壳“平躺”、机芯竖插 | Lathe 绕 **Y** 轴，而场景以 Z 为厚度方向；需 `rotation.x = ±PI/2`（已实测两者都把 Y 映射到 Z） |
 | Lathe profile 从圆心起笔 | 一整块实心盘挡住全部内容 | `profile[0] = [0, z]` 会扫出实心底；应从**内半径**起笔做成壳 |
 | 切换场景不重新取景 | 新场景缩成一小块 | 比较 `source_name_` 时它已被覆盖为新值（先存 `previous_source`） |
@@ -1962,8 +1962,16 @@ Shape+holes/InstancedMesh/AnimationMixer）20/20 可用；端到端（three.js �
 > 其他一切（网格/矩阵/材质/光照）都正常而画面空白的场合，答案几乎总在这两样上。
 >
 > 配套的工具面：`three_composite_probe`（同一场景×缩放×矩形口径的对照）、
-> `three_camera_probe`（`lookAt` 抽取是否正确）、`lathe_axis_probe`（Lathe 轴向实测）、
+> `lookat_diag_probe`（`lookAt` 三个环节的正确性）、`lathe_axis_probe`（Lathe 轴向实测）、
 > `three_anim_probe`（`userData` 动画字段是否抽出来）。
+>
+> **反面教训也写在这里**：我当时拿 `three_camera_probe` 的输出断定“`lookAt` 角度减半”，
+> 而探针本身没错，是我把打印出来的**点**当成**方向**读了。
+> 一个自己算错的期望值 + 一个看似懂的探针输出 = 一条写在文档里的假缺陷。
+> 后来用 `lookat_diag_probe`（把中间量分别读出来）才消掉。
+>
+> **口径**：怀疑库的数值时，先把三个环节的中间量**分别**读出来；
+> 只看最终结果很容易把“我算错了”误认为“库坏了”。
 
 ##### 一个值得记下的口径发现
 

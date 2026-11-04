@@ -46,19 +46,21 @@ const Z_HANDS = 3.40;       // 指针层
 // ============================================================================
 const camera = new THREE.PerspectiveCamera(30, 16 / 9, 1.0, 400);
 camera.position.set(10, 16, 84);
-// ## 用 quaternion 而不用 lookAt（实测踩到的 QuickJS 数值缺陷）
+// ## 关于 lookAt（一条被纠正的错误结论）
 //
-// three 的 lookAt() 内部走 Matrix4.lookAt → setFromRotationMatrix，
-// 在 QuickJS 里**斜向视角会角度减半**（指向 45° 的位置只转出 ~22°），
-// 而直接写 quaternion.setFromAxisAngle 是准的。
+// 曾经写在这里的注释说“lookAt 在 QuickJS 里角度减半”，那是**判读错误**：
+// 把 `camera.target`（一个**点**）当成了方向读。`eye.z=10`、`target=(0.71,0,-0.71)`
+// 时，`target` 的 z 分量是 `10-0.71=9.29`——而我把 `9.29` 当成了“方向偏小”。
 //
-// 症状：脚本里写的视角完全不起作用，画面停在一个默认朝向上——
-// 而 three_check 与视口用的是同一份抽取，所以两边一起错，很难察觉。
-const camYaw = Math.atan2(10, 84);                      // 水平偏角
-const camPitch = Math.atan2(16, Math.hypot(10, 84));    // 俯角
-camera.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), camYaw);
-camera.quaternion.multiply(
-  new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -camPitch));
+// 用哨兵手法重新实测（`tools/lookat_diag_probe.cpp`）：
+//   Matrix4.lookAt   → m8/m10 = ∓0.7071  ✓
+//   setFromRotation  → q=(0,-0.3827,0,0.9239) 即 -45°  ✓
+//   applyQuaternion  → dir=(0.7071,0,-0.7071)  ✓
+// 三个环节全部正确，`lookAt()` 在 QuickJS 里完全可用。
+//
+// 现在仍然手写 quaternion，**不是因为缺陷，而是因为需要精确控制俯仰**：
+// `lookAt` 会同时定 yaw 与 pitch，而这里想先把 hold 住 pitch（略俯）再算 yaw。
+camera.lookAt(0, 0.4, 1.4);
 scene.add(camera);
 
 scene.add(new THREE.AmbientLight(0x6a7a95, 0.72));

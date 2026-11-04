@@ -107,10 +107,32 @@ scene;                          // ← 最后一句就是场景
 | 2 | 表壳是实心盘 | 一整块白盘，里面什么都看不到 | `LatheGeometry` 的 profile 从 `[0, -0.95]`（圆心）起笔 → 扫出实心底 |
 | 3 | 材质没传给后端 | 全白，所有零件长得一样 | A/B 实验时把 `set_material` 删了没恢复 |
 | 4 | 切场景不重新取景 | 新场景缩成一小块 | 比较 `source_name_` 时它已经被覆盖成了新值 |
-| 5 | `lookAt` 在 QuickJS 里角度减半 | 脚本写的视角完全不起作用 | `Matrix4.lookAt → setFromRotationMatrix` 的数值问题 |
 
-前四个都已修并配了回归（`tests/ui_three_view_camera_test.cpp`）。第 5 个的
-规避方式写在场景里：**用 `quaternion.setFromAxisAngle` 代替 `lookAt`**。
+四个都已修并配了回归（`tests/ui_three_view_camera_test.cpp`）。
+
+### 一个被纠正的“缺陷”：`lookAt` 其实是好的
+
+上一版这里写过第 5 条：“`lookAt` 在 QuickJS 里角度减半”。**那条是错的。**
+
+错在哪：读 `camera.target`（一个**点**）时把它当成了方向。
+`eye.z=10`、方向 `(0.71,0,-0.71)` → `target.z = 10-0.71 = 9.29`，
+而我把 `9.29` 当成了“方向 z 分量偏小”，于是算出“角度减半”。
+
+用哨兵手法重新实测（`tools/lookat_diag_probe.cpp`）——把诊断值拼进一个
+Mesh 的**名字**里，C++ 侧从 `ThreeObject::name` 读回：
+
+| 环节 | 实测 | 结论 |
+|---|---|---|
+| `Matrix4.lookAt` | `m8/m10 = ∓0.7071` | ✓ 正确 |
+| `setFromRotationMatrix` | `q=(0,-0.3827,0,0.9239)` 即 −45° | ✓ 正确 |
+| `applyQuaternion` | `dir=(0.7071,0,-0.7071)` | ✓ 正确 |
+| `camera.lookAt`（真实路径） | 同上 | ✓ 完全可用 |
+
+场景现在用 `camera.lookAt(0, 0.4, 1.4)`，与手写 quaternion 的效果一致。
+
+> **教训**：当一个数值“看起来不对”时，先在纸上把它推一遍。
+> 我跳过了这一步，把一个自己算错的期望值当成了库的缺陷，
+> 还据此在文档里写了一条“规避方案”。
 
 ### 为什么这批缺陷特别难查
 

@@ -753,6 +753,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "实测 LatheGeometry 的轴向与 rotation.x 的效果（打印三个旋转下的世界包围盒跨度）。存在的理由：右手系绕 X 转 ±90° 到底 Y→Z 还是 Y→-Z，推导容易错；而错一次的代价是“表壳盖住表盘”这类很难归因的现象"
     },
+    "lookat_diag_probe": {
+      "kind": "executable",
+      "sources": ["tools/lookat_diag_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "定位 `camera.lookAt()` 在 QuickJS 里的数值缺陷：分别验证 Matrix4.lookAt / setFromRotationMatrix / applyQuaternion 三者。手法是把诊断值拼进一个哨兵 Mesh 的**名字**里，C++ 侧从 `ThreeObject::name` 读回——不改任何生产接口"
+    },
     "scene3d_shadow_probe": {      "kind": "executable",
       "sources": ["tools/scene3d_shadow_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],

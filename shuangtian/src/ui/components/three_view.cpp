@@ -171,7 +171,6 @@ void ThreeView::set_camera_state(const OrbitCameraState& state) {
 }
 
 void ThreeView::frame_scene(float margin) {
-  // （视角默认从 +Z 侧看；若场景的正面朝 -Z，用户拖一下就好——不在这里猜。）
   const auto box = scene_bounds(scene_);
   if (box.is_empty()) {
     // 空场景：给一个能看见原点的默认视角
@@ -181,12 +180,46 @@ void ThreeView::frame_scene(float margin) {
     mark_dirty();
     return;
   }
+
+  // ## 先尊重**场景自己的相机**（如果它写了）
+  //
+  // 实测踩到：场景脚本里写 `camera.position.set(10,16,84)` + `camera.lookAt(0,0.4,1.4)`，
+  // 而视口里看到的却是另一回事——因为 `frame_scene` 只按包围盒算距离，
+  // yaw/pitch/fov 全用 `OrbitCameraState` 的默认值，**把作者写的视角丢了**。
+  //
+  // 这很隐蔽：脚本里的相机明明是对的（`three_check` 用它能出好图），
+  // 而视口里“就是不对”——很容易误判成“抽取坏了”（我当时就这么想了）。
+  //
+  // 做法：把场景 camema 的 eye 方向换算成球坐标；fov 也一并沿用。
+  // 距离仍由包围盒决定（场景相机可能是为静态单帧调的，直接用它
+  // 可能让物体出框）。
+  {
+    const math::Vec3 eye = scene_.camera.eye;
+    const math::Vec3 delta{eye.x - box.center().x, eye.y - box.center().y,
+                           eye.z - box.center().z};
+    const float horizontal = std::sqrt(delta.x * delta.x + delta.z * delta.z);
+    // 方向退化（相机在目标点上）时不动，保持默认值
+    if (horizontal > 1e-3f || std::abs(delta.y) > 1e-3f) {
+      orbit_.yaw = std::atan2(delta.x, delta.z);
+      orbit_.pitch = std::atan2(delta.y, std::max(horizontal, 1e-3f));
+    }
+    if (scene_.camera.fov_y_degrees > 1.0f) orbit_.fov_y_degrees = scene_.camera.fov_y_degrees;
+  }
   orbit_.target = box.center();
   const math::Vec3 size = box.size();
   // 包围球半径 = 对角线一半（比逐轴取最大更保守，斜放的长条也能框住）
   const float radius = 0.5f * std::sqrt(size.x * size.x + size.y * size.y + size.z * size.z);
   const float safe_radius = std::max(radius, 0.05f);
-  // 由 fov 反解距离：让半径对应的张角占半个视野
+  // ## 距离要同时满足**垂直**与**水平**两个方向
+  //
+  // fov 是垂直视角，宽屏的物理宽高比大——但圆形物体在**竖直方向**受限，
+  // 所以真正的约束是垂直方向的 `half_fov`。
+  //
+  // 这里是 1:1 的半径模型（包围球），两个方向对称，所以仍用垂直 fov 即可；
+  // 但**不要**因为视口很宽就把距离拉大（那会让物体变小且无意义）。
+  //
+  // 另一层：`OrbitCameraState` 默认 fov=42，而场景可能写 30（更“长焦”）。
+  // 用场景 fov 时距离会算小（更近），这是对的——长焦本来就该靠得更近。
   const float half_fov = std::max(orbit_.fov_y_degrees, 1.0f) * 0.5f * kPi / 180.0f;
   orbit_.distance = safe_radius * std::max(margin, 1.0f) / std::max(std::sin(half_fov), 0.05f);
   orbit_.clamp();

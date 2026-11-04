@@ -187,3 +187,51 @@ scene;
   ST_CHECK(std::abs(objects[0].material.metallic - objects[1].material.metallic) > 0.5f);
   ST_CHECK(std::abs(objects[0].material.roughness - objects[1].material.roughness) > 0.3f);
 }
+
+ST_TEST(three_view_frame_scene_respects_scene_camera) {
+  // ## 场景脚本写的视角必须被尊重
+  //
+  // 实测踩到：脚本里 `camera.position.set(10,16,84)` + `camera.lookAt(...)`，
+  // 而视口里看到的完全不同——因为 `frame_scene()` 只按包围盒算距离，
+  // yaw/pitch/fov 全用默认值，**把作者写的视角丢了**。
+  //
+  // 这极易误判：脚本里的相机明明是对的（`three_check` 用它能出好图），
+  // 而视口里"就是不对"——我当时就误判成"抽取坏了"，
+  // 还写了一条假的 `lookAt` 缺陷进文档。
+  constexpr const char* kAngled = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(28, 16 / 9, 0.5, 500);
+camera.position.set(30, 20, 40);   // 明显偏右偏上的斜视角
+camera.lookAt(0, 0, 0);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const box = new THREE.Mesh(new THREE.BoxGeometry(6, 6, 6),
+  new THREE.MeshStandardMaterial({ color: 0x4488ff }));
+box.name = 'box';
+scene.add(box);
+scene;
+)js";
+  auto view = make_view(kAngled, "angled.js");
+  ST_REQUIRE(view->object_count() == 1U);
+  view->frame_scene();
+
+  const auto state = view->camera_state();
+  // fov 必须沿用场景的 28（而不是默认 42）
+  ST_CHECK_NEAR(state.fov_y_degrees, 28.0f, 0.5f);
+  // yaw 必须是"从 +X 偏 +Z 一侧看"（atan2(30, 40) ≈ 0.6435）
+  ST_CHECK_NEAR(state.yaw, std::atan2(30.0f, 40.0f), 0.05f);
+  // pitch 必须是仰角（atan2(20, hypot(30,40)) ≈ 0.3588），而不是默认 0.28
+  ST_CHECK_NEAR(state.pitch, std::atan2(20.0f, std::hypot(30.0f, 40.0f)), 0.05f);
+
+  // 距离仍由包围盒决定（场景相机只是"方向参考"）：必须大于包围球半径
+  st::raster::Bounds box_bounds = st::raster::Bounds::empty();
+  for (const auto& object : view->scene().objects) {
+    const auto pick = st::raster::make_pick_object(object.name, object.mesh, object.world);
+    if (pick.world_bounds.is_empty()) continue;
+    box_bounds = box_bounds.union_with(pick.world_bounds);
+  }
+  ST_REQUIRE(!box_bounds.is_empty());
+  const auto size = box_bounds.size();
+  const float radius = 0.5f * std::sqrt(size.x * size.x + size.y * size.y + size.z * size.z);
+  ST_CHECK(state.distance > radius * 0.9f);
+}
