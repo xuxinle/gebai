@@ -276,11 +276,30 @@ def icon_cefu(c):
 
 
 def icon_xiangqi(c):
-    """相期（桌面常驻面板）：一个"卡片里的小人"——等待/待办。"""
-    fg = (1.0, 1.0, 1.0)
-    rounded_rect(c, 56, 56, 200, 200, 18, fg, alpha=0.22)
-    disc(c, 128, 104, 26, fg)
-    rounded_rect(c, 84, 140, 172, 176, 18, fg, alpha=0.9)
+    """相期：红/白/蓝三段竖条（与 `make_xiangqi_icon_png` 小尺寸档同源）。
+
+    ⚠ 这份图标必须与 `examples/xiangqi/main.cpp` 的 `make_xiangqi_icon_png()`
+    小尺寸档（≤24px 那一档）画**同一套图形**：那份是任务栏/窗口图标，
+    这份经 `make_ico.py` 转成 exe 资源图标（资源管理器/快捷方式看到的）。
+    之前两套各画各的（这里是卡片小人，那边是三竖条），
+    同一个应用在两处显示两个图标（用户实测报过）。
+
+    同源基准（与 main.cpp 常量一致）：
+    - 条色：红 #F26455 / 白 / 蓝 #5AA4E8，色相差 201°，16px 下不读成同色
+    - 位置：cx = 0.265 / 0.500 / 0.735，半宽 0.058 / 0.064 / 0.058（×256）
+    - 纵向：0.230..0.770（×256 = 59..197）
+    """
+    red = (0xF2 / 255.0, 0x64 / 255.0, 0x55 / 255.0)
+    white = (1.0, 1.0, 1.0)
+    blue = (0x5A / 255.0, 0xA4 / 255.0, 0xE8 / 255.0)
+    bars = (
+        (0.265 * SIZE, 0.058 * SIZE, red),
+        (0.500 * SIZE, 0.064 * SIZE, white),
+        (0.735 * SIZE, 0.058 * SIZE, blue),
+    )
+    top, bottom = 0.230 * SIZE, 0.770 * SIZE
+    for cx, half_w, color in bars:
+        rounded_rect(c, cx - half_w, top, cx + half_w, bottom, 6, color)
 
 
 def icon_xmlapp(c):
@@ -320,7 +339,7 @@ APPS = {
     "caiyun":  ("examples/caiyun/assets/caiyun-icon.png",   (0.20, 0.62, 0.60), icon_caiyun),
     "gedou":   ("examples/gedou/assets/gedou-icon.png",     (0.78, 0.26, 0.32), icon_gedou),
     "cefu":    ("examples/cefu/assets/cefu-icon.png",       (0.42, 0.36, 0.68), icon_cefu),
-    "xiangqi": ("examples/xiangqi/assets/xiangqi-icon.png", (0.24, 0.26, 0.30), icon_xiangqi),
+    "xiangqi": ("examples/xiangqi/assets/xiangqi-icon.png", (0x14 / 255.0, 0x11 / 255.0, 0x0E / 255.0), icon_xiangqi),
     "gbcode":  ("examples/gbcode/assets/gbcode-icon.png",   (0.33, 0.42, 0.95), icon_gbcode),
     "xmlapp":  ("examples/xmlapp/assets/xmlapp-icon.png",   (0.37, 0.48, 0.55), icon_xmlapp),
 }
