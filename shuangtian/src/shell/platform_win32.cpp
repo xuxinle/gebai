@@ -648,11 +648,17 @@ class Win32Backend final : public Backend {
     // 而"下一帧"没有必然的触发（repaint 已消费）→ 屏幕停在拉伸的旧内容上。）
     // GPU 画布优先走 swapchain（零 CPU 拷贝）；软件画布或未就绪时落回 GDI blit。
     //
-    // ⚠ **不做局部上屏**：本 swapchain 用 `DXGI_SWAP_EFFECT_DISCARD`，`Present`
-    // 之后后备缓冲内容未定义，只拷损坏区会让其余像素变黑块（实测：Windows +
-    // NVIDIA L20-6Q 上界面频繁出现大片黑区）。局部上屏需要先换成保留型
-    //（`FLIP_SEQUENTIAL`）并重做拷贝路径，那是独立一轮的事——在那之前
-    // `set_present_region` 收下的区域只当“提示”，不参与上屏。
+    // **局部上屏**（软件路径，2026-11-04）：应用已告知本帧唯一被改动的区域
+    //（`set_present_region`，逻辑像素），只重排 + 只 BitBlt 那块行带。4K 屏实测：
+    // 整屏 8.8 ms → hover 一个按钮（32×32）<0.1 ms。DIB 是保留型的，其余像素
+    // 留的是上帧内容，只拷脏区不会留黑块（与 swapchain 的 DISCARD 语义不同）。
+    //
+    // 三种时候必须整屏（`region = nullptr`）：① 应用报了空矩形（全量帧/回调未装）；
+    // ② 本帧发生了尺寸重建（`size_dirty_` 消费过，新 DIB 内容未定义）；③ 首帧。
+    // ②靠 `ensure_dib` 尺寸不匹配即重建 + 重建后 DIB 全零不可用的事实，这里用
+    // `present_region_` 每帧消费后清零的时序保证“尺寸变化那帧必是全量”
+    //（WM_SIZE → repaint_for_resize → present 时 app 尚未设新区域）。
+    const bool full_frame = present_region_.is_empty();
     if (presenter_ != nullptr) {
       if (auto presented = presenter_->present(*surface_, surface_->physical_width(),
                                                surface_->physical_height());
@@ -679,13 +685,14 @@ class Win32Backend final : public Backend {
     //
     // 为何有的机器没问题：GPU 路径走 `presenter_->present()` 直接 return，根本
     // 到不了这一行。也就是“渲染器 autu 选型的机器差异”决定了这个缺陷是否发作。
-    if (blit()) {
+    if (blit(full_frame ? nullptr : &present_region_)) {
       ++frames_;
     } else {
       // 建 DIB 失败（内存不足等）：如实计入“没上屏”，而不是静默当作已呈现——
       // 否则 `present_ms` 正常、`frames` 正常，而屏幕是空的（这正是本缺陷难查的原因）。
       ++present_skipped_;
     }
+    present_region_ = math::IntRect{};   // 每帧消费：不消费会让下一帧误走局部
   }
 
   [[nodiscard]] auto poll_event() -> std::optional<ui::Event> override {
@@ -1586,13 +1593,28 @@ class Win32Backend final : public Backend {
   ///
   /// ⚠ **`ensure_dib()` 在这里，不能挪到调用方**：DIB 是惰性的
   /// （`resize_buffers_in_place()` 会故意丢掉它），重建就该发生在“真正要画”的这一刻。
-  [[nodiscard]] auto blit() -> bool {
+  [[nodiscard]] auto blit(const math::IntRect* region = nullptr) -> bool {
     if (!ensure_dib()) return false;
     const std::span<const std::uint32_t> source = surface_->pixels();
-    const std::size_t count =
-        std::min(source.size(), static_cast<std::size_t>(surface_->physical_width()) *
-                                    static_cast<std::size_t>(surface_->physical_height()));
-    // 通道重排：画布 `0xRRGGBBAA` → DIB `0xAARRGGBB`。
+    const int canvas_width = surface_->physical_width();
+    const int canvas_height = surface_->physical_height();
+    // **局部上屏区域解析**（与 X11 同一纯函数 `resolve_present_area`）：
+    //
+    // `present_region_` 是**逻辑像素**（`UiRoot::dirty_rect()` 的口径），而重排与
+    // `BitBlt` 要的是物理像素行带。换算规则两端共用一份，否则同一个应用在两个
+    // 后端的局部重绘边缘会差一列像素（X11 处的说明同理）。
+    //
+    // `region == nullptr` = 整屏（曝光/首帧/尺寸变化必须走这条）。
+    // DIB 是**保留型**的：局部帧只重写脏区行带，其余像素留的是上帧内容——
+    // 这正是只 BitBlt 脏区的前提（DIB 里的旧内容仍有效）。
+    math::IntRect area{0, 0, canvas_width, canvas_height};
+    if (region != nullptr) {
+      area = resolve_present_area(*region, scale_, canvas_width, canvas_height);
+      if (area.is_empty()) return true;   // 区域在画布外：本帧无事可做，但没有失败
+    }
+    const std::size_t stride = static_cast<std::size_t>(canvas_width);
+    const std::size_t count = static_cast<std::size_t>(area.width);
+    // 通道重排：画布 `0xRRGGBBAA` → DIB `0xAARRGGBB`，**按行带只处理脏区**。
     //
     // 把四个字节依次看：(R,G,B,A) → (A,R,G,B)——这正好是**像素内字节循环右移一位**，
     // 即 `(p >> 8) | (p << 24)`。早期实现拆成“取四个通道再拼回去”，语义相同但慢一倍：
@@ -1619,34 +1641,42 @@ class Win32Backend final : public Backend {
       const std::uint64_t hi = ((two & kHi) >> 8U) | ((two & kHi) << 24U);
       return (lo & kLo) | (hi & kHi);
     };
-    std::size_t index = 0;
     constexpr std::size_t kUnroll = 8;  // 8 像素 = 4 个 uint64
-    for (; index + kUnroll <= count; index += kUnroll) {
-      std::uint64_t a = 0;
-      std::uint64_t b = 0;
-      std::uint64_t c = 0;
-      std::uint64_t d = 0;
-      std::memcpy(&a, source.data() + index, sizeof(a));
-      std::memcpy(&b, source.data() + index + 2, sizeof(b));
-      std::memcpy(&c, source.data() + index + 4, sizeof(c));
-      std::memcpy(&d, source.data() + index + 6, sizeof(d));
-      a = rotate(a);
-      b = rotate(b);
-      c = rotate(c);
-      d = rotate(d);
-      std::memcpy(dib_pixels_ + index, &a, sizeof(a));
-      std::memcpy(dib_pixels_ + index + 2, &b, sizeof(b));
-      std::memcpy(dib_pixels_ + index + 4, &c, sizeof(c));
-      std::memcpy(dib_pixels_ + index + 6, &d, sizeof(d));
+    for (int row = 0; row < area.height; ++row) {
+      const std::size_t offset = static_cast<std::size_t>(area.y + row) * stride +
+                                 static_cast<std::size_t>(area.x);
+      if (offset + count > source.size()) break;
+      const std::uint32_t* src_row = source.data() + offset;
+      std::uint32_t* dst_row = dib_pixels_ + offset;
+      std::size_t index = 0;
+      for (; index + kUnroll <= count; index += kUnroll) {
+        std::uint64_t a = 0;
+        std::uint64_t b = 0;
+        std::uint64_t c = 0;
+        std::uint64_t d = 0;
+        std::memcpy(&a, src_row + index, sizeof(a));
+        std::memcpy(&b, src_row + index + 2, sizeof(b));
+        std::memcpy(&c, src_row + index + 4, sizeof(c));
+        std::memcpy(&d, src_row + index + 6, sizeof(d));
+        a = rotate(a);
+        b = rotate(b);
+        c = rotate(c);
+        d = rotate(d);
+        std::memcpy(dst_row + index, &a, sizeof(a));
+        std::memcpy(dst_row + index + 2, &b, sizeof(b));
+        std::memcpy(dst_row + index + 4, &c, sizeof(c));
+        std::memcpy(dst_row + index + 6, &d, sizeof(d));
+      }
+      // 尾巴：逐像素处理（宽不保证 8 的倍数）。
+      for (; index < count; ++index) {
+        const std::uint32_t pixel = src_row[index];
+        dst_row[index] = (pixel >> 8U) | (pixel << 24U);
+      }
     }
-    // 尾巴：逐像素处理（宽高不保证 8 的倍数）。
-    for (; index < count; ++index) {
-      const std::uint32_t pixel = source[index];
-      dib_pixels_[index] = (pixel >> 8U) | (pixel << 24U);
-    }
+    // 只 BitBlt 脏区行带：整帧时 area 覆盖全画布，行为与旧实现完全一致。
     HDC window_dc = ::GetDC(window_);
     if (window_dc == nullptr) return false;
-    ::BitBlt(window_dc, 0, 0, surface_->physical_width(), surface_->physical_height(), memory_dc_, 0, 0,
+    ::BitBlt(window_dc, area.x, area.y, area.width, area.height, memory_dc_, area.x, area.y,
              SRCCOPY);
     ::ReleaseDC(window_, window_dc);
     return true;
@@ -2261,9 +2291,10 @@ class Win32Backend final : public Backend {
   bool present_fallback_logged_{false};
   /// 应用声明的本帧改动区（**逻辑像素**；空 = 整帧）——由 `set_present_region` 写入。
   ///
-  /// ⚠ 仅作诊断记录，**不参与上屏**：本 swapchain 是 `DXGI_SWAP_EFFECT_DISCARD`，
-  /// `Present` 后后备缓冲内容未定义，只拷损坏区会留黑块（实测 NVIDIA L20-6Q
-  /// 上大片黑区）。要真用它省拷贝量，得先换成 `FLIP_SEQUENTIAL` 并重做上屏路径。
+  /// **软件路径已真用它做局部上屏**（2026-11-04）：只重排 + 只 BitBlt 这块区域
+  //（物理换算用 `resolve_present_area`，与 X11 同一纯函数）。GPU swapchain 路径
+  /// 仍走 `CopySubresourceRegion`（app.cpp:1082 的局部上屏另一条腿）。
+  /// `present()` 每帧消费后清零——不消费会让下一帧误走局部路径。
   math::IntRect present_region_{};
   /// 请求的渲染器（来自 `--renderer`；`auto` 表示"首次建面时实测选优"）。
   std::string renderer_{"auto"};
