@@ -21,8 +21,6 @@
        要改图形请**同时**改两处（本文件与 make_xiangqi_icon_png）。
        几何约定见 tools/make_brand_svgs.py 的文件头。 -->
   <rect x="0.5" y="0.5" width="23" height="23" rx="5.2" fill="#1C1915"/>
-  <rect x="0.8" y="0.8" width="22.4" height="22.4" rx="5.0" fill="none"
-        stroke="#565049" stroke-opacity="0.55" stroke-width="0.7"/>
   <rect x="4.97" y="5.52" width="2.78" height="12.96" fill="#F26455"/>
   <rect x="10.46" y="5.52" width="3.07" height="12.96" fill="#FFFFFF"/>
   <rect x="16.25" y="5.52" width="2.78" height="12.96" fill="#5AA4E8"/>
