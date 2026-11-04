@@ -345,8 +345,7 @@ void over_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) n
 }
 
 void convert_rgba_to_xrgb_row(std::uint32_t* dst, const std::uint32_t* src,
-                              std::size_t count) noexcept {
-  if (count == 0) return;
+                              std::size_t count) noexcept {  if (count == 0) return;
 #if ST_SIMD_AVX2
   if (cpu_has_avx2()) {
     const __m256i alpha_bits = _mm256_set1_epi32(static_cast<int>(0xFF000000U));
@@ -375,6 +374,59 @@ void convert_rgba_to_xrgb_row(std::uint32_t* dst, const std::uint32_t* src,
 #else
   for (std::size_t index = 0; index < count; ++index) {
     dst[index] = ((src[index] >> 8U) & 0x00FFFFFFU) | 0xFF000000U;
+  }
+#endif
+}
+
+void rotate_bgra_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept {
+  if (count == 0) return;
+#if ST_SIMD_AVX2
+  if (cpu_has_avx2()) {
+    // 字节循环右移一位 = 每像素 (R,G,B,A)→(A,R,G,B)：单条 shuffle 即可（每个 32 位
+    // lane 内按 1,2,3,0 取源字节——小端下 uint32 0xRRGGBBAA 的内存字节序是
+    // AA,BB,GG,RR，目标 0xAARRGGBB 是 BB,GG,RR,AA，即 out[i]=in[(i+1)%4]）。
+    // ×2 展开减少循环开销（与现有路径同风格）。
+    const __m256i shuffle = _mm256_setr_epi8(1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15,
+                                             12, 1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13,
+                                             14, 15, 12);
+    std::size_t index = 0;
+    for (; index + 16 <= count; index += 16) {
+      const __m256i a = _mm256_shuffle_epi8(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + index)), shuffle);
+      const __m256i b = _mm256_shuffle_epi8(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + index + 8)), shuffle);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + index), a);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + index + 8), b);
+    }
+    for (; index + 8 <= count; index += 8) {
+      const __m256i a = _mm256_shuffle_epi8(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + index)), shuffle);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + index), a);
+    }
+    for (; index < count; ++index) dst[index] = (src[index] >> 8U) | (src[index] << 24U);
+    return;
+  }
+#endif
+#if ST_SIMD_X86
+  const __m128i shuffle = _mm_setr_epi8(1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
+  std::size_t index = 0;
+  for (; index + 8 <= count; index += 8) {
+    const __m128i a =
+        _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + index)), shuffle);
+    const __m128i b = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + index + 4)),
+                                       shuffle);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + index), a);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + index + 4), b);
+  }
+  for (; index + 4 <= count; index += 4) {
+    const __m128i a =
+        _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + index)), shuffle);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + index), a);
+  }
+  for (; index < count; ++index) dst[index] = (src[index] >> 8U) | (src[index] << 24U);
+#else
+  for (std::size_t index = 0; index < count; ++index) {
+    dst[index] = (src[index] >> 8U) | (src[index] << 24U);
   }
 #endif
 }

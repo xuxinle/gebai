@@ -162,6 +162,45 @@ ST_TEST(simd_convert_rgba_to_xrgb_matches_reference) {
   st::raster::simd::convert_rgba_to_xrgb_row(nullptr, nullptr, 0);
 }
 
+ST_TEST(simd_rotate_bgra_row_matches_reference_across_lengths) {
+  // `rotate_bgra_row`（win32 DIB 上屏重排）在全部长度/对齐上与标量参考一致。
+  // 与 convert_rgba_to_xrgb 同一性质：shuffle 表一错就是通道串色（肉眼可见的花屏），
+  // 三路（avx2/sse2/标量）由同一语义钉住；尾部路径（count%8≠0）也要覆盖。
+  const auto reference = [](std::uint32_t pixel) noexcept -> std::uint32_t {
+    return (pixel >> 8U) | (pixel << 24U);
+  };
+  constexpr std::size_t kLengths[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 23, 24, 31, 32, 33, 64};
+  std::uint32_t state = 0x9E3779B9U;
+  for (const std::size_t count : kLengths) {
+    std::vector<std::uint32_t> src(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      // 伪随机但全覆盖：每个字节位置都可能取到任意值（xorshift 后拼四个字节）。
+      state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+      src[index] = state;
+    }
+    std::vector<std::uint32_t> out(count, 0xDEADBEEFU);
+    st::raster::simd::rotate_bgra_row(out.data(), src.data(), count);
+    for (std::size_t index = 0; index < count; ++index) {
+      ST_CHECK_EQ(out[index], reference(src[index]));
+    }
+  }
+  // 原地转换与另存一致。
+  {
+    std::vector<std::uint32_t> in_place = {0x11223344U, 0x55667788U, 0x99AABBCCU, 0xDDEEFF00U,
+                                           0x01020304U, 0x05060708U, 0x090A0B0CU, 0x0D0E0F10U,
+                                           0x11121314U};
+    std::vector<std::uint32_t> copied = in_place;
+    std::vector<std::uint32_t> out_place(in_place.size(), 0U);
+    st::raster::simd::rotate_bgra_row(in_place.data(), in_place.data(), in_place.size());
+    st::raster::simd::rotate_bgra_row(out_place.data(), copied.data(), copied.size());
+    for (std::size_t index = 0; index < in_place.size(); ++index) {
+      ST_CHECK_EQ(in_place[index], out_place[index]);
+    }
+  }
+  // count=0 合法。
+  st::raster::simd::rotate_bgra_row(nullptr, nullptr, 0);
+}
+
 ST_TEST(simd_over_row_matches_reference_across_lengths) {
   // `over_row` 在**全部长度**上与标量参考逐像素一致，特别是短行。
   //

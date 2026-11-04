@@ -38,6 +38,7 @@
 #include "st/codec/png.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
+#include "st/raster/simd.hpp"
 #include "st/shell/icon_scale.hpp"
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
@@ -1617,61 +1618,26 @@ class Win32Backend final : public Backend {
     // 通道重排：画布 `0xRRGGBBAA` → DIB `0xAARRGGBB`，**按行带只处理脏区**。
     //
     // 把四个字节依次看：(R,G,B,A) → (A,R,G,B)——这正好是**像素内字节循环右移一位**，
-    // 即 `(p >> 8) | (p << 24)`。早期实现拆成“取四个通道再拼回去”，语义相同但慢一倍：
+    // 即 `(p >> 8) | (p << 24)`。实现下沉到 `raster::simd::rotate_bgra_row`（AVX2
+    // shuffle 单条指令重排 8 像素 / SSE2 4 像素 / 标量兼容，运行时检测，
+    // 三路逐像素一致由 `raster_simd_test` 钉住）：
     //
     // | 写法 | 3533×1921 median | 每像素 |
     // |---|---|---|
-    // | 逐通道拆掩码再拼（旧） | 6.07 ms | 0.89 ns/px |
-    // | **64 位成一处理 2 像素 + ×8 展开（现）** | **2.97 ms** | **0.44 ns/px** |
+    // | 逐通道拆掩码再拼（旧旧） | 6.07 ms | 0.89 ns/px |
+    // | 64 位成一处理 2 像素 + ×8 展开（旧） | 2.97 ms | 0.44 ns/px |
+    // | **AVX2 shuffle（现，支持时）** | 见 simd 路径基准 | — |
     // | 纯 `memcpy`（理论下限） | 1.71 ms | 0.25 ns/px |
-    //
-    // 两个像素拼进 `uint64` 后，低半位的 `<< 24` 会**溢出到高半位**，所以必须先分半、
-    // 再用掩码拼回去（直接整体移位会串像素）。逐字节等价由 `tools/channel_swap_probe.cpp`
-    // 验证（4 种写法结果逐字节相同）。
     //
     // 为什么不去掉这趟重排（曾试过两条路，都不行）：
     // ① 让 GDI 按掩码自己解读（`BI_BITFIELDS`）：通道正确，但它内部逐像素重打包，
     //    `BitBlt` 从 0.245 ms 涨到 **14.4 ms**（`tools/dib_bitfields_probe.cpp` 实测）；
     // ② 改画布像素格式为 BGRA：会动到整个绘制/合成层的字节序假设，风险远大于 3 ms。
-    constexpr std::uint64_t kLo = 0x00000000FFFFFFFFULL;
-    constexpr std::uint64_t kHi = 0xFFFFFFFF00000000ULL;
-    // 一个 uint64 = 两个像素：各自做字节循环右移一位。
-    const auto rotate = [](std::uint64_t two) {
-      const std::uint64_t lo = ((two & kLo) >> 8U) | ((two & kLo) << 24U);
-      const std::uint64_t hi = ((two & kHi) >> 8U) | ((two & kHi) << 24U);
-      return (lo & kLo) | (hi & kHi);
-    };
-    constexpr std::size_t kUnroll = 8;  // 8 像素 = 4 个 uint64
     for (int row = 0; row < area.height; ++row) {
       const std::size_t offset = static_cast<std::size_t>(area.y + row) * stride +
                                  static_cast<std::size_t>(area.x);
       if (offset + count > source.size()) break;
-      const std::uint32_t* src_row = source.data() + offset;
-      std::uint32_t* dst_row = dib_pixels_ + offset;
-      std::size_t index = 0;
-      for (; index + kUnroll <= count; index += kUnroll) {
-        std::uint64_t a = 0;
-        std::uint64_t b = 0;
-        std::uint64_t c = 0;
-        std::uint64_t d = 0;
-        std::memcpy(&a, src_row + index, sizeof(a));
-        std::memcpy(&b, src_row + index + 2, sizeof(b));
-        std::memcpy(&c, src_row + index + 4, sizeof(c));
-        std::memcpy(&d, src_row + index + 6, sizeof(d));
-        a = rotate(a);
-        b = rotate(b);
-        c = rotate(c);
-        d = rotate(d);
-        std::memcpy(dst_row + index, &a, sizeof(a));
-        std::memcpy(dst_row + index + 2, &b, sizeof(b));
-        std::memcpy(dst_row + index + 4, &c, sizeof(c));
-        std::memcpy(dst_row + index + 6, &d, sizeof(d));
-      }
-      // 尾巴：逐像素处理（宽不保证 8 的倍数）。
-      for (; index < count; ++index) {
-        const std::uint32_t pixel = src_row[index];
-        dst_row[index] = (pixel >> 8U) | (pixel << 24U);
-      }
+      raster::simd::rotate_bgra_row(dib_pixels_ + offset, source.data() + offset, count);
     }
     // 只 BitBlt 脏区行带：整帧时 area 覆盖全画布，行为与旧实现完全一致。
     HDC window_dc = ::GetDC(window_);

@@ -54,4 +54,14 @@ void erase_row(std::uint32_t* dst, std::size_t count, std::uint8_t alpha) noexce
 void convert_rgba_to_xrgb_row(std::uint32_t* dst, const std::uint32_t* src,
                               std::size_t count) noexcept;
 
+/// 画布行（`0xRRGGBBAA`）→ Win32 DIB 行（小端 `0xAARRGGBB`，即 BGRA 字节序）。
+///
+/// 语义：`dst[i] = (src[i] >> 8) | (src[i] << 24)`——像素内字节循环右移一位
+/// (R,G,B,A)→(A,R,G,B)，alpha 原样保留（DIB 合成由 GDI 处理，不预乘不丢 alpha）。
+///
+/// 为什么下沉到这里：win32 后端每帧上屏前的整屏线性重排（4K 实测标量 6.07ms/
+/// 64 位展开 2.97ms，纯 memcpy 下限 1.71ms）——shuffle 版单条指令完成 8 像素重排，
+/// 三路（AVX2/SSE2/标量）逐像素一致由测试钉住。行内允许原地转换。
+void rotate_bgra_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept;
+
 }  // namespace st::raster::simd
