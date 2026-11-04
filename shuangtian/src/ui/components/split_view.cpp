@@ -423,7 +423,7 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
   // **有缝隙时不画线**（`gap_ > 0`）：缝本身就是分隔（透出外层壳色），
   // 再在缝中间叠一条线会变成“缝里有一条脏线”。仅在悬停/拖拽时画——
   // 那是“可以拖这里”的交互反馈，必须有。
-  const bool show_line = gap_ <= 0.0f || hovered_ || dragging_;
+  const bool show_line = gap_ <= 0.0f || handle_hovered_ || dragging_;
   if (!show_line) return;
   const auto& colors = context.theme.colors();
   const float width = context.theme.metrics().border_width;
@@ -435,10 +435,11 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
   // 悬停 2px（`border_strong`）、拖拽 2px 主色。
   // 手柄命中区（`handle_size_` 宽）比视觉线宽得多——看起来一条细线、抓起来不费劲。
   const float line = dragging_ ? std::max(width * 2.0f, 2.0f)
-                               : (hovered_ ? std::max(width * 2.0f, 2.0f)
-                                           : Divider::kLineThickness);
+                               : (handle_hovered_ ? std::max(width * 2.0f, 2.0f)
+                                                  : Divider::kLineThickness);
   const math::Color color = dragging_ ? colors.primary
-                                      : (hovered_ ? colors.border_strong : colors.border_subtle);
+                                      : (handle_hovered_ ? colors.border_strong
+                                                         : colors.border_subtle);
   // ⚠ `center` 已经是**绝对坐标**（`handle_rect()` 返回的矩形已含 `bounds_.x/y`）。
   // 这里再写 `bounds_.x + center` 就是**加了两次**：分栏落在 x=44 时，线被画到
   // 361.66 而非 317.66——整整偏出一个 `bounds_.x`，**穿进编辑区的行号栏**，
@@ -452,7 +453,7 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
     canvas.fill_rect(line_rect, raster::Paint::solid(color));
   }
   // 拖拽把手（居中的短粗条）：hover/拖拽时出现，静态时隐藏（安静的分隔线形态）。
-  if (hovered_ || dragging_) {
+  if (handle_hovered_ || dragging_) {
     const float grip = 24.0f;
     const float thickness = 3.0f;
     const math::Color grip_color = dragging_ ? colors.primary : colors.border_strong;
@@ -481,7 +482,15 @@ auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {
   };
   switch (event.kind) {
     case EventKind::HoverIn:
+      mark_dirty();
+      return false;
     case EventKind::HoverOut:
+      // 指针离开整个分栏区：手柄悬停态一定要清（否则那条线会留在屏上）。
+      // `HoverIn` 不反向置位——它的语义是“进了分栏区”，而这整块包括两个面板，
+      // 真正在手柄上与否由 `MouseMove` 判定。
+      if (handle_hovered_) {
+        handle_hovered_ = false;
+      }
       mark_dirty();
       return false;
     case EventKind::MouseDown: {
@@ -499,7 +508,21 @@ auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::MouseMove: {
-      if (!dragging_) return false;
+      if (!dragging_) {
+        // **手柄悬停判定**（非拖拽时的 MouseMove 也要接）：
+        //
+        // 为何不能用基类的 `hovered_`：它的语义是“指针落在**本元素**上”，
+        // 而 SplitView 的 bounds 覆盖**整个分栏区**——鼠标进入任意一侧面板
+        // 都会把它置位，于是“只有手柄才该亮的悬停反馈”变成“碰任何地方都亮”
+        //（用户 2026-11-04 报：「鼠标悬浮在任意面板内时还是显示一条线」）。
+        // 这里改成自己记“指针是否真的在手柄命中区内”。
+        const bool on_handle = handle_rect().contains(event.position);
+        if (on_handle != handle_hovered_) {
+          handle_hovered_ = on_handle;
+          mark_dirty();
+        }
+        return false;
+      }
       (void)context;
       // 拖拽归属（UiRoot 的 pressed_ 锁定本元素）保证拖出手柄也不断——
       // 与 ScrollBar 拖滑块同一契约。`grab_offset_` 保持抓取点相对位置（不跳变），
@@ -512,6 +535,9 @@ auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::Click: {
       if (!dragging_) return false;
       dragging_ = false;
+      // 松手后悬停态按真实指针位置重判（下一次 MouseMove 会把它算对；
+      // 先清成 false 避免“松手后线不肯消失”）。
+      handle_hovered_ = false;
       mark_dirty();
       return true;
     }

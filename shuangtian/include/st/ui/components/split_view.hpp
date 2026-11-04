@@ -209,6 +209,9 @@ class SplitView : public Element {
   float handle_size_{12.0f};
   /// 两侧面板之间的缝宽（0 = 直接相邻；见 `set_gap`）。
   float gap_{0.0f};
+  /// 指针是否真的在**手柄命中区**上（自定义，不用基类的 `hovered_`——后者是整个分栏区）。
+  /// 只驱动悬停反馈（分割线亮起、把手出现），不参与命中判定。
+  bool handle_hovered_{false};
   /// 缝隙填充（空 = 不画，透出外层壳色；见 `set_gap_fill`）。
   std::optional<Surface> gap_fill_{};
   /// 解析后的缝隙色（`apply_theme` 从 `gap_fill_` 算）。

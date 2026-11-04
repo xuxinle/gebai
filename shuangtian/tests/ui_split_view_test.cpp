@@ -789,6 +789,58 @@ ST_TEST(split_view_gap_fill_hides_the_seam) {
   st::log::out("[gap-fill] 未填={:08X} 填充后={:08X}\n", unfilled, filled);
 }
 
+/// **悬停反馈只认手柄**（回归：用户 2026-11-04 报「鼠标悬浮在任意面板内时还是显示一条线」）。
+///
+/// 根因：绘制时看的是基类的 `hovered_`——它的语义是“指针落在**整个元素**上”，
+/// 而 SplitView 的 bounds 覆盖两个面板，于是鼠标进面板任何位置都会亮线。
+/// 改成自己记 `handle_hovered_`（只在指针真的落在手柄命中区内才为真）。
+///
+/// 守什么：在面板内部移动不能亮线；移到手柄上必须亮。两个方向都断言，
+/// 否则“索性关掉悬停反馈”也能让用例转绿。
+ST_TEST(split_view_hover_seam_only_when_pointer_on_handle) {
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto split = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split->set_ratio(0.5f, false);
+  split->set_gap(4.0f);
+  auto* first = split->add_child(std::make_unique<Element>());
+  auto* second = split->add_child(std::make_unique<Element>());
+  first->set_surface(Element::Surface::Content);
+  second->set_surface(Element::Surface::Content);
+  SplitView* split_ptr = split.get();
+  root.set_content(std::move(split));
+  root.layout(true);
+
+  const st::ui::RenderContext context = root.render_context();
+  // 采样缝隙中心：悬停时那里会画 `border_strong` 的 2px 线，静态就是填色/底色。
+  const auto seam_pixel = [&]() {
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(800, 600, 1.0f);
+    canvas.clear(st::math::Color{0xFF, 0x00, 0x00, 0xFF});   // 红：能被 line 覆盖就变
+    split_ptr->paint(context, canvas);
+    const auto handle = split_ptr->handle_rect();
+    const auto x = static_cast<std::size_t>(handle.center().x);
+    return canvas.pixels()[300U * 800U + x];
+  };
+
+  // ① 指针在面板内部（远离手柄）：不应有线。
+  st::ui::Event inside;
+  inside.kind = st::ui::EventKind::MouseMove;
+  inside.position = st::math::Point{600.0f, 300.0f};
+  (void)root.dispatch(inside);
+  const std::uint32_t idle = seam_pixel();
+
+  // ② 指针落在手柄正中：必须有线（颜色应当变化）。
+  st::ui::Event on_handle;
+  on_handle.kind = st::ui::EventKind::MouseMove;
+  const auto handle = split_ptr->handle_rect();
+  on_handle.position = st::math::Point{handle.center().x, handle.center().y};
+  (void)root.dispatch(on_handle);
+  const std::uint32_t hovered = seam_pixel();
+
+  ST_CHECK(idle != hovered);
+  st::log::out("[split-hover] 面板内={:08X} 手柄上={:08X}\n", idle, hovered);
+}
+
 ST_TEST(split_view_handle_wins_hit_over_overlapping_children) {
   st::ui::UiRoot root;
   root.set_viewport(st::math::Size{800.0f, 600.0f});
