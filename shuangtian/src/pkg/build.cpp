@@ -1987,10 +1987,17 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   // 归档放在对象目录（与 .o 同生命周期）；路径进链接命令的 `long_args`。
   // `target_units` 指向目标级单元（可为空向量 = 纯库级目标）；nullptr = 调用方
   // 无目标级划分信息（入口位置未知），退田全直传的旧路径。
+  //
+  // 归档名含目标名：同一个 `build/<档位>/obj/` 是**多个目标共享**的，
+  // 同名归档会被后一个目标重建覆盖——并行 `st build A & st build B` 会互相写坏
+  //（与 `st test` 的分片并行同一类隐患）。
   std::string library_archive;
   std::vector<CompileUnit> direct_units = units;
   if (!units.empty() && target_units != nullptr) {
-    library_archive = fs::join(fs::parent(units.front().object), "_library_units.a");
+    const std::string archive_tag = options.target.empty() ? std::string("library")
+                                                           : options.target;
+    library_archive =
+        fs::join(fs::parent(units.front().object), "_library_units_" + archive_tag + ".a");
     if (auto status = archive_library_units(manifest, units, toolchain, library_archive);
         !status) {
       return forward_error(status.error());
@@ -2376,7 +2383,20 @@ auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> b
         const bool has_debug_sections =
             headers->stdout_text.contains(".debug_info") ||
             headers->stdout_text.contains("__debug_info");
-        if (!has_debug_sections) return ok();
+        // ## 还要看**符号表在不在**（`--strip-all` 的额外职责）
+        //
+        // 只看“没有 debug 段”是**不够**的：旧产物（`--strip-debug` 时代）恰好就是
+        // “debug 段没了、COFF 符号表还在”——按旧判据会直接返回 ok()，于是那 799 KB
+        // 的符号表永远留在旧产物里（除非手工 `--force`）。
+        //
+        // 判据：`objdump -p` 对已剥离符号的产物只输出 `symbols stripped`（实测
+        // MinGW）——它比读 PE 头里的 `NumberOfSymbols` 更可移植（ELF 侧也认同一句）。
+        if (!has_debug_sections) {
+          if (auto priv = process::run(objdump, {"-p", artifact});
+              priv.has_value() && priv->exit_code == 0) {
+            if (priv->stdout_text.contains("symbols stripped")) return ok();
+          }
+        }
       }
     }
   }
@@ -2404,7 +2424,21 @@ auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> b
     return status;
   }
   // ② 从产物里去掉
-  if (auto status = run_objcopy({"--strip-debug", artifact}); !status) return status;
+  //
+  // 用 `--strip-all` 而不是 `--strip-debug`：前者额外丢掉 **COFF/ELF 符号表**。
+  //
+  // 为何符号表对交付物没用（2026-11-04 实测取证）：
+  // - **崩溃栈不靠它**：MinGW 下 DbgHelp 不读 DWARF，`SymFromAddr` 拿不到名字，
+  //   `platform_crash.cpp` 输出的是「`模块+偏移` + `addr2line` 提示」——
+  //   实测同一程序带符号表 / 不带符号表，崩溃输出**逐行相同**。
+  // - **调试不靠它**：分离的 `.debug` 里已有完整 DWARF 与符号（① 拷的就是它），
+  //   `gdb` / `nm` / `addr2line -e 产物.debug` 都可直接用。
+  // - **本项目也没有任何代码/工具读它**（`tools/` 下无 nm/objdump 读符号表的路径）。
+  //
+  // 代价：`nm 产物` 不再列出符号（要就 `nm 产物.debug`）。实测 gbcode release
+  // **6.79 MB → 6.01 MB（−799 KB，−11.5%）**，而 `--gc-sections` 已经裁过代码，
+  // 符号表是这个量级里唯一纯元信息的残渣。
+  if (auto status = run_objcopy({"--strip-all", artifact}); !status) return status;
   // ③ 记下"符号在隔壁"（gdb 靠 DebugLink 自动认）
   if (auto status = run_objcopy({"--add-gnu-debuglink=" + debug_file, artifact}); !status) {
     // DebugLink 没写上不算致命（产物已瘦身、`.debug` 也在），但 gdb 就不能自动找到了——
