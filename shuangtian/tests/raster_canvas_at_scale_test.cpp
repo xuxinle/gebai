@@ -62,3 +62,82 @@ ST_TEST(draw_canvas_at_places_scaled_source_exactly) {
   ST_CHECK_EQ(box.right, 41);    // 18 + 24 - 1
   ST_CHECK_EQ(box.bottom, 41);
 }
+
+/// `draw_canvas_at` 与 `draw_canvas`+逻辑坐标必须**得到同一张图**。
+///
+/// ## 为什么这条必须存在（2026-11-04 实测暴露）
+///
+/// 用户报“相期图标启动时光滑、启动后变粗糙”，连续截屏定位到 **782ms 处图标
+/// 从 (18,15) 跳到 (17,14)**——那是 `defer_gpu` 把画布从软件换成 GPU 的时刻。
+/// 两条路径对同一次贴图给出了不同的落点，于是同一个图标在切换前后“跳”一下。
+///
+/// 本用例不依赖 GPU（CI 上很可能没有）：它钉的是**软件侧两条 API 的等价性**——
+/// `draw_canvas_at(src, px, py)` 必须与 `draw_canvas(src, {px/scale, py/scale,
+/// src.width(), src.height()})` 像素级相同。任何一侧改了取整规则，这里立刻红。
+///
+/// 取**非整数 DPI + 非整数落点**：`12 * 1.5 = 18` 是整数，恰恰盖不到这个缺陷
+///（既有的 `draw_canvas_at_places_scaled_source_exactly` 就是 18，所以它一直是绿的）。
+ST_TEST(draw_canvas_at_matches_draw_canvas_at_fractional_scale) {
+  constexpr float kScale = 1.25f;   // 非整数 DPI（Windows 常见的一档）
+  constexpr int kSourcePx = 25;     // 物理 25 → 逻辑 20
+
+  st::raster::Canvas source{kSourcePx, kSourcePx, kScale};
+  source.clear(st::math::Color{0, 0, 0, 0});
+  source.fill_path(st::math::Path{}.add_rect(st::math::Rect{2.0f, 2.0f, 16.0f, 16.0f}),
+                   st::raster::Paint::solid(st::math::Color{255, 0, 0, 255}));
+
+  // 同一个物理落点，两条写法：
+  //   ① draw_canvas_at(src, px, py)            —— 物理坐标直给
+  //   ② draw_canvas(src, {px/scale, py/scale, src.width(), src.height()})
+  //      —— 逻辑坐标（draw_canvas_at 内部就是这么转的）
+  // 它们必须逐像素相同；若不同，就说明转换里有取整不一致。
+  for (const int px : {13, 17, 23}) {
+    st::raster::Canvas via_at = st::raster::Canvas::for_logical_size(60, 60, kScale);
+    via_at.clear(st::math::Color{0, 0, 0, 0});
+    via_at.draw_canvas_at(source, px, px);
+
+    st::raster::Canvas via_canvas = st::raster::Canvas::for_logical_size(60, 60, kScale);
+    via_canvas.clear(st::math::Color{0, 0, 0, 0});
+    via_canvas.draw_canvas(source,
+                           st::math::Rect{static_cast<float>(px) / kScale,
+                                          static_cast<float>(px) / kScale,
+                                          static_cast<float>(source.width()),
+                                          static_cast<float>(source.height())});
+
+    const Box a = ink_box(via_at);
+    const Box b = ink_box(via_canvas);
+    ST_REQUIRE(a.valid());
+    ST_REQUIRE(b.valid());
+    // 差异信息里带上 px，红了能直接看出是哪一档偏移
+    ST_CHECK_EQ(a.left, b.left);
+    ST_CHECK_EQ(a.top, b.top);
+    ST_CHECK_EQ(a.right, b.right);
+    ST_CHECK_EQ(a.bottom, b.bottom);
+  }
+}
+
+/// 非整数 DPI 下，`draw_canvas_at` 的落点必须严格等于传入的物理坐标。
+///
+/// 这是上一条的“单边断言”：即使两条 API 恰好错得一样（那样上一条会绿），
+/// 物理坐标就是物理坐标——`draw_canvas_at(src, 17, 17)` 的墨迹必须从 17 开始，
+/// 不能被 `floor(x/scale)` 拖到 16。
+ST_TEST(draw_canvas_at_keeps_exact_physical_origin) {
+  constexpr float kScale = 1.5f;
+  st::raster::Canvas source{30, 30, kScale};   // 物理 30 → 逻辑 20
+  source.clear(st::math::Color{0, 0, 0, 0});
+  source.fill_path(st::math::Path{}.add_rect(st::math::Rect{0.0f, 0.0f, 20.0f, 20.0f}),
+                   st::raster::Paint::solid(st::math::Color{255, 0, 0, 255}));
+
+  // 17 / 1.5 = 11.333…（非整数）——正是相期标题栏图标在 DPI 1.5 下的实际落点。
+  for (const int px : {17, 18, 19}) {
+    st::raster::Canvas target = st::raster::Canvas::for_logical_size(80, 80, kScale);
+    target.clear(st::math::Color{0, 0, 0, 0});
+    target.draw_canvas_at(source, px, px);
+    const Box box = ink_box(target);
+    ST_REQUIRE(box.valid());
+    ST_CHECK_EQ(box.left, px);
+    ST_CHECK_EQ(box.top, px);
+    ST_CHECK_EQ(box.right, px + 29);   // 铺满整张源（30 物理）
+    ST_CHECK_EQ(box.bottom, px + 29);
+  }
+}

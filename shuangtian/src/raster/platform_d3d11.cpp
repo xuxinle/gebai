@@ -640,7 +640,37 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
 // 主路径：单一子矩形（`g_uv`，通常是整张纹理）；字形尺寸来自 `g_rect.zw`。
 float4 ps_main(VsOut input) : SV_Target {
   const float2 half_size = g_rect.zw * 0.5;
-  return shade(input.local, input.local / g_rect.zw, input.pixel, g_uv, half_size);
+  const int mode = (int)g_mode.x;
+
+  // ## 位图模式（mode 3）必须**裁掉外扩那一圈**（2026-11-04 实测定位）
+  //
+  // `vs_main` 把四边形向外扩了 1 像素——那是为了 SDF 圆角/描边能拿到边界像素的
+  // 部分覆盖率（见那里的说明）。但对**预乘 RGBA 位图**，外扩没有任何好处，
+  // 反而把纹理“拉大”：
+  //
+  // | | 软件 `draw_canvas` | GPU 原实现 |
+  // |---|---|---|
+  // | 写入范围 | `area = round_out(dest)`，正好 30 像素 | quad 扩到 32 像素 |
+  // | 纹理映射 | 1 texel = 1 像素 | 30 texel 拉到 32 像素（放大 6.7%） |
+  // | 图标起点 | x=18 | **x=17** |
+  // | 图标尺寸 | 30×30 | **32×32** |
+  //
+  // 实测取证（TEMP-PROBE 把 mode==3 改成输出纯红）：红块是 **32×32 @ (17,14)**，
+  // 而传入的 rect 是 `(18,15,30,30)`——完全对上了外扩。
+  // 用户看到的：相期标题栏图标在 `defer_gpu` 升级那一帧（~780ms）从 (18,15)
+  // 跳到 (17,14)、且边缘发糊。这就是“软件与 GPU 渲染效果不一致”的具体形态。
+  //
+  // 修法：位图模式把 `local` 超出 `[0, g_rect.zw]` 的片元直接 discard。
+  // 这比“UV 内缩半纹素”更贴合软件语义——软件就是**不写**那些像素，
+  // 而不是“写一个边缘颜色”。
+  if (mode == 3) {
+    if (input.local.x < 0.0 || input.local.y < 0.0 || input.local.x >= g_rect.z ||
+        input.local.y >= g_rect.w) {
+      discard;
+    }
+  }
+  const float2 uv01 = input.local / g_rect.zw;
+  return shade(input.local, uv01, input.pixel, g_uv, half_size);
 }
 
 // 合批路径：子矩形、字形尺寸都由顶点带下来（逐字形不同）。
@@ -1690,6 +1720,30 @@ class GpuCanvas final : public Surface {
     }
     // 两个三角形（6 个顶点），四边形向外扩 1 像素（理由同 `vs_main`：
     // 光栅化按像素中心判定内外，不扩会丢边界那一行）。
+    //
+    // ## ❗ 外扩只能改 `position`，**不能改 `local01`**（2026-11-04 实测修正）
+    //
+    // `local01` 是采样纹理用的归一化坐标。曾经用它按**外扩后的顶点**算：
+    // ```
+    // vertex.local01 = {(vx - px) / pw, (vy - py) / ph};   // vx 是外扩后的！
+    // ```
+    // 于是 UV 范围变成 `-1/pw .. 1 + 1/pw`（这里 -0.033 .. 1.033），
+    // 着色器把它当 0..1 用：
+    //
+    // | | 正确 | 曾经 |
+    // |---|---|---|
+    // | 纹理映射 | 30 texel → 30 屏幕像素 | 30 texel → **32 屏幕像素** |
+    // | 左边缘像素 17 的 UV | 越界（CLAMP 后仍画第0列） | -0.0167 → **画出第 0 列** |
+    // | 墨迹起点 | 18 | **17** |
+    // | 墨迹高度 | 30 | **32** |
+    //
+    // 用户看到的：标题栏图标在 `defer_gpu` 升级那一帧（~780ms）从 (18,15) 跳到
+    // (17,14)，且边缘发糊（纹理被拉了 6.7%）。而**软件路径一直是 30px 1:1**——
+    // 两边差 1px 位置 + 2px 尺寸，这就是“软件与 GPU 渲染效果不一致”的具体形态。
+    //
+    // 正确做法：`local01` 用**原始矩形**（即 `local` ÷ 尺寸）算。
+    // 外扩部分自然得到越界 UV，靠采样器的 CLAMP 行为取边缘 texel——
+    // 那正是“再往外画也无所谓”的语义，且**不会把纹理拉伸**。
     const float px = static_cast<float>(x);
     const float py = static_cast<float>(y);
     const float pw = static_cast<float>(width);
@@ -1703,6 +1757,7 @@ class GpuCanvas final : public Surface {
       BatchVertex vertex{};
       vertex.position = {vx, vy};
       vertex.local = {vx - px, vy - py};
+      // 归一化分母是 `pw/ph`（**真实矩形**），不是外扩后的跨度。
       vertex.local01 = {(vx - px) / pw, (vy - py) / ph};
       vertex.uv = subrect;
       vertex.half_size = half;

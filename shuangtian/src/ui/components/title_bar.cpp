@@ -46,6 +46,11 @@ constexpr std::size_t k_button_close = 2;
 /// "调整标题图标"会静默改掉按钮图标——这正是同类缺陷的常见来源。
 constexpr float k_icon_size = 14.0f;
 /// 标题图标边长。
+///
+/// 曾短暂改成 20（想靠更大位图改善圆角质感），但视觉上“图标偏大、压过品牌名”，
+/// 已改回 16。圆角质感的问题**不是尺寸造成的**，真因在 GPU 侧的位图外扩
+///（`ps_main` 的 mode==3 现在会裁掉外扩那一圈，见那里的说明）——
+/// 那个修好后，16px 下软件与 GPU 的图标已经一致（实测 x18..47 y15..44、30×30）。
 constexpr float k_title_icon_size = 16.0f;
 /// 标题栏内边距（左右）。
 constexpr float k_padding_x = 12.0f;
