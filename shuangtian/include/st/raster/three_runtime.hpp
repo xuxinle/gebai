@@ -126,6 +126,13 @@ struct ThreeObject {
   [[nodiscard]] auto animated() const noexcept -> bool {
     return spin_speed != 0.0f || oscillate_amplitude != 0.0f;
   }
+
+  /// 取景时**不算**本物体（`mesh.userData.noFrame = true`）。
+  ///
+  /// 用于背景板/地面板这类“氛围件”：它们通常比主体大一圈，
+  /// 算进包围盒会让取景距离白白拉远——实测：表径 40 而背景盘半径 22.4，
+  /// 把取景距离从 86 拉到 120，主体在画面里只剩一半大。
+  bool no_frame{false};
 };
 
 /// 抽出来的完整场景（相机 + 灯光 + 物体）。

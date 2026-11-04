@@ -760,7 +760,9 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       // 这里只把意图（轴/速度/振幅/频率）带出去，实际旋转由渲染侧逐帧算。
       // 字段缺省时给 null，C++ 侧按 0 处理。
       spin: (o.userData && o.userData.spin) || null,
-      oscillate: (o.userData && o.userData.oscillate) || null
+      oscillate: (o.userData && o.userData.oscillate) || null,
+      // 取景时不算它（背景板/地面板这类氛围件）
+      noFrame: !!(o.userData && o.userData.noFrame)
     });
   });
 
@@ -1053,6 +1055,12 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
             object.oscillate_axis =
                 read_axis(oscillate.get(), "axis", math::Vec3{0.0f, 0.0f, 1.0f});
           }
+        }
+        // 取景排除标记（背景板/地面板这类氛围件）
+        {
+          JsRef flag{impl_->context,
+                     JS_GetPropertyStr(impl_->context, source.get(), "noFrame")};
+          object.no_frame = JS_ToBool(impl_->context, flag.get()) > 0;
         }
       }
 

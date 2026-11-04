@@ -793,6 +793,13 @@ hands.add(secondHand);
       color: 0x141d2b, metalness: 0.45, roughness: 0.60
     }));
   backdrop.name = 'backdrop';
+  // ## 取景时不算它
+  //
+  // 背景盘比表壳还大一圈（22.4 vs 20）——把它算进包围盒，取景距离会从 86
+  // 拉到 120，主体在画面里只剩一半大。实测截图就是这个观感。
+  //
+  // `noFrame` 是给“氛围件”的口径：它们需要被画出来，但不该决定取景。
+  backdrop.userData.noFrame = true;
   backdrop.position.z = -1.55;
   backdrop.rotation.x = Math.PI / 2;
   scene.add(backdrop);

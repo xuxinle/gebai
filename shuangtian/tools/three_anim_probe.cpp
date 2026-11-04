@@ -32,7 +32,12 @@ int main(int argc, char** argv) {
               static_cast<double>(scene->camera.fov_y_degrees));
   int spinning = 0;
   int oscillating = 0;
+  int no_frame = 0;
   for (const auto& object : scene->objects) {
+    if (object.no_frame) {
+      ++no_frame;
+      std::printf("  noFrame   %-22s（取景时不计入包围盒）\n", object.name.c_str());
+    }
     if (object.spin_speed != 0.0f) {
       ++spinning;
       std::printf("  spin      %-22s speed=%.4f axis=(%.1f,%.1f,%.1f)\n", object.name.c_str(),
@@ -49,6 +54,7 @@ int main(int argc, char** argv) {
                   static_cast<double>(object.oscillate_phase));
     }
   }
-  std::printf("合计：自转 %d 个 / 振荡 %d 个\n", spinning, oscillating);
+  std::printf("合计：自转 %d 个 / 振荡 %d 个 / 取景排除 %d 个\n", spinning, oscillating,
+              no_frame);
   return (spinning + oscillating) > 0 ? 0 : 2;
 }

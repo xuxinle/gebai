@@ -235,3 +235,68 @@ scene;
   const float radius = 0.5f * std::sqrt(size.x * size.x + size.y * size.y + size.z * size.z);
   ST_CHECK(state.distance > radius * 0.9f);
 }
+
+ST_TEST(three_view_no_frame_excludes_backdrop) {
+  // ## `noFrame` 让"氛围件"不参与取景
+  //
+  // 背景板/地面板通常比主体大一圈，算进包围盒会让取景距离白白拉远——
+  // 实测：表径 40，一块半径 22.4 的背景盘把距离从 86 拉到 120，
+  // 主体在画面里只剩一半大。
+  constexpr const char* kWithBackdrop = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 16 / 9, 0.5, 500);
+camera.position.set(0, 0, 60);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+const subject = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4),
+  new THREE.MeshStandardMaterial({ color: 0xff8800 }));
+subject.name = 'subject';
+scene.add(subject);
+
+const plate = new THREE.Mesh(new THREE.BoxGeometry(30, 30, 1),
+  new THREE.MeshStandardMaterial({ color: 0x222222 }));
+plate.name = 'plate';
+plate.position.z = -3;
+plate.userData.noFrame = true;   // 声明"别用它取景"
+scene.add(plate);
+scene;
+)js";
+  // 同样两份场景，只差一个 userData 标记
+  constexpr const char* kWithoutFlag = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 16 / 9, 0.5, 500);
+camera.position.set(0, 0, 60);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+const subject = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4),
+  new THREE.MeshStandardMaterial({ color: 0xff8800 }));
+subject.name = 'subject';
+scene.add(subject);
+
+const plate = new THREE.Mesh(new THREE.BoxGeometry(30, 30, 1),
+  new THREE.MeshStandardMaterial({ color: 0x222222 }));
+plate.name = 'plate';
+plate.position.z = -3;
+scene.add(plate);
+scene;
+)js";
+
+  auto flagged = make_view(kWithBackdrop, "flagged.js");
+  auto plain = make_view(kWithoutFlag, "plain.js");
+  ST_REQUIRE(flagged->object_count() == 2U);
+  ST_REQUIRE(plain->object_count() == 2U);
+
+  // 标记已抽出来
+  bool found_flag = false;
+  for (const auto& object : flagged->scene().objects) {
+    if (object.name == "plate" && object.no_frame) found_flag = true;
+  }
+  ST_CHECK(found_flag);
+
+  flagged->frame_scene();
+  plain->frame_scene();
+  // 排除了大背景板 → 距离应显著更近
+  ST_CHECK(flagged->camera_state().distance < plain->camera_state().distance * 0.6f);
+}

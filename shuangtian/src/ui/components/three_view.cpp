@@ -33,6 +33,14 @@ auto scene_bounds(const raster::ThreeScene& scene) -> raster::Bounds {
   raster::Bounds box = raster::Bounds::empty();
   for (const auto& object : scene.objects) {
     if (object.mesh.is_empty()) continue;
+    // ## 跳過声明了 `noFrame` 的物体
+    //
+    // 背景板/地面板这类“氛围件”通常比主体大一圈，把它们算进包围盒
+    // 会让取景距离白白拉远——实测：表的直径 40，而一块半径 22.4 的
+    // 背景盘把距离从 86 拉到 120，主体在画面里只剩一半大。
+    //
+    // 场景里写 `mesh.userData.noFrame = true` 即可（与 spin/oscillate 同一套习惯）。
+    if (object.no_frame) continue;
     const auto pick = raster::make_pick_object(object.name, object.mesh, object.world);
     if (pick.world_bounds.is_empty()) continue;
     box = box.union_with(pick.world_bounds);
@@ -811,6 +819,14 @@ auto ThreeView::get_property(std::string_view name) const -> std::optional<std::
   // 后端重建次数：若它每帧都在涨，画面就永远停在初始时刻
   if (name == "backend_rebuilds") return std::to_string(backend_rebuilds_);
   if (name == "render_size") return std::format("{}x{}", backend_width_, backend_height_);
+  // 取景用的包围盒（诊断：看 noFrame 有没有被排除）
+  if (name == "frame_bounds") {
+    const auto box = scene_bounds(scene_);
+    if (box.is_empty()) return std::string("empty");
+    const auto size = box.size();
+    return std::format("size=({:.2f},{:.2f},{:.2f})", static_cast<double>(size.x),
+                       static_cast<double>(size.y), static_cast<double>(size.z));
+  }
   if (name == "backend_pref") return backend_pref_.empty() ? std::string("auto") : backend_pref_;
   // 实际送给后端的相机（证明它不是一个退化的默认值）
   if (name == "camera_state") {
@@ -924,7 +940,7 @@ auto ThreeView::readonly_property_names() const -> std::vector<std::string_view>
   return {"objects",      "backend",      "picked",       "selected_name",
           "error",        "hover_events", "click_events", "pick_distance",
           "paint_frames", "anim_time", "backend_rebuilds", "render_size",
-          "mesh_stats", "first_anim_deg", "backend_pref", "camera_state"};
+          "mesh_stats", "first_anim_deg", "backend_pref", "camera_state", "frame_bounds"};
 }
 
 auto ThreeView::invoke_action(std::string_view action, std::string_view argument) -> bool {
