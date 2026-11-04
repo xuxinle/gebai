@@ -369,6 +369,39 @@ struct SceneSpec {
   /// 为什么放在 `SceneSpec` 而不是 `SceneObjectSpec`：动画是**跨节点**的
   ///（一条轨道动一个节点，一段动画动整台设备），挂在单个对象上表达不了。
   std::optional<st::raster::Clip> animation{};
+
+  // ── three.js 源码场景（2026-11-05） ──
+  //
+  // ## 为何需要第三条表达路径
+  //
+  // 前两条（`objects` 声明式 JSON、过程式 `Scene3D` 调用）对**人**够用，
+  // 对**模型**不够——不是因为能力少，而是因为语料里没有：模型写
+  // three.js 几乎一次就对，写本框架的 JSON 要反复试。
+  //
+  // 所以这一档不是"再包一层 API"，而是**换掉表达层**：源码里直接写
+  // `new THREE.Mesh(new THREE.ExtrudeGeometry(shape, ...), ...)`，
+  // 由 `three_runtime` 抽出几何/材质/相机/灯光再交给本框架渲染。
+  //
+  // ## 与 `objects` 的关系：**互斥，非空时优先**
+  //
+  // 两者同时给会让“到底以哪个为准”变成隐规则。这里定死：
+  // `three_script` 非空 ⇒ 忽略 `objects`；为空 ⇒ 完全走旧路径（逐像素不变）。
+  //
+  // ## 能写什么
+  //
+  // 完整 JS：循环、函数、条件。这是它相对声明式 JSON 的**核心优势**
+  //（"沿弧线摆 24 个方块"在 JSON 里要写 24 遍，这里一个 for）。
+  /// three.js 源码（非空时覆盖 `objects` 的几何描述）。
+  ///
+  /// 契约（与 `three_runtime` 一致）：最后一个表达式应是
+  /// `THREE.Scene` / `Group` / `Mesh`，或定义一个名为 `scene` 的全局变量。
+  std::string three_script{};
+
+  /// three.js 源码在报错/日志里的**文件名**（默认 `<inline-three>`）。
+  ///
+  /// 为何可配：出问题时错误消息会带这个文件名与行号。从文件加载时填上真实路径，
+  /// 模型/人才能一眼定位到源文件的那一行。
+  std::string three_script_name{};
 };
 
 /// 把一个形状引用解析成实际可加载的路径。
@@ -379,6 +412,26 @@ struct SceneSpec {
 /// 而不是一个拼接出来的、看着陌生又不存在的路径）。
 [[nodiscard]] auto resolve_shape_path(std::string_view reference, std::string_view asset_basis)
     -> std::string;
+
+/// three.js 源码 ⇒ 可直接渲染的 `SceneSpec`（几何/材质/相机/灯光全部抽好）。
+///
+/// ## 为何要这个而不是让调用方自己调 `ThreeRuntime`
+///
+/// 调用方关心的是"这个场景要画什么"，不是"怎么从 JS 堆里把 Float32Array 搬出来"。
+/// 本函数把那段搬运（以及它自带的**一堆语义翻译坑**：灯方向取反、side → 剔除模式、
+/// three 的线性色 ↔ 本框架的线性色）收进一处——那几处每一处错了都是
+/// “画面不对但不报错”。
+///
+/// ## 抽出来的物体长什么样
+///
+/// 每个物体带 `<three:N>` 形式的 `shape`（`N` 是 `three_primitives` 里的下标），
+/// 几何**已经建好**，不再按 `shape` 参数重新生成。`render_scene*` 家族认这个前缀。
+///
+/// 错误：`Unsupported`（three 运行时不可用）、`Parse`（语法/运行时错误，带行号）、
+/// `Timeout`（超过执行时限）、`Invalid`（脚本未产出场景）。
+[[nodiscard]] auto scene_spec_from_three(std::string_view script,
+                                         std::string_view script_name = "<inline-three>")
+    -> Result<SceneSpec>;
 
 /// 把 JSON 解析成 `SceneSpec`。
 ///

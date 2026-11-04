@@ -84,7 +84,11 @@
 
 namespace st::raster {
 
-class SceneObjectSpec;
+/// 前置声明。
+///
+/// ⚠ 必须写 `struct` 而不是 `class`：`SceneObjectSpec` 的实际定义是 `struct`，
+/// 两者混用会让 clang 报 `-Wmismatched-tags`（MSVC ABI 下可能导致链接错误）。
+struct SceneObjectSpec;
 
 /// 锚点名（`pivot_at` 同一张词表的八方向 + center）。
 struct AnchorKind {

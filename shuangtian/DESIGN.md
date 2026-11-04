@@ -1889,6 +1889,94 @@ Model 层零改动。
 实跑：xmlapp / xiangqi 两个示例已改吃这条通路，e2e（`xmlapp_e2e.py` /
 `xiangqi_e2e.py`）全绿。文档：`docs/hot-reload.md`。
 
+#### 4.2.14 three.js 作为三维的**表达层**（2026-11-05）
+
+**问题不是能力，是语料。** 三维渲染器本来就能画（透视/深度/光照/PBR/阴影/透明都在），
+但**由模型来写场景**时两道入口都低效：
+
+| 入口 | 对人的体验 | 对模型的体验 |
+|---|---|---|
+| 声明式 JSON（`SceneSpec.objects`） | 好（字段齐、可校验） | 差：字段语义靠文档，模型语料里几乎没有这种写法 |
+| 过程式 `Scene3D` 调用 | 好（灵活） | 差：调用顺序错了会静默失效 |
+| **three.js 源码** | 好（模型/人都熟） | **好：语料极丰富，几乎一次就对** |
+
+所以新增的不是“第四个渲染器”，而是**第三条表达路径**：模型写 three.js，
+几何/材质/相机/灯光被抽出来交给**本框架已有的两条腿**渲染。
+
+| 项 | 做法 |
+|---|---|
+| three.js 跑在哪 | 本框架已内嵌的 QuickJS（`third_party/quickjs`）——**不引浏览器** |
+| three.js 的哪一半用 | 只用**数据侧**：`Scene`/`Object3D`/`BufferGeometry`/`Material`/`Camera`/`Light` |
+| 哪一半不用 | `WebGLRenderer`（光栅化是本框架的事）、`TextureLoader`/`GLTFLoader`/`document` |
+| 几何怎么拿 | `JS_GetTypedArrayBuffer` + `JS_GetArrayBuffer` **直读内存**（不走 Json 转换） |
+| 语义怎么对齐 | 一张显式翻译表（灯方向取反 / `side`→剔除 / 色彩空间不再解码…）见 `docs/three3d.md` §3.3 |
+
+**实测**：加载 55ms / 常驻 4.5MiB / 每帧推进 54µs；模型高频 API 面（Extrude/Lathe/Tube/
+Shape+holes/InstancedMesh/AnimationMixer）20/20 可用；端到端（three.js 场景 → 本框架渲染 → PNG）
+像素判据全绿。
+
+##### 一个关键的工程决策：闭环不能靠“看图”
+
+三维的失败**几乎从不报错**（相机钻进物体、物体出框、光方向反、颜色重复解码——
+解析器与渲染器全部“成功”），而**从截图判断这些恰恰是模型的弱项**。
+所以闭环做成"读数字"：`scene_report` 把画面量成事实（覆盖率/逐物体像素/亮度分布）
++ 诊断（结论码 + **可执行的修正建议**），`three_check` 工具把它暴露成命令行（退出码可当 CI 门禁）。
+
+于是迭代是纯文本往返：`写脚本 → three_check → 按建议改 → 再跑`。
+
+##### 踩到并修掉的真缺陷（都是“不报错”的那类）
+
+| 缺陷 | 症状 | 根因 |
+|---|---|---|
+| 先跑 three 后打桩 | `exports is not defined` | three.cjs 是 CJS，**顶层就在读写** `exports`/`module` |
+| 全局作用域求值 | 第二次同一脚本报 `redeclaration of 'scene'` | `const scene` 落到了全局；改为包 IIFE + 自动 return 末表达式 |
+| three 分支漏 `end_frame` | `draw_calls` 在涨、位置全对、**像素 0** | `draw_mesh` 只提交到内部缓冲，合成在 `end_frame` |
+| 把 `pixels()` 当 RGBA 解 | 四个颜色判据全假阴性（`rgb(x,y,255)`） | `Surface::pixels()` 是 **0xAARRGGBB**；验证一律走 `to_rgba8()` |
+
+##### 交互式视口（`ThreeView`）又抓到一批——“画了但看不见”
+
+做机械表场景（129 个物体 / 51.8 万顶点）时浮出的一批，共同点：**全都不报错**，
+而且相互遮蔽（修好一个另一个才暴露出来）。
+
+| 缺陷 | 症状 | 根因 |
+|---|---|---|
+| 远平面没跟着距离扩 | 视口里只有背景色 | `far_z` 默认 100，而 `frame_scene()` 对 40mm 直径的表算出距离 122 → **整个场景在远裁剪面之外** |
+| 合成目标矩形与相机视口不一致 | 同上（更难查） | `end_frame` 的 destination 与 `set_camera` 算 aspect 用的尺寸必须同口径 |
+| `lookAt()` 在 QuickJS 里角度减半 | 脚本写的视角完全不起作用 | `Matrix4.lookAt → setFromRotationMatrix` 的数值问题；规避：用 `quaternion.setFromAxisAngle` |
+| `LatheGeometry` 轴向 | 表壳“平躺”、机芯竖插 | Lathe 绕 **Y** 轴，而场景以 Z 为厚度方向；需 `rotation.x = ±PI/2`（已实测两者都把 Y 映射到 Z） |
+| Lathe profile 从圆心起笔 | 一整块实心盘挡住全部内容 | `profile[0] = [0, z]` 会扫出实心底；应从**内半径**起笔做成壳 |
+| 切换场景不重新取景 | 新场景缩成一小块 | 比较 `source_name_` 时它已被覆盖为新值（先存 `previous_source`） |
+| `set_material` 被 A/B 删掉未恢复 | 全白，所有零件长得一样 | 不调时后端用默认材质（无金属度/粗糙度区分）——**A/B 实验必须成对回滚** |
+
+###### 为什么这批特别难查（一条方法论）
+
+单独看每一环都正常：物体数 129、网格 51.8 万顶点、世界矩阵逐帧在变
+（`r00` 0.968→0.903）、`draw_calls` 129、`paint_frames` 在增长、后端 `gpu`。
+而 `three_check`（新建画布、无裁剪、scale=1、用场景自带相机）渲染同一份场景
+**完全正常**——所以它证明不了视口路径是对的。
+
+转折点是**把相机参数当判据打印出来**（新增 `camera_state` 只读属性）：
+`eye.z = 118.75` 而 `far_z = 100`，一眼就完了.
+
+> **口径**：排查“画了但看不见”时，先打印**相机与目标矩形**，再看别的。
+> 其他一切（网格/矩阵/材质/光照）都正常而画面空白的场合，答案几乎总在这两样上。
+>
+> 配套的工具面：`three_composite_probe`（同一场景×缩放×矩形口径的对照）、
+> `three_camera_probe`（`lookAt` 抽取是否正确）、`lathe_axis_probe`（Lathe 轴向实测）、
+> `three_anim_probe`（`userData` 动画字段是否抽出来）。
+
+##### 一个值得记下的口径发现
+
+本框架的环境反射**自带底面光**（`env_strength` 未配时按 `ambient + 0.55` 给基准，
+目的让金属“哪里都在映环境”）。实测：**完全不打光**的中灰球平均亮度仍有 **40.2/255**，
+正常打光是 **45.6**。所以不能用绝对亮度阈值判“没打光”——那条诊断代码保留但阈值写得很低，
+注释里记了这个实测值，防止后来者照着直觉改成“看起来合理”的数。
+
+**回归**：4 个测试文件共 36 用例 / 327 断言（抽取 11 + 语义翻译 8 + 接入 6 + 报告 11），
+其中像素级判据覆盖“覆盖率/冷暖分布/换相机变化/逐物体可见性/空画面/相机内部/纯色块/完全重叠”。
+**接口**：`include/st/raster/three_runtime.hpp`、`include/st/raster/scene_report.hpp`。
+**文档**：`docs/three3d.md`。**工具**：`tools/three_check.cpp`（`st build three_check`）。
+
 ### 4.3 text
 ```cpp
 namespace st::text {

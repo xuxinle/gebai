@@ -26,7 +26,7 @@
     "src/lsp/*.cpp",
     "src/perf/*.cpp"
   ],
-  "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json"],
+  "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs"],
   "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c"],
   "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
   "tests": ["tests/*_test.cpp"],
@@ -100,7 +100,7 @@
   },
   "targets": {
     "all": { "kind": "group",
-             "libraries": ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "xiangqi", "cefu", "gedou"],
+             "libraries": ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "threelab", "xiangqi", "cefu", "gedou"],
              "//libraries": "group 的 libraries 是**成员目标**（依次构建），不是链接的库——语义见 manifest.hpp 的 TargetSpec::libraries。" },
     "st_core": { "kind": "library",
                  "include_sources": ["src/core/*.cpp", "src/codec/*.cpp", "src/math/*.cpp",
@@ -169,6 +169,10 @@
                   "//embed": "只嵌图标素材（界面本身是运行期读的文件）；图标两件：PNG给窗口系统、SVG 给自绘标题栏。",
                   "embed": ["examples/xmlapp/assets/xmlapp-icon.png",
                               "examples/xmlapp/assets/xmlapp-logo.svg"] },
+    "threelab": { "kind": "executable", "sources": ["examples/threelab/*.cpp"],
+                  "exclude_sources": ["src/pkg/*"],
+                  "//note": "three.js 场景实时预览器：监听 scenes/*.js 并热重载，支持旋转/缩放/平移/悬浮/点选。脚本是运行期读的普通 three.js 代码（不 embed）——这是本示例的要点：用户写的就是它已经会写的东西。",
+                  "//slow": "它是常驻应用（有主循环），不适合当单元测试跑；验证靠 tools/threelab_e2e.py 与 tests/ui_three_view_test.cpp" },
     "xiangqi": { "kind": "executable", "sources": ["examples/xiangqi/*.cpp"],
                   "exclude_sources": ["src/pkg/*"],
                   "//note": "agent 控制的桌面常驻面板：webSocket 客户端连控制器；界面 ui/main.xml、逻辑 ui/app.js（运行期读，不 embed）",
@@ -718,6 +722,36 @@
       "sources": ["tools/scene3d_capability_matrix.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "三维能力矩阵：逐项核对软件腿/GPU腿是否都真的支持（阴影/透明/金属高光）"
+    },
+    "three_check": {
+      "kind": "executable",
+      "sources": ["tools/three_check.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "三维渲染自检：把一份场景（three.js 源码或 JSON）渲染一遍，输出 PASS/FAIL + 逐物体可见性 + 可执行的修正建议。退出码可当 CI 门禁（0=ok，1=有 error，2=解析失败）。这是“写→渲染→验证”闭环的最后一环：模型读文本就够了，不必看图"
+    },
+    "three_anim_probe": {
+      "kind": "executable",
+      "sources": ["tools/three_anim_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "把场景里 `userData.spin` / `userData.oscillate` 的抽取结果打出来。存在的理由：动画失效是**完全静默**的（场景照常渲染、物体数正确，就是不动），静态截图区分不出“本来就没动”与“动画坏了”——这个探针让它可断言"
+    },
+    "three_composite_probe": {
+      "kind": "executable",
+      "sources": ["tools/three_composite_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "复现 `ThreeView` 的合成路径：同一个 Scene3D，只把**目标画布 device_scale 与目标矩形口径**两个变量拎出来对照。用于定位“three_check 能画、视口里只剩背景色”那个问题"
+    },
+    "three_camera_probe": {
+      "kind": "executable",
+      "sources": ["tools/three_camera_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "验证相机 `lookAt` 的抽取：对比“lookAt 后 add / add 后 lookAt / 不调 lookAt”三种写法抽出的 target。存在的理由：抽取错的症状是“视角完全不对”（看到背面而不是正面），而它会与轨道相机重叠、很难归因"
+    },
+    "lathe_axis_probe": {
+      "kind": "executable",
+      "sources": ["tools/lathe_axis_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "实测 LatheGeometry 的轴向与 rotation.x 的效果（打印三个旋转下的世界包围盒跨度）。存在的理由：右手系绕 X 转 ±90° 到底 Y→Z 还是 Y→-Z，推导容易错；而错一次的代价是“表壳盖住表盘”这类很难归因的现象"
     },
     "scene3d_shadow_probe": {      "kind": "executable",
       "sources": ["tools/scene3d_shadow_probe.cpp"],

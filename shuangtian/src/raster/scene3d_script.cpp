@@ -1,5 +1,7 @@
 #include "st/raster/scene3d_script.hpp"
 
+#include "st/raster/three_runtime.hpp"
+
 #include "st/raster/gltf.hpp"
 #include "st/codec/png.hpp"
 #include "st/core/log.hpp"
@@ -1297,19 +1299,37 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
     return st::unexpected(ErrorCode::Parse, "snap：步长必须 >= 0（0 = 关闭）");
   }
 
+  // ── three.js 源码场景（与 `objects` 互斥，非空时优先） ──
+  //
+  // 先读它，因为它决定 `objects` 是否必填：写 three 脚本时 `objects` 可以省。
+  spec.three_script = json_get_string(json, "three_script", "");
+  spec.three_script_name = json_get_string(json, "three_script_name", "");
+
   const Json* objects = json_find(json, "objects");
-  if (objects == nullptr) {
-    return st::unexpected(ErrorCode::Parse, "objects：缺少（哪怕是空数组也要写）");
+  if (objects == nullptr && spec.three_script.empty()) {
+    // `objects` 是必填的（哪怕是空数组）——除非写了 three 脚本
+    return st::unexpected(ErrorCode::Parse,
+                          "objects：缺少（哪怕是空数组也要写；或改用 three_script）");
   }
-  if (!objects->is_array()) {
+  if (objects != nullptr && !objects->is_array()) {
     return st::unexpected(ErrorCode::Parse, "objects：需要数组");
   }
-  const auto& arr = objects->get_ref<const Json::array_t&>();
-  spec.objects.reserve(arr.size());
-  for (std::size_t i = 0; i < arr.size(); ++i) {
-    const auto obj = read_object(arr[i], i);
-    if (!obj) return st::forward_error(obj.error());
-    spec.objects.push_back(*obj);
+  // 写了 three 脚本时 `objects` 被忽略（文档里已声明）：**不建树、不跑约束**——
+  // 那些结果会被渲染路径丢掉，白花时间且掩盖真正的错。
+  //
+  // 实现方式是“把处理范围限定在非 three 模式”：用一个空数组代替 objects，
+  // 后面的建树/重名/约束逻辑因而天然空转（它们对空列表都是无操作）。
+  const bool three_mode = !spec.three_script.empty();
+  const Json kEmptyObjects = Json::array();
+  const Json& objects_value = three_mode ? kEmptyObjects : *objects;
+  {
+    const auto& arr = objects_value.get_ref<const Json::array_t&>();
+    spec.objects.reserve(arr.size());
+    for (std::size_t i = 0; i < arr.size(); ++i) {
+      const auto obj = read_object(arr[i], i);
+      if (!obj) return st::forward_error(obj.error());
+      spec.objects.push_back(*obj);
+    }
   }
   // 扁平写法（`objects` 里平铺 + 各自 `parent`）→ 树。
   //
@@ -1430,6 +1450,24 @@ auto parse_scene_spec_text(std::string_view text) -> Result<SceneSpec> {
   const auto json = json_parse(text);
   if (!json) return st::forward_error(json.error());
   return parse_scene_spec(*json);
+}
+
+auto scene_spec_from_three(std::string_view script, std::string_view script_name)
+    -> Result<SceneSpec> {
+  if (script.empty()) {
+    return st::unexpected(ErrorCode::Invalid, "three 脚本为空");
+  }
+  auto three_scene = ThreeRuntime::instance().evaluate(script, script_name);
+  if (!three_scene.has_value()) return st::forward_error(three_scene.error());
+
+  // 直接搭一份完整的 `SceneSpec`：相机/光照/物体全部就位，`three_script` 留在
+  // 里面（调用方若把它序列化出去、以后再渲染，仍能重放；预览与导出两条路一致）。
+  SceneSpec spec{};
+  spec.camera = three_scene->camera;
+  spec.lighting = three_scene->lighting;
+  spec.three_script = std::string(script);
+  spec.three_script_name = std::string(script_name);
+  return spec;
 }
 
 auto resolve_shape_path(std::string_view reference, std::string_view asset_basis)
@@ -1769,6 +1807,49 @@ auto collect_drawable_node_names(const SceneSpec& spec) -> std::vector<std::stri
 auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3D& scene,
                  Surface& canvas, math::Color background) -> Result<void> {
   canvas.clear(background);
+
+  // ## three.js 源码场景：**另一条完整的渲染路径**
+  //
+  // 为什么不把抽出来的几何塞进 `spec.objects` 复用下面的遍历：
+  //
+  // | 项 | `SceneObjectSpec` 路径 | three 抽出来的东西 |
+  // |---|---|---|
+  // | 几何 | **按参数现场生成**（shape + size） | **已给定的顶点表**（没有参数可重生成） |
+  // | 材质 | 对象级字段 | 已翻译成 `Material` 结构 |
+  // | 层级 | `SceneObjectSpec` 树 + 约束解算 | 已经是 three 的世界矩阵 |
+  //
+  // 硬塞进去就要给 `SceneObjectSpec` 加一个“外部几何”字段并绕过约束/布尔/阵列
+  // 全部逻辑——那些路径对它都是无意义的，而每个绕过点都是一个“以为生效实际没走”的坑。
+  // 分开写虽然多几十行，但两边都保持单一直线。
+  if (!spec.three_script.empty()) {
+    auto three_scene = ThreeRuntime::instance().evaluate(spec.three_script, spec.three_script_name);
+    if (!three_scene.has_value()) return st::forward_error(three_scene.error());
+
+    scene.begin_frame(background);
+    scene.set_camera(three_scene->camera);
+    scene.set_lighting(three_scene->lighting);
+    for (const auto& warning : three_scene->warnings) {
+      ST_LOG_WARN("three 场景：{}", warning);
+    }
+    for (const auto& object : three_scene->objects) {
+      if (!object.visible) continue;
+      scene.set_cull_mode(object.cull);
+      scene.set_material(object.material);
+      scene.draw_mesh(object.mesh, object.world);
+    }
+    // ## `end_frame` 不能漏（漏了看起来就是“什么都没画”）
+    //
+    // 三维腿的 `draw_mesh` 只是把三角形提交到内部缓冲；**合成到画布发生在
+    // `end_frame`**（它才做色调映射/sRGB 编码与 goal → canvas 的拷贝）。
+    // 漏了它，`draw_calls` 会涨、内部缓冲也有内容，但画布上什么也没有——
+    // 本仓实测就是这样：抽取出 3 个方块、位置全对，而像素计数为 0。
+    scene.set_cull_mode(spec.cull_mode);
+    scene.set_material(Material{});
+    scene.end_frame(canvas, math::Rect{0.0f, 0.0f,
+                                       static_cast<float>(canvas.physical_width()),
+                                       static_cast<float>(canvas.physical_height())});
+    return ok();
+  }
 
   // ## 顺序在这里被钉死
   //

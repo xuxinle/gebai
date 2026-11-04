@@ -1,0 +1,303 @@
+# 用 three.js 写三维场景
+
+> 目标：让**模型/人写 three.js 就能出图**，光栅化由霜天自己做（不引浏览器）。
+>
+> 一句话定位：three.js 在这里是**场景描述 DSL**，不是渲染器。
+
+## 一、为什么要有这条路
+
+本框架原有的三维入口有两个：声明式 JSON（`SceneSpec.objects`）与过程式调用（`Scene3D`）。
+两者对人够用，**对模型不够**——不是能力少，而是语料里没有。
+
+实测对比（同一个"金属球浮在底座上"）：
+
+| 表达层 | 模型的首次成功率 | 失败模式 |
+|---|---|---|
+| three.js 源码 | 接近一次就对 | 偶尔漏 `scene.add()` |
+| 本框架的 JSON 场景 | 要反复试 | 字段语义靠查文档，`rotation` 单位/顺序易错 |
+| 过程式 `Scene3D` 调用 | 要反复试 | 调用顺序错了会静默失效 |
+
+所以这条路的价值不在"多一个 API"，而在**换掉表达层**。
+渲染能力完全没变（仍是本框架的两条腿：有显卡走 D3D11，没有走软件光栅器）。
+
+## 二、怎么写
+
+### 2.1 最小可用形态
+
+```cpp
+#include "st/raster/three_runtime.hpp"
+#include "st/raster/scene3d_script.hpp"
+
+auto spec = st::raster::scene_spec_from_three(R"js(
+  const scene = new THREE.Scene();
+
+  const camera = new THREE.PerspectiveCamera(45, 16/9, 0.1, 100);
+  camera.position.set(0, 1.2, 4.5);
+  camera.lookAt(0, 0.3, 0);
+  scene.add(camera);
+
+  scene.add(new THREE.AmbientLight(0x8899bb, 0.5));
+  const key = new THREE.DirectionalLight(0xffffff, 2.4);
+  key.position.set(3, 4.5, 3.5);
+  key.target.position.set(0, 0.3, 0);
+  scene.add(key);
+  scene.add(key.target);
+
+  scene.add(new THREE.Mesh(
+    new THREE.SphereGeometry(0.7, 32, 24),
+    new THREE.MeshStandardMaterial({ color: 0xd09050, metalness: 0.85, roughness: 0.22 })));
+
+  scene;   // ← 最后一个表达式的值就是场景
+)js", "hero.js");
+
+st::raster::Canvas canvas(960, 540);
+if (spec.has_value()) {
+  st::raster::render_scene(*spec, canvas, st::math::Color{8, 10, 16, 255});
+}
+```
+
+### 2.2 从 JSON 里用（裁云 `model_script`）
+
+裁云的 `model3d` 图层本来就吃 `model_script`。加一个字段即可：
+
+```json
+{
+  "kind": "model3d",
+  "model_script": {
+    "three_script": "const scene = new THREE.Scene(); ... scene;",
+    "three_script_name": "shots/hero.js"
+  }
+}
+```
+
+`three_script` 非空时**忽略 `objects`**（两者互斥，避免"以谁为准"变成隐规则）。
+
+### 2.3 契约（三条，必须记）
+
+| 项 | 规则 |
+|---|---|
+| **返回值** | 最后一个表达式应是 `Scene` / `Group` / `Mesh`（数组也收），或定义全局 `scene` |
+| **相机** | 放在场景里（`scene.add(camera)`）或不放都行，两种都能取到 |
+| **能写什么** | 完整 JS：循环、函数、条件 —— 这是它相对 JSON 的核心优势 |
+
+```js
+// 沿弧线摆 24 个方块：JSON 要写 24 遍，这里一个 for
+const scene = new THREE.Scene();
+const mat = new THREE.MeshStandardMaterial({ color: 0x88aaff, metalness: 0.6 });
+for (let i = 0; i < 24; i++) {
+  const angle = (i / 24) * Math.PI * 2;
+  const block = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), mat);
+  block.position.set(Math.cos(angle) * 2, 0.5, Math.sin(angle) * 2);
+  block.rotation.y = -angle;
+  scene.add(block);
+}
+scene;
+```
+
+## 三、能力边界（**明确声明，不是遗漏**）
+
+### 3.1 用的部分
+
+| three.js | 说明 |
+|---|---|
+| `Scene` / `Group` / `Object3D` | 父子变换、`updateMatrixWorld` 全是纯 JS |
+| `BufferGeometry` + 全部内置几何生成器 | 顶点/法线/UV/索引从 `Float32Array` **零拷贝**读内存 |
+| `ExtrudeGeometry` / `LatheGeometry` / `TubeGeometry` / `Shape` + holes | 实测均可用（模型最爱写的轮廓建模） |
+| `CatmullRomCurve3` / `Vector2` / `Vector3` / `Quaternion` / `Euler` / `Matrix4` / `Box3` | 数学类全可用 |
+| `PerspectiveCamera` / `OrthographicCamera` | 位置/朝向/fov/near/far/ortho_scale 全部翻译 |
+| `DirectionalLight` / `PointLight` / `SpotLight` / `AmbientLight` / `HemisphereLight` | 前四类精确翻译；半球光近似为"环境 + 顶光" |
+| `InstancedMesh` / `AnimationMixer` | 可构造、可算（动画的**采样结果**能取到） |
+| `MeshStandardMaterial` / `Physical` / `Phong` / `Lambert` | color/metalness/roughness/opacity/emissive/side/depthWrite |
+| `MeshBasicMaterial` | 映射为"自发光 + unlit"（three 里它不受光） |
+
+### 3.2 **不**用的部分（这是硬约束）
+
+| three.js | 为什么不用 |
+|---|---|
+| `WebGLRenderer` | 渲染由本框架的 `Scene3D` 做（这正是"不引浏览器"的意思） |
+| `TextureLoader` / `ImageLoader` / `document` / `Image` | 没有浏览器环境。**构造不报错，但加载不了** |
+| `GLTFLoader` / `OBJLoader` / `FBXLoader` | 外部模型请用本框架的 `gltf` 字段（它有自己的加载器） |
+| 多材质网格（`material: [m1, m2]`） | 当前只取第一个材质。需要多材质请拆成多个 Mesh |
+| `SkinnedMesh` 的骨骼动画 | 网格会按当前姿态抽出（不是时间轴驱动） |
+| `SkeletonHelper` / `ArrowHelper` 等辅助对象 | 它们不是 Mesh，被跳过 |
+
+### 3.3 语义翻译表（**最容易踩的地方**）
+
+两套引擎对同一概念的定义有细微差别，而差别几乎总是**不报错、只让画面变样**：
+
+| 概念 | three.js | 霜天 | 本层怎么翻译 | 漏翻的后果 |
+|---|---|---|---|---|
+| 平行光方向 | `position → target`（**射出**） | 指向光源 | **取反** | 灯照不到东西，全黑 |
+| 点光衰减距离 | `distance` | `radius` | 直接映射 | — |
+| 聚光角度 | `angle`（半角，弧度） | 内外锥（度） | `angle × 180/π`；内锥按 `penumbra` 收窄 | 光斑大小不对 |
+| `opacity` | 需 `transparent: true` 才生效 | `< 1` 就混合 | 未设 `transparent` 时**拉回 1.0** | 半透明物体变实心 |
+| `side` | Front / Back / Double | `CullMode` | Front→剔背面；Back→剔正面；Double→不剔 | 薄片背面消失 / 内壁外露 |
+| `depthWrite` | 同名 | `depth_write` | 直接映射 | 透明物体挡住后面的东西 |
+| 颜色 | `Color.toArray()` **已是线性** | `base_color` 要线性 | 直接用（**不再解码**） | 画面整体发暗 2 倍 |
+| 坐标系 | 右手系、+Y 上、相机看 -Z | 同 | 无需翻转 | 场景镜像/旋转 90° |
+| 矩阵序 | 列主序 `m[col*4+row]` | 同 | `memcpy` | 位置镜像错位 |
+| `MeshBasicMaterial` | 不受光 | 无此概念 | 自发光 + `emission_unlit` | Basic 材质被光照加工 |
+
+> **颜色口径的实测依据**：three 在 `ColorManagement.enabled`（默认 true）时，
+> `new Color(0xd08a50)` 就已经把 sRGB 解码成线性 `[0.6308, 0.2542, 0.0802]`。
+> 中灰 `0x808080` → 线性 `0.2159`（不是 0.502）。两边口径天然一致，**不要再解码一次**。
+
+## 四、闭环验证：怎么知道画对了
+
+### 4.1 为什么不能靠"看图"
+
+三维的失败**几乎从不报错**：
+
+| 症状 | 解析器 | 渲染器 | 画面 |
+|---|---|---|---|
+| 相机钻进物体里 | 无意见 | 无意见 | 全黑 / 全糊 |
+| 物体全在取景框外 | 无意见 | 无意见 | 一片背景色 |
+| 物体只有 3 个像素 | 无意见 | 无意见 | 看着像"没画" |
+| 两个物体完全重叠 | 无意见 | 无意见 | 只看到一个 |
+| 光方向反了 | 无意见 | 无意见 | 全黑 |
+| 颜色重复解码 | 无意见 | 无意见 | 偏暗，"像配色问题" |
+
+而这些恰恰是模型最难自查的一类（**从截图判断"球是不是被相机切掉了"是模型的弱项**）。
+所以闭环不能建立在"看图"上。
+
+### 4.2 用 `three_check`（推荐）
+
+```bash
+# 命令行——模型/CI 都能直接用
+st build three_check
+./build/release/bin/three_check --three hero.js --png out/hero.png
+```
+
+输出：
+
+```text
+PASS ok（480×320，覆盖 19.11%，亮度 63.2）
+诊断：
+  [info] 画面正常：覆盖 19.1%，平均亮度 63.2
+```
+
+坏场景会明确报出来：
+
+```text
+FAIL nothing_drawn（480×320，覆盖 0.00%，亮度 48.7）
+诊断：
+  [error] 画面里几乎没有东西：非背景像素 0 个（480×320 共 153600 像素）
+          — 三个最常见成因，按顺序排查：
+            ① 相机在物体内部或物体在相机背后 → 把 camera.eye 沿视线方向退到物体外面；
+            ② 物体全在取景框外 → 让相机 target 指向物体包围盒中心；
+            ③ 没写 scene.add(mesh) / 物体 visible=false
+```
+
+**退出码**：`0` = ok，`1` = 有 error（画面不可用），`2` = 参数/IO/解析失败。
+可以直接当 CI 门禁。
+
+### 4.3 用 API
+
+```cpp
+#include "st/raster/scene_report.hpp"
+
+const auto report = st::raster::inspect_scene_render(spec, 480, 320, background);
+if (!report.ok()) {
+  // report.verdict: "ok" / "nothing_drawn" / "camera_inside" / ...
+  // report.diagnostics: 每条带 level/code/message/suggestion
+  // report.objects: 逐物体的 pixels/coverage/bbox（**"哪个物体没出现"只有这里能查**）
+  ST_LOG_WARN("{}", st::raster::report_text(report));
+}
+```
+
+### 4.4 报告能认出什么（都有实测用例）
+
+| 结论码 | 触发条件 | 实测用例 |
+|---|---|---|
+| `nothing_drawn` | 非背景像素 < 24 | `scene_report_detects_empty_frame` |
+| `camera_inside` | 覆盖率 > 95% | `scene_report_detects_camera_inside_geometry` |
+| `object_out_of_frame` | 某物体单独渲染 0 像素 | `scene_report_reports_per_object_visibility` |
+| `object_tiny` | 某物体 < 24 像素 | `scene_report_detects_tiny_object` |
+| `all_overlapping` | 全部物体屏幕包围盒相同 | `scene_report_detects_fully_overlapping_objects` |
+| `no_shading_variation` | 亮度标准差 < 2（纯色块） | `scene_report_flags_pure_flat_image` |
+| `image_too_dark` / `image_blown_out` | 平均亮度 < 12 / > 235 | 见下节"已知口径" |
+
+> **逐物体探测只对声明式场景（`objects`）可用**。three 场景是"一条脚本"，
+> 没法"只保留其中一个物体"再渲染——那需要改脚本源码。所以 three 场景
+> 报告只给整幅层面的事实，且**不会伪造**"某个物体看不见"的假警告。
+
+### 4.5 已知口径（写判据前必看）
+
+**环境反射自带底面光**：本框架的 `env_strength` 未配置时，会按
+`ambient + 0.55` 给一个基准环境反射强度（目的是让金属"哪里都在映环境"）。
+实测：**完全不打光**的一个中灰球，平均亮度仍有 **40.2/255**；同一个球正常打光是 **45.6**。
+
+所以：
+- 不能用"亮度 < 12"来判"没打光"（永远触发不了）；
+- 判"有没有光"要看**方差**（没光时各面亮度接近，有光时有明确方向性明暗）；
+- 这条已写进 `scene_report.cpp` 的注释里，改阈值前先读它。
+
+## 五、性能
+
+实测数据（本机 RTX 4080 + 软件腿对比）：
+
+| 项 | 实测值 | 备注 |
+|---|---|---|
+| three.js 加载（编译 + 求值） | **55 ms** | 线程内单例，只付一次 |
+| 常驻内存（加载后） | **4.5 MiB** | 默认上限 64 MiB（脚本层默认 16 MiB 不够） |
+| 每帧推进（旋转 + 求矩阵 + 遍历） | **54 µs** | 与几何量无关（只遍历对象图） |
+| 抽取（1189 顶点球 + 2 个盒） | 约 0.5 ms | `Float32Array` 零拷贝读内存 |
+| 渲染 480×320（三物体场景） | **13 ms**（GPU 腿） | 软件腿约 30 ms |
+| `three_check` 完整跑一遍 | 约 90 ms | 含逐物体探测 |
+
+### 5.1 为什么抽取不慢
+
+走 `JS_GetTypedArrayBuffer` + `JS_GetArrayBuffer` **直接读内存**，不是逐个元素转 Json。
+后者实测 3.5 µs/顶点（1 万顶点 35 ms），前者是"每缓冲一次取指针"。
+
+### 5.2 重新求值 vs 缓存
+
+`render_impl` 的 three 分支**每次渲染都重新求值脚本**。这对"逐帧动画"是必要的
+（脚本里的时间相关逻辑要重算），代价是每帧多约 1~2 ms（脚本规模而定）。
+若要逐帧复用同一场景（静态镜头），调用方可以只求值一次、自己持有 `ThreeScene`
+再逐帧 `draw_mesh`。
+
+## 六、三条实现细节（改代码前必读）
+
+### 6.1 脚本必须包在 IIFE 里
+
+直接 `JS_Eval` 是在**全局作用域**执行。模型写的 `const scene = ...` 会落到全局，
+于是同一个运行时（线程内单例）**第二次**求值同样写法的脚本时报
+`redeclaration of 'scene'`——而错误点指向用户完全无辜的第一行。
+
+实测就是这样：测试里第一次跑通了，隔两个用例再跑就报重声明。
+而真实使用（裁云逐帧、预览+导出二次渲染）**必然**多次求值。
+
+修法：包进 `(function(){ 'use strict'; ... })()`，并自动把**最后一个表达式**改成
+`return <expr>;`（保留"语句列表最后一句就是返回值"这个有用语义）。
+
+### 6.2 `end_frame` 不能漏
+
+三维腿的 `draw_mesh` 只是把三角形提交到内部缓冲；**合成到画布发生在 `end_frame`**
+（它才做色调映射 / sRGB 编码 / 到画布的拷贝）。
+
+漏了它的症状极具误导性：`draw_calls` 在涨、几何数据也对、位置全对，但**画布上什么也没有**
+（像素计数 0）。本仓实测就踩过这一脚。
+
+### 6.3 像素格式：用 `to_rgba8()`，不要自己拆 `pixels()`
+
+`Surface::pixels()` 是 **`0xAARRGGBB`** 打包（`red<<24 | green<<16 | blue<<8 | alpha`）。
+拿它当 RGBA 解析会把 **alpha 当成蓝色通道**——本仓实测因此让四个颜色判据全部假阴性
+（每个采样点都读出 `rgb(x, y, 255)`）。
+
+所有验证一律走 `to_rgba8()`：它是对外声明的"直通 RGBA8 字节流"，与 PNG/截图同一条路径。
+
+## 七、相关文件
+
+| 文件 | 作用 |
+|---|---|
+| `include/st/raster/three_runtime.hpp` | 运行时接口（`evaluate` / `available` / 单例） |
+| `src/raster/three_runtime.cpp` | 实现（QuickJS 直连 + 语义翻译；公共头不引 `quickjs.h`） |
+| `include/st/raster/scene_report.hpp` / `src/raster/scene_report.cpp` | 渲染自检报告 |
+| `src/raster/scene3d_script.cpp` | `three_script` 字段与渲染分支 |
+| `third_party/three/three.cjs` | three.js 0.160.1（MIT），编译期嵌入 |
+| `tools/three_check.cpp` | 命令行自检工具 |
+| `tests/raster_three_runtime_test.cpp` | 抽取正确性（11 用例） |
+| `tests/raster_three_semantics_test.cpp` | 语义翻译（8 用例） |
+| `tests/raster_scene3d_three_script_test.cpp` | 接入（6 用例） |
+| `tests/raster_scene_report_test.cpp` | 自检报告（11 用例） |

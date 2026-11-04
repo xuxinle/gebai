@@ -129,6 +129,8 @@
 | [`../DESIGN.md`](../DESIGN.md) | 为什么这样设计、接口长什么样、踩过哪些坑 | 档案 | 活 |
 | [`../CONVENTIONS.md`](../CONVENTIONS.md) | 写代码必须遵守什么（禁用/强制特性、lint） | 详读 | 活 |
 | [`geometry.md`](geometry.md) | **三维建模能力**（几何层）：图元/组合/动画/蒙皮/glTF/拾取/贴图/过程化/生态素材/大模型可用性 | 档案 | 活 |
+| [`three3d.md`](three3d.md) | **用 three.js 写三维场景**：写法、能力边界、语义翻译表、**闭环验证**（`three_check` 与渲染自检报告）、性能 | 详读 | 活·**接口** |
+| [`threelab.md`](threelab.md) | **threelab 示例应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、控制通道驱动、e2e 验收 | 速查 | 活 |
 | [`cross_platform.md`](cross_platform.md) | 跨平台会怎么错、提交前逐条自查什么 | 速查 | 活 |
 | [`declarative.md`](declarative.md) | 声明式 UI（`st::ui::dsl` + `declarative.js`）的设计与**调用方契约** | 详读 | 活·**接口** |
 | [`perceptual_changes.md`](perceptual_changes.md) | 观感类改动怎么做：正交量、量尺三坑、八步循环 | 详读 | 活 |
