@@ -119,6 +119,18 @@ class SplitView : public Element {
   void set_gap(float gap);
   [[nodiscard]] auto gap() const noexcept -> float { return gap_; }
 
+  /// 把缝隙填成**面板自己的色**（默认关 = 不画，透出外层壳色）。
+  ///
+  /// 为何需要：`gap` 制的分隔靠“缝比面板亮/暗”让人看出边界。若希望面板
+  /// **看着连成一片**、不要任何分隔感，把缝隙涂成面板色即可——布局间距、
+  /// 拖拽手柄、命中区全部不变，只是不再有可见的明暗带。
+  ///
+  /// 传 `Element::Surface` 而不是颜色：
+  /// 颜色得从主题来，而调用方（页面构建器）通常拿不到主题；
+  /// 枚举在 `apply_theme` 里解析，换主题时自动跟着变（不存颜色副本）。
+  void set_gap_fill(std::optional<Surface> surface);
+  [[nodiscard]] auto gap_fill() const noexcept -> std::optional<Surface> { return gap_fill_; }
+
   // —— 命中 ——
   /// 手柄区域归自己（**不是整块矩形**）：只有落在手柄内才算“点到了分割线”，
   /// 其余一律 false 交给子面板——否则 SplitView 会把里面所有按钮的点击都吃掉。
@@ -197,6 +209,10 @@ class SplitView : public Element {
   float handle_size_{12.0f};
   /// 两侧面板之间的缝宽（0 = 直接相邻；见 `set_gap`）。
   float gap_{0.0f};
+  /// 缝隙填充（空 = 不画，透出外层壳色；见 `set_gap_fill`）。
+  std::optional<Surface> gap_fill_{};
+  /// 解析后的缝隙色（`apply_theme` 从 `gap_fill_` 算）。
+  math::Color gap_fill_color_{};
   bool dragging_{false};
   bool first_hidden_{false};
   bool second_hidden_{false};

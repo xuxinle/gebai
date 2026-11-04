@@ -751,6 +751,44 @@ ST_TEST(split_view_gap_insets_only_between_panels) {
   root.set_content(nullptr);
 }
 
+/// **缝隙填色**：`set_gap_fill` 把缝涂成面板色后，缝里不再透出外层壳色。
+///
+/// 守的是什么：用户 2026-11-04 报「面板分隔线要隐藏」——gbcode 的缝（`kPanelGap`）
+/// 透出 `Surface::Alt`，浅色主题下比面板亮一档，看上去就是一道分隔亮带。
+/// 填成面板色后该带的像素应完全等于面板底色；不填时应该能看到差异。
+ST_TEST(split_view_gap_fill_hides_the_seam) {
+  const auto sample = [](std::optional<Element::Surface> fill) {
+    st::ui::UiRoot root;
+    root.set_viewport(st::math::Size{400.0f, 200.0f});
+    auto split = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+    split->set_ratio(0.5f, false);
+    split->set_gap(4.0f);
+    if (fill.has_value()) split->set_gap_fill(*fill);
+    auto* first = split->add_child(std::make_unique<Element>());
+    auto* second = split->add_child(std::make_unique<Element>());
+    first->set_surface(Element::Surface::Content);
+    second->set_surface(Element::Surface::Content);
+    SplitView* split_ptr = split.get();
+    root.set_content(std::move(split));
+    root.layout(true);
+    const st::ui::RenderContext context = root.render_context();
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(400, 200, 1.0f);
+    canvas.clear(st::math::Color{0xFF, 0x00, 0xFF, 0xFF});   // 品红：缝若没被画就是这个色
+    split_ptr->paint(context, canvas);
+    const auto handle = split_ptr->handle_rect();
+    const int x = static_cast<int>(handle.center().x);
+    return canvas.pixels()[static_cast<std::size_t>(100) * 400U + static_cast<std::size_t>(x)];
+  };
+
+  const std::uint32_t unfilled = sample(std::nullopt);
+  const std::uint32_t filled = sample(Element::Surface::Content);
+  // 不填：缝透出画布底色（品红 `0xAARRGGBB`）。
+  ST_CHECK_EQ(unfilled, 0xFF00FFFFU);
+  // 填成面板色：缝不再透出品红。
+  ST_CHECK(filled != 0xFF00FFFFU);
+  st::log::out("[gap-fill] 未填={:08X} 填充后={:08X}\n", unfilled, filled);
+}
+
 ST_TEST(split_view_handle_wins_hit_over_overlapping_children) {
   st::ui::UiRoot root;
   root.set_viewport(st::math::Size{800.0f, 600.0f});

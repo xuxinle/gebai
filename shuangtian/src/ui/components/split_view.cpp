@@ -121,6 +121,13 @@ void SplitView::set_gap(float gap) {
   mark_layout_dirty();
 }
 
+void SplitView::set_gap_fill(std::optional<Surface> surface) {
+  if (gap_fill_ == surface) return;
+  gap_fill_ = surface;
+  // 只影响绘制，不动布局。颜色在下一次 `apply_theme` 重算。
+  mark_dirty();
+}
+
 void SplitView::set_second_hidden(bool hidden) {
   if (hidden == second_hidden_) return;
   second_hidden_ = hidden;
@@ -142,6 +149,16 @@ void SplitView::apply_theme(const Theme& theme) {
   style_.background = math::Color{0, 0, 0, 0};
   style_.color = enabled_ ? colors.text : colors.text_faint;
   style_.radius = theme.metrics().radius_sm;
+  // 缝隙填色（`set_gap_fill`）：在这里解析，换主题自动跟着变。
+  if (gap_fill_.has_value()) {
+    switch (*gap_fill_) {
+      case Surface::Base: gap_fill_color_ = colors.surface; break;
+      case Surface::Alt: gap_fill_color_ = colors.surface_alt; break;
+      case Surface::Sunken: gap_fill_color_ = colors.surface_sunken; break;
+      case Surface::Content: gap_fill_color_ = colors.surface_raised; break;
+      case Surface::None: gap_fill_ = std::nullopt; gap_fill_color_ = {}; break;
+    }
+  }
 }
 
 void SplitView::measure(const RenderContext& context, const Constraints& constraints) {
@@ -391,6 +408,18 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
   // 画一条悬空分隔线会让用户以为还能拖）。`handle_rect` 在隐藏侧时空矩形，
   // 下面的几何自然退化，但先退出省一笔。
   if (child_count() < 2 || first_hidden_ || second_hidden_) return;
+  const bool horizontal = orientation_ == Orientation::Horizontal;
+  // **缝隙填色**（`set_gap_fill`）：把这条缝涂成面板色就能让面板“看着连成一片”——
+  // 布局间距与拖拽手柄全部不变，只是不再透出外层壳色（那层往往比面板亮/暗一档，
+  // 在浅色主题下就是一道看得出来的分隔亮带）。
+  if (gap_ > 0.0f && gap_fill_.has_value()) {
+    const math::Rect handle = handle_rect();
+    const float center = horizontal ? handle.center().x : handle.center().y;
+    const math::Rect strip = horizontal
+                                ? math::Rect{center - gap_ * 0.5f, bounds_.y, gap_, bounds_.height}
+                                : math::Rect{bounds_.x, center - gap_ * 0.5f, bounds_.width, gap_};
+    canvas.fill_rect(strip, raster::Paint::solid(gap_fill_color_));
+  }
   // **有缝隙时不画线**（`gap_ > 0`）：缝本身就是分隔（透出外层壳色），
   // 再在缝中间叠一条线会变成“缝里有一条脏线”。仅在悬停/拖拽时画——
   // 那是“可以拖这里”的交互反馈，必须有。
@@ -398,7 +427,6 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
   if (!show_line) return;
   const auto& colors = context.theme.colors();
   const float width = context.theme.metrics().border_width;
-  const bool horizontal = orientation_ == Orientation::Horizontal;
   // 视觉线位置与命中区同一几何（handle_rect 以命中区中心定位；线画在中心）。
   const math::Rect handle = handle_rect();
   const float center = horizontal ? handle.center().x : handle.center().y;
