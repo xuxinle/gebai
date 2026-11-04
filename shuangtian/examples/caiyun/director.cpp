@@ -425,6 +425,15 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     layer.model_bob_hz = static_cast<float>(
         std::clamp(st::json_get_double(node, "model_bob_hz", layer.model_bob_hz), 0.01, 5.0));
     layer.model_backdrop = st::json_get_bool(node, "model_backdrop", layer.model_backdrop);
+    // ## 叠加层开关（`model_script` 非空时才有意义）
+    //
+    // 两个都默认关：场景自己的相机与材质是“模型定义的一部分”，
+    // 不该被图层默认值（`cam_azimuth=35` 之类）默默盖掉。
+    // 打开后才让 `cam_*` / `model_color` 等字段参与。
+    layer.model_use_layer_camera =
+        st::json_get_bool(node, "model_use_layer_camera", layer.model_use_layer_camera);
+    layer.model_material_override =
+        st::json_get_bool(node, "model_material_override", layer.model_material_override);
           layer.model_texture = st::json_get_string(node, "model_texture", layer.model_texture);
       // 场景脚本（字面 JSON）。
       //
@@ -744,6 +753,9 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
       node["model_bounce_squash"] = static_cast<double>(layer.model_bounce_squash);
     }
     if (layer.cam_azimuth != 35.0f) node["cam_azimuth"] = static_cast<double>(layer.cam_azimuth);
+    // 叠加层开关：只在打开时写出（避免给每份脚本都添两个 false）
+    if (layer.model_use_layer_camera) node["model_use_layer_camera"] = true;
+    if (layer.model_material_override) node["model_material_override"] = true;
     if (layer.cam_elevation != 18.0f) {
       node["cam_elevation"] = static_cast<double>(layer.cam_elevation);
     }

@@ -1,4 +1,4 @@
-/// `SceneSpec.three_script`（three.js 源码场景）的接入测试。
+﻿/// `SceneSpec.three_script`（three.js 源码场景）的接入测试。
 ///
 /// ## 为什么这一层要有独立的用例
 ///
@@ -205,4 +205,123 @@ ST_TEST(scene_spec_three_and_json_both_produce_similar_coverage) {
   const double ratio = static_cast<double>(three_pixels) / static_cast<double>(json_pixels);
   ST_CHECK(ratio > 0.4);
   ST_CHECK(ratio < 2.5);
+}
+
+ST_TEST(scene_spec_text_accepts_three_source_directly) {
+  // ## 裁云联动的接缝：`parse_scene_spec_text` 必须同时吃 JSON 与 three 源码
+  //
+  // 它是裁云 `model_script`、三维预览、自检三条路的**共同入口**。
+  // 若它只认 JSON，threelab 里写的场景就进不了片子——而那正是联动的全部意义。
+  //
+  // 判据不用“看起来像不像 JS”，而是：先试 JSON，是对象才算声明式，
+  // 其余一律当 three 源码（这样 `{` 开头的 three 脚本也能走对分支）。
+  constexpr const char* kThree = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+camera.position.set(0, 0, 8);
+camera.lookAt(0, 0, 0);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+const ball = new THREE.Mesh(new THREE.SphereGeometry(1.5, 24, 16),
+  new THREE.MeshStandardMaterial({ color: 0x4488ff }));
+ball.name = 'ball';
+scene.add(ball);
+scene;
+)js";
+  const auto from_three = st::raster::parse_scene_spec_text(kThree);
+  ST_REQUIRE(from_three.has_value());
+  ST_CHECK(!from_three->three_script.empty());
+  ST_CHECK_NEAR(static_cast<double>(from_three->camera.fov_y_degrees), 35.0, 0.5);
+
+  // JSON 形态必须继续可用（旧剧本不能坏）
+  constexpr const char* kJson = R"json({
+  "camera": {"eye": [0, 1, 4], "target": [0, 0, 0], "fov": 45},
+  "objects": [{"name": "box", "shape": "box", "size": [1, 1, 1],
+               "translate": [0, 0.5, 0], "color": [180, 140, 80]}]
+})json";
+  const auto from_json = st::raster::parse_scene_spec_text(kJson);
+  ST_REQUIRE(from_json.has_value());
+  ST_CHECK(from_json->three_script.empty());
+  ST_CHECK(from_json->objects.size() == 1U);
+}
+
+ST_TEST(scene_spec_overlay_windows_are_applied) {
+  // ## 三扇叠加窗（裁云的 `model_*` 全靠它们接进场景）
+  //
+  // 任一扇没生效时**画面根本不变也不报错**——实测在 `camera_override`
+  // 上卡了一轮：探针显示"差异 0.0%"，真实原因是 schema 拒了字段、
+  // 渲染根本没发生。所以这里直接验渲染结果的像素差异。
+  constexpr const char* kScript = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 500);
+camera.position.set(0, 0, 60);
+camera.lookAt(0, 0, 0);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0x8899bb, 0.8));
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(3, 4, 5);
+scene.add(key);
+const box = new THREE.Mesh(new THREE.BoxGeometry(20, 20, 20),
+  new THREE.MeshStandardMaterial({ color: 0xc79a4e, metalness: 0.9, roughness: 0.25 }));
+box.name = 'box';
+box.position.set(4, 0, 0);
+scene.add(box);
+scene;
+)js";
+  auto base = st::raster::scene_spec_from_three(kScript, "<overlay>");
+  ST_REQUIRE(base.has_value());
+
+  auto render_once = [](const st::raster::SceneSpec& spec) {
+    st::raster::Canvas canvas{240, 240, 1.0f};
+    auto created = st::raster::Scene3D::create(240, 240);
+    if (!created.has_value()) return std::vector<std::uint32_t>{};
+    const auto status = st::raster::render_scene_into(spec, **created, canvas,
+                                                      st::math::Color{10, 12, 16, 255});
+    if (!status.has_value()) return std::vector<std::uint32_t>{};
+    const auto view = canvas.pixels();
+    return std::vector<std::uint32_t>(view.begin(), view.end());
+  };
+  auto differ_ratio = [](const std::vector<std::uint32_t>& a,
+                         const std::vector<std::uint32_t>& b) {
+    if (a.size() != b.size() || a.empty()) return 1.0;
+    std::size_t different = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      if (a[i] != b[i]) ++different;
+    }
+    return static_cast<double>(different) / static_cast<double>(a.size());
+  };
+
+  const auto baseline = render_once(*base);
+  ST_REQUIRE(!baseline.empty());
+
+  // ① 整体姿态
+  {
+    st::raster::SceneSpec spec = *base;
+    spec.extra_transform = st::math::Mat4::rotation(st::math::Vec3{0.0f, 1.0f, 0.0f}, 0.7f);
+    ST_CHECK(differ_ratio(baseline, render_once(spec)) > 0.01);
+  }
+  // ② 相机覆盖
+  {
+    st::raster::SceneSpec spec = *base;
+    st::raster::Camera camera{};
+    camera.eye = st::math::Vec3{60.0f, 40.0f, 0.0f};
+    camera.target = st::math::Vec3{0.0f, 0.0f, 0.0f};
+    camera.up = st::math::Vec3{0.0f, 1.0f, 0.0f};
+    camera.fov_y_degrees = 45.0f;
+    camera.near_z = 0.1f;
+    camera.far_z = 500.0f;
+    spec.camera_override = camera;
+    ST_CHECK(differ_ratio(baseline, render_once(spec)) > 0.01);
+  }
+  // ③ 材质覆盖
+  {
+    st::raster::SceneSpec spec = *base;
+    st::raster::Material material{};
+    material.base_color = st::math::Vec3{1.0f, 0.0f, 0.0f};
+    material.base_color_set = true;
+    material.metallic = 0.0f;
+    material.roughness = 0.9f;
+    spec.material_override = material;
+    ST_CHECK(differ_ratio(baseline, render_once(spec)) > 0.01);
+  }
 }

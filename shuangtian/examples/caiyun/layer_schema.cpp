@@ -65,7 +65,11 @@ constexpr PropertyDesc kLayerProperties[] = {
     // 为何不用 `Text`：那会渲染成单行输入框，一整个场景 JSON 在里面
     // 既看不清也没法编辑。
     {.name = "model_script", .type = PropertyType::Multiline,
-     .summary = "场景脚本（整幅三维场景的 JSON）", .advanced = true},
+     .summary = "场景脚本（三维场景：JSON 声明式或 three.js 源码）", .advanced = true},
+    {.name = "model_use_layer_camera", .type = PropertyType::Boolean,
+     .summary = "用图层相机盖掉场景自带相机（镜头推拉/机位切换）", .advanced = true},
+    {.name = "model_material_override", .type = PropertyType::Boolean,
+     .summary = "用图层材质盖掉场景内各物体材质", .advanced = true},
     {.name = "cam_distance", .type = PropertyType::Number, .min_value = 1.5f,
      .max_value = 12.0f, .step = 0.1f, .summary = "相机距离", .advanced = true},
     {.name = "cam_fov", .type = PropertyType::Number, .min_value = 8.0f, .max_value = 110.0f,
@@ -195,6 +199,12 @@ auto get_layer_property(const Layer& layer, std::string_view name)
   if (name == "model_scale") return number(static_cast<double>(layer.model_scale));
   if (name == "model_spin") return number(static_cast<double>(layer.model_spin));
   if (name == "model_script") return layer.model_script;
+  if (name == "model_use_layer_camera") {
+    return std::string(layer.model_use_layer_camera ? "true" : "false");
+  }
+  if (name == "model_material_override") {
+    return std::string(layer.model_material_override ? "true" : "false");
+  }
   if (name == "cam_distance") return number(static_cast<double>(layer.cam_distance));
   if (name == "cam_fov") return number(static_cast<double>(layer.cam_fov));
   if (name == "light_azimuth") return number(static_cast<double>(layer.light_azimuth));
@@ -236,9 +246,20 @@ auto set_layer_property(Layer& layer, std::string_view name, std::string_view va
     return true;
   }
   if (desc->type == PropertyType::Boolean) {
-    if (name != "bold") return false;
-    layer.bold = value == "true" || value == "1" || value == "on";
-    return true;
+    const bool flag = value == "true" || value == "1" || value == "on";
+    if (name == "bold") {
+      layer.bold = flag;
+      return true;
+    }
+    if (name == "model_use_layer_camera") {
+      layer.model_use_layer_camera = flag;
+      return true;
+    }
+    if (name == "model_material_override") {
+      layer.model_material_override = flag;
+      return true;
+    }
+    return false;
   }
   if (desc->type == PropertyType::Choice) {    for (std::size_t index = 0; index < desc->choices.size(); ++index) {
       if (desc->choices[index] != value) continue;

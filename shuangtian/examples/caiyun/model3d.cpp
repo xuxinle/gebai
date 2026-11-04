@@ -860,6 +860,66 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
     // 换个目录导出就变成「模型不见了」。
     st::raster::SceneSpec resolved = *spec;
     resolved.asset_basis = std::string(asset_basis);
+
+    // ── 叠加层的 `model_*` / `cam_*`（组合，不再是互斥）──
+    //
+    // 三样东西一律叠加（它们是“这个镜头里怎么用它”，与模型定义无关）：
+    //
+    // | 字段 | 效果 |
+    // |---|---|
+    // | `model_scale` | 整体缩放 |
+    // | `model_yaw` + `model_spin` | 整体绕 Y 转（含随时间） |
+    // | `model_tilt` | 整体绕 X 倾 |
+    // | `model_bob` | 整体上下浮 |
+    //
+    // 相机与材质**默认不盖**（场景自己写的优先），分别用
+    // `model_use_layer_camera` / `model_material_override` 显式打开。
+    {
+      // 姿态：与单网格分支同一套 `evaluate_model3d`，但因为不进场景空间，
+      // 只取它的 yaw/tilt/bob（相机相关项在下面单独处理）。
+      const Model3dPose pose = evaluate_model3d(layer, local_time, scene_duration);
+      const bool poses = std::abs(layer.model_yaw) > 1e-5f ||
+                         std::abs(layer.model_spin) > 1e-5f ||
+                         std::abs(layer.model_tilt) > 1e-5f ||
+                         std::abs(layer.model_bob) > 1e-5f ||
+                         std::abs(layer.model_scale - 1.0f) > 1e-5f;
+      if (poses) {
+        // 顺序：浮 → 缩放 → 自转 → 倾斜。
+        // 缩放放中间是为了让“转/浮”不被缩放量级影响偏移（缩放放最里层会把
+        // 浮动的位移也一起缩，调 `model_scale` 时浮动高度就变了）。
+        st::math::Mat4 pose_matrix =
+            st::math::Mat4::translation(st::math::Vec3{0.0f, pose.bob_y, 0.0f}) *
+            st::math::Mat4::scaling(st::math::Vec3{layer.model_scale, layer.model_scale,
+                                                   layer.model_scale}) *
+            st::math::Mat4::rotation(st::math::Vec3{0.0f, 1.0f, 0.0f}, pose.yaw) *
+            st::math::Mat4::rotation(st::math::Vec3{1.0f, 0.0f, 0.0f}, pose.tilt);
+        resolved.extra_transform = pose_matrix;
+      }
+      // 相机：显式开关
+      if (layer.model_use_layer_camera) {
+        st::raster::Camera camera{};
+        camera.eye = pose.eye;
+        camera.target = pose.target;
+        camera.up = st::math::Vec3{0.0f, 1.0f, 0.0f};
+        camera.fov_y_degrees = pose.fov_y_degrees;
+        camera.near_z = 0.05f;
+        camera.far_z = 1000.0f;   // 大场景（表壳这类）远平面要给够
+        resolved.camera_override = camera;
+      }
+      // 材质：显式开关
+      if (layer.model_material_override) {
+        st::raster::Material material{};
+        material.metallic = std::clamp(layer.model_metallic, 0.0f, 1.0f);
+        material.roughness = std::clamp(layer.model_roughness, 0.0f, 1.0f);
+        material.specular = 0.35f + 0.65f * (1.0f - material.roughness);
+        // 基色从图层字段来（线性空间：与 `Material::base_color` 同一口径）
+        material.base_color = st::math::Vec3{static_cast<float>(layer.model_color.r) / 255.0f,
+                                            static_cast<float>(layer.model_color.g) / 255.0f,
+                                            static_cast<float>(layer.model_color.b) / 255.0f};
+        material.base_color_set = true;
+        resolved.material_override = material;
+      }
+    }
     // ## offscreen 必须与主画布**同后端**
     //
     // 这是零拷贝能否生效的最后一环（实测定位）。

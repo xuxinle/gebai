@@ -1,4 +1,4 @@
-/// 裁云脚本字段 schema 的实现（见 `schema.hpp`）。
+﻿/// 裁云脚本字段 schema 的实现（见 `schema.hpp`）。
 ///
 /// ## 数据的来源纪律
 ///
@@ -222,8 +222,18 @@ constexpr auto kLayerFields = std::array{
               "场景脚本：整幅三维场景（camera/lighting/shadow/objects）。"
               "两种写法：①对象（推荐，可直接用素材库的 preset）；"
               "②字符串（内嵌紧凑 JSON，适合生成式写入）；"
-              "设了就接管整幅图层（自带相机与光照，与 model_shape 互斥）",
+              "③**three.js 源码**（推荐：语料丰富，模型几乎一次就对）。"
+              "与 model_* 是**叠加关系**：几何/材质/相机归场景，"
+              "姿态（model_spin/tilt/bob/scale）与合成（阴影/背景）由图层叠加。",
               true},
+    FieldSpec{"model_use_layer_camera", SchemaScope::Layer, SchemaType::Bool, false, 0, 0,
+              false,
+              "用图层相机（cam_*）盖掉场景自带相机。关闭时尊重场景里写的视角；"
+              "打开后可做镜头推拉/多机位切换"},
+    FieldSpec{"model_material_override", SchemaScope::Layer, SchemaType::Bool, false, 0, 0,
+              false,
+              "用图层材质（model_color/metallic/roughness）盖掉场景内各物体的材质。"
+              "关闭时保留场景自己的材质（黄铜/蓝钢这类是模型的一部分）"},
     FieldSpec{"model_shadow", SchemaScope::Layer, SchemaType::Number, true, 0.0, 1.0, true,
               "接触阴影强度 0~1（仅组内生效，0.45~0.65 建议）", true,
               Aliases("shadow", "contact_shadow")},

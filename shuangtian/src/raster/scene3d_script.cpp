@@ -1447,9 +1447,24 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
 }
 
 auto parse_scene_spec_text(std::string_view text) -> Result<SceneSpec> {
+  // ## 自动识别两种形态：JSON 声明式 / three.js 源码
+  //
+  // 这个函数是裁云 `model_script`、三维预览、自检三条路的**共同入口**。
+  // 让它在文本层面分流，比在每个调用方各写一遍判断好：
+  //
+  // · 一处判断，三条路自动同时支持（少一处漏改的机会）
+  // · 同一种输入在任何入口得到同一个结果
+  //
+  // 判据不用“看起来像不像 JS”——而是**先试 JSON 解析**：
+  // 合法 JSON 只有当它真的是对象时才算声明式场景；其余一律当 three.js 源码。
+  // 这样 `{` 开头的 three 脚本（极少）也能走到正确分支。
   const auto json = json_parse(text);
-  if (!json) return st::forward_error(json.error());
-  return parse_scene_spec(*json);
+  if (json.has_value() && json->is_object()) {
+    // 显式写了 `three_script` 字段的 JSON：那是声明式包着脚本，走 JSON 路径
+    return parse_scene_spec(*json);
+  }
+  // 非 JSON → 当 three.js 源码处理（空文本会在这里得到明确报错）
+  return scene_spec_from_three(text, "<inline>");
 }
 
 auto scene_spec_from_three(std::string_view script, std::string_view script_name)
@@ -1825,17 +1840,37 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     auto three_scene = ThreeRuntime::instance().evaluate(spec.three_script, spec.three_script_name);
     if (!three_scene.has_value()) return st::forward_error(three_scene.error());
 
+    // ## 相机：场景自带 vs 图层覆盖
+    //
+    // 默认用场景自己的（作者写 `camera.lookAt(...)` 就是在表达“从哪看”）。
+    // `camera_override` 有值时换掉它——裁云用这个做镜头推拉/机位切换，
+    // 而不必让每个场景文件重写一遍。
+    const Camera camera = spec.camera_override.has_value() ? *spec.camera_override
+                                                           : three_scene->camera;
+
     scene.begin_frame(background);
-    scene.set_camera(three_scene->camera);
+    scene.set_camera(camera);
     scene.set_lighting(three_scene->lighting);
     for (const auto& warning : three_scene->warnings) {
       ST_LOG_WARN("three 场景：{}", warning);
     }
+    // ## 整体姿态：乘在世界矩阵**后面**
+    //
+    // 语义：`scene_pose * object.world` —— 先让物体到它该在的位置（场景内），
+    // 再把整个场景当作一个刚体去摆弄（绕原点转/缩放/浮）。
+    //
+    // 反过来乘（`object.world * pose`）会让每个物体**各自绕自身原点**转，
+    // 一个由多个零件组成的模型会当场散开——那是两种完全不同的效果。
     for (const auto& object : three_scene->objects) {
       if (!object.visible) continue;
       scene.set_cull_mode(object.cull);
-      scene.set_material(object.material);
-      scene.draw_mesh(object.mesh, object.world);
+      // 材质：默认用物体自己的（模型的一部分）；`material_override` 有值时统一换掉
+      scene.set_material(spec.material_override.has_value() ? *spec.material_override
+                                                           : object.material);
+      const math::Mat4 world = spec.extra_transform.has_value()
+                                   ? *spec.extra_transform * object.world
+                                   : object.world;
+      scene.draw_mesh(object.mesh, world);
     }
     // ## `end_frame` 不能漏（漏了看起来就是“什么都没画”）
     //

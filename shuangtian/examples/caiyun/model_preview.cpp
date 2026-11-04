@@ -168,7 +168,16 @@ struct Check {
 
   bool all_ok = true;
   st::log::out("素材预览：{}\n", spec_path);
-  st::log::out("  物体 {} 个 · {}×{}\n", spec->objects.size(), width, height);
+  // ## 两种脚本形态要分别报
+  //
+  // `objects.size()` 只对**声明式 JSON** 有意义；three.js 源码的几何在脚本里
+  //（求值后才存在），所以它恒为 0。直接报 0 会让用户误以为“场景是空的”——
+  // 而画面里明明有 129 个零件。
+  if (!spec->three_script.empty()) {
+    st::log::out("  three.js 源码 {} 字节 · {}×{}\n", spec->three_script.size(), width, height);
+  } else {
+    st::log::out("  物体 {} 个 · {}×{}\n", spec->objects.size(), width, height);
+  }
   st::log::out("  平均亮度 {:.3f} · 可见 {:.1f}% · 明亮 {:.1f}% · 峰值 {:.2f}\n",
                static_cast<double>(stats.mean_luma), static_cast<double>(stats.lit_ratio) * 100.0,
                static_cast<double>(stats.bright_ratio) * 100.0,

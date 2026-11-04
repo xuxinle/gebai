@@ -759,6 +759,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "定位 `camera.lookAt()` 在 QuickJS 里的数值缺陷：分别验证 Matrix4.lookAt / setFromRotationMatrix / applyQuaternion 三者。手法是把诊断值拼进一个哨兵 Mesh 的**名字**里，C++ 侧从 `ThreeObject::name` 读回——不改任何生产接口"
     },
+    "scene_spec_dual_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene_spec_dual_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "验证 `parse_scene_spec_text` 同时接受 JSON 声明式与 three.js 源码。它是**裁云联动的唯一接口**（`model_script`、三维预览、自检三条路都走它），所以这条判据就是联动本身能不能成立的依据"
+    },
+    "scene_overlay_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene_overlay_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "验证 three 场景的三扇叠加窗（extra_transform / camera_override / material_override）。存在的理由：任一扇没生效时**画面根本不变也不报错**，只能靠对比渲染结果发现"
+    },
     "scene3d_shadow_probe": {      "kind": "executable",
       "sources": ["tools/scene3d_shadow_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],

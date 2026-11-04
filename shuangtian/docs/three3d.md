@@ -58,19 +58,44 @@ if (spec.has_value()) {
 
 ### 2.2 从 JSON 里用（裁云 `model_script`）
 
-裁云的 `model3d` 图层本来就吃 `model_script`。加一个字段即可：
+裁云的 `model3d` 图层吃 `model_script`，**两种写法都行**（自动识别）：
 
 ```json
+// ① 直接给 three.js 源码（推荐：语料丰富，模型几乎一次就对）
+{
+  "kind": "model3d",
+  "model_script": "const scene = new THREE.Scene(); ... scene;"
+}
+
+// ② 包成对象（能从文件加载时把真实路径带进去，报错带行号）
 {
   "kind": "model3d",
   "model_script": {
-    "three_script": "const scene = new THREE.Scene(); ... scene;",
+    "three_script": "...",
     "three_script_name": "shots/hero.js"
   }
 }
 ```
 
-`three_script` 非空时**忽略 `objects`**（两者互斥，避免"以谁为准"变成隐规则）。
+识别在 `parse_scene_spec_text` 里做：先试 JSON，**是对象**才算声明式，
+其余一律当 three 源码。一处判断，预览/渲染/自检三条路自动同时支持。
+
+### 2.2.1 与图层 `model_*` 的关系：**叠加，不是互斥**
+
+| 字段组 | `model_script` 非空时 | 开关 |
+|---|---|---|
+| 几何（`model_shape`/`model_obj`/`model_gltf`） | 忽略（几何由场景提供） | — |
+| 材质（`model_color`/`metallic`/`roughness`） | 默认用场景的；打开则统一换掉 | `model_material_override` |
+| 相机（`cam_*`） | 默认用场景的；打开则用图层相机 | `model_use_layer_camera` |
+| 姿态（`model_yaw`/`spin`/`tilt`/`bob`/`scale`） | **总是叠加** | — |
+| 合成（`model_shadow`/`model_backdrop`） | **总是叠加** | — |
+
+分开的理由：镜头推拉与投影阴影是**片子层的事**，不该让每个场景重写；
+而几何与材质属于模型自己的定义，写进场景才对。
+
+> ⚠ 打开 `model_use_layer_camera` 后，`cam_distance` 默认只有 3.0——
+> 而一个 40mm 直径的模型包围半径约 30，直接钻到模型里面。
+> 用这个开关时**必须同时调 `cam_distance`**（实测过：不调就是一整块贴脸）。
 
 ### 2.3 契约（三条，必须记）
 
