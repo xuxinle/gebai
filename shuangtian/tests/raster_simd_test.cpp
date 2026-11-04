@@ -162,6 +162,100 @@ ST_TEST(simd_convert_rgba_to_xrgb_matches_reference) {
   st::raster::simd::convert_rgba_to_xrgb_row(nullptr, nullptr, 0);
 }
 
+ST_TEST(simd_rotate_bgra_row_matches_reference_across_lengths) {
+  // `rotate_bgra_row`（win32 DIB 上屏重排）在全部长度/对齐上与标量参考一致。
+  // 与 convert_rgba_to_xrgb 同一性质：shuffle 表一错就是通道串色（肉眼可见的花屏），
+  // 三路（avx2/sse2/标量）由同一语义钉住；尾部路径（count%8≠0）也要覆盖。
+  const auto reference = [](std::uint32_t pixel) noexcept -> std::uint32_t {
+    return (pixel >> 8U) | (pixel << 24U);
+  };
+  constexpr std::size_t kLengths[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 23, 24, 31, 32, 33, 64};
+  std::uint32_t state = 0x9E3779B9U;
+  for (const std::size_t count : kLengths) {
+    std::vector<std::uint32_t> src(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      // 伪随机但全覆盖：每个字节位置都可能取到任意值（xorshift 后拼四个字节）。
+      state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+      src[index] = state;
+    }
+    std::vector<std::uint32_t> out(count, 0xDEADBEEFU);
+    st::raster::simd::rotate_bgra_row(out.data(), src.data(), count);
+    for (std::size_t index = 0; index < count; ++index) {
+      ST_CHECK_EQ(out[index], reference(src[index]));
+    }
+  }
+  // 原地转换与另存一致。
+  {
+    std::vector<std::uint32_t> in_place = {0x11223344U, 0x55667788U, 0x99AABBCCU, 0xDDEEFF00U,
+                                           0x01020304U, 0x05060708U, 0x090A0B0CU, 0x0D0E0F10U,
+                                           0x11121314U};
+    std::vector<std::uint32_t> copied = in_place;
+    std::vector<std::uint32_t> out_place(in_place.size(), 0U);
+    st::raster::simd::rotate_bgra_row(in_place.data(), in_place.data(), in_place.size());
+    st::raster::simd::rotate_bgra_row(out_place.data(), copied.data(), copied.size());
+    for (std::size_t index = 0; index < in_place.size(); ++index) {
+      ST_CHECK_EQ(in_place[index], out_place[index]);
+    }
+  }
+  // count=0 合法。
+  st::raster::simd::rotate_bgra_row(nullptr, nullptr, 0);
+}
+
+ST_TEST(simd_tint_over_row_matches_reference_across_lengths) {
+  // `tint_over_row`（几何 sprite 颜色无关化的调染路径）在全部长度/颜色/alpha 上
+  // 与标量参考一致。量化口径必须与烘焙路径相同（否则几何 sprite 的像素对齐测试
+  //（round_rect_diff 等）会抓住 1 LSB 级漂移）。
+  const auto reference = [](std::uint32_t dst, std::uint32_t premul_color,
+                            std::uint32_t mask_alpha) noexcept -> std::uint32_t {
+    if (mask_alpha == 0U) return dst;
+    const auto scale = [mask_alpha](std::uint32_t value) noexcept {
+      return (value * mask_alpha + 127U) / 255U;
+    };
+    const std::uint32_t r = scale((premul_color >> 24U) & 0xFFU);
+    const std::uint32_t g = scale((premul_color >> 16U) & 0xFFU);
+    const std::uint32_t b = scale((premul_color >> 8U) & 0xFFU);
+    const std::uint32_t sa = scale(premul_color & 0xFFU);   // tinted alpha
+    // over（预乘两侧）：c + d×(255-sa)/255，精确除法口径。
+    const std::uint32_t inv = 255U - sa;
+    const auto over_ch = [inv](std::uint32_t s, std::uint32_t d) noexcept {
+      return s + (d * inv + 127U) / 255U;
+    };
+    return (over_ch(r, (dst >> 24U) & 0xFFU) << 24U) |
+           (over_ch(g, (dst >> 16U) & 0xFFU) << 16U) |
+           (over_ch(b, (dst >> 8U) & 0xFFU) << 8U) |
+           over_ch(sa, dst & 0xFFU);
+  };
+  constexpr std::size_t kLengths[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33, 64};
+  // 交叉遍历：dst 底色 × tint 色 × 遮罩 alpha（覆盖半透明叠加与饱和边界）。
+  constexpr std::uint32_t kDsts[] = {0x00000000U, 0xFF000000U, 0x80808080U, 0x12345678U,
+                                     0xFEDCBA98U, 0xFFFFFFFFU};
+  constexpr std::uint32_t kColors[] = {0x00000000U, 0x00FF00FFU, 0xFFFFFFFFU, 0x80402080U,
+                                       0x10203040U, 0x3F7F3F7FU};   // 预乘色：每通道 ≤ alpha（契约）
+  constexpr std::uint32_t kAlphas[] = {0U, 1U, 64U, 128U, 200U, 254U, 255U};
+  std::uint32_t state = 0x2545F491U;
+  for (const std::size_t count : kLengths) {
+    // 每个长度用伪随机遮罩序列（覆盖各种 alpha 组合在同一行内交替）。
+    std::vector<std::uint32_t> mask(count);
+    std::vector<std::uint32_t> dst(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+      const auto a = kAlphas[state % 7U];
+      mask[i] = (a << 24U) | (a << 16U) | (a << 8U) | a;   // 白色预乘遮罩形态
+      state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+      dst[i] = kDsts[state % 6U];
+    }
+    for (const std::uint32_t color : kColors) {
+      std::vector<std::uint32_t> actual = dst;
+      st::raster::simd::tint_over_row(actual.data(), mask.data(), count, color);
+      for (std::size_t i = 0; i < count; ++i) {
+        ST_CHECK_EQ(actual[i], reference(dst[i], color, mask[i] & 0xFFU));
+      }
+    }
+  }
+  // count=0 合法。
+  st::raster::simd::tint_over_row(nullptr, nullptr, 0, 0xFF000000U);
+}
+
 ST_TEST(simd_over_row_matches_reference_across_lengths) {
   // `over_row` 在**全部长度**上与标量参考逐像素一致，特别是短行。
   //

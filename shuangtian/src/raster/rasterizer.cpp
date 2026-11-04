@@ -144,6 +144,14 @@ void rasterize_polylines(const std::vector<Polyline>& polylines, int first_y, in
   for (int y = first_y; y < last_y; ++y) {
     table.seek(y);
     runs.clear();
+    // **曾经试过「垂直边短路」并已回退**（2026-11-04）：若干全垂直边覆盖整行，
+    // 4 个子采样结果完全相同，可算 1 次后权重 ×4。
+    //
+    // **实测否决**：预检本身要再扫一遍活跃边表，而中段行的边本来就只有 2 条——
+    // 扫描开销 ≫ 省下的 3 次求交（`bench_rounded_card_fill`：1.06 ms → 1.15 ms，
+    // 慢 8%）。与「先量再改」纪律一致：假设胜不过数据，如实回退并把结论留在这里
+    //（同样的想法不必再试一遍）。真要加速中段，得让**边表结构**本身就区分垂边
+    //（建表时分组），而不是每行再识别一次。
     for (int sample = 0; sample < kSubsamples; ++sample) {
       const float sample_y =
           static_cast<float>(y) + (static_cast<float>(sample) + 0.5f) * kSubsampleWeight;

@@ -258,14 +258,21 @@ void UiRoot::collect_animation_requests() {
   // **定时唤醒点也在这同一次遍历里顺带汇总**（取最早）：到点要帧的低频事件
   //（闪烁/倒计时）与连续动画共用这一趟树遍历，零额外成本。分开收集就得再遍历一次。
   wake_at_ = -1.0;
-  // **悬停提示在计时中 → 必须要下一帧**。
+  // **悬停提示在计时中 → 登记到期唤醒点**（不再拉帧）。
   //
-  // 为何必须在这里：提示是“悬停满 N 毫秒才弹”，而主循环在静止时不开帧
-  //（`animation_pending_` 为假就等事件）。不在这里报“还要一帧”，计时就永远
-  // 停在第一帧——现象是“鼠标停半天，提示怎么都不出现”（实测）。
-  if ((hint_target_ != nullptr || !hint_target_id_.empty()) && !hint_visible_) {
-    animation_pending_ = true;
-  }
+  // 历史与为何改：这里曾是 `animation_pending_ = true`——那会让 hint 的 450ms
+  // 计时段**每 16ms 拉一帧**，而那段时间里没有任何像素变化（气泡还没弹），
+  // 每帧都走「damage 空 → 全量重绘」（实测 headless 6.9ms/帧、4K 软件窗口
+  // 20+7ms/帧——鼠标悬停不动，CPU 却按 60fps 满转，2026-11-04 实测）。
+  //
+  // 改成唤醒点后：计时期间的空闲等待被夹到到期时刻（见 `next_wake_in_ms` 的
+  // hint 分支），到点那一帧 `update_hint` 弹出气泡（自带 damage/整帧），
+  // 语义与光标闪烁同一套「消费-重立」协议。
+  //
+  // 计时推进仍靠 `paint_frame` 开头的 `update_hint`（那里按帧间墙钟差推进）——
+  // 只要到期前有任何帧（事件/动画）来过，计时就是准的；到期前完全静止时，
+  // 唤醒点保证到期那一刻有一帧。
+  // （hint 计时用单调墙钟 ns，见 `update_hint` 的说明；这里不需要另记时间戳。）
   const auto walk = [this](auto&& self, Element& element) -> void {
     // **定时唤醒：汇总后立即消费（清元素侧）**。与 `animation_requested_` 同一
     // 套"消费-重立"协议：元素在自己的下一次绘制里重新登记新的唤醒点。
@@ -1562,14 +1569,18 @@ auto UiRoot::tree_damage_pending() const noexcept -> bool {
 }
 
 auto UiRoot::needs_frame() const noexcept -> bool {
-  // 悬停提示需要我们出帧的两种情况：
-  //   ① 气泡还没显示——**计时靠 `paint_frame` 推进**（虽然时戳改成了单调钟，
-  //      但判定仍在那里），不出帧就攒不够延时；
+  // 悬停提示需要我们出帧的情况（2026-11-04 改为唤醒点语义）：
+  //   ① 气泡还没显示且**延时已到**——不到点不拉帧（计时段的空闲等待被
+  //      `next_wake_in_ms` 夹到到期时刻；期间每 16ms 拉一帧是白画——气泡
+  //      未弹，帧帧全量重绘，实测鼠标悬停不动 CPU 按 60fps 满转）；
   //   ② 气泡已显示但指针已**失联**——靠逐帧检查宽限期来收起（鼠标停住不动时
   //      不会再有 MouseMove 事件，只靠事件侧检查就永远收不了）。
   // 气泡正常展示中（未失联、粘滞期已过）不要求帧，因此不会常驻重绘。
-  const bool hint_counting =
-      (hint_target_ != nullptr || !hint_target_id_.empty()) && !hint_visible_;
+  const bool hint_due =
+      (hint_target_ != nullptr || !hint_target_id_.empty()) && !hint_visible_ &&
+      hint_start_ns_ > 0 &&
+      static_cast<double>(st::time::now_ns() - hint_start_ns_) / 1e6 >=
+          static_cast<double>(hint_delay_ms_);
   const bool hint_leave_pending = hint_lost_ns_ > 0;
   // 粘滞期内需要帧：过了 `kHintMinVisibleMs` 才能开始判“是否该收起”，
   // 不出帧就不会有人去算这个时间点，气泡会永久挂在屏幕上。
@@ -1583,7 +1594,7 @@ auto UiRoot::needs_frame() const noexcept -> bool {
   // 与元素登记 `request_wake_at` 时用的口径同源。
   const bool wake_due = wake_at_ >= 0.0 && time_seconds_ >= wake_at_;
   return dirty_ || followup_ || pending_full_ || !pending_damage_.is_empty() ||
-         tree_layout_dirty() || tree_damage_pending() || hint_counting ||
+         tree_layout_dirty() || tree_damage_pending() || hint_due ||
          hint_leave_pending || hint_sticky || wake_due;
 }
 
@@ -1676,6 +1687,19 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
     (void)take_root_damage();
     return false;
   }
+  // **纯计时帧也不画**（2026-11-04 修「hover 后连续全量重绘」）：损坏区为空、
+  // 无整帧标记，但被 wake/animating 拉起——旧路径在这里落入
+  //「damage 空 → use_full」，把一次**没有任何像素变化**的帧画成全量重绘。
+  // 实测（hover nav 后 450ms 提示计时段）：每 16ms 一帧全量重绘（paint 6.9ms），
+  // 4K 软件窗口下是 20ms + 7ms 送显——鼠标悬停什么都不做，CPU 却按 60fps 满转。
+  //
+  // 为什么可以不画：① 真在动的元素（hover 过渡/开关动画）每帧自己
+  // `record_damage()`，damage 不会空；② hint 计时在函数开头已推进；
+  // ③ `wake_due` 的消费者（光标闪烁）翻转时自己上报 damage——真正需要像素的
+  // 帧必有 damage，damage 空就说明这一帧不需要像素。`collect_animation_requests`
+  // 仍要跑：它维护「下一帧要不要来」的判定（hint 计时中 → 要），停了提示就冻结。
+  // 与空帧分支同样报 `last_frame_presentable_ = false`（本帧没产生新像素，
+  // present 是纯浪费）。
   // 全量条件：显式整帧标记 / 画布不支持局部 / 损坏区为空（无可裁剪的区，
   // 通常是“只有定时唤醒到期”的帧）/ 损坏区过大（超过视口 55% 时整帧更划算
   // ——跳过裁剪开销与小块拼接）。

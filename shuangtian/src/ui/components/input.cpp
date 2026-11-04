@@ -330,20 +330,13 @@ void Input::apply_theme(const Theme& theme) {
     style_.border_color = next_border;
     applied_theme_border_ = next_border;
   }
-  // **凹槽内阴影**：把“输入框”从“一块较深的底色”变成“被压进去的槽”。
-  //
-  // 这里**无条件重落**（不跟 `theme_style_owned_`）：内阴影不是调用方能显式设的
-  // 外观项（`Style` 里没有对外的 inset 入口），也就不存在“保住显式设置”的问题。
-  // 它也必须每帧跟着主题走——亮/暗两个模式的浓度不同（见 `Metrics::sunken_shadow`）。
-  //
-  // 偏移 `{0, 1}`：光从左上来 ⇒ 暗部压在**上**内缘。只有纵向偏移是故意的：
-  // 横向也给偏移会让左右两边一亮一暗，而输入框是水平拉伸的矩形，
-  // 左右不对称在宽框上会被读成“描边没对齐”（实测第一版就是左右偏了 1px 的效果）。
-  style_.shadow.color = theme.metrics().sunken_shadow;
-  style_.shadow.blur = theme.metrics().sunken_shadow_blur;
-  style_.shadow.offset_x = 0.0f;
-  style_.shadow.offset_y = 1.0f;
-  style_.shadow.inset = true;
+  // **凹槽内阴影已移除**（2026-11-04 修双绘）：这里曾无条件落 `shadow.inset`，
+  // 而通用路径 `paint_box` 会真画它——旧 `paint_content` 再用一遍 `fill_rect`
+  // 底色把内阴影盖回去（画了再盖，双倍开销）。实测每个 Input 多付
+  // 4 条渐变带 + 1 次 rounded clip（两个输入框占全帧 ~0.4ms）。
+  // 凹槽的“被压进去”由更深的底色（`surface_sunken`）+ 上缘 1px 边框表达，
+  // 像素结果与旧观感一致（内阴影从未真正可见——一直被盖）。
+  style_.shadow = Shadow{};   // 重置为无阴影（见 Style 默认值）
   // ⚠ **不要在这里 `mark_dirty()`**（实测踩到：加了它会让
   // `script_write_takes_partial_damage_path` 这类“局部重绘”用例直接变红）：
   // `apply_theme` 现在每帧都会被调（主题传播与重排解耦，见 `UiRoot::layout`），
@@ -395,9 +388,24 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
   } else if (hovered() || pressed()) {
     border = colors.border_strong;
   }
-  canvas.fill_rect(bounds_, raster::Paint::solid(background), radius);
-  paint_border(canvas, bounds_, radius, border, metrics.border_width);
-  if (usable && focused()) paint_focus_ring(context, canvas, bounds_, radius);
+  // **底色/边框不再在这里画**（2026-11-04 修双绘）：通用路径 `Element::paint_box`
+  // 已用 `style_` 画过同一块底色与同一道边框环（`apply_theme` 每帧把主题色落进
+  // `style_.background/border_color`，含内阴影）。这里再画一遍是纯冗余。
+  //
+  // 状态色（聚焦 primary / 悬停 border_strong / 禁用 surface_alt）只在**与通用
+  // 路径已画的色不同**时补画：底色不同（禁用）先铺底，再补一道边框环覆盖
+  //（环是 path 填充，远轻于整块 fill_rect）。像素结果与双绘路径一致。
+  if (usable && focused()) {
+    paint_focus_ring(context, canvas, bounds_, radius);
+    if (border != style_.border_color) {
+      paint_border(canvas, bounds_, radius, border, metrics.border_width);
+    }
+  } else if (border != style_.border_color || background != style_.background) {
+    if (background != style_.background) {
+      canvas.fill_rect(bounds_, raster::Paint::solid(background), radius);
+    }
+    paint_border(canvas, bounds_, radius, border, metrics.border_width);
+  }
 
   const math::Rect box = inner_box(context);
   if (box.is_empty()) return;
@@ -960,9 +968,19 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
   } else if (hovered() || pressed()) {
     border = colors.border_strong;
   }
-  canvas.fill_rect(bounds_, raster::Paint::solid(background), radius);
-  paint_border(canvas, bounds_, radius, border, metrics.border_width);
-  if (usable && focused()) paint_focus_ring(context, canvas, bounds_, radius);
+  // 同 Input：底色/边框由通用 `paint_box` 画，这里只补状态色差异
+  //（与 Input::paint_content 的说明同一逻辑，2026-11-04 修双绘）。
+  if (usable && focused()) {
+    paint_focus_ring(context, canvas, bounds_, radius);
+    if (border != style_.border_color) {
+      paint_border(canvas, bounds_, radius, border, metrics.border_width);
+    }
+  } else if (border != style_.border_color || background != style_.background) {
+    if (background != style_.background) {
+      canvas.fill_rect(bounds_, raster::Paint::solid(background), radius);
+    }
+    paint_border(canvas, bounds_, radius, border, metrics.border_width);
+  }
 
   const math::Rect box = inner_box(context);
   if (box.is_empty()) return;

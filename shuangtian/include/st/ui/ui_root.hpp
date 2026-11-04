@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "st/raster/canvas.hpp"
+#include "st/core/time.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/input_coalescer.hpp"
 #include "st/ui/selector.hpp"
@@ -64,9 +65,27 @@ class UiRoot : public Element::HostFocus {
   /// 帧循环轮询它（每帧一次），必须 O(1)：收集已在 `collect_animation_requests`
   /// 里顺带做完（那一次遍历本来就在），这里只读结果。
   [[nodiscard]] auto next_wake_in_ms() const noexcept -> double {
-    if (wake_at_ < 0.0) return -1.0;
-    const double delta = (wake_at_ - time_seconds_) * 1000.0;
-    return delta < 0.0 ? 0.0 : delta;
+    double result = -1.0;
+    if (wake_at_ >= 0.0) {
+      const double delta = (wake_at_ - time_seconds_) * 1000.0;
+      result = delta < 0.0 ? 0.0 : delta;
+    }
+    // **悬停提示的到期时刻也是唤醒点**（2026-11-04）：hint 计时段不再用
+    // `animation_pending_` 拉帧（那会让静止悬停每 16ms 全量重绘一帧——
+    // 气泡还没弹，每帧都是白画）。这里把「到弹还有多久」并入唤醒计算，
+    // 帧循环空闲等待被夹到它，到点那一帧 `update_hint` 弹出气泡（自带 damage）。
+    //
+    // 计时基准是单调墙钟（`update_hint` 的说明），与 `time_seconds_` 不同源——
+    // 直接算剩余毫秒，不换算时间轴。
+    if ((hint_target_ != nullptr || !hint_target_id_.empty()) && !hint_visible_ &&
+        hint_start_ns_ > 0) {
+      const double held_ms =
+          std::max(0.0, static_cast<double>(st::time::now_ns() - hint_start_ns_) / 1e6);
+      const double remain_ms = static_cast<double>(hint_delay_ms_) - held_ms;
+      const double hint_wake = remain_ms <= 0.0 ? 0.0 : remain_ms;
+      if (result < 0.0 || hint_wake < result) result = hint_wake;
+    }
+    return result;
   }
 
   /// 事件分发（命中测试 → 捕获链 → 冒泡；焦点/悬停状态随之更新）。

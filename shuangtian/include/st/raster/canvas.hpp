@@ -387,7 +387,10 @@ class Canvas final : public Surface {
 
   /// 把一张已建好的几何贴图贴到画布（`try_geometry_sprite` 的交付半步）。
   /// `origin` 是本次绘制的位置（贴图内部坐标相对它）。
-  auto blit_geometry_sprite(const GeometrySprite& sprite, math::Point origin) -> bool;
+  /// 颜色无关化（2026-11-04）：贴图只存几何 alpha 遮罩，`color`×`opacity`
+  /// 在此时调染（`simd::tint_over_row`）——同一几何在悬停过渡的颜色插值帧间复用。
+  auto blit_geometry_sprite(const GeometrySprite& sprite, math::Point origin, math::Color color,
+                            float opacity) -> bool;
 
   int physical_width_{0};
   int physical_height_{0};

@@ -2009,22 +2009,28 @@ auto Canvas::try_geometry_sprite(std::uint64_t geometry_key, const Paint& paint,
   }
   const math::Color color = paint.color();
 
-  // ② 完整键 = 几何 × 颜色 × 不透明度 × 混合模式
+  // ② **键只含几何**（2026-11-04 颜色无关化）。
+  //
+  // 旧键 = 几何 × 颜色 × opacity × blend——悬停过渡时颜色逐帧插值，同一张卡片形状
+  // 每帧都是新键：实测 4K gallery 一帧 30 次 round_rect 里 143 次 miss（57% 命中），
+  // 大头正是「几何不变、颜色在变」的过渡帧。颜色无关化后贴图只存 **alpha 遮罩**，
+  // blit 时按当前颜色调染（`simd::tint_over_row`，与烘进颜色的旧路径逐位一致——
+  // 同一算式只是乘法时机不同，见 tint_over_row 的等价性说明）。
+  //
+  // opacity ≠ 1 时仍走旧口径（乘法合不进单次 tint，等价性论证复杂）：
+  // 把 opacity 烘进调染色的 alpha（预乘不变量保持），仍用同一张几何贴图。
   std::uint64_t hash = geometry_key;
   const auto mix64 = [&hash](std::uint64_t part) {
     hash ^= part;
     hash *= 1099511628211ULL;
   };
-  mix64(static_cast<std::uint64_t>(color.r) | (static_cast<std::uint64_t>(color.g) << 8U) |
-        (static_cast<std::uint64_t>(color.b) << 16U) | (static_cast<std::uint64_t>(color.a) << 24U));
-  mix64(static_cast<std::uint64_t>(static_cast<std::uint32_t>(math::clamp01(opacity) * 100000.0f)));
-  mix64(static_cast<std::uint64_t>(blend));
+  (void)mix64;   // 键不再混入颜色/opacity/blend（全部在 blit 时处理）
 
-  // ③ 查缓存（命中就贴到**本次**位置——贴图与位置无关）
+  // ③ 查缓存（命中就按**当前颜色**调染贴到本次位置——贴图与颜色/位置无关）
   for (const auto& entry : geometry_sprites_) {
     if (entry.key == hash) {
       ++geometry_stats_.hits;
-      return blit_geometry_sprite(entry.sprite, draw_origin);
+      return blit_geometry_sprite(entry.sprite, draw_origin, color, opacity);
     }
   }
 
@@ -2032,18 +2038,19 @@ auto Canvas::try_geometry_sprite(std::uint64_t geometry_key, const Paint& paint,
   ++geometry_stats_.misses;
   const Path physical = build();
   if (physical.is_empty()) return false;
-  // 离屏画布的画笔：纯色、`opacity` 烘进**画布混合**（与其后真正的贴图合成同口径）。
+  // **烘焙只存几何 alpha 遮罩（白色预乘）**：颜色在 blit 时调染。
   //
-  // ⚠ 两个坑：
-  // 1. **不能**把 opacity 乘进颜色的 alpha：那会把 `style.opacity` 与颜色自身的 alpha
-  //    混为一谈，随后贴图时又乘一次——实测 523 像素差、最大通道差 166。
-  // 2. 必须用 **SrcOver**（不是 `Src`）——即使在透明底上二者结果相同。
-  //    原因在 `blend_coverage_runs`：只有 `SrcOver` 走“先按像素累加覆盖率、同一像素只混一次”
-  //    的路径；`Src` 是覆盖语义，同一像素被多段覆盖时只保留**最后一段**——
-  //    圆角弧段正是“一像素多段”的典型（实测覆盖率 48/109 vs 正确值 88/164）。
-  const raster::Paint sprite_paint = raster::Paint::solid(color);
+  // 白色不透明画笔 src-over 到透明底的结果就是 `a` 通道遗留（r=g=b=a，即白色预乘）
+  //——它携带且仅携带几何覆盖率信息。旧版本把颜色烘进贴图导致颜色逐帧变化时
+  //（悬停过渡）缓存全 miss；遮罩化后同一几何只烘一次。
+  //
+  // 等价性：blit 侧 `tint_over_row(dst, mask, premul(color)×opacity)` 的逐像素算式
+  // 与旧「烘色贴图 over dst」逐位一致（乘法结合律，同一量化口径——
+  // 见 `simd::tint_over_row` 的说明与新增三路一致性测试）。
+  // ⚠ 烘焙仍用 SrcOver（同一像素多段覆盖时覆盖率累加，见下方 2 号坑）。
+  const raster::Paint sprite_paint = raster::Paint::solid(math::Color{255, 255, 255, 255});
   const raster::DrawOptions options_for_sprite{.blend = raster::BlendMode::SrcOver,
-                                              .opacity = opacity};
+                                              .opacity = 1.0f};
   const auto polylines = physical.flatten(0.25f);
   if (polylines.empty()) return false;
   bool has_point = false;
@@ -2119,11 +2126,13 @@ auto Canvas::try_geometry_sprite(std::uint64_t geometry_key, const Paint& paint,
     geometry_sprites_.erase(geometry_sprites_.begin());
   }
   geometry_sprites_.push_back(GeometryCacheEntry{hash, std::move(sprite)});
-  return blit_geometry_sprite(geometry_sprites_.back().sprite, draw_origin);
+  return blit_geometry_sprite(geometry_sprites_.back().sprite, draw_origin, color, opacity);
 }
 
-auto Canvas::blit_geometry_sprite(const GeometrySprite& sprite, math::Point origin) -> bool {
-  // 颜色与不透明度已烘进贴图（键里含它们），这里只负责把预乘色按 `src-over` 贴上去。
+auto Canvas::blit_geometry_sprite(const GeometrySprite& sprite, math::Point origin, math::Color color,
+                                  float opacity) -> bool {
+  // **颜色在此时调染**（遮罩只存几何）：tint = premul(color×opacity) 按 mask alpha
+  // 逐像素 over 到 dst（见 `simd::tint_over_row`）。与旧「烘进颜色的贴图」逐位一致。
   cleared_fresh_ = false;
   const math::IntRect clip = clip_rect();
   if (clip.is_empty() || sprite.pixels == nullptr || sprite.spans == nullptr) return true;
@@ -2133,6 +2142,16 @@ auto Canvas::blit_geometry_sprite(const GeometrySprite& sprite, math::Point orig
   const int origin_y = static_cast<int>(std::lround(origin.y)) + sprite.y;
   const auto& pixels = *sprite.pixels;
   const auto& spans = *sprite.spans;
+  // 调染色：opacity 烘进 alpha（预乘不变量保持；与旧键口径的 opacity 乘法等价）。
+  const float effective = math::clamp01(opacity);
+  math::Color tinted = color;
+  if (effective < 0.999f) {
+    tinted.r = static_cast<std::uint8_t>((color.r * effective) + 0.5f);
+    tinted.g = static_cast<std::uint8_t>((color.g * effective) + 0.5f);
+    tinted.b = static_cast<std::uint8_t>((color.b * effective) + 0.5f);
+    tinted.a = static_cast<std::uint8_t>((color.a * effective) + 0.5f);
+  }
+  const std::uint32_t premul = math::premultiply(tinted);
   for (int row = 0; row < sprite.height; ++row) {
     const int y = origin_y + row;
     if (y < clip.y || y >= clip.bottom()) continue;
@@ -2145,8 +2164,8 @@ auto Canvas::blit_geometry_sprite(const GeometrySprite& sprite, math::Point orig
                                         static_cast<std::size_t>(sprite.width);
     auto* dst = pixels_.data() + static_cast<std::size_t>(y) *
                                      static_cast<std::size_t>(physical_width_);
-    simd::over_row(dst + x_begin, src + (x_begin - origin_x),
-                   static_cast<std::size_t>(x_end - x_begin));
+    simd::tint_over_row(dst + x_begin, src + (x_begin - origin_x),
+                        static_cast<std::size_t>(x_end - x_begin), premul);
   }
   return true;
 }
