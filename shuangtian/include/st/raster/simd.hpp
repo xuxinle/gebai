@@ -64,4 +64,18 @@ void convert_rgba_to_xrgb_row(std::uint32_t* dst, const std::uint32_t* src,
 /// 三路（AVX2/SSE2/标量）逐像素一致由测试钉住。行内允许原地转换。
 void rotate_bgra_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept;
 
+/// 按遮罩 alpha 调染颜色并 src-over 到目标行（几何 sprite 的颜色无关化）。
+///
+/// 语义：`dst[i] = over(tinted, dst[i])`，其中 `tinted = premul(color) × mask[i].a`
+///（`mask` 是几何 sprite 烘焙出的纯 alpha 遮罩，白色预乘像即 `a` 在低字节）。
+///
+/// 与「烘进颜色的贴图」逐位一致的论证：烘焙版贴图像素 = `premul(color) × a`（烘焙时
+/// 白色路径的 src-over 到透明底就是 alpha 遃留），再 over 到 dst；本函数用同一个
+/// `premul(color) × a` 中间量 over 到 dst——同一算式、同一量化口径（simd::over_row
+/// 的 16 位通道路径），只是乘法发生在 blit 时而不是烘焙时。
+/// 语义契约与 `over_row` 相同（两侧预乘、c≤a 不变量）；`color` 必须**不透明**
+///（a=255，几何 sprite 只接纯色不透明画笔）。
+void tint_over_row(std::uint32_t* dst, const std::uint32_t* mask, std::size_t count,
+                   std::uint32_t premul_color) noexcept;
+
 }  // namespace st::raster::simd

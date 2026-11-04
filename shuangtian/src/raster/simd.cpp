@@ -146,6 +146,25 @@ namespace {
               over(source_alpha, channel(dst, 0)));
 }
 
+/// 逐像素「按遮罩 alpha 调染预乘色再 over」的标量参考（`tint_over_row` 的三路基准）。
+///
+/// 量化口径与 SIMD 路径同式：`tinted_c = (c × a + 127) / 255`（精确除法，
+/// 16 位不溢出：上界 255×255+127 = 65152 < 65536）；dst 侧同式。
+/// 预乘色要求 `c ≤ a_color` 且遮罩 alpha 是独立因子——两者乘后仍满足 c ≤ 255。
+[[nodiscard]] auto tint_over_scalar(std::uint32_t dst, std::uint32_t premul_color,
+                                    std::uint32_t mask_alpha) noexcept -> std::uint32_t {
+  if (mask_alpha == 0U) return dst;
+  const auto scale = [mask_alpha](std::uint32_t value) noexcept {
+    return (value * mask_alpha + 127U) / 255U;
+  };
+  const std::uint32_t r = scale(channel(premul_color, 24));
+  const std::uint32_t g = scale(channel(premul_color, 16));
+  const std::uint32_t b = scale(channel(premul_color, 8));
+  const std::uint32_t a = scale(channel(premul_color, 0));   // tinted alpha，非 mask alpha
+  const std::uint32_t src = (r << 24U) | (g << 16U) | (b << 8U) | a;
+  return over_scalar(dst, src);
+}
+
 }  // namespace
 
 auto backend() noexcept -> const char* {
@@ -378,8 +397,7 @@ void convert_rgba_to_xrgb_row(std::uint32_t* dst, const std::uint32_t* src,
 #endif
 }
 
-void rotate_bgra_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept {
-  if (count == 0) return;
+void rotate_bgra_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept {  if (count == 0) return;
 #if ST_SIMD_AVX2
   if (cpu_has_avx2()) {
     // 字节循环右移一位 = 每像素 (R,G,B,A)→(A,R,G,B)：单条 shuffle 即可（每个 32 位
@@ -427,6 +445,123 @@ void rotate_bgra_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t c
 #else
   for (std::size_t index = 0; index < count; ++index) {
     dst[index] = (src[index] >> 8U) | (src[index] << 24U);
+  }
+#endif
+}
+
+void tint_over_row(std::uint32_t* dst, const std::uint32_t* mask, std::size_t count,
+                   std::uint32_t premul_color) noexcept {
+  if (count == 0) return;
+  // 遮罩像素：白色预乘（r=g=b=a），只有低字节 a 有信息。
+  // tinted = (color_c × a / 255) 各通道 + a——与烘焙路径的量化
+  //（(x*255+127)/255 精确除法，见 scale_255）同一口径。
+#if ST_SIMD_AVX2
+  if (cpu_has_avx2()) {
+    const __m256i color_v = _mm256_set1_epi32(static_cast<int>(premul_color));
+    std::size_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+      const __m256i m = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(mask + index));
+      // 取每像素低字节 alpha 广播成 16 位 lane：a = m & 0x00FF（各通道同值）。
+      const __m256i alpha = _mm256_and_si256(m, _mm256_set1_epi16(0x00FF));
+      // color 16 位 lane 拆解：低半（r,b 低字节）与高半（g,a）。
+      const __m256i color_lo = _mm256_and_si256(color_v, _mm256_set1_epi16(0x00FF));
+      const __m256i color_hi = _mm256_and_si256(_mm256_srli_epi16(color_v, 8),
+                                                _mm256_set1_epi16(0x00FF));
+      // tinted_c = (color_c × a + 127) / 255（精确除法，与 scale_255 同式）
+      const __m256i lo_round = _mm256_add_epi16(_mm256_mullo_epi16(color_lo, alpha),
+                                                _mm256_set1_epi16(127));
+      const __m256i hi_round = _mm256_add_epi16(_mm256_mullo_epi16(color_hi, alpha),
+                                                _mm256_set1_epi16(127));
+      const __m256i lo = _mm256_srli_epi16(
+          _mm256_mulhi_epu16(lo_round, _mm256_set1_epi16(static_cast<short>(0x8081))), 7);
+      const __m256i hi = _mm256_srli_epi16(
+          _mm256_mulhi_epu16(hi_round, _mm256_set1_epi16(static_cast<short>(0x8081))), 7);
+      const __m256i tinted = _mm256_or_si256(lo, _mm256_slli_epi16(hi, 8));
+      // src-over 到 dst（预乘两侧）：dst = tinted + dst×(255-src_a)/255。
+      // ⚠ **src_a 是 tinted 的 alpha（不是遮罩的）**：tinted.a = color.a × mask.a / 255
+      //（调染色不透明时才等于 mask.a）。半透明调染色下用错会把目标混得过重。
+      // tinted 的 alpha 就在偶 lane 的低字节（lo 那份），这里单独按同式算一份广播到
+      // 全 lane：color 的 alpha 是整行常量，只需与 mask alpha 逐 lane 相乘。
+      const __m256i alpha_round = _mm256_add_epi16(
+          _mm256_mullo_epi16(_mm256_set1_epi16(static_cast<short>(premul_color & 0xFFU)), alpha),
+          _mm256_set1_epi16(127));
+      const __m256i src_alpha = _mm256_srli_epi16(
+          _mm256_mulhi_epu16(alpha_round, _mm256_set1_epi16(static_cast<short>(0x8081))), 7);
+      const __m256i dst_v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + index));
+      const __m256i inv = _mm256_sub_epi16(_mm256_set1_epi16(255), src_alpha);
+      const __m256i d_lo = _mm256_and_si256(dst_v, _mm256_set1_epi16(0x00FF));
+      const __m256i d_hi = _mm256_and_si256(_mm256_srli_epi16(dst_v, 8),
+                                            _mm256_set1_epi16(0x00FF));
+      const __m256i dlo_round = _mm256_add_epi16(_mm256_mullo_epi16(d_lo, inv),
+                                                 _mm256_set1_epi16(127));
+      const __m256i dhi_round = _mm256_add_epi16(_mm256_mullo_epi16(d_hi, inv),
+                                                 _mm256_set1_epi16(127));
+      const __m256i d_lo_scaled = _mm256_srli_epi16(
+          _mm256_mulhi_epu16(dlo_round, _mm256_set1_epi16(static_cast<short>(0x8081))), 7);
+      const __m256i d_hi_scaled = _mm256_srli_epi16(
+          _mm256_mulhi_epu16(dhi_round, _mm256_set1_epi16(static_cast<short>(0x8081))), 7);
+      const __m256i result = _mm256_adds_epu16(
+          tinted, _mm256_or_si256(d_lo_scaled, _mm256_slli_epi16(d_hi_scaled, 8)));
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + index), result);
+    }
+    for (; index < count; ++index) {
+      const auto a = static_cast<std::uint32_t>(mask[index] & 0xFFU);
+      if (a == 0U) continue;
+      dst[index] = tint_over_scalar(dst[index], premul_color, a);
+    }
+    return;
+  }
+#endif
+#if ST_SIMD_X86
+  const __m128i color_v = _mm_set1_epi32(static_cast<int>(premul_color));
+  std::size_t index = 0;
+  for (; index + 4 <= count; index += 4) {
+    const __m128i m = _mm_loadu_si128(reinterpret_cast<const __m128i*>(mask + index));
+    const __m128i alpha = _mm_and_si128(m, _mm_set1_epi16(0x00FF));
+    const __m128i color_lo = _mm_and_si128(color_v, _mm_set1_epi16(0x00FF));
+    const __m128i color_hi =
+        _mm_and_si128(_mm_srli_epi16(color_v, 8), _mm_set1_epi16(0x00FF));
+    const __m128i lo_round =
+        _mm_add_epi16(_mm_mullo_epi16(color_lo, alpha), _mm_set1_epi16(127));
+    const __m128i hi_round =
+        _mm_add_epi16(_mm_mullo_epi16(color_hi, alpha), _mm_set1_epi16(127));
+    const __m128i lo = _mm_srli_epi16(
+        _mm_mulhi_epu16(lo_round, _mm_set1_epi16(static_cast<short>(0x8081))), 7);
+    const __m128i hi = _mm_srli_epi16(
+        _mm_mulhi_epu16(hi_round, _mm_set1_epi16(static_cast<short>(0x8081))), 7);
+    const __m128i tinted = _mm_or_si128(lo, _mm_slli_epi16(hi, 8));
+    // src_a = tinted 的 alpha（color.a × mask.a / 255，非遮罩 alpha；见 AVX2 分支说明）。
+    const __m128i alpha_round =
+        _mm_add_epi16(_mm_mullo_epi16(_mm_set1_epi16(static_cast<short>(premul_color & 0xFFU)),
+                                      alpha), _mm_set1_epi16(127));
+    const __m128i src_alpha = _mm_srli_epi16(
+        _mm_mulhi_epu16(alpha_round, _mm_set1_epi16(static_cast<short>(0x8081))), 7);
+    const __m128i dst_v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + index));
+    const __m128i inv = _mm_sub_epi16(_mm_set1_epi16(255), src_alpha);
+    const __m128i d_lo = _mm_and_si128(dst_v, _mm_set1_epi16(0x00FF));
+    const __m128i d_hi = _mm_and_si128(_mm_srli_epi16(dst_v, 8), _mm_set1_epi16(0x00FF));
+    const __m128i dlo_round =
+        _mm_add_epi16(_mm_mullo_epi16(d_lo, inv), _mm_set1_epi16(127));
+    const __m128i dhi_round =
+        _mm_add_epi16(_mm_mullo_epi16(d_hi, inv), _mm_set1_epi16(127));
+    const __m128i d_lo_scaled = _mm_srli_epi16(
+        _mm_mulhi_epu16(dlo_round, _mm_set1_epi16(static_cast<short>(0x8081))), 7);
+    const __m128i d_hi_scaled = _mm_srli_epi16(
+        _mm_mulhi_epu16(dhi_round, _mm_set1_epi16(static_cast<short>(0x8081))), 7);
+    const __m128i result = _mm_adds_epu16(
+        tinted, _mm_or_si128(d_lo_scaled, _mm_slli_epi16(d_hi_scaled, 8)));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + index), result);
+  }
+  for (; index < count; ++index) {
+    const auto a = static_cast<std::uint32_t>(mask[index] & 0xFFU);
+    if (a == 0U) continue;
+    dst[index] = tint_over_scalar(dst[index], premul_color, a);
+  }
+#else
+  for (std::size_t index = 0; index < count; ++index) {
+    const auto a = static_cast<std::uint32_t>(mask[index] & 0xFFU);
+    if (a == 0U) continue;
+    dst[index] = tint_over_scalar(dst[index], premul_color, a);
   }
 #endif
 }

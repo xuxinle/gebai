@@ -187,6 +187,7 @@
 | [`OPTIMIZATION_BASELINE.md`](OPTIMIZATION_BASELINE.md) | 结构优化**改动前**快照 | 速查 | 记录 |
 | [`OPTIMIZATION_PROGRESS.md`](OPTIMIZATION_PROGRESS.md) | 结构优化过程与交接 | 速查 | 记录 |
 | [`OPTIMIZATION_REPORT.md`](OPTIMIZATION_REPORT.md) | 结构优化收尾（17 个提交，每阶段可回滚） | 速查 | 记录 |
+| [`OPTIMIZATION_PERF_2026-11.md`](OPTIMIZATION_PERF_2026-11.md) | 性能优化轮（2026-11）：局部上屏/双绘/重排 SIMD/空转归零 + 后续 R 轮 | 速查 | 记录（进行中） |
 | [`MERGE_REVIEW.md`](MERGE_REVIEW.md) | `optimize/ui-viewport-2026` 合并前复核（16 笔逐笔） | 速查 | 记录（分支已并入） |
 | [`BUILD_ISOLATION_PLAN.md`](BUILD_ISOLATION_PLAN.md) | **构建隔离方案（未落地）**：多 worker 互踩的四层机制 + 改动面与代价 | 详读 | 方案（只分析未落地） |
 
