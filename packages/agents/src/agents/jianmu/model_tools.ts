@@ -91,7 +91,7 @@ function runProc(cmd: string, args: string[], cwd: string, timeoutMs: number): P
 }
 
 /** 确保 exe 存在，否则给出**可执行**的提示（而不是一句"找不到"）。 */
-function requireExe(ctx: ToolContext, path: string, label: string, profile: string): string | null {
+function requireExe(path: string, label: string, profile: string): string | null {
   if (existsSync(path)) return null
   return (
     `找不到 ${label}：${path}\n`
@@ -191,7 +191,7 @@ export const renderCheckTool: Tool = {
     if (isBpy) {
       // `align_bench_probe`：自动识别 .js/.py，固定 1100x800，输出 PNG。
       const exe = exePath(ctx, "align_bench_probe", profile)
-      const missing = requireExe(ctx, exe, "align_bench_probe", profile)
+      const missing = requireExe(exe, "align_bench_probe", profile)
       if (missing) return { output: missing }
       await mkdirOf(outPath)
       const r = await runProc(exe, [scriptPath, outPath], frameworkRoot(ctx), 120_000)
@@ -205,7 +205,7 @@ export const renderCheckTool: Tool = {
 
     // three.js：`three_check` 自带"空画面 / 相机在物体里 / 物体全在框外"的诊断。
     const exe = exePath(ctx, "three_check", profile)
-    const missing = requireExe(ctx, exe, "three_check", profile)
+    const missing = requireExe(exe, "three_check", profile)
     if (missing) return { output: missing }
     await mkdirOf(outPath)
     const argv = [exe, "--three", scriptPath, "--png", outPath]
@@ -228,7 +228,6 @@ async function mkdirOf(path: string): Promise<void> {
 }
 
 // ============================================================ capability
-
 /**
  * 两条表达层的**能力边界**：回答"这个能力到底支持吗、写到什么程度"。
  *
@@ -250,15 +249,14 @@ export const capabilityTool: Tool = {
     {
       topic: {
         type: "string",
-        description: "过滤主题：three（three.js 面）/ bpy（bpy 面）/ look（观感与「假」）/ perf（性能）",
-      },
-    },
+        description:
+          "过滤主题：three（three.js 面）/ bpy（bpy 面）/ look（观感与「假」）/ perf（性能）/ verify（怎么验，含已修缺陷清单）",
+      },    },
     [],
   ),
   async execute(args) {
     const topic = String(args.topic ?? "").trim().toLowerCase()
-    const sections: Record<string, string[]> = {
-      three: [
+    const sections: Record<string, string[]> = {      three: [
         "three.js 表达层（.js）",
         "  ✓ 用：Scene/Group/Object3D、全部内置几何生成器、Extrude/Lathe/Tube/Shape+holes、",
         "       Vector2/3、Quaternion、Euler、Matrix4、Box3、Perspective/OrthographicCamera、",
@@ -311,6 +309,31 @@ export const capabilityTool: Tool = {
         "  · bpy 场景：MicroPython 求值 + JSON 抽取，数百毫秒到数秒（与物体数线性相关）",
         "  · three.js 场景：编译 + 求值约 55ms（three.js 0.160 内嵌），每帧推进约 54µs",
         "  · 顶点数比物体数更能预测耗时；InstancedMesh 是大量重复物体的正解",
+      ],
+      verify: [
+        "可执行的验收工具（不靠肉眼）：",
+        "",
+        "  st build scene3d_capability_probe && ./build/dev/bin/scene3d_capability_probe",
+        "    20 条常用能力各跑一份最小脚本（Lathe/Tube/TorusKnot/Shape+holes/InstancedMesh/",
+        "    Group/透明/双面/自发光/点光/聚光/正交相机/半球光/自转/关键帧 + bpy 四项）。",
+        "    当前 20/20 可用。加一条能力只需在 kCapabilities 里加一行。",
+        "",
+        "  st build render_gap_probe && ./build/dev/bin/render_gap_probe <scene.js|scene.py>",
+        "    量：两条腿差异像素比（实测 0.00%）+ 暗部存在性 + 落图。",
+        "    ⚠ 全图均值/暗部占比在“背景占 80%”的构图上没可比性，要裁主体区域。",
+        "",
+        "  st build bpy_sphere_geometry_probe && ./build/dev/bin/bpy_sphere_geometry_probe",
+        "    bpy 图元的包围盒判据。实测基线（24×12、radius=1.0）：三轴 1.0018/1.0000/1.0000。",
+        "",
+        "  单测：st test three_script_ / bpy_uv_sphere / mixed_assets / scene3d_feature",
+        "",
+        "已修的真实缺陷（都曾表现为“看着假”而错误信息离真因很远）：",
+        "  · 脚本入口按行识别最后一句 → 跨行表达式/一行多语句报语法错（曾让 16/20 条能力假失败）",
+        "  · 沙箱没有 console → 一句 console.log 把整份脚本打断",
+        "  · bpy 的 _sin/_cos 相位未归约 → 球被拉成多瓣花（顶点到半径 3.64）",
+        "  · UV 球环数多算一个 → 末两环读越界顶点",
+        "  · 四边形耳切用 x/y 平面判内含 → 球面被切成跨曲面的三角形",
+        "  · THREE.__assets 跨场景残留 → 换了场景画面还是老模型",
       ],
     }
     const chosen = topic && sections[topic] ? [topic] : Object.keys(sections)
