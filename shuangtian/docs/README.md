@@ -79,7 +79,7 @@
 | 量"指标测不到的那一点精致度" | `polish.md` | 速查 |
 | 写跨平台代码 | `../CONVENTIONS.md` §10（红线）→ `cross_platform.md`（详细版 + 自查清单） | 详读/速查 |
 | 写声明式界面 | `declarative.md`（**§5.5「调用方必须知道的三件事」是硬契约**） | 详读·接口 |
-| 用 XML + JS 写应用 | `xml-ui.md`（`examples/xmlapp` 通路） | 详读 |
+| 用 XML + JS 写应用 | `xml-ui.md`（`examples/xiangqi` 通路） | 详读 |
 | 改文件即生效（不重编不重启） | `hot-reload.md`（`st::ui::HotReload`；`../DESIGN.md` §4.2.28） | 速查 |
 | 写测试 | `../CONVENTIONS.md` §7；"假绿测试"的教训在 `../DESIGN.md` §8.3.2 | —— |
 | 用真按键验界面交互（输入/快捷键/回显） | `../CONVENTIONS.md` §7.7.1（三条注入通道怎么选）+ §7.7.2 | —— |
@@ -187,7 +187,7 @@
 |---|---|---|---|
 | [`sqlite_integration.md`](sqlite_integration.md) | SQLite 源码内置：为什么这么接、边界划在哪 | 详读 | 记录（已落地） |
 | [`BUILD_CHECK.md`](BUILD_CHECK.md) | `st check` 跨编译器检查：为什么需要它 | 速查 | 记录（已落地） |
-| [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`examples/xmlapp`） | 详读 | 记录（已落地） |
+| [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`examples/xiangqi`） | 详读 | 记录（已落地） |
 | [`TERMINAL_FIXES_20261008.md`](TERMINAL_FIXES_20261008.md) | 终端修复轮：光标错位/输入回显/多会话串台 | 速查 | 记录（已落地） |
 | [`OPTIMIZATION_BASELINE.md`](OPTIMIZATION_BASELINE.md) | 结构优化**改动前**快照 | 速查 | 记录 |
 | [`OPTIMIZATION_PROGRESS.md`](OPTIMIZATION_PROGRESS.md) | 结构优化过程与交接 | 速查 | 记录 |

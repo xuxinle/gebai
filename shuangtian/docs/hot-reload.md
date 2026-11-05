@@ -7,14 +7,14 @@
 
 ```bash
 # 在窗口里改（默认开 watch，改 XML/JS 保存即生效）
-./build/dev/bin/st run xmlapp --profile dev
+./build/dev/bin/st run xiangqi --profile dev -- --watch
 
 # 无头 + 控制通道（自动化/像素断言同样吃热重载）
-./build/dev/bin/xmlapp --headless --watch --control-port 0 --control-file /tmp/ctl.json
+./build/dev/bin/xiangqi --headless --watch --control-port 0 --control-file /tmp/ctl.json
 ```
 
 `st run` 现在对**壳层源码没改**的应用**跳过构建**：XML/JS 是运行期读的文件，
-改它们不需要编译。要强制重建用 `st build xmlapp` 或 `st run … --force`。
+改它们不需要编译。要强制重建用 `st build xiangqi` 或 `st run … --force`。
 （判据：目标第一条 `sources` 里的壳层源文件与产物比 mtime —— 任一源比产物新才重建。）
 
 ## 改了会发生什么
@@ -94,7 +94,7 @@ while (!app.quit_requested()) {
 ## 参考实现
 
 - `include/st/ui/hot_reload.hpp` / `src/ui/hot_reload.cpp`（本层）
-- `examples/xmlapp/main.cpp`（`--watch` / `--no-watch`、`app.hot.reload`）
+- `examples/xiangqi/main.cpp`（`--watch` / `--no-watch`、`app.hot.reload`；**主循环里的 `hot.poll()` 不能省**——`HotReload` 只负责比指纹与重建，推进它是调用方的事）
 - `examples/xiangqi/main.cpp`（常驻面板：默认不 watch，`--watch` 打开）
 - 回归：`tests/ui_hot_reload_test.cpp`（原子/换树/清场/指纹各一条）、
   `tools/hot_reload_e2e.py`（真进程：改文件 → 控制通道看界面变没变）

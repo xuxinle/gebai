@@ -58,8 +58,8 @@ SEQUENCE = [
     "gbcode_usability_e2e.py",
     "louyue_e2e.py",
     "caiyun_e2e.py",
-    "xmlapp_e2e.py",
-    # 同一二进制的另一面：**改文件即生效**（改 XML/JS 保存就重载，写错不清界面）
+    # 同一二进制的另一面：**改文件即生效**（改 XML/JS 保存就重载，写错不清界面）。
+    # 宿主是相期（它也走 `HotReload`，且是常驻应用，更能暴露重载后状态没清干净的问题）。
     "hot_reload_e2e.py",
     # 实时类：每秒 60 次判定 + 每帧重绘（判定帧/朝向/回合结束/AI 确定性）
     "gedou_e2e.py",
@@ -98,7 +98,7 @@ KNOWN_EXCLUDED = {
     "window_icon_check.py",
 }
 
-DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "gedou", "gedou_rl"]
+DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xiangqi", "gedou", "gedou_rl"]
 
 
 def bin_path(profile: str, app: str) -> Path:

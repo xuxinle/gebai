@@ -1,4 +1,4 @@
-# 用 XML + JS 写应用（xmlapp 通路）
+# 用 XML + JS 写应用（XML+JS 通路）
 
 > 面向**不写 C++ 也能做应用**：界面写在 XML 里、逻辑写在 JS 里，
 > 真实能力（读文件、跑命令、查库）由 C++ 通过桥暴露给脚本。
@@ -38,7 +38,7 @@ $('#go').on('click', () => {
 });
 ```
 
-`main.cpp` 里只有三件事（完整模板见 `examples/xmlapp/main.cpp`）：
+`main.cpp` 里只有三件事（完整模板见 `examples/xiangqi/main.cpp`）：
 
 ```cpp
 // ① 壳层先挂（窗框/标题栏）：XML 树由 HotReload 换根，落点是它当前的父元素
@@ -158,13 +158,13 @@ bridge.expose("fs.read", [](const std::vector<st::Json>& args) -> st::Result<st:
 | 底部那条跑到窗口中间 | 根元素少了 `grow="true"`（它挂在 `WindowFrame::content()` 下） |
 | 点了没反应（事件） | 事件名写错（如 `change`——框架只有 `click`）。现在会直接报错 |
 | 点了勾选框又弹回原状 | 同一元素同一事件被绑了两次（重建式渲染下累积）。句柄的 `.on()` 已内置去重 |
-| 属性写了没生效 | 看应用 stderr 的 `[xmlapp] 属性未生效：…`（报告里有标签名与行号） |
+| 属性写了没生效 | 看应用 stderr 的 `[hot] 属性未生效：…`（报告里有标签名与行号） |
 | JS 里 `xxx is not a function` | 桥没暴露（`bridge.exposed()` 可查）/ 名字写错 / 桥在 `start()` 之前建（必须在之后） |
 
 ## 参考
 
-- 完整可运行示例：`examples/xmlapp/`（任务清单，零 C++ UI 代码）
+- 完整可运行示例：`examples/xiangqi/`（相期：桌面常驻卡片面板，界面零 C++ UI 代码）
 - **改文件即生效**：`docs/hot-reload.md`（`ui::HotReload`，`DESIGN.md` §4.2.28）
-- 端到端回归：`tools/xmlapp_e2e.py`、`tools/hot_reload_e2e.py`
+- 端到端回归：`tools/hot_reload_e2e.py`（改文件即生效的四个分支）；相期自身能力面见 `tools/xiangqi_e2e.py`
 - 设计说明：`DESIGN.md` §4.2.20（XML 建树）与 §4.2.21（脚本桥）
 - C++ 声明式（不需要 XML 时的另一条路）：`docs/declarative.md`

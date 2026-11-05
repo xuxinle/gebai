@@ -34,8 +34,7 @@
 | `gbcode_usability_e2e.py` | gbcode | **真实使用者路径**（真磁盘工作区 + 真 git 仓 + 真 shell）：树行可读与零坐标驱动/BOM 与 CRLF 保真/Shift+Tab 反缩进/查找替换/终端忙闲语义与标签短名/菜单项按 id 激活/状态栏格子反馈/Git 暂存与提交真落盘/大文件滚动 | `py -3 tools/gbcode_usability_e2e.py` |
 | `louyue_e2e.py` | louyue | 设计文档 §7 四条验收：两笔不同混合模式笔画导出后独立解码 PNG 逐像素断色（±2/255）/撤销重做逐像素一致/九种混合模式对 W3C 公式/交互链路 | `py -3 tools/louyue_e2e.py` |
 | `caiyun_e2e.py` | caiyun | 设计文档 §7 五条验收：帧哈希确定性（同刻两次一致、异刻不同——证明预览跟着播放头走）/修剪分割移动入出点/导出帧数与抽查哈希/`--bench` 压测 | `py -3 tools/caiyun_e2e.py` |
-| `xmlapp_e2e.py` | xmlapp | 通路的三个接缝：XML 建出界面树/JS 调 C++ 真落数据/JS 动态建删结构 | `py -3 tools/xmlapp_e2e.py` |
-| `hot_reload_e2e.py` | xmlapp | **改文件即生效**（真进程）：改 XML 换树 / 改 JS 重装且绑定不叠 / 写错 XML 不清界面 / 写错 JS 不丢逻辑 | `py -3 tools/hot_reload_e2e.py` |
+| `hot_reload_e2e.py` | xiangqi | **改文件即生效**（真进程）：改 XML 换树 / 改 JS 重装且绑定不叠 / 写错 XML 不清界面 / 写错 JS 不丢逻辑 | `py -3 tools/hot_reload_e2e.py` |
 | `gedou_e2e.py` | gedou | **类拳皇对战**的 7 组断言：判定只在判定帧出盒 / 命中扣血 = 招式表 / 判定盒在朝向方向 / 必杀破防且击倒 / 血空→over+胜者胜利姿态+KO / 打开判定盒画面真变（像素哈希 + 亮度统计）/ AI 同种子两跑逐值一致 | `py -3 tools/gedou_e2e.py` |
 | `gedou_reverse_verify.py` | gedou | **逆向验证**（非普通断言）：逐条把修复回退→确认重编成功→确 e2e/单测变红→恢复回绿。7 个案例（含一个"应当保持绿"的对照：期望值与实现同源） | `py -3 tools/gedou_reverse_verify.py [--only 案例名]` |
 | `gedou_balance_check.py` | gedou | **训练前的平衡体检**：8 个固定动作 × 3 档难度矩阵。判据写死：任一固定动作胜率 ≥ 90% 即"无脑必胜"，训练没意义（实测：不体检直接训，"一直按踢"100% 胜） | `py -3 tools/gedou_balance_check.py --episodes 80` |

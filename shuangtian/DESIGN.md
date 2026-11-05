@@ -95,7 +95,7 @@ shuangtian/
 ├── src/<层>/*.cpp        # 实现（与头同名优先）
 │   └── **/platform_*.cpp # 平台/系统 API 单点封装（禁令受控例外）
 ├── tests/<层>_<模块>_test.cpp
- ├── examples/{gallery,gbcode,louyue,caiyun,xmlapp}/   # 五示例：组件面 / 编辑器面 / 光栅面 / 动效面 / 纯 XML+JS 面（见根 README「示例」节）
+ ├── examples/{gallery,gbcode,louyue,caiyun,xiangqi}/  # 示例：组件面 / 编辑器面 / 光栅面 / 动效面 / 纯 XML+JS 面（见根 README「示例」节）
 ├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：nlohmann/json、quickjs-ng、
 │                         # batterycenter/embed、sqlite（amalgamation 源码内置）；
 │                         # 来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
@@ -1886,8 +1886,9 @@ Model 层零改动。
 **回归**：`tests/ui_hot_reload_test.cpp`（换树指针变化 / 坏 XML 不清界面 / 坏 JS 不清绑定 /
 内容相同不重载 / status 诊断面，5 例 53 断言）、`tools/hot_reload_e2e.py`
 （真进程：改文件 → 控制通道问界面变没变，四条通路各 1~3 条断言）。
-实跑：xmlapp / xiangqi 两个示例已改吃这条通路，e2e（`xmlapp_e2e.py` /
-`xiangqi_e2e.py`）全绿。文档：`docs/hot-reload.md`。
+实跑：xiangqi 已改吃这条通路，e2e（`hot_reload_e2e.py` / `xiangqi_e2e.py`）全绿。
+推进 `HotReload` 的那一行（主循环里的 `hot.poll()`）属于调用方责任——漏掉不会报错，
+只表现为「改了文件没反应」。文档：`docs/hot-reload.md`。
 
 #### 4.2.14 three.js 作为三维的**表达层**（2026-11-05）
 
@@ -5657,7 +5658,7 @@ gallery（用 3D）仍保留 3D 符号 54 个、体积从 ≈9.5 MB → **6.56 M
 
 ```json
 "all": { "kind": "group",
-         "libraries": ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "xiangqi", "cefu", "gedou"] }
+         "libraries": ["gallery", "gbcode", "louyue", "caiyun", "threelab", "xiangqi", "cefu", "gedou"] }
 ```
 
 - `kind: "group"` 的目标**不编译任何单元**，只是把 `libraries` 里列的成员**依次**构建。

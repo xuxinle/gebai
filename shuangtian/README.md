@@ -219,7 +219,7 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 | `gbcode` | 文本 / 编辑器（应用面，全声明式；**正式可用**） | `CodeEditor` | 声明式组装复杂应用、组件协同；真实文件/ LSP/ Git/ 终端全链路 |
 | **`louyue` 镂月** | **像素 / 光栅创作面** | **自绘画布**（自定义 `paint_content`） | 光栅管线实战：`BlendMode`/`Surface` 合成、逐像素操作、PNG 编解码**往返**、撤销栈 |
 | **`caiyun` 裁云** | **时间 / 动效应用面 + AI 生成面** | **导演脚本 + 成片管线**（脚本 → 场景片段 → 1080p 帧序列 → mp4） | 帧预算与续帧协议、播放/擦洗、拖拽修剪这类连续交互；跨线程长任务 + 进度回 UI；内置时间轴「外部真值源 + 委托编辑」应用示范位 |
-| **`xmlapp`** | **纯 XML + JS 通路**（零 C++ 界面代码） | `ui/main.xml` + `ui/app.js` | XML 界面描述 + `ScriptBridge` JS 驱动：动态界面不写一行 C++ 也能成应用；**改 XML/JS 保存即生效**（不重编不重启，`docs/xml-ui.md`、`docs/hot-reload.md`、`DESIGN.md` §4.2.20–22 / §4.2.28） |
+| **`xiangqi` 相期** | **纯 XML + JS 通路**（零 C++ 界面代码） | `ui/main.xml` + `ui/app.js` | XML 界面描述 + `ScriptBridge` JS 驱动：动态界面不写一行 C++ 也能成应用；**改 XML/JS 保存即生效**（不重编不重启，`docs/xml-ui.md`、`docs/hot-reload.md`、`DESIGN.md` §4.2.20–22 / §4.2.28） |
 | **`gedou` 格斗** | **实时游戏面** | **自绘骨架舞台**（`paint_content`）+ 60Hz 逻辑帧 | 连续动画与实时输入：固定步长逻辑帧与渲染帧解耦、"按住/边沿"两种键语义、判定盒与骨架同源、AI 与玩家走同一输入面、同种子可复现（`examples/gedou/README.md`）；**同一个示例还带一条强化学习链路**（C++ 环境 + torch PPO + 权重回流游戏，`examples/gedou/RL.md`） |
 
 命名出处：镂月成歌扇，裁云作舞衣。—— 唐·李义府《堂堂词》。两个示例都走

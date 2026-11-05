@@ -1571,8 +1571,15 @@ auto run_app(int argc, char** argv) -> int {
       }
     }
 
-    // 保活：长时间无消息时主动 ping，确认对端活着；无响应则断开（半开连接现形）。
+    // 保活：长时间无消息时主动 ping，确认对端活着；无响应则断开（半开死链现形）。
     link.keepalive();
+
+    // 热重载：`--watch` 时每帧判一次文件内容指纹（未开时是常数级判断）。
+    //
+    // 为何必须在主循环里调：`HotReload` 只是“比指纹 + 重建”，**推进它是调用方的事**。
+    // 漏掉这一行不会报错——只表现为“改了 XML/JS 没反应”（实测：从 xmlapp 迁过来时
+    // 漏过，静态检查与编译都绿）。
+    if (hot.poll() > 0) app.request_repaint();
 
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
@@ -1590,8 +1597,12 @@ auto run_app(int argc, char** argv) -> int {
   // 连接超时最多 400 ms，所以这里最多等那么久（正常情况下早已完成）。
   if (agent_worker.joinable()) agent_worker.join();
   link.disconnect();
-  st::log::out("相期退出：{} 帧，处理消息 {} 条（未处理的卡片留在 {}，下次启动会重新出现）\n", frames,
+  st::log::out("相期退出：{} 帧，处理消息 {} 条（未处理的卡片留在 {}，下次启动会重新出现）", frames,
             handled, store.inbox_dir());
+  const Json final_hot = hot.status();
+  st::log::out("  · 热重载：界面重建 {} 次 / 逻辑重装 {} 次\n",
+            st::json_as_i64(final_hot["ui_refreshes"], 0),
+            st::json_as_i64(final_hot["script_refreshes"], 0));
   return 0;
 }
 

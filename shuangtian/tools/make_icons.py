@@ -302,21 +302,6 @@ def icon_xiangqi(c):
         rounded_rect(c, cx - half_w, top, cx + half_w, bottom, 6, color)
 
 
-def icon_xmlapp(c):
-    """xmlapp：尖括号 + 中间一道斜杠（`</>` 的记号）。
-
-    与 gbcode 的 `< >` 区分：那里中点圆（光标/当前行），这里斜杠（闭合标签）。
-    同族不同物——任务栏相邻放置能看出是一家、但不是一个应用。
-    """
-    fg = (1.0, 1.0, 1.0)
-    w = 24
-    thick_line(c, 100, 68, 56, 128, w, fg)     # <
-    thick_line(c, 56, 128, 100, 188, w, fg)
-    thick_line(c, 156, 68, 200, 128, w, fg)    # >
-    thick_line(c, 200, 128, 156, 188, w, fg)
-    thick_line(c, 141, 62, 115, 194, 18, fg, alpha=0.85)   # 斜杠
-
-
 def icon_gbcode(c):
     """gbcode：尖括号 + 中心点。
 
@@ -341,7 +326,6 @@ APPS = {
     "cefu":    ("examples/cefu/assets/cefu-icon.png",       (0.42, 0.36, 0.68), icon_cefu),
     "xiangqi": ("examples/xiangqi/assets/xiangqi-icon.png", (0x14 / 255.0, 0x11 / 255.0, 0x0E / 255.0), icon_xiangqi),
     "gbcode":  ("examples/gbcode/assets/gbcode-icon.png",   (0.33, 0.42, 0.95), icon_gbcode),
-    "xmlapp":  ("examples/xmlapp/assets/xmlapp-icon.png",   (0.37, 0.48, 0.55), icon_xmlapp),
 }
 
 

@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APPS = ["gallery", "gbcode", "louyue", "caiyun", "xiangqi", "cefu", "gedou", "xmlapp"]
+APPS = ["gallery", "gbcode", "louyue", "caiyun", "xiangqi", "cefu", "gedou"]
 
 
 def source_of(app: str) -> Path:

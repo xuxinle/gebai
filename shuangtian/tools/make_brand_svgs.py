@@ -108,14 +108,6 @@ XIANGQI = svg("#3D4249", '''    <rect x="4.6" y="5.0" width="14.8" height="14.0"
     "       \"有个人在等你\"是它的语义，比原来的 bell（铃铛=通知）更准：\n"
     "       它不只是提醒，是**待办/等待用户介入**。")
 
-XMLAPP = svg("#5E7A8C", '''    <path d="M9.2 7.4 L4.9 12.0 L9.2 16.6 L10.8 15.2 L7.5 12.0 L10.8 8.8 Z"/>
-    <path d="M14.8 7.4 L19.1 12.0 L14.8 16.6 L13.2 15.2 L16.5 12.0 L13.2 8.8 Z"/>
-    <path d="M13.6 6.2 L10.4 17.8" stroke="#FFFFFF" stroke-width="1.6" 
-          stroke-linecap="round" opacity="0.85"/>''',
-    "xmlapp —— 纯 XML+JS 示例。尖括号 + 中间一道斜杠（`</>` 的记号）。\n"
-    "       与 gbcode 的 `< >` 区分：那里中点圆（光标），这里斜杠（闭合标签）。\n"
-    "       同族不同物——放在任务栏相邻位置能看出是同一家族、但不是一个应用。")
-
 APPS = {
     "gallery": ("examples/gallery/assets/gallery-logo.svg", GALLERY),
     "louyue":  ("examples/louyue/assets/louyue-logo.svg",   LOUYUE),
@@ -123,7 +115,6 @@ APPS = {
     "gedou":   ("examples/gedou/assets/gedou-logo.svg",     GEDOU),
     "cefu":    ("examples/cefu/assets/cefu-logo.svg",       CEFU),
     "xiangqi": ("examples/xiangqi/assets/xiangqi-logo.svg", XIANGQI),
-    "xmlapp":  ("examples/xmlapp/assets/xmlapp-logo.svg",   XMLAPP),
 }
 
 
