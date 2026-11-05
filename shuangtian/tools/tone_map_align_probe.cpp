@@ -115,6 +115,37 @@ int main() {
     expect(r > g + 20, "AgX：饱和红 HDR 保住色相（不变白）", detail);
   }
 
+  // ── ④b 更严：纯红不该变成橙 ────────────────────────────────────────
+  //
+  // 上一条只验了“红比绿高”，而实际缺陷是“绿被抬到 169”——红仍是最高通道，
+  // 所以上一条会通过，但它已经**从红变成了橙**。这是判据不够严的典型：
+  // 只比大小关系、不比幅度。
+  {
+    const auto mapped = st::raster::tone_map(Vec3{1.0f, 0.0f, 0.0f}, ToneMap::Agx);
+    const int r = st::raster::linear_to_srgb8(mapped.x);
+    const int g = st::raster::linear_to_srgb8(mapped.y);
+    const int b = st::raster::linear_to_srgb8(mapped.z);
+    char detail[192];
+    std::snprintf(detail, sizeof(detail),
+                  "纯红 → (%d,%d,%d)；G、B 应各 <= R/3=%d", r, g, b, r / 3);
+    expect(g <= r / 3 && b <= r / 3, "AgX：纯红不变橙（通道幅度）", detail);
+  }
+
+  // ── ④c 中性灰必须无饱和度 ──────────────────────────────────────────
+  //
+  // 灰色进 → 灰出。任何色偏都是三通道处理不对称的痕迹。
+  {
+    const auto mapped = st::raster::tone_map(Vec3{0.18f, 0.18f, 0.18f}, ToneMap::Agx);
+    const int r = st::raster::linear_to_srgb8(mapped.x);
+    const int g = st::raster::linear_to_srgb8(mapped.y);
+    const int b = st::raster::linear_to_srgb8(mapped.z);
+    const int spread = std::max({r, g, b}) - std::min({r, g, b});
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "灰 0.18 → (%d,%d,%d)，通道极差 %d（应 <=2）", r,
+                  g, b, spread);
+    expect(spread <= 2, "AgX：中性灰无色偏", detail);
+  }
+
   // ── ⑤ 来源默认：bpy 场景应当是 AgX ───────────────────────────────────
   if (!st::raster::BpySceneExtractor::available()) {
     std::printf("  [SKIP] bpy 来源默认（bpy 不可用）\n");

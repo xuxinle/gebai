@@ -820,6 +820,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "诊断：把抽出来的灯光/材质/分组数值打出来。全黑时分不清是光反了、强度 0、还是基色没设"
     },
+    "agx_saturation_probe": {
+      "kind": "executable",
+      "sources": ["tools/agx_saturation_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "诊断 AgX 对材质本色的去饱和是否过度：把每步数值与饱和度打出来，区分“实现问题”与“色彩空间错”与“本来就该去饱和”"
+    },
     "tone_map_align_probe": {
       "kind": "executable",
       "sources": ["tools/tone_map_align_probe.cpp", "src/python/mp_bridge.c",

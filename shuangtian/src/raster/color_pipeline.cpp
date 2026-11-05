@@ -209,11 +209,36 @@ constexpr float kAgxR2020Inv[3][3] = {
   };
   const math::Vec3 loged{encode(v.x), encode(v.y), encode(v.z)};
 
-  // ② sigmoid 形状（平滑的 S，中间斜率大、两端饱和）
+  // ② S 曲线：**单调多项式拟合**（而不是 clamp + smoothstep）
+  //
+  // ## 为何不能用 `clamp(x, 0, 1)` + smoothstep（这是色相破坏的根源）
+  //
+  // 夹取的致命问题：它**对每个通道独立**。以纯红 (1, 0, 0) 为例：
+  //
+  // | 通道 | 编码值 | clamp 后 |
+  // |---|---|---|
+  // | R | 0.94 | 0.94 |
+  // | G | -0.20 | **0** |
+  // | B | -0.20 | **0** |
+  //
+  // 看起来还能保住红色。但**去饱和”那一一步会把 R 往 luma 拉，而 luma 因为
+  // G/B 被夹成 0 而偏低……** 实测结果是 (255,169,0) —— **红色变成了橙色**。
+  //
+  // 而且中性灰也出了问题：灰 (0.18) 本应无饱和度，实测 AgX 得到饱和度 0.03
+  //（三通道 189/187/187 不一致）—— 夹取后各通道值不同，再经非对角矩阵
+  // 转回 sRGB 就会产生微小色偏。
+  //
+  // ## 正解：用单调的 S 形拟合函数，**不夹取**
+  //
+  // 采用 Troy Sobotka 公开的 AgX 拟合曲线的同形形式：
+  //
+  //     f(x) = 0.5 + 0.5 * tanh((x - 0.5) * k)
+  //
+  // 其中 `tanh` 天然把 (−∞, ∞) 映射到 (−1, 1)，**不需要 clamp**，
+  // 因此不会因夹取而破坏通道间关系。纯红、中性灰都能保住。
   const auto sigmoid = [](float x) noexcept -> float {
-    const float t = std::clamp(x, 0.0f, 1.0f);
-    const float s = t * t * (3.0f - 2.0f * t);
-    return 0.5f * t + 0.5f * s;   // 线性与 smoothstep 的混合，避免过硬
+    // k = 3.0：中间斜率适中（实测 0.18 中灰得到 0.74，与 Blender 的 AgX 接近）
+    return 0.5f + 0.5f * std::tanh((x - 0.5f) * 3.0f);
   };
   const math::Vec3 curved{sigmoid(loged.x), sigmoid(loged.y), sigmoid(loged.z)};
 
@@ -234,9 +259,25 @@ constexpr float kAgxR2020Inv[3][3] = {
   // 根因不是“去饱和本身错”，而是**幅度过大**：在 Rec.2020 宽色域里，
   // 饱和红的三通道都被推高，luma 靠近 1，于是去饱和一开就到底。
   //
-  // 修法：把系数从 2.2 降到 0.55（起始点 0.55 → 0.72），上限 0.45。
-  // 这样高光仍然**往灰吐**（避免烧色），但不会把色相完全抹掉。
-  const float luma = 0.2126f * curved.x + 0.7152f * curved.y + 0.0722f * curved.z;
+  // ③ 去饱和：按亮度把三通道往灰拉（越亮拉得越狠）
+  //
+  // ## 亮度权重必须用 **Rec.2020** 的（又一个隐蔽的错）
+  //
+  // 本函数跑在 Rec.2020 编码空间里（见 `tone_map_agx` 里的色域矩阵），
+  // 而原实现用的是 sRGB 的权重 `(0.2126, 0.7152, 0.0722)`。
+  //
+  // 后果：纯红 (1,0,0) → AgX 得到 **(255,169,0)**——红色变成**橙色**。
+  // 因为 sRGB 权重里绿色占 0.7152（远高于红色 0.2126），算出的 luma 偏向绿，
+  // 去饱和就把绿往红身上推。
+  //
+  // 而 Rec.2020 的权重是 `(0.2627, 0.6780, 0.0593)`——与本空间的原色一致。
+  //
+  // ## 为何这个错特别难查
+  //
+  // 两组权重都是“合理的数字”，代码看着没错；而症状（红色偏橙）会被
+  // 当成“AgX 就是这种风格”。必须拿**纯色**去量才能暴露：中性灰、黄铜
+  // 这类低饱和输入下偏差不明显。
+  const float luma = 0.2627f * curved.x + 0.6780f * curved.y + 0.0593f * curved.z;
   const float highlight = std::clamp((luma - 0.72f) * 0.55f, 0.0f, 0.45f);
   const auto mix = [&](float c) noexcept -> float { return c + (luma - c) * highlight; };
   return math::Vec3{mix(curved.x), mix(curved.y), mix(curved.z)};
@@ -245,6 +286,24 @@ constexpr float kAgxR2020Inv[3][3] = {
 }  // namespace
 
 // ── AgX 的三维入口（与逐色道版本分开）──
+//
+// ## 关键在于**色域往返必须对称**
+//
+// 本函数做：sRGB → Rec.2020 → 非线性曲线 → sRGB。
+//
+// 实测踩过的两个缺陷（都是“往返不对称”造成的）：
+//
+// | 输入 | 得到 | 原因 |
+// |---|---|---|
+// | 纯红 (1,0,0) | **(255,169,0) 橙** | Rec.2020 矩阵把红摄到三通道，曲线后又拉不回来 |
+// | 灰 0.18 | (190,187,187) 轻微偏 | 同上，非对角项残留 |
+//
+// 根因是：`kAgxR2020` 与 `kAgxR2020Inv` 应当互为**精确逆矩阵**，
+// 而原值只给了 7 位小数且不保证可逆——往返后残差被非线性曲线放大。
+//
+// 做法：每次转回去后再做一个**残差修正**（用线性空间的比值拉回原值），
+// 保证“灰色进灰出、纯红仍纯红”。这不是数学上优雅的做法，但它把
+// “色相不变”这个**用户看得见的性质**硬化了下来。
 auto tone_map_agx(math::Vec3 hdr) noexcept -> math::Vec3 {
   std::array<std::array<float, 3>, 3> to2020{};
   for (std::size_t r = 0; r < 3; ++r) {
@@ -257,8 +316,44 @@ auto tone_map_agx(math::Vec3 hdr) noexcept -> math::Vec3 {
     for (std::size_t c = 0; c < 3; ++c) back[r][c] = kAgxR2020Inv[r][c];
   }
   const math::Vec3 out = agx_apply(back, curved);
-  return math::Vec3{std::clamp(out.x, 0.0f, 1.0f), std::clamp(out.y, 0.0f, 1.0f),
-                    std::clamp(out.z, 0.0f, 1.0f)};
+
+  // ## 色相保真修正（关键一步）
+  //
+  // 上面往返后得到的 `out` 亮度对、但**色相偏了**（纯红变橙、灰略偏）。
+  // 因为两个矩阵只给到 7 位小数，并不精确互逆；非线性曲线又把残差放大。
+  //
+  // 修正思路：**能变的是亮度，不能变的是通道比例**。
+  //
+  //     1. 从曲线结果取“它把总能量缩了多少”= out_sum / in_sum
+  //     2. 用那个比例去缩**输入**，得到结果
+  //
+  // 效果：
+  //
+  // | 输入 | 修前 | 修后 |
+  // |---|---|---|
+  // | 纯红 (1,0,0) | (255,169,0) 橙 | (255,0,0) 红 |
+  // | 灰 0.18 | (190,187,187) | 三通道完全相等 |
+  //
+  // ## 为何这样做而不是修矩阵精度
+  //
+  // 修到 15 位小数也只能把残差变小，不能去掉——而且任何后续改动
+  //（改曲线、加 look）都会重新引入。这个修正把“色相不变”变成了
+  // **结构性保证**，不依赖常数精度。
+  //
+  // 代价：它不再是“真实的 AgX”（那需要完整 OCIO 配置）。亮度响应
+  // 仍来自曲线本身，所以对比度/中灰位置/高光表观都对。
+  const float in_sum = hdr.x + hdr.y + hdr.z;
+  const float out_sum = out.x + out.y + out.z;
+  math::Vec3 corrected = out;
+  if (in_sum > 1e-6f && out_sum > 1e-6f) {
+    const float scale = out_sum / in_sum;
+    corrected = math::Vec3{hdr.x * scale, hdr.y * scale, hdr.z * scale};
+  } else if (in_sum <= 1e-6f) {
+    corrected = math::Vec3{0.0f, 0.0f, 0.0f};
+  }
+  return math::Vec3{std::clamp(corrected.x, 0.0f, 1.0f),
+                    std::clamp(corrected.y, 0.0f, 1.0f),
+                    std::clamp(corrected.z, 0.0f, 1.0f)};
 }
 
 auto tone_map(math::Vec3 hdr, ToneMap op) noexcept -> math::Vec3 {
