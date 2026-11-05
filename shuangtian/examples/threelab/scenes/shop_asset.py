@@ -204,25 +204,62 @@ wall_side = make_box('wall_side', WALL_T, INNER_D, WALL_H, MAT_WALL)
 
 # 带窗洞的侧墙：用四块拼成一个"口"字（窗洞 0.9 × 0.8）
 def make_window_wall(name):
-    """侧墙 + 窗洞。用四块板拼成窗框状（比布尔运算可靠）。"""
-    bm = bmesh.new()
-    win_w = 0.90   # 沿 Y
-    win_h = 0.80   # 沿 Z
-    win_z0 = 1.15  # 窗台高
-    win_y0 = (INNER_D - win_w) * 0.5
-    win_y1 = win_y0 + win_w
+    """侧墙 + 窗洞：用四块板拼成「口」字（比布尔运算可靠）。
 
-    # 左块 / 右块（沿 Y 占满，但避开窗）
-    _add_box(bm, WALL_T, win_y0, WALL_H, 0.0, (win_y0) * 0.5 - INNER_D * 0.5, WALL_H * 0.5)
-    _add_box(bm, WALL_T, INNER_D - win_y1, WALL_H, 0.0,
-             (win_y1 + INNER_D * 0.5) * 0.5, WALL_H * 0.5)
-    # 窗下块 / 窗上块（只占窗宽）
-    _add_box(bm, WALL_T, win_w, win_z0, 0.0,
-             (win_y0 + win_y1) * 0.5 - INNER_D * 0.5 + INNER_D * 0.5 - INNER_D * 0.5,
-             win_z0 * 0.5)
-    _add_box(bm, WALL_T, win_w, WALL_H - win_z0 - win_h, 0.0,
-             (win_y0 + win_y1) * 0.5 - INNER_D * 0.5,
-             win_z0 + win_h + (WALL_H - win_z0 - win_h) * 0.5)
+    ## 坐标约定（这一版算错过，记下来）
+
+    板要铺在 **y ∈ [-INNER_D/2, +INNER_D/2]**、**z ∈ [0, WALL_H]** 的矩形里，
+    中间挖掉一块窗洞。四块板：
+
+        ┌──────────┬──────────┬──────────┐
+        │          │  窗上块  │          │   z: win_z1 .. WALL_H
+        │  左块    ├──────────┤   右块   │
+        │          │  窗洞    │          │   z: win_z0 .. win_z1
+        │          ├──────────┤          │
+        │          │  窗下块  │          │   z: 0 .. win_z0
+        └──────────┴──────────┴──────────┘
+          y: -D/2  win_y0   win_y1  +D/2
+
+    每块的中心 = (起点 + 终点) / 2，尺寸 = 终点 - 起点。
+
+    ## 上一版的错
+
+    左/右块的 y 中心算成了 `win_y0 * 0.5 - D/2`（少加了起点偏移），
+    结果整面墙的 y 范围跑到 [-1.20, **1.80**]（应当 [-1.20, 1.20]），
+    多出 0.6 米——在画面上表现为**一侧墙伸出去一截**。
+
+    判据：拼接出来的几何，**总包围盒必须等于设计尺寸**。这次的教训是
+    拼完没有验证包围盒。
+    """
+    bm = bmesh.new()
+    half_d = INNER_D * 0.5
+
+    win_w = 0.90                     # 窗宽（沿 Y）
+    win_h = 0.80                     # 窗高（沿 Z）
+    win_z0 = 1.15                    # 窗台高
+    win_z1 = win_z0 + win_h          # 窗顶高
+    win_y0 = -win_w * 0.5            # 窗口在 Y 方向居中
+    win_y1 = win_w * 0.5
+
+    def slab(y_from, y_to, z_from, z_to):
+        """按区间放一块板（避免手算中心点出错的封装）。"""
+        cy = (y_from + y_to) * 0.5
+        cz = (z_from + z_to) * 0.5
+        sy = y_to - y_from
+        sz = z_to - z_from
+        if sy <= 0.0 or sz <= 0.0:
+            return
+        _add_box(bm, WALL_T, sy, sz, 0.0, cy, cz)
+
+    # 左块：y ∈ [-D/2, win_y0]，整高
+    slab(-half_d, win_y0, 0.0, WALL_H)
+    # 右块：y ∈ [win_y1, +D/2]，整高
+    slab(win_y1, half_d, 0.0, WALL_H)
+    # 窗下块：y ∈ [win_y0, win_y1]，z ∈ [0, win_z0]
+    slab(win_y0, win_y1, 0.0, win_z0)
+    # 窗上块：y ∈ [win_y0, win_y1]，z ∈ [win_z1, WALL_H]
+    slab(win_y0, win_y1, win_z1, WALL_H)
+
     return _finish(name, bm, MAT_WALL, smooth=False)
 
 

@@ -1330,6 +1330,60 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
     }
   }
 
+  // ── 色调映射：读 `renderer.toneMapping` / `scene.toneMapping`（2026-11-05）
+  //
+  // ## 为何需要这个口子
+  //
+  // 本框架的 `Lighting::tone_map` 默认是 **ACES**。ACES 是电影工业的
+  // 显示变换：它把整个画面压进一个 S 曲线，**代价是降低饱和度**——
+  // 尤其对低亮度的颜色，会把它们洗成灰。
+  //
+  // 实测（小卖部示例）：一套本来饱和度为 0.8~0.96 的配色（暖白墙、红招牌、
+  // 木作、蓝周转箱），渲染出来整张图看着是**灰的**。
+  //
+  // 而 three.js 里 `renderer.toneMapping` 是**脚本自己控制**的真实 API
+  //（`THREE.NoToneMapping` / `ACESFilmicToneMapping` / `AgXToneMapping`）。
+  // 之前本框架完全忽略它——无论脚本写什么，都用 ACES。
+  //
+  // 现在读两个位置（兼容两种写法）：
+  //   1. 全局 `renderer.toneMapping`（three 的标准用法）
+  //   2. `scene.toneMapping`（方便脚本不必造一个 renderer）
+  //
+  // 取值与 three 的常量对齐：0=None, 1=Linear(=None), 2=Reinhard,
+  // 3=Cineon(=Filmic), 4=ACESFilmic, 5/6=AgX, 7=Neutral(≈AgX)
+  {
+    int tone = -1;
+    JsRef global_root{impl_->context, JS_GetGlobalObject(impl_->context)};
+    JsRef renderer{impl_->context,
+                   JS_GetPropertyStr(impl_->context, global_root.get(), "renderer")};
+    if (JS_IsObject(renderer.get())) {
+      tone = static_cast<int>(get_double(impl_->context, renderer.get(), "toneMapping", -1.0));
+    }
+    if (tone < 0) {
+      tone = static_cast<int>(get_double(impl_->context, scene_root.get(), "toneMapping", -1.0));
+    }
+    if (tone >= 0) {
+      switch (tone) {
+        case 0:   // THREE.NoToneMapping
+        case 1:   // THREE.LinearToneMapping
+          scene.lighting.tone_map = ToneMap::None;
+          break;
+        case 2:   // THREE.ReinhardToneMapping
+          scene.lighting.tone_map = ToneMap::Reinhard;
+          break;
+        case 3:   // THREE.CineonToneMapping
+          scene.lighting.tone_map = ToneMap::Filmic;
+          break;
+        case 4:   // THREE.ACESFilmicToneMapping
+          scene.lighting.tone_map = ToneMap::Aces;
+          break;
+        default:  // 5/6 = AgXToneMapping，7 = NeutralToneMapping
+          scene.lighting.tone_map = ToneMap::Agx;
+          break;
+      }
+    }
+  }
+
   return scene;
 }
 
