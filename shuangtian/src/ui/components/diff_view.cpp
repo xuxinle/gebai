@@ -30,6 +30,16 @@ constexpr float kSeparatorInset{6.0f};
 /// 与 `CodeEditor` 的 `kTopPadding` 同值：算分隔条 y 时要和编辑器内容原点对齐。
 /// 两处若漂移，分隔条会与它标注的那一块**错开若干像素**（而它看着仍然"有条"）。
 constexpr float kEditorTopPadding{4.0f};
+/// 缩略条的上下内边距（轨道不贴到 body 边缘）。
+constexpr float kOverviewInset{4.0f};
+/// 缩略条里改动短横的高度。比行高细得多：它是“分布示意”，不是正文。
+/// 取 2px：20 处改动在 600px 轨道里各占 3px 时就“连成一条虚线”，
+/// 看着像滚动条而不是分布图（实测截图就是这个观感）。
+constexpr float kOverviewMarkHeight{2.0f};
+/// 缩略条最小可拖高度：长文件里可见比很小，再小就抓不住了。
+constexpr float kOverviewMinBox{12.0f};
+/// 缩略条与右栏竖向滚动条之间的间隙（避让热区冲突）。
+constexpr float kOverviewScrollbarGap{14.0f};
 
 }  // namespace
 
@@ -732,6 +742,21 @@ void DiffView::arrange(const RenderContext& context, math::Rect rect) {
                   math::Rect{rect.x + half, body_y, rect.width - half, body_height});
   }
 
+  // —— 右缘缩略条（覆盖层，**不挤窄编辑器**）——
+  //
+  // 位置：**右栏内缘**（滚动条左侧一点点）。两个约束：
+  //  ① 不能与右栏滚动条重叠——两者都是竖向拖动，抢同一个热区就是灾难；
+  //  ② 不能被裁到编辑器之外。
+  // 所以从右缘向左量“滚动条宽 + 间隙”。
+  const float overview_w = show_overview_ ? std::min(overview_width_, rect.width * 0.08f) : 0.0f;
+  const float track_h = std::max(0.0f, body_height - kOverviewInset * 2.0f);
+  overview_track_ = math::Rect{rect.x + rect.width - overview_w - kOverviewScrollbarGap,
+                               body_y + kOverviewInset, overview_w, track_h};
+  overview_box_valid_ = overview_w > 0.0f && track_h > 0.0f;
+  // 可见区框：由滚动偏移与内容总高反算。**行数 × 行高 = 内容高**
+  //（左栏是整份文件，行高已就绪后才能算；否则框不成立）。
+  const std::size_t total_lines = left_ != nullptr ? left_->line_count() : 0U;
+
   // —— 分隔条位置：由**行高 × 行号**推出，与编辑器绘制同源 ——
   //
   // 不自己算行高（那是编辑器的事）：读它的 `line_height` 属性。两者若各算一遍，
@@ -746,6 +771,36 @@ void DiffView::arrange(const RenderContext& context, math::Rect rect) {
     }
   };
   const float line_height = line_height_of(*left_);
+
+  // —— 缩略条的**可见区框**（需要行高，所以排到这里）——
+  //
+  // 三个量各自的意义：
+  //  内容总高 = 总行数 × 行高（整份文件）；
+  //  可见高   = 视口高；
+  //  框高     = 轨道高 × 可见高 / 内容总高（下限 12px，否则长文件下框小到无法拖）；
+  //  框顶     = 轨道高 × 滚动偏移 / 内容总高。
+  //
+  // ⚠ 本组件**不知道**视口高，它得从子件的 `line_height` + 自身 body 高反推：
+  // 视口高就是 body_height（编辑器排满整个 body）。
+  if (overview_box_valid_ && line_height > 0.0f) {
+    const float content_h = static_cast<float>(total_lines) * line_height;
+    const float viewport_h = std::max(1.0f, body_height);
+    if (content_h <= viewport_h + 1.0f) {
+      // 内容装得下：整条都是可见区，缩略条没有信息量——照样画（见 paint），
+      // 但框就是整条（不画“部分”）——调用方靠 `overview_box_` 判断可见比。
+      overview_box_ = overview_track_;
+    } else {
+      const float ratio = viewport_h / content_h;
+      const float box_h = std::max(kOverviewMinBox, overview_track_.height * ratio);
+      const float max_scroll = std::max(1.0f, content_h - viewport_h);
+      const float scrolled = left_ != nullptr ? std::min(left_->scroll_offset().y, max_scroll) : 0.0f;
+      const float travel = overview_track_.height - box_h;
+      const float box_y = overview_track_.y + (max_scroll > 0.0f ? travel * scrolled / max_scroll : 0.0f);
+      overview_box_ = math::Rect{overview_track_.x, box_y, overview_track_.width, box_h};
+    }
+  } else {
+    overview_box_valid_ = false;
+  }
 
   // —— 首次定位到第一个差异（待办，见 `set_auto_focus_first_hunk`）——
   //
@@ -816,10 +871,92 @@ void DiffView::paint_content(const RenderContext& context, raster::Surface& canv
                        raster::Paint::solid(colors.primary), 1.5f);
     }
   }
+
+  // —— 右缘缩略条（IDEA 同款）——
+  //
+  // 三层信息叠在一条 12px 宽的竖条上：
+  //   底：轨道（极淡，让“整体范围”可见）；
+  //   中：每个差异一行彩色短横（位置 = 比例映射，颜色区分增/删）；
+  //   顶：可见区框（半透明主色底 + 描边，可拖）。
+  //
+  // 为何要画差异短横而不只是“位置框”：
+  // 几千行的文件里，用户真正想知道的是“改动集中在哪一段”——
+  // 这是**分布**信息，不是**位置**信息。两者正交，缺一个就不成立。
+  if (show_overview_ && overview_box_valid_) {
+    canvas.fill_rect(overview_track_, raster::Paint::solid(colors.surface_alt.with_alpha_f(0.55F)),
+                     2.0f);
+    const std::size_t total = left_ != nullptr ? left_->line_count() : 0U;
+    if (total > 0U && !diff_.hunks.empty()) {
+      const float span = static_cast<float>(total);
+      // 短横**不占满轨道宽**（缩进 3px）：满宽会读成“分段式滚动条”，
+      // 而缩进后的短横更像“标注”（IDEA 同）。
+      const float inner_w = std::max(2.0f, overview_track_.width - 6.0f);
+      const float inner_x = overview_track_.x + 3.0f;
+      for (const text::DiffHunk& hunk : diff_.hunks) {
+        // 块的纵向范围：用它的**新侧起止行**（并列视图的对齐行号）。
+        // 起止相同时（单行改动）给一个最小高度，否则它会被压成 0 像素而看不见。
+        const float begin = static_cast<float>(hunk.new_start == 0U ? 1U : hunk.new_start);
+        const float end = begin + static_cast<float>(std::max<std::size_t>(hunk.new_count, 1U));
+        const float y0 = overview_track_.y +
+                         overview_track_.height * std::min(1.0f, (begin - 1.0f) / span);
+        const float y1 = overview_track_.y + overview_track_.height * std::min(1.0f, end / span);
+        const float mark_h = std::max(kOverviewMarkHeight, y1 - y0);
+        // 颜色：本块含新增 → 主色（绿系语义）；含删除 → 危险色；两者都含 → 主色。
+        bool has_add = false;
+        bool has_del = false;
+        for (const text::DiffLine& line : hunk.lines) {
+          if (line.kind == text::DiffLineKind::Added) has_add = true;
+          if (line.kind == text::DiffLineKind::Removed) has_del = true;
+        }
+        const math::Color mark_color =
+            has_add ? colors.success : (has_del ? colors.danger : colors.text_muted);
+        canvas.fill_rect(math::Rect{inner_x, y0, inner_w, mark_h},
+                         raster::Paint::solid(mark_color.with_alpha_f(0.85F)), 1.0f);
+      }
+    }
+    // 可见区框：半透明底 + 描边（拖动时它跟着动，是唯一的反馈）。
+    canvas.fill_rect(overview_box_, raster::Paint::solid(colors.primary.with_alpha_f(0.16F)),
+                     2.0f);
+    const float bw = 1.0f;
+    canvas.fill_rect(math::Rect{overview_box_.x, overview_box_.y, overview_box_.width, bw},
+                     raster::Paint::solid(colors.primary.with_alpha_f(0.55F)), 0.0f);
+    canvas.fill_rect(
+        math::Rect{overview_box_.x, overview_box_.y + overview_box_.height - bw,
+                   overview_box_.width, bw},
+        raster::Paint::solid(colors.primary.with_alpha_f(0.55F)), 0.0f);
+  }
 }
 
 auto DiffView::on_event(const RenderContext& context, Event& event) -> bool {
   (void)context;
+  // —— 缩略条拖拽（优先于分隔条点击：它叠在最右侧，且意图更明确）——
+  //
+  // 两种手势：
+  //   按在**框内** → 拖动（记住按点与框顶的差，拖起来不跳）；
+  //   按在**轨道其他位置** → 跳转（把框中心接到按点）——这是滚动条的惯例。
+  if (overview_box_valid_ && (event.kind == EventKind::MouseDown ||
+                              event.kind == EventKind::MouseMove ||
+                              event.kind == EventKind::MouseUp)) {
+    const bool inside_track = overview_track_.contains(event.position);
+    const bool inside_box = overview_box_.contains(event.position);
+    if (event.kind == EventKind::MouseDown && inside_track) {
+      overview_dragging_ = true;
+      overview_grab_dy_ = inside_box ? event.position.y - overview_box_.y : overview_box_.height * 0.5F;
+      if (!inside_box) {
+        // 点轨道空白：直接把视口搬过去（不用先点击再拖，那是两步）。
+        scroll_from_overview(event.position.y);
+      }
+      return true;
+    }
+    if (event.kind == EventKind::MouseMove && overview_dragging_) {
+      scroll_from_overview(event.position.y);
+      return true;
+    }
+    if (event.kind == EventKind::MouseUp && overview_dragging_) {
+      overview_dragging_ = false;
+      return true;
+    }
+  }
   // 点击分隔条 → 跳到该差异块（「点一下就去那里」是差异视图的基本手势）。
   if (event.kind == EventKind::Click) {
     for (std::size_t index = 0; index < separator_rects_.size(); ++index) {
@@ -830,6 +967,48 @@ auto DiffView::on_event(const RenderContext& context, Event& event) -> bool {
     }
   }
   return false;
+}
+
+void DiffView::set_show_overview(bool value) {
+  if (show_overview_ == value) return;
+  show_overview_ = value;
+  mark_layout_dirty();
+}
+
+void DiffView::set_overview_width(float value) {
+  // 夹到合理范围：太窄看不见（且命中区抓不住），太宽就是在抢内容区。
+  const float clamped = std::clamp(value, 4.0f, 40.0f);
+  if (overview_width_ == clamped) return;
+  overview_width_ = clamped;
+  mark_layout_dirty();
+}
+
+void DiffView::scroll_from_overview(float pointer_y) {
+  if (left_ == nullptr || !overview_box_valid_) return;
+  const float line_height = [&] {
+    const auto value = left_->get_property("line_height");
+    if (!value.has_value()) return 0.0f;
+    try {
+      return std::stof(*value);
+    } catch (...) {
+      return 0.0f;
+    }
+  }();
+  if (line_height <= 0.0f) return;
+  const float content_h = static_cast<float>(left_->line_count()) * line_height;
+  const float travel = overview_track_.height - overview_box_.height;
+  if (travel <= 0.0f) return;
+  // 框顶 = 指针 − 抓取偏移 → 换成比例 → 乘可滚范围。
+  const float box_top = std::clamp(pointer_y - overview_grab_dy_, overview_track_.y,
+                                   overview_track_.y + travel);
+  const float ratio = (box_top - overview_track_.y) / travel;
+  const float viewport_h = std::max(1.0f, bounds_.height - (show_header_ ? kHeaderHeight : 0.0f));
+  const float max_scroll = std::max(0.0f, content_h - viewport_h);
+  left_->set_scroll_offset(left_->scroll_offset().x, ratio * max_scroll);
+  // 两栏滚动同步走**既有链路**（`sync_scroll_from` 是子件的滚动回调入口，
+  // 这里直接调它会跳过 `syncing_` 保护——所以要复用它的语义：先同步另一栏，
+  // 再发 `on_scroll`）。
+  sync_scroll_from(*left_);
 }
 
 auto DiffView::semantics_text() const -> std::string { return summary(); }

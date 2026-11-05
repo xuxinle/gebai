@@ -119,7 +119,7 @@ class DiffView : public Element {
   /// 缩略条把两个正交的量（**分布**与**位置**）压到一条竖条上。
   ///
   /// 默认开：它是差异视图的标配部件，不需要宿主每次记得打开。
-  void set_show_overview(bool value) { show_overview_ = value; mark_layout_dirty(); }
+  void set_show_overview(bool value);
   [[nodiscard]] auto show_overview() const noexcept -> bool { return show_overview_; }
   /// 缩略条宽度（逻辑像素）。宿主缩得很窄时可以关掉它（见上）。
   void set_overview_width(float value);
@@ -286,10 +286,13 @@ class DiffView : public Element {
   /// 为何不能只看 `bounds().height > 0`：那是**本组件**的矩形，它非零不代表内部
   /// 编辑器已经把行高算出来了（还没 measure/arrange 过时行高缓存是 0）。
   [[nodiscard]] auto line_height_ready() const -> bool;
+  /// 缩略条拖拽 → 把滚动位置搬到指针所指的比例处。
+  void scroll_from_overview(float pointer_y);
   [[nodiscard]] static auto is_disabled(const std::vector<std::size_t>& list,
                                        std::size_t number) -> bool;
   /// 切行（唯一口径：去掉行尾 `\r`；末尾无换行也算一行；空文本是一行空行）。
-  static auto split_lines_of(std::string_view text) -> std::vector<std::string_view>;  [[nodiscard]] auto step_hunk(int delta) -> std::size_t;
+  static auto split_lines_of(std::string_view text) -> std::vector<std::string_view>;
+  [[nodiscard]] auto step_hunk(int delta) -> std::size_t;
   /// 滚动同步（避免互相唤醒：用自己的挂起标记）。
   void sync_scroll_from(CodeEditor& source);
   [[nodiscard]] static auto join_numbers(const std::vector<std::size_t>& values) -> std::string;
