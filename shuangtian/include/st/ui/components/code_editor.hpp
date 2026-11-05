@@ -81,6 +81,38 @@ class CodeEditor : public Element {
   /// （与 Input/TextArea 的同一决议，见 DESIGN.md）；需要“外部写入也算变化”的
   /// 场景走属性面 `set_property("text", ...)`（控制通道写入会通知）。
   void set_text(std::string text);
+  /// 更新全文但**保留编辑状态**：光标/选择（按位置内容重新定位）、滚动位置、撤销栈。
+  ///
+  /// 用于“文本被重新合成、但用户没换文档”的场景——差异视图编辑后重算就是典型：
+  /// 每一栏的文本带着对齐填充行/分隔行重新生成，而用户的光标必须待在原来的地方。
+  ///
+  /// 为何不能直接用 `set_text`：它语义是“**换了一份文档**”（光标归 0、滚动回顶、撤销栈清空），
+  /// 逐键重算时那就是“每敲一个字光标就跳回行首”（实测过的缺陷）。
+  ///
+  /// 定位口径：用**行号 + 列号**在两个版本里各自换算（而不是字节偏移）——
+  /// 填充行会让同一位置在两版文本里的字节偏移不同，行/列才稳定。
+  /// 新位置若超出行数则夹到文本末尾。
+  void replace_text_keep_state(std::string text);
+  /// 同上，但按**逻辑行**挂锦（用在文本里混有“造出来的行”的场景：差异视图的
+  /// 对齐填充行与 `@@` 分隔行）。
+  ///
+  /// 为何仅凭行号不够（实测）：重算后填充行数量会变，同一个显示行号就指向**不同内容**——
+  /// 表现是“光标跑到别处的倒数第二个字符”（用户实测报告）。
+  ///
+  /// `old_real` / `new_real` 是两份文本各自的“这一显示行是不是真实内容”表
+  /// （与 `DiffView::Side::real` 同口径，空 = 全部当真）。光标的**逻辑行序号**
+  /// （前面有几个真实行）在两版里保持一致，列同上。
+  ///
+  /// `caret_anchor`：光标在**旧文本里的字节偏移**；`kNoCaretAnchor` = 用当前 `cursor_`。
+  ///
+  /// 为何需要它（实测）：`on_change` 是在 `cursor_ += n` **之后**触发的，
+  /// 宿主拿着回调去重排文本时，当前的 `cursor_` 已经是“刚打完字之后”的位置——
+  /// 拿它当锚点会把新字的长度再算一遍，表现为光标卡在刚打的字**前面**不动。
+  /// 宿主（`DiffView`）在推文本前拍下当时的 `cursor_index()`，重排后交回来就是对的。
+  static constexpr std::size_t kNoCaretAnchor = static_cast<std::size_t>(-1);
+  void replace_text_keep_state(std::string text, const std::vector<char>& old_real,
+                               const std::vector<char>& new_real,
+                               std::size_t caret_anchor = kNoCaretAnchor);
   [[nodiscard]] auto text() const noexcept -> const std::string& { return text_; }
   /// 按语言名（规范名/别名/扩展名）设定高亮语言；空串 = 关闭高亮。
   void set_language(std::string language);
@@ -347,18 +379,6 @@ class CodeEditor : public Element {
     std::size_t line{0};
     LineMark mark{LineMark::None};
 
-    /// 行号槽左侧的**勾选框**（勾选列）。
-    ///
-    /// 为何做成装饰而不是让宿主在编辑器外面画一列：勾选框必须**逐行对齐**
-    /// （每一行一个、且随滚动跑），而“哪一行在屏幕上的 y”只有编辑器知道——
-    /// 宿主自己算必然与真实行高/滚动分叉（那是差异视图早就踩过的同一类坑）。
-    enum class Check : std::uint8_t {
-      None,      ///< 不画（默认；非逐行暂存模式下零开销）
-      Unchecked, ///< 画一个空方框
-      Checked,   ///< 画一个勾上的方框
-      Disabled,  ///< 画一个灰方框（这一行不可选：上下文行）
-    };
-    Check check{Check::None};
   /// 行号槽里显示的号；`0` = 用本行真实行号，`kNoNumber` = **不显示行号**。
     ///
     /// 三态而不是两态，是因为“拿不到另一侧的行号”与“这一行不属于任何一侧”
@@ -422,6 +442,23 @@ class CodeEditor : public Element {
   [[nodiscard]] auto scroll_offset() const noexcept -> math::Point { return {scroll_x_, scroll_y_}; }
   /// 滚动增量（越界夹取到内容边界；正 dy 向下）。
   void scroll_by(float dx, float dy);
+
+  /// **空白滚动**（VSCode 的 `scrollBeyondLastLine`）：允许把最后一行直接滚到视口**最上方**。
+  ///
+  /// 关闭时内容底边贴视口底边（旧行为：末行之后只剩 `kBottomPadding`），
+  /// 于是再长的文件也没法把末行拖到顶部被“上方的空白”包住——
+  /// 而读代码时把当前段落往上挪是常规动作。默认**开**。
+  void set_scroll_beyond_last_line(bool value);
+  [[nodiscard]] auto scroll_beyond_last_line() const noexcept -> bool { return scroll_beyond_; }
+
+  /// 垂直方向**最大滚动偏移**——唯一口径。
+  ///
+  /// 为何必须只有一个函数：滑块尺寸（`v_scroll_thumb_rect`）、拖动映射
+  /// （`apply_v_scroll_drag`）、夹取（`clamp_scroll`）、跳行（`scroll_to_line`）
+  /// 四处都要这个数。曾经是四处各写一遍 `content_height() - bounds_.height`，
+  /// 加一个“额外空白”时必然有漏（漏的那处会与滚动位置自相矛盾：滑块到底了还能滚、
+  /// 或者还能往下拖却已经不动）。
+  [[nodiscard]] auto max_scroll_y() const noexcept -> float;
   /// 把第 `line` 行（从 1 起）滚到视野**顶部**（越界夹取，不会滚过内容末尾）。
   void scroll_to_line(std::size_t line);
   /// 首行可见行号（**从 1 起**；空文档为 1）——控制通道据此断言「视口停在哪一行」。
@@ -445,7 +482,20 @@ class CodeEditor : public Element {
   /// 用**缓存几何**（`arrange`/`paint` 已填）：不需要 `RenderContext`，
   /// 因此能在事件回调里直接调（那里拿不到 context）。缓存未填时返回空矩形
   ///（调用方按"没有光标位置"处理，不要拿它去定位）。
+  /// 当前预编辑串（输入法组合中、**尚未确定**的那段）。空 = 无组合。
+  ///
+  /// 它不参与 `text()`、不参与光标/选择计算、不进撤销栈——只是画在光标处的一段临时串。
+  [[nodiscard]] auto preedit() const noexcept -> const std::string& { return preedit_; }
+
   [[nodiscard]] auto caret_screen_rect() const noexcept -> math::Rect;
+  /// 指针形态**按位置细分**：正文 I-beam、行号栏（gutter）箭头、滚动条“可拖拽滚动”。
+  ///
+  /// 为何放在公开区：它是本组件对“指针在能干什么”的公开契约（与
+  /// `MouseCursor::Scroll` / `Text` / `Arrow` 三者一一对应），自动化与单测
+  /// 靠它断言“滚动条上不是 I-beam”（那是看得见但不能截图断言的那类缺陷）。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override;
+  /// 输入法插入点（`Element` 契约；与 `caret_screen_rect` 同一份几何）。
+  [[nodiscard]] auto caret_rect() const -> math::Rect override { return caret_screen_rect(); }
 
   // —— 滚动条几何（与绘制/命中同一份；暴露出来是为了可断言）——
 
@@ -474,13 +524,6 @@ class CodeEditor : public Element {
   /// 或者放弃组件自带的鼠标行为。这个回调把“右键点了这里”作为一件事告诉宿主，
   /// 同时**不动光标**（右键不改选择，与主流编辑器一致）。
   std::function<void(math::Point)> on_context_menu{};
-  /// 勾选框被点（行号 0 起）。宿主在这里切换选择状态。
-  ///
-  /// 为何不改 `on_line_click` 之类的通用行事件：勾选框是**按钮式**语义
-  ///（点一下切换），与"点进这一行开始编辑"是两件事——混在一起会让
-  /// "点勾选框顺便把光标挪过去"（用户没要求）。
-  std::function<void(std::size_t)> on_checkbox_toggle{};
-
   /// **`Ctrl+点击`**（参数为命中的**字符索引**，UTF-8 字节偏移）：宿主通常据此实现“跳到定义”。
   ///
   /// 为什么由组件先接住而不是让宿主自己判：点击的**语义分岔点在组件内部**——
@@ -561,8 +604,6 @@ class CodeEditor : public Element {
   void transform_lines(std::size_t first_line, std::size_t last_line,
                        const std::function<std::string(std::string_view)>& transform);
   auto rebuild_line_geometry(const RenderContext& context) const -> void;
-  /// 指针形态按位置细分：正文 I-beam、行号栏（gutter）箭头。见 .cpp 说明。
-  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override;
   [[nodiscard]] auto gutter_width(const RenderContext& context) const -> float;
   [[nodiscard]] auto line_height(const RenderContext& context) const -> float;
   [[nodiscard]] auto text_origin(const RenderContext& context) const -> math::Point;
@@ -598,17 +639,6 @@ class CodeEditor : public Element {
   /// 鼠标位置落在第几行（不在文本区则 -1）。
   [[nodiscard]] auto hover_line_at(const RenderContext& context, math::Point point) const -> int;
 
-  /// 点是否落在**勾选列**上（那种情况下返回该行的 0 起行号；否则 -1）。
-  ///
-  /// 为何不把这段塞进 `on_event` 里直接调宿主：勾选框的语义归属**宿主**
-  ///（编辑器不知道"勾上表示要暂存"），所以这里只回答"点到哪个框了"。
-  [[nodiscard]] auto checkbox_line_at(const RenderContext& context, math::Point point) const
-      -> int;
-  /// 勾选框被点的回调（行号 0 起）。宿主在这里切换选择状态。
-  ///
-  /// 为何不改 `on_line_click` 之类的通用行事件：勾选框是**按钮式**语义
-  ///（点一下就切换），与"点进这一行开始编辑"是两件事——混在一起会让
-  /// "点勾选框顺便把光标挪过去"（用户没要求）。
   /// 可达最大水平偏移。
   [[nodiscard]] auto max_scroll_x(const RenderContext& context) const -> float;
   void apply_h_scroll_drag(const RenderContext& context, float pointer_x);
@@ -646,6 +676,15 @@ class CodeEditor : public Element {
   std::size_t anchor_{0};
   float scroll_x_{0.0f};
   float scroll_y_{0.0f};
+  /// 输入法预编辑串（显示态，见 `preedit()`）。
+  std::string preedit_{};
+  /// 预编辑串内的光标（**码点**偏移）。
+  int preedit_cursor_{0};
+  /// 空白滚动开关（见 `set_scroll_beyond_last_line`；默认开）。
+  ///
+  /// 开启时垂直滚动的上限从 `content - viewport` 变成 `content - line_height`——
+  /// 此时末行恰好能贴在视口顶端（而不是夹到“底边对齐”）。
+  bool scroll_beyond_{true};
   float font_scale_{1.0f};
   /// 行距倍数（见 `set_line_spacing`）。
   float line_spacing_{kDefaultLineSpacing};
@@ -707,9 +746,6 @@ class CodeEditor : public Element {
   /// 而现算需要 `RenderContext`（绘制期才有）。一帧滞后在这里不可见。
   mutable std::size_t last_visible_first_{1};
   mutable std::size_t last_visible_last_{0};
-  /// 装饰里是否有勾选框（决定 gutter 是否加宽 + 点击是否命勾选列）。
-  bool any_checkbox_{false};
-  /// 勾选框被点（行号 0 起）。
   /// 行装饰（整体替换语义，见 `set_line_decorations`）。
   std::vector<LineDecoration> line_marks_{};
   /// 按行号索引的装饰表（绘制热路径用；`set_*` 时重建）。
@@ -725,6 +761,13 @@ class CodeEditor : public Element {
   bool h_dragging_{false};
   /// 垂直滚动条拖拽中（同上，垂直方向）。
   bool v_dragging_{false};
+  /// 上一帧绘制时两条滚动条的轨道矩形（`cursor_at` 用；它拿不到 `RenderContext`）。
+  ///
+  /// 为何缓存而不是现算：滚动条可见性依赖 `max_scroll_x(context)`（要量最宽行）
+  /// 与 `max_scroll_y()`（要行高），两者都要 context。而指针查询发生在鼠标移动时，
+  /// 那时没有 context。缓存的滞后期只有一帧，而滚动条的出现/消失不由鼠标驱动。
+  mutable math::Rect last_v_bar_rect_{};
+  mutable math::Rect last_h_bar_rect_{};
   float v_drag_offset_{0.0f};
   float h_drag_offset_{0.0f};
   mutable std::shared_ptr<const text::LanguageSpec> spec_cache_{};

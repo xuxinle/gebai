@@ -75,9 +75,6 @@ std::string& editor_clipboard() {
 // 声明在 hpp（它们要用 selected_text()/host()，必须是成员）。
 
 inline constexpr float kGutterPadding{12.0f};
-/// 勾选列宽（逐行暂存）。独立成常量是因为 `gutter_width` 与点击命中
-/// **两处都要用它**——各写一个数早晚会分叉（那表现为"点框没反应"）。
-inline constexpr float kCheckboxColumnWidth{18.0f};
 /// 行尾注解与正文之间的间隔（见 `LineDecoration::end_text`）。
 inline constexpr float kEndAnnotationGap{16.0f};
 /// 行尾注解与视口右缘的保留（它不该贴死在边上）。
@@ -179,17 +176,6 @@ auto CodeEditor::available_languages() -> std::vector<std::string> {
 }
 
 void CodeEditor::set_line_decorations(std::vector<LineDecoration> marks) {
-  // 勾选列是否启用：决定 gutter 宽度（见 `gutter_width`）与点击命中。
-  // 在这里算一次而不是每帧扫装饰表：装饰表在滚动/打字时不变。
-  const bool had_checkbox = any_checkbox_;
-  any_checkbox_ = false;
-  for (const auto& mark : marks) {
-    if (mark.check != LineDecoration::Check::None) {
-      any_checkbox_ = true;
-      break;
-    }
-  }
-  if (had_checkbox != any_checkbox_) geometry_dirty_ = true;   // gutter 宽度变了要重算几何
   line_marks_ = std::move(marks);
   rebuild_line_mark_index();
   mark_dirty();
@@ -313,6 +299,112 @@ void CodeEditor::set_text(std::string text) {
   // 这与 Input/TextArea 的既定决议一致：C++ API 静默，属性面写入才通知
   // （见 `set_property("text")` 与 DESIGN.md「程序化写入不冒充用户编辑」）。
   // 用户编辑走 `notify_change()`（insert/delete/undo/replace_all 都经它）。
+}
+
+void CodeEditor::replace_text_keep_state(std::string text) {
+  replace_text_keep_state(std::move(text), {}, {});
+}
+
+void CodeEditor::replace_text_keep_state(std::string text, const std::vector<char>& old_real,
+                                         const std::vector<char>& new_real,
+                                         std::size_t caret_anchor) {
+  if (text_ == text) return;
+
+  // —— 切行（唯一口径：去掉行尾 `\r`；末尾无换行也算一行；空文本是一行空行）——
+  const auto split = [](const std::string& source) {
+    std::vector<std::pair<std::size_t, std::size_t>> out;   // [begin, end)
+    std::size_t begin = 0;
+    for (std::size_t at = 0; at < source.size(); ++at) {
+      if (source[at] == '\n') {
+        std::size_t end = at;
+        if (end > begin && source[end - 1] == '\r') --end;
+        out.emplace_back(begin, end);
+        begin = at + 1;
+      }
+    }
+    std::size_t end = source.size();
+    if (end > begin && source[end - 1] == '\r') --end;
+    if (begin < source.size() || source.empty()) out.emplace_back(begin, end);
+    return out;
+  };
+  const auto old_lines = split(text_);
+  const auto new_lines = split(text);
+
+  // —— 把光标/选择换算成：**逻辑行序号**（前面有几个真实行）+ 列（在该行内的字节列）——
+  //
+  // 为何用逻辑行而不是显示行：对齐填充行是“造出来的”，它的数量随重算变化，
+  // 同一个显示行号在重算后就指向别的内容（实测：光标从当前行跑到另一行的倒数第二个字符）。
+  // 而“这是我看到的第几条真实内容”在两版里是一致的。
+  const auto locate = [&old_real](const std::string& source,
+                                 const std::vector<std::pair<std::size_t, std::size_t>>& lines,
+                                 std::size_t index) {
+    const std::size_t at = std::min(index, source.size());
+    // 所在显示行：**最后一个行起点 ≤ `at` 的那一行**。
+    //
+    // 旧写法用“`at` 落在 [begin, end) 内”判行，而 `end` 是**不含换行的行尾**——
+    // 光标恰在行尾（`at == end`，最常见：行末打字）时它落不进本行，
+    // 误落到下一行，于是列号被当成 0（实测：光标卡在刚打的字前面）。
+    std::size_t display_row = 0;
+    for (std::size_t row = 0; row < lines.size(); ++row) {
+      if (lines[row].first <= at) {
+        display_row = row;
+      } else {
+        break;
+      }
+    }
+    std::size_t logical_row = 0;      // 前面有几个真实行
+    for (std::size_t row = 0; row < display_row && row < lines.size(); ++row) {
+      const bool is_real = row >= old_real.size() ? true : old_real[row] != 0;
+      if (is_real) ++logical_row;
+    }
+    const std::size_t begin = display_row < lines.size() ? lines[display_row].first : source.size();
+    const std::size_t end = display_row < lines.size() ? lines[display_row].second : source.size();
+    const std::size_t position = std::max(begin, std::min(at, end));
+    return std::pair<std::size_t, std::size_t>{logical_row, position - begin};
+  };
+  const auto [cursor_logical, cursor_column] =
+      locate(text_, old_lines, caret_anchor == kNoCaretAnchor ? cursor_ : caret_anchor);  const auto [anchor_logical, anchor_column] = locate(text_, old_lines, anchor_);
+
+  const float keep_x = scroll_x_;
+  const float keep_y = scroll_y_;
+  text_ = std::move(text);
+
+  // —— 逻辑行序号 → 新文本的字节偏移（跳过填充行；超出则夹到末尾）——
+  const auto offset_of = [&new_real](
+                             const std::string& source,
+                             const std::vector<std::pair<std::size_t, std::size_t>>& lines,
+                             std::size_t logical_row, std::size_t column) {
+    std::size_t seen = 0;
+    std::size_t fallback = source.size();   // 同列夹取用（末个真实行行尾）
+    for (std::size_t row = 0; row < lines.size(); ++row) {
+      const bool is_real = row >= new_real.size() ? true : new_real[row] != 0;
+      if (!is_real) continue;
+      if (seen == logical_row) {
+        const std::size_t begin = lines[row].first;
+        const std::size_t span = lines[row].second - lines[row].first;
+        return begin + std::min(column, span);
+      }
+      ++seen;
+      fallback = lines[row].second;
+    }
+    return fallback;
+  };
+  cursor_ = std::min(offset_of(text_, new_lines, cursor_logical, cursor_column), text_.size());
+  anchor_ = std::min(offset_of(text_, new_lines, anchor_logical, anchor_column), text_.size());
+  scroll_x_ = keep_x;
+  scroll_y_ = keep_y;
+
+  // **撤销栈保留**：这不是一次编辑（它是同一份内容的重新排版），
+  // 清掉的话用户前面的撤销历史会在他打字时静默消失。
+  if (find_enabled_) {
+    rebuild_find_matches();
+    find_active_set_ = false;
+    find_active_ = kNoFindMatch;
+  }
+  hover_line_ = -1;
+  h_dragging_ = false;
+  mark_highlight_dirty();
+  // 不触发 `on_change`：调用方就是“重新排版文本”的人，回告它会形成回路。
 }
 
 void CodeEditor::set_language(std::string language) {
@@ -1066,9 +1158,6 @@ auto CodeEditor::gutter_width(const RenderContext& context) const -> float {
   const std::size_t digits = std::to_string(std::max<std::size_t>(line_count(), 1)).size();
   float width = port.measure_width(std::string(digits, '0'), font_size(),
                                    text::FontRole::Monospace) + kGutterPadding * 2.0f;
-  // 勾选列（逐行暂存）：**加宽 gutter** 而不是把框叠在行号上——
-  // 叠上去会让行号在勾选时变得不可读（而"看着几号行"与"选哪一行"要同时可用）。
-  if (any_checkbox_) width += kCheckboxColumnWidth;
   return width;
 }
 
@@ -1084,6 +1173,19 @@ auto CodeEditor::gutter_width(const RenderContext& context) const -> float {
 /// 所以读到的总上一帧的值——而 gutter 宽度只在行数位数变化时改变，
 /// 这个滞后不可感知。
 auto CodeEditor::cursor_at(math::Point point) const noexcept -> MouseCursor {
+  // 滚动条优先：滚动条的语义是“拖着看另一个地方”，与正文的“定位字符”
+  // 是两件事。旧实现里它落在 `bounds_` 内、被一律归为 `Text`——
+  // 在滚动条上显示 I-beam，用户以为能在那里点出一个插入点（实测存在很久）。
+  //
+  // 几何来自**上一帧缓存**（`v_scroll_bar_rect`/`h_scroll_bar_rect` 会写）：
+  // 与 gutter 同一条理由——`cursor_at` 拿不到 `RenderContext`（量不了文本宽），
+  // 而鼠标事件一定发生在某帧之后，一帧的滞后在这里不可感知。
+  if (!last_v_bar_rect_.is_empty() && last_v_bar_rect_.contains(point)) {
+    return MouseCursor::Scroll;
+  }
+  if (!last_h_bar_rect_.is_empty() && last_h_bar_rect_.contains(point)) {
+    return MouseCursor::Scroll;
+  }
   if (show_line_numbers_ && point.x < bounds_.x + gutter_cache_) return MouseCursor::Arrow;
   return MouseCursor::Text;
 }
@@ -1155,6 +1257,36 @@ auto CodeEditor::content_height() const noexcept -> float {
   return static_cast<float>(line_spans_.size()) * line_height_cache_ + kTopPadding + kBottomPadding;
 }
 
+/// 垂直滚动上限的**唯一口径**（四处调用方共用，见头文件里的说明）。
+///
+/// 空白滚动开：上限 = 内容高 − 一个行盒。此时把 `scroll_y_` 推到上限，
+/// 末行的行盒正好落在视口顶端（再往上留 `kTopPadding`，即末行的文字起点对齐视口顶）。
+/// 关：上限 = 内容高 − 视口高（内容底边贴视口底，旧行为）。
+///
+/// ⚠ **内容装得下时上限恒为 0**（哪怕开了空白滚动）：
+/// “把末行拖到顶部”只在**文件比视口长**时才有意义（否则整篇不到一屏，
+/// 拖它只是把一小段文字在屏上乱推）；而这一条同时保住了另一个重要不变式——
+/// “内容不溢出就不画滚动条”（否则每个两行小文件右侧都会多一条滑块）。
+auto CodeEditor::max_scroll_y() const noexcept -> float {
+  const float content = content_height();
+  const float view = bounds_.height;
+  if (content <= view) return 0.0f;
+  if (scroll_beyond_) {
+    const float line = line_height_cache_ > 0.0f ? line_height_cache_ : 1.0f;
+    return std::max(0.0f, content - kTopPadding - line);
+  }
+  return std::max(0.0f, content - view);
+}
+
+void CodeEditor::set_scroll_beyond_last_line(bool value) {
+  if (scroll_beyond_ == value) return;
+  scroll_beyond_ = value;
+  // 关上时要立即夹回去（否则视口会停在开时的合法位置、看起来“飘在空中”）。
+  // 上限改用**本组件自己的** `max_scroll_y()`：不依赖 `RenderContext`（这里拿不到）。
+  scroll_y_ = std::max(0.0f, std::min(scroll_y_, max_scroll_y()));
+  mark_layout_dirty();
+}
+
 auto CodeEditor::content_width(const RenderContext& context) const -> float {
   return gutter_cache_ + max_line_width(context) + kGutterPadding * 2.0f;
 }
@@ -1202,8 +1334,12 @@ auto CodeEditor::expand_tabs(std::string_view row) const -> TabExpansion {
 
 auto CodeEditor::v_scroll_bar_rect(const RenderContext& context) const -> math::Rect {
   if (bounds_.is_empty()) return {};
-  // 内容未溢出时不画也不命中（否则空文档上下也会有一条可拖的条纹）
-  if (content_height() <= bounds_.height || bounds_.height <= 0.0f) return {};
+  // 内容未溢出时不画也不命中（否则空文档上下也会有一条可拖的条纹）。
+  //
+  // 判据用 `max_scroll_y()`（而不是“内容高 > 视口高”的裸式）：空白滚动开启后，
+  // “能不能滚”由它统一回答（内容装得下时恒为 0）。写在这里而不是各处现算，
+  // 保证“有滑块、滑块能拖到到底”与“能否滚动”是同一个事实。
+  if (max_scroll_y() <= 0.0f || bounds_.height <= 0.0f) return {};
   const float reserve = max_scroll_x(context) > 0.5f ? kScrollBarWidth : 0.0f;
   return math::Rect{bounds_.right() - kScrollBarWidth - 2.0f, bounds_.y,
                     kScrollBarWidth, std::max(1.0f, bounds_.height - reserve)};
@@ -1216,7 +1352,10 @@ auto CodeEditor::v_scroll_thumb_rect(const RenderContext& context) const -> math
   if (total <= 0.0f) return {};
   const float thumb = std::max(24.0f, track.height * std::min(1.0f, track.height / total));
   const float travel = std::max(1.0f, track.height - thumb);
-  const float max_scroll = std::max(1.0f, total - bounds_.height);
+  // 滑块位置与拖动映射必须用**同一个上限**（`max_scroll_y`）：
+  // 一个用“内容−视口”、另一个用“内容−行盒”时，滑块拖到底与实际到底差一屏。
+  const float max_scroll = max_scroll_y();
+  if (max_scroll <= 0.0f) return math::Rect{track.x, track.y, track.width, thumb};
   const float offset = std::clamp(scroll_y_ / max_scroll, 0.0f, 1.0f) * travel;
   return math::Rect{track.x, track.y + offset, track.width, thumb};
 }
@@ -1225,10 +1364,11 @@ void CodeEditor::apply_v_scroll_drag(const RenderContext& context, float pointer
   const math::Rect track = v_scroll_bar_rect(context);
   if (track.width <= 0.0f) return;
   const float total = content_height();
+  if (total <= 0.0f) return;
   const float thumb = std::max(24.0f, track.height * std::min(1.0f, track.height / total));
   const float travel = std::max(1.0f, track.height - thumb);
   const float local = std::clamp((pointer_y - track.y - v_drag_offset_) / travel, 0.0f, 1.0f);
-  const float max_scroll = std::max(0.0f, total - bounds_.height);
+  const float max_scroll = max_scroll_y();
   // **不碰光标**：滚动条的语义是“看另一个地方”，不是“把光标挪过去”。
   const float before_y = scroll_y_;
   scroll_y_ = local * max_scroll;
@@ -1294,15 +1434,6 @@ auto CodeEditor::hover_line_at(const RenderContext& context, math::Point point) 
   const auto total = static_cast<std::ptrdiff_t>(line_count());
   if (line >= total) return -1;
   return static_cast<int>(line);
-}
-
-auto CodeEditor::checkbox_line_at(const RenderContext& context, math::Point point) const -> int {
-  if (!any_checkbox_ || gutter_cache_ <= 0.0f) return -1;
-  // 勾选列占 gutter 的**最左** `kCheckboxColumnWidth`（见绘制处）。
-  if (point.x < bounds_.x || point.x > bounds_.x + kCheckboxColumnWidth) return -1;
-  // 纵向复用 `hover_line_at`：**行高的权威来源只有一处**，
-  // 自己再算一遍必然与绘制分叉（"点框没反应"最常见的成因）。
-  return hover_line_at(context, point);
 }
 
 /// 水平滚动条矩形（内容溢出时贴在文本区底部；否则为空）。
@@ -1430,7 +1561,7 @@ void CodeEditor::set_scroll_offset(float x, float y) {
 /// 超过内容高度时画出**空白屏**（视口越过最后一行、什么都不显示）——
 /// 这是控制通道 `scroll_to_line` 与示例“跳转到行”都踩得到的真缺陷。
 void CodeEditor::clamp_scroll(const RenderContext& context) {
-  const float max_y = std::max(0.0f, content_height() - bounds_.height);
+  const float max_y = max_scroll_y();
   scroll_y_ = std::clamp(scroll_y_, 0.0f, max_y);
   const float view_width = std::max(0.0f, bounds_.width - gutter_cache_ - kGutterPadding);
   const float max_x = std::max(0.0f, content_width(context) - gutter_cache_ - kGutterPadding * 2.0f -
@@ -1450,7 +1581,10 @@ void CodeEditor::scroll_by(float dx, float dy) {
 void CodeEditor::scroll_to_line(std::size_t line) {
   const std::size_t clamped = std::min(line == 0 ? 0 : line - 1, line_count() - 1);
   const float before_y = scroll_y_;
-  scroll_y_ = static_cast<float>(clamped) * line_height_cache_;
+  // 夹到**同一口径**的上限：不夹时末几行会把视口推过内容底（旧缺陷，画白屏）。
+  // 开了空白滚动后上限不再是“内容−视口”，因此不能再让 `clamp_scroll`（需 context）
+  // 独自负责——`scroll_to_line` 自身就是完整的一步。
+  scroll_y_ = std::min(static_cast<float>(clamped) * line_height_cache_, max_scroll_y());
   mark_dirty();
   notify_scroll(scroll_x_, before_y);
 }
@@ -1463,6 +1597,8 @@ auto CodeEditor::first_visible_line(const RenderContext& context) const -> std::
   // `scroll_to_line(n)` 后本值应正好是 n（测试钉死这条口径）。
   const float top = std::max(0.0f, scroll_y_ - kTopPadding);
   const auto first = static_cast<std::size_t>(std::ceil(static_cast<double>(top / height)));
+  // 空白滚动开启时，视口第一行可能比末行还靠后（末行已贴在顶部、下面全是空白）。
+  // 此时“第一可见行”就是末行——夹到 `line_count()-1`，不能报出一个不存在的行号。
   return std::min(first, line_count() - 1) + 1;
 }
 
@@ -1746,57 +1882,6 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       }
     }
 
-      // 勾选框：**与时序（`LineMark`）无关地画**。
-      //
-      // 它原本嵌在 `if (use_ink)` 里，于是 `LineMark::None` 的行（正是「没改动的行」）
-      // 永远不画框——而用户要选的恰好是改动行，看起来就像「勾选框根本不会画」
-      //（实测踩到：像素断言显示开/关模式画面完全一样，探针也一条都没打）。
-      //
-      // 它在 gutter **最左**（槽内竖条已让到右缘，两者不叠）。
-      if (decoration != nullptr && decoration->check != LineDecoration::Check::None) {
-        const float box = std::max(9.0f, std::min(13.0f, height * 0.62f));
-        const math::Rect box_rect{bounds_.x + kGutterPadding * 0.5f,
-                                  row_top + (height - box) * 0.5f, box, box};
-        const bool checked = decoration->check == LineDecoration::Check::Checked;
-        const bool disabled = decoration->check == LineDecoration::Check::Disabled;
-        const math::Color edge = disabled ? colors.text_muted.with_alpha_f(0.5F)
-                                          : (checked ? colors.primary : colors.text_muted);
-        canvas.fill_rect(box_rect,
-                         raster::Paint::solid(checked && !disabled
-                                                  ? colors.primary.with_alpha_f(0.9F)
-                                                  : colors.surface),
-                         2.0f);
-        // 边框用四道 1px 实心条画（框架的描边只有 `stroke_path`，为一个方框引 Path
-        // 不划算；而 1px 的四条与真描边在视觉上不可分辨）。
-        const raster::Paint edge_paint = raster::Paint::solid(edge);
-        canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, box_rect.width, 1.0f}, edge_paint, 0.0f);
-        canvas.fill_rect(
-            math::Rect{box_rect.x, box_rect.bottom() - 1.0f, box_rect.width, 1.0f}, edge_paint,
-            0.0f);
-        canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, 1.0f, box_rect.height}, edge_paint,
-                         0.0f);
-        canvas.fill_rect(
-            math::Rect{box_rect.right() - 1.0f, box_rect.y, 1.0f, box_rect.height}, edge_paint,
-            0.0f);
-        if (checked && !disabled) {
-          // 勾：用一串小方块沿两段斜线铺（不依赖图标资源——无图标后端也要能看）。
-          const raster::Paint tick = raster::Paint::solid(colors.on_primary);
-          const math::Point tick_start{box_rect.x + box * 0.24f, box_rect.y + box * 0.50f};
-          const math::Point tick_corner{box_rect.x + box * 0.44f, box_rect.y + box * 0.72f};
-          const math::Point tick_finish{box_rect.x + box * 0.78f, box_rect.y + box * 0.26f};
-          const auto draw_tick = [&canvas, tick](math::Point from, math::Point to) {
-            constexpr int kSteps = 8;
-            for (int step = 0; step <= kSteps; ++step) {
-              const float t = static_cast<float>(step) / static_cast<float>(kSteps);
-              const float x = from.x + (to.x - from.x) * t;
-              const float y = from.y + (to.y - from.y) * t;
-              canvas.fill_rect(math::Rect{x - 0.9f, y - 0.9f, 1.8f, 1.8f}, tick, 0.0f);
-            }
-          };
-          draw_tick(tick_start, tick_corner);
-          draw_tick(tick_corner, tick_finish);
-        }
-      }
 
     // 当前行底色 + 行号槽内的当前行指示（行号槽高亮 = VSCode 的“我在哪一行”锚点）
     if (line == current) {
@@ -2051,6 +2136,25 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     }
   }
 
+  // 输入法预编辑串（尚未确定的那段）：画在**光标处**，带下划线，**不换行**
+  //（换行会让本行后面的内容全部错位，而组合串是个瞬态）。
+  //
+  // 为何画在这里而不是插到 `text_` 里：预编辑随时可能被取消或整体替换，
+  // 进了文本就要配合一整套“撤销—复原”（而用户按 Esc 应当**无痕迹**），
+  // 且每敲一个拼音字母都会往撤销栈里压一帧。
+  if (focused_ && !preedit_.empty()) {
+    const std::size_t line = line_of_index(cursor_);
+    if (line >= first_line && line < last_line) {
+      const float row_top = origin_y + static_cast<float>(line) * height;
+      const float x = x_for_index(context, cursor_);
+      port.draw(canvas, preedit_, math::Point{x, row_top + text_offset}, font_size(),
+                colors.primary, text::FontRole::Monospace);
+      const float width = port.measure_width(preedit_, font_size(), text::FontRole::Monospace);
+      canvas.fill_rect(math::Rect{x, row_top + height - 2.0f, width, 1.0f},
+                       raster::Paint::solid(colors.primary), 0.0f);
+    }
+  }
+
   // 光标（聚焦且可见时）
   if (focused_ && !read_only_) {
     const std::size_t line = line_of_index(cursor_);
@@ -2187,6 +2291,13 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   }
 
   const bool has_h = max_scroll_x(context) > 0.5f;
+  // 缓存给 `cursor_at`（它拿不到 RenderContext；见那里的说明）。
+  //
+  // ⚠ 水平条只在**真溢出**时才算：`h_scroll_bar_rect()` 不看溢出与否
+  //（它的职责是“要画在哪”，不是“要不要画”），无条件缓存会让编辑器底部 9px
+  // 永远显示滚动光标。
+  last_v_bar_rect_ = v_track;
+  last_h_bar_rect_ = has_h ? h_scroll_bar_rect() : math::Rect{};
   if (has_h) {
     const math::Rect track = h_scroll_bar_rect();
     canvas.fill_rect(track, raster::Paint::solid(colors.surface_alt), kScrollBarWidth * 0.5f);
@@ -2236,17 +2347,7 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
         if (on_context_menu) on_context_menu(event.position);
         return true;
       }
-      // 勾选框优先于一切：它是**按钮式**语义（点一下切换，光标不动）。
-      // 排在滚动条之前是因为它在 gutter 里、与滚动条不重叠；排在这里只是为了让
-      // "点框"这件事在代码里一眼可见（否则它会被夹在滚动条与光标两段之间）。
-      if (event.button == 1 && on_checkbox_toggle) {
-        if (const int box_line = checkbox_line_at(context, event.position); box_line >= 0) {
-          on_checkbox_toggle(static_cast<std::size_t>(box_line));
-          event.handled = true;
-          return true;   // 吞掉：不让它同时移光标
-        }
-      }
-      // 滚动条优先：两条滚动条都**不能落到“移光标”分支**上——
+          // 滚动条优先：两条滚动条都**不能落到“移光标”分支**上——
       // 拖滚动条是“看另一个地方”，把光标一起挪走是错的（实测：拖垂直条后光标从第 1 行跳到第 30 行）。
       const math::Rect v_track = v_scroll_bar_rect(context);
       if (v_track.width > 0.0f && v_track.contains(event.position)) {
@@ -2375,7 +2476,20 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
     }
     case EventKind::TextInput:
       if (event.text.empty()) return false;
+      // 提交时预编辑串已被“结果串”取代，清掉临时显示（否则会与真正插入的文本重叠一段）。
+      if (!preedit_.empty()) {
+        preedit_.clear();
+        mark_dirty();
+      }
       insert_text(event.text);
+      return true;
+    case EventKind::ImeComposition:
+      // 预编辑串只是**显示态**：不进 `text_`、不进撤销栈（见 `EventKind::ImeComposition`）。
+      // 空串 = 组合结束（取消/提交），此时只需重绘一次把它擦掉。
+      if (preedit_ == event.text) return true;
+      preedit_ = event.text;
+      preedit_cursor_ = event.preedit_cursor;
+      mark_dirty();
       return true;
     case EventKind::KeyDown:
       // 未识别的键返回 false 冒泡（全局快捷键/焦点环由此获得落点）；
@@ -2686,6 +2800,7 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
   if (name == "tab_width") return std::to_string(tab_width_);
   if (name == "indent_guides") return indent_guides_ ? "true" : "false";
   if (name == "auto_pairs") return auto_pairs_ ? "true" : "false";
+  if (name == "scroll_beyond_last_line") return scroll_beyond_ ? "true" : "false";
   if (name == "scroll") {
     return std::format("{:.1f},{:.1f}", static_cast<double>(scroll_x_),
                        static_cast<double>(scroll_y_));
@@ -2857,6 +2972,10 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
       return false;
     }
   }
+  if (name == "scroll_beyond_last_line") {
+    set_scroll_beyond_last_line(truthy(value));
+    return true;
+  }
   if (name == "goto_line" || name == "line") {
     if (const auto line = parse_size(value); line.has_value()) {
       goto_line(*line);
@@ -2870,7 +2989,8 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
 auto CodeEditor::property_names() const -> std::vector<std::string_view> {
   return {"text",   "language",  "cursor",   "line",       "column",     "lines",
           "selection", "selected_text", "read_only", "highlight", "show_line_numbers",
-          "tab_width", "indent_guides", "auto_pairs", "font_size", "font_scale", "scroll",
+          "tab_width", "indent_guides", "auto_pairs", "scroll_beyond_last_line", "font_size",
+          "font_scale", "scroll",
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
           "find_active", "find_case", "find_word", "line_height", "text_offset", "caret_top",
           "ink_height", "baseline", "diagnostics", "diagnostic_errors", "hover_diagnostic",

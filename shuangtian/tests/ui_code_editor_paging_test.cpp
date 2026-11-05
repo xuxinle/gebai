@@ -4,6 +4,7 @@
 /// 目的是把它们钉死在**单元层面**，而不是只靠端到端脚本兜住。
 
 #include "st/app/text_port.hpp"
+#include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/code_editor.hpp"
@@ -142,7 +143,50 @@ ST_TEST(code_editor_short_document_has_no_scrollbar) {
   Fixture fx;
   if (!fx.has_font()) return;
   fx.editor.set_text("one\ntwo\n");
+  // 短文档（装得下）就没有滚动条：空白滚动只对**比视口长**的文档生效，
+  // 否则每个两行小文件右侧都会多一条滑块。
   ST_CHECK(!(fx.editor.v_scroll_bar_rect(fx.context).width > 0.0f));
+}
+
+ST_TEST(code_editor_scroll_beyond_last_line_reaches_top) {
+  // 空白滚动（用户 2026-11-05 要求）：末行可以直接滚到视口**最上方**。
+  //
+  // 旧上限是“内容高 − 视口高”（内容底边贴视口底）：末行永远只能在屏幕下半部分，
+  // 想把当前段落往上挪出视野中心做不到。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  for (int index = 0; index < 120; ++index) {
+    fx.editor.insert_text("line " + std::to_string(index) + "\n");
+  }
+  const std::size_t total = fx.editor.line_count();
+  fx.editor.scroll_to_line(total);   // 末行
+  // 末行已滚到视口顶部：第一可见行就是末行（而不是“末行贴在底部”）。
+  ST_CHECK_EQ(fx.editor.first_visible_line(fx.context), total);
+  // 关掉空白滚动 → 回到“底边对齐”的旧语义（末行在视口内，但不在顶部）。
+  fx.editor.set_scroll_beyond_last_line(false);
+  fx.editor.scroll_to_line(total);
+  ST_CHECK(fx.editor.first_visible_line(fx.context) < total);
+  ST_CHECK(fx.editor.last_visible_line(fx.context) == total);
+}
+
+ST_TEST(code_editor_scrollbar_uses_scroll_cursor_not_text) {
+  // 滚动条上的鼠标光标必须是“可拖拽滚动”而不是编辑器正文的 I-beam：
+  // 整块 `cursor_at` 曾经一律返回 Text，于是拖滚动条时光标是插入符（看着像能在那儿打字）。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  for (int index = 0; index < 200; ++index) fx.editor.insert_text("x\n");
+  // 先画一帧：滚动条几何是绘制/排布阶段缓存的（`cursor_at` 拿不到 RenderContext）。
+  st::raster::Canvas canvas(static_cast<int>(fx.editor.bounds().width),
+                            static_cast<int>(fx.editor.bounds().height));
+  canvas.clear(fx.theme.colors().surface);
+  fx.editor.paint_content(fx.context, canvas);
+  const st::math::Rect track = fx.editor.v_scroll_bar_rect(fx.context);
+  ST_CHECK(track.width > 0.0f);
+  ST_CHECK(fx.editor.cursor_at(track.center()) == st::ui::MouseCursor::Scroll);
+  // 正文区仍是文本插入符（两类意图不能混）。
+  const st::math::Point body{fx.editor.bounds().x + fx.editor.bounds().width * 0.5f,
+                             fx.editor.bounds().y + fx.editor.bounds().height * 0.5f};
+  ST_CHECK(fx.editor.cursor_at(body) == st::ui::MouseCursor::Text);
 }
 
 // ————————————————————————————————————————————————————————————————————————————

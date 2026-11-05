@@ -74,6 +74,43 @@ class DiffView : public Element {
   /// 便捷：直接给两段文本（内部走 `text::make_file_diff`）。
   void set_texts(std::string_view old_text, std::string_view new_text);
 
+  /// **整文件模式**：给两侧全文，视图按“整份文件”排（而不是只排差异块）。
+  ///
+  /// 为何需要它（2026-11-05，VSCode/IDEA 同款）：差异块模式只能看到 `@@` 附近
+  /// 几行上下文，于是右栏根本不是“文件的当前内容”——它是一个片段。两件事因此做不成：
+  /// - **就地编辑**（用户要求“编辑器与对比一体、改了自动对比”）：在片段里改，
+  ///   改的是片段，回算差异必然把整篇算成改动；
+  /// - **当文件阅读**：想看差异块之间的内容就得另行打开文件。
+  ///
+  /// 传空串 = 回到差异块模式（旧行为，保留：只想要变更区域时用）。
+  ///
+  /// `path` 只用于**头部摘要与可观测面**（`summary()` / `left_text` 的标识）——
+  /// 不传的话摘要里没有文件名，而“现在是哪个文件的差异”是差异视图必须回答的事
+  ///（跨文件导航就是按它看变化）。
+  ///
+  /// `keep_numbers`：两侧都显示**真实行号**（空白文本对比用）。默认 `false` ——
+  /// 文件差异的两栏是“同一份文件的两次呈现”，行号要能单独归零（删行/填行不编号）；
+  /// 而两段独立文本没有“文件行号”这回事，空缺的数字看着就像出错。
+  void set_full_texts(std::string old_full, std::string new_full, std::string path = {},
+                      bool keep_numbers = false);
+  [[nodiscard]] auto full_texts_enabled() const noexcept -> bool { return full_file_; }
+
+  /// 是否画 `@@ … @@` 分隔条（默认是）。
+  ///
+  /// 整文件模式下应当关掉：VSCode/IDEA 的差异编辑器**不画** `@@`——
+  /// 整份文件都在眼前时，“这一块从第几行开始”是多余的噪声（而且每个块多条 22px
+  /// 的带子会把文件拉得很长）。导航仍可用：`hunk_rows` 不依赖分隔条。
+  void set_show_hunk_separators(bool value) { show_separators_ = value; }
+  [[nodiscard]] auto show_hunk_separators() const noexcept -> bool { return show_separators_; }
+
+  /// 是否画顶部摘要带（默认是）。
+  ///
+  /// 宿主自己已经在工具条里写了同样的摘要时（gbcode 的对比/差异工具条），
+  /// 这里再画一遍就是**同一句话出现两次**（截图上很显眼）。是否该显示宿主最清楚，
+  /// 所以开关交给它——而不是组件自作主张把摘要藏起来。
+  void set_show_header(bool value) { show_header_ = value; mark_layout_dirty(); }
+  [[nodiscard]] auto show_header() const noexcept -> bool { return show_header_; }
+
   /// 清空（无差异）。
   void clear();
 
@@ -98,48 +135,48 @@ class DiffView : public Element {
   void set_read_only(bool value);
   [[nodiscard]] auto read_only() const noexcept -> bool { return read_only_; }
 
-  /// 字号档位/绝对字号透传到两侧编辑器（`0` = 跟随主题）。
-  void set_font_size(float size);
+  /// 右栏内容被编辑（传最新全文）——宿主据它重算差异（“改了就自动对比”）。
+  ///
+  /// 为何是回调而不是让 DiffView 自己重算：“与什么比”是宿主的语义
+  ///（可能是暂存区、可能是 HEAD、可能是磁盘上的文件）——组件只知道“文本变了”。
+  std::function<void(std::string_view)> on_text_edit{};
+
+  /// **左栏**编辑（同上，传左栏的逻辑文本）。
+  ///
+  /// 为何要分左右：文件差异只放右栏可写（左栏是对照基线），而**空白文本对比**
+  /// 两侧都是用户自己的内容——两边都得能改、且各自要知道是谁变了。
+  std::function<void(std::string_view)> on_left_text_edit{};
+
+  /// 让**两侧都可编辑**（空白对比用；文件差异不要用它——左栏是基线）。
+  ///
+  /// 与 `set_read_only(false)` 的区别：那个只开右栏（刻意），这个是“两份都是我的”。
+  void set_both_sides_editable(bool value) { allow_left_edit_ = value; push_to_editors(); }
+
+  /// **显式请求**“下一次排完就跳到第一个差异”（一次性）。
+  ///
+  /// 为何要做成“待办”而不是当场 `goto_hunk(0)`：`scroll_to_line` 要行高，
+  /// 而行高在首次 `arrange` 之前还是 0——当场滚是**算术上必然失败**的
+  ///（滚到 0×行高 = 原地），而且失败得静悄悄：画面停在第一行，看着只是“没跳”。
+  ///
+  /// 为何不让 `set_diff` 自己置位：它会被“右栏编辑后自动重算”调到，
+  /// 那时把视口拽回第一处等于用户正在打第 200 行、画面每 180ms 跳回第 1 行。
+  /// “打开就跳第一处”是宿主的意图，所以由宿主在**真的打开**时调本函数。
+  void request_focus_first_hunk() { (void)goto_hunk(0); }
+  /// 是否有待执行的“跳第一处”（自动化/测试可断言）。
+  [[nodiscard]] auto focus_first_hunk_pending() const noexcept -> bool {
+    return pending_scroll_hunk_ != kNoHunk;
+  }
 
   // —— 导航 ——
+
+  /// 字号档位/绝对字号透传到两侧编辑器（`0` = 跟随主题）。
+  void set_font_size(float size);
 
   /// 差异块（hunk）数量。
   [[nodiscard]] auto hunk_count() const noexcept -> std::size_t { return diff_.hunks.size(); }
   /// 当前所在差异块下标（无差异为 `kNoHunk`）。
   [[nodiscard]] auto current_hunk() const noexcept -> std::size_t { return current_hunk_; }
 
-  // —— 逐行暂存（B11/C3）——
-  //
-  // 为什么选择状态住在 `DiffView` 而不是 `CodeEditor`：**身份是 `hunk.lines` 下标**
-  //（见 `build_partial_patch` 的说明），而编辑器只知道“屏幕上的第几行”——
-  // 那个行号是 `DiffView` 拼出来的显示行（含占位/分隔行），两者不是一回事。
-  // 把选择放在知道映射关系的那一层，就不需要反向查表。
-  ///
-  /// 打开/关闭“逐行暂存”模式。开启后左侧栏出现勾选列，点行切换选中。
-  ///
-  /// 为何是模式而不是常驻：勾选列会占掉左侧栏的宽度（本来就窄），
-  /// 而“逐行挑着提交”是个阶段性动作（做完就回到“看差异”）。
-  void set_staging_mode(bool value);
-  [[nodiscard]] auto staging_mode() const noexcept -> bool { return staging_mode_; }
-  /// 某行是否被选中（`hunk`/`line` 都是下标）。
-  [[nodiscard]] auto is_line_selected(std::size_t hunk, std::size_t line) const -> bool;
-  /// 切换某行的选中态（返回新状态）。
-  auto toggle_line(std::size_t hunk, std::size_t line) -> bool;
-  /// 选中/取消整个 hunk。
-  void set_hunk_selected(std::size_t hunk, bool selected);
-  /// 全选/全不选。
-  void set_all_selected(bool selected);
-  /// 已选中的 `(hunk, line)` 对（顺序稳定——补丁里的顺序靠它）。
-  [[nodiscard]] auto selected_lines() const
-      -> const std::vector<std::pair<std::size_t, std::size_t>>& {
-    return selected_;
-  }
-  /// 已选行数。
-  [[nodiscard]] auto selected_count() const noexcept -> std::size_t { return selected_.size(); }
-  /// **构造可提交的补丁**（选中的行；空串 = 选得不够形成有效补丁）。
-  [[nodiscard]] auto build_stage_patch() const -> std::string;
-  /// 选择变化回调（宿主据此启用/禁用“暂存选中行”按钮）。
-  std::function<void()> on_selection_changed{};
   /// 跳到第 `index` 个差异块（夹取；把它滚到视野顶部并高亮分隔条）。返回是否成功。
   auto goto_hunk(std::size_t index) -> bool;
   /// 下一个 / 上一个差异块（环绕）。返回落点下标，无差异返回 `kNoHunk`。
@@ -180,53 +217,65 @@ class DiffView : public Element {
   /// 一侧文本里的显示行数（含占位行）。
   [[nodiscard]] auto line_count(bool new_side) const -> std::size_t;
 
+  /// **逻辑文本**（去掉对齐填充行与 `@@` 分隔行后的真实内容）。
+  ///
+  /// 为何需要它：显示文本是“同一份内容的两次呈现”（见类头文件的行表），
+  /// 里面混着为对齐而插的空行与分隔条。拿它去重新算差异，那些行会被当成
+  /// “真实换行”——结果整篇都成了改动（而画面看着像“什么都没变”）。
+  /// 自动对比（编辑后重算）必须以真实内容为输入。
+  ///
+  /// 新键入的行（超出上一轮重建范围）一律算真实内容。
+  [[nodiscard]] auto logical_text(bool new_side) const -> std::string;
+
  private:
   /// 一侧的文本 + 行装饰（渲染前的中间产物）。
   struct Side {
     std::string text{};
     std::size_t lines{0};
-    /// 是否画勾选列（逐行暂存模式）。
-    ///
-    /// 两侧都会开（2026-10-18 改）：只开左栏时，“新增一行”在右侧根本没有勾选框
-    ///（实测：只有删除行能勾，新增类型改动无法逐行暂存）。
-    bool staging{false};
-    /// 本侧第 `row`（0 起显示行）对应的勾选态。
-    ///
-    /// 为何按**显示行**而不按 `(hunk, line)`：`begin_row` 只知道显示行——
-    /// 它是“往一侧追加一行”的唯一入口。身份映射另建 `checkbox_targets`（同批追加）。
-    std::vector<CodeEditor::LineDecoration::Check> checks{};
-    /// 本侧第 `row` 个显示行属于哪个 `(hunk, line)`（`kNoHunk` = 不可选）。
-    ///
-    /// 与 `checks` **同批追加**（见 `rebuild_side_by_side`）——两者一旦分家，
-    /// 勾选框就会与它作用的行错位（而画面上完全看不出）。
-    std::vector<std::pair<std::size_t, std::size_t>> checkbox_targets{};
-    // 故意**不提供** `check_for(row)` 这类按显示行下标的访问器：
-    // 它的下标空间与"已 push 的项数"差一位（`begin_row` 内部才自增 `lines`），
-    // 提供它就等于给后人留一个必然越界的口子（第一版正是这样丢掉了整个勾选列）。
     std::vector<CodeEditor::LineDecoration> marks{};
     /// 每个显示行 → 该侧的真实行号（占位/分隔行 = 0，即「不给号」）。
     std::vector<std::size_t> numbers{};
+    /// 每个显示行是否承载**真实内容**（0 = 对齐填充行 / `@@` 分隔行）。
+    ///
+    /// 与 `numbers` **同址推入**（同一个 `begin_row`）。之所以不直接看 `numbers`：
+    /// 语义上“有没有行号”与“是不是真内容”是两件事（将来允许“真的不显示行号”时会分家），
+    /// 而 `logical_text()` 靠这一位筛掉造出来的行——拿显示文本重算差异时若带进
+    /// 填充行，整篇会被比成“全改了”。
+    std::vector<char> real{};
     /// 可滚动的差异块下标（显示行序）。
     std::vector<std::size_t> hunk_rows{};
   };
 
-  /// 选择变化后重建装饰并推给编辑器（见实现里的说明）。
-  void refresh_checkboxes();
   /// 重建两侧文本（差异 → 显示行 + 装饰 + 行号）。
   void rebuild();
   void rebuild_side_by_side();
   void rebuild_unified();
+  /// 整文件模式的并列重建（块间空隙按纯上下文逐行排）。
+  void rebuild_side_by_side_full();
   /// 往一侧追加一个显示行（**唯一的写入口**：装饰行号与文本行必须同步递增）。
   /// `inline_ranges` 是行内改动区间（字节偏移；见 `DiffLine::inline_old`）。
+  ///
+  /// `real` = 这一行**是否承载真实内容**（`@@` 分隔行与对齐填充行都是 `false`）。
+  ///
+  /// 为何必须是显式参数而不是“行号非零”:行号与“是不是内容”是两件事——
+  /// 空白文本对比时填充行也要有行号（否则右栏数字断断续续，看着像错），
+  /// 而它**仍然不是内容**：`logical_text()` 靠这一位筛掉造出来的行，
+  /// 拿显示文本重算差异时若带进填充行，整篇会被比成“全改了”。
   static void begin_row(Side& side, std::size_t number, CodeEditor::LineMark mark,
                         std::string_view text, bool gutter_bar = false,
-                        std::vector<std::pair<std::size_t, std::size_t>> inline_ranges = {});
+                        std::vector<std::pair<std::size_t, std::size_t>> inline_ranges = {},
+                        bool real = true);
   /// 把重建结果推给两侧编辑器（文本 + 装饰 + 只读位）。
   void push_to_editors();
-  /// 该侧该行是否被「禁用」（不出现）。
-  [[nodiscard]] static auto is_disabled(const std::vector<std::size_t>& list, std::size_t number)
-      -> bool;
-  [[nodiscard]] auto step_hunk(int delta) -> std::size_t;
+  /// 行高是否真的量出来了（`scroll_to_line` 能不能算出非零偏移）。
+  ///
+  /// 为何不能只看 `bounds().height > 0`：那是**本组件**的矩形，它非零不代表内部
+  /// 编辑器已经把行高算出来了（还没 measure/arrange 过时行高缓存是 0）。
+  [[nodiscard]] auto line_height_ready() const -> bool;
+  [[nodiscard]] static auto is_disabled(const std::vector<std::size_t>& list,
+                                       std::size_t number) -> bool;
+  /// 切行（唯一口径：去掉行尾 `\r`；末尾无换行也算一行；空文本是一行空行）。
+  static auto split_lines_of(std::string_view text) -> std::vector<std::string_view>;  [[nodiscard]] auto step_hunk(int delta) -> std::size_t;
   /// 滚动同步（避免互相唤醒：用自己的挂起标记）。
   void sync_scroll_from(CodeEditor& source);
   [[nodiscard]] static auto join_numbers(const std::vector<std::size_t>& values) -> std::string;
@@ -234,29 +283,38 @@ class DiffView : public Element {
       -> std::optional<std::vector<std::size_t>>;
 
   text::FileDiff diff_{};
+  /// 整文件模式的两侧全文（空 = 差异块模式；见 `set_full_texts`）。
+  std::string full_old_{};
+  std::string full_new_{};
+  /// 整文件模式的路径（只用于摘要展示；空 = 不显示文件名）。
+  std::string full_path_{};
+  bool full_file_{false};
+  /// 整文件模式是否给对齐填充行编号（见 `set_full_texts` 的 `keep_numbers`）。
+  bool keep_numbers_{false};
+  /// 是否画 `@@` 分隔条（见 `set_show_hunk_separators`）。
+  bool show_separators_{true};
+  /// 是否画顶部摘要带（见 `set_show_header`）。
+  bool show_header_{true};
   DiffLayout layout_{DiffLayout::SideBySide};
   bool show_line_numbers_{true};
   bool read_only_{true};
+  /// “待执行的滚动到某块”（行高未就绪时置位，`arrange` 消费）。
+  std::size_t pending_scroll_hunk_{static_cast<std::size_t>(-1)};
   /// 左栏是否允许编辑（默认否；见 `set_read_only`）。
   bool allow_left_edit_{false};
   float font_size_{0.0f};
+  /// 去重的禁用行集合（两侧各自的 1 起行号；见 `set_disabled_lines`）。
   std::vector<std::size_t> disabled_old_{};
   std::vector<std::size_t> disabled_new_{};
 
   Side old_side_{};
   Side new_side_{};
-  std::size_t current_hunk_{kNoHunk};
-
-  /// 逐行暂存模式开关（见 `set_staging_mode` 的说明）。
-  bool staging_mode_{false};
-  // 身份映射表已下沉到 `Side::checkbox_targets`（2026-10-18）：两栏各有自己的表，
-  // 因为它们各自的显示行空间不同（右栏有为对齐而补的填充行）。
-  /// 已选中的 `(hunk, line)` 对，**保持插入顺序**（补丁里的行序靠它稳定）。
+  /// 上一次真的推给编辑器的两份 `real` 表（保留光标用的锚点）。
   ///
-  /// 为何用有序 vector 而不是 `set`：`build_partial_patch` 按给定顺序拼补丁，
-  /// 而无序容器的遍历序在不同实现/不同容量下会变——那会让同一份选择生成两份
-  /// 文本不同的补丁（"看着一样、实际不一样"，最难查的那类）。
-  std::vector<std::pair<std::size_t, std::size_t>> selected_{};
+  /// 为何要单独存一份：`old_side_`/`new_side_` 在 `rebuild()` 里刚被重建，
+  /// 而“编辑器里现在那份文本对应的 `real` 表”是**上一轮**的——两份不是同一个东西。
+  std::vector<char> pushed_real_left_{};
+  std::vector<char> pushed_real_right_{};  std::size_t current_hunk_{kNoHunk};
 
   CodeEditor* left_{nullptr};
   CodeEditor* right_{nullptr};

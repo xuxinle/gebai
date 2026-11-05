@@ -37,21 +37,15 @@ DiffView::DiffView() = default;
 DiffView::~DiffView() = default;
 
 void DiffView::set_diff(const text::FileDiff& diff) {
-  // **内容真的变了才处理**（实测缺陷）：声明式宿主每帧都调 `set_diff`，
-  // 而旧实现无条件清空 `selected_`——于是勾选行一旦触发重组（例如按钮
-  // enabled 跟着选中数变）就被自己抹掉了，用户看到“勾了又没勾”。
-  // 比较成本可忽（差异结构 + 行文本），而“以为没变”会让视图停在旧内容上，
-  // 所以只在相等时早退，不省略比较。
+  // **内容真的变了才处理**：声明式宿主每帧都调 `set_diff`，而无条件重建会把
+  // 两栏的滚动位置与光标当场抹掉（用户在阅读，画面却自己跳回开头）。
+  // 比较成本可忽（差异结构 + 行文本），而“以为没变”会让视图停在旧内容上。
   if (diff_ == diff) return;
   diff_ = diff;
   current_hunk_ = diff_.hunks.empty() ? kNoHunk : 0;
-  // ⚠ **换了 diff 必须清空选择**：`selected_` 存的是 `(hunk, line)` **下标**，
-  // 而新 diff 的同一下标指向的是**另一行**。不清的话用户会看到"我明明选的是
-  // 第 3 行的新增，怎么补丁里删的是别处"——这是下标当身份用的经典陷阱。
-  if (!selected_.empty()) {
-    selected_.clear();
-    if (on_selection_changed) on_selection_changed();
-  }
+  // ⚠ **不在这里置“首次定位”**：`set_diff` 也会被“右栏编辑后自动重算”调到，
+  // 而那时把视口拽回第一处等于：用户正在打第 200 行，画面每 180ms 跳回第 1 行。
+  // “打开就跳第一处”由宿主在**真的打开**时显式调 `request_focus_first_hunk()`。
   rebuild();
   push_to_editors();
   mark_layout_dirty();
@@ -59,6 +53,38 @@ void DiffView::set_diff(const text::FileDiff& diff) {
 
 void DiffView::set_texts(std::string_view old_text, std::string_view new_text) {
   set_diff(text::make_file_diff(old_text, new_text));
+}
+
+void DiffView::set_full_texts(std::string old_full, std::string new_full, std::string path,
+                              bool keep_numbers) {
+  // 两侧全文（含路径）一致 ⇒ 无变化（声明式每帧都会调，不能无条件重建）。
+  if (full_file_ && full_old_ == old_full && full_new_ == new_full && full_path_ == path &&
+      keep_numbers_ == keep_numbers) {
+    return;
+  }
+  full_file_ = true;
+  keep_numbers_ = keep_numbers;
+  full_old_ = std::move(old_full);
+  full_new_ = std::move(new_full);
+  full_path_ = std::move(path);
+  // 差异结构从**这两段全文**现算：整文件模式下的“新旧”只能是它们自己，
+  // 不能吃宿主的 `diff_`（那个可能来自另一对文本，例如暂存区↔工作区）。
+  diff_ = text::make_file_diff(full_old_, full_new_);
+  // 路径只用于摘要展示（`summary()` 优先读 `diff_` 的路径，这里补上）。
+  diff_.old_path = full_path_;
+  diff_.new_path = full_path_;
+  current_hunk_ = diff_.hunks.empty() ? kNoHunk : 0;
+  rebuild();
+  push_to_editors();
+  // **重算后重新落实“该停在哪一块”**：`push_to_editors` 会把新文本推给编辑器，
+  // 而两栏文本变了就意味着滚动位置得重新算（`replace_text_keep_state` 保留的是
+  // 旧文本的滚动——切文件时那个值属于另一个文件，必须丢掉）。
+  //
+  // 为何不能只靠 `arrange` 里的消费：`set_full_texts` 之后宿主会调
+  // `request_focus_first_hunk()`，那时 `bounds_` 可能已是旧值 → 立即滚会算出 0。
+  // 统一在这里把待办与当前块重新对齐（`arrange` 里只负责真正滚）。
+  if (!diff_.hunks.empty()) pending_scroll_hunk_ = current_hunk_;
+  mark_layout_dirty();
 }
 
 void DiffView::clear() {
@@ -74,6 +100,10 @@ void DiffView::set_layout(DiffLayout layout) {
   layout_ = layout;
   rebuild();
   push_to_editors();
+  // 内联模式下右栏隐藏 → 它不该可写（否则用键盘 Tab 能聚焦到一个看不见的编辑器）。
+  if (right_ != nullptr) {
+    right_->set_read_only(read_only_ || layout_ != DiffLayout::SideBySide);
+  }
   mark_layout_dirty();
 }
 
@@ -101,9 +131,11 @@ void DiffView::set_disabled_lines(std::vector<std::size_t> old_lines,
 }
 
 void DiffView::set_read_only(bool value) {
+  if (read_only_ == value) return;
   read_only_ = value;
-  if (left_ != nullptr) left_->set_read_only(value);
-  if (right_ != nullptr) right_->set_read_only(true);
+  // 具体到每一栏的只读位由 `push_to_editors` 统一算（左栏看 `allow_left_edit_`，
+  // 右栏看并列/内联）——这里不另写一套，以免两处口径分叉（刚刚就分叉过）。
+  push_to_editors();
 }
 
 void DiffView::set_font_size(float size) {
@@ -146,27 +178,238 @@ void DiffView::rebuild() {
   separator_rows_.clear();
   if (layout_ == DiffLayout::Unified) {
     rebuild_unified();
+  } else if (full_file_) {
+    rebuild_side_by_side_full();
   } else {
     rebuild_side_by_side();
   }
 }
 
+void DiffView::rebuild_side_by_side_full() {
+  // 整文件并列：**先按行切成两份表**，再逐行推进。
+  //
+  // 算法与差异块模式同构（块内仍用 `build_rows` 配对），差别只在“块与块之间”：
+  // 差异块模式直接跳到下一块（中间的行不显示），而整文件模式要**把中间的行补上**——
+  // 那正是“编辑器与对比一体”的意思：看到的是整份文件，改动只是其中的标记。
+  const auto split_lines = [](const std::string& text) {
+    std::vector<std::string_view> out;
+    std::size_t begin = 0;
+    const auto push_trimmed = [&](std::size_t from, std::size_t to) {
+      // **去掉行尾 `\r`**：CRLF 文件里每一行都带它，而 `text::diff_hunks` 比的是
+      // 去掉后的语义行——两边口径不一致时，块内的行显示干净、块间的上下文行带着
+      // 不可见的 `\r`，自动对比就会把它们判成改动（实测：整篇一片红）。
+      while (to > from && (text[to - 1] == '\r' || text[to - 1] == '\n')) --to;
+      out.push_back(std::string_view(text).substr(from, to - from));
+    };
+    for (std::size_t index = 0; index < text.size(); ++index) {
+      if (text[index] == '\n') {
+        push_trimmed(begin, index);
+        begin = index + 1;
+      }
+    }
+    // 末尾没有换行的最后一段也是内容；而**空文本**不该多出一行空行。
+    if (begin < text.size() || text.empty()) push_trimmed(begin, text.size());
+    return out;
+  };
+  const std::vector<std::string_view> old_lines = split_lines(full_old_);
+  const std::vector<std::string_view> new_lines = split_lines(full_new_);
+
+  std::size_t old_cursor = 0;   // 下一个未消费的旧侧行（0 起）
+  std::size_t new_cursor = 0;   // 下一个未消费的新侧行
+
+  const auto append_context = [&](std::size_t old_upto, std::size_t new_upto) {
+    // 块前纯上下文：两侧行号同步递进（差异算法保证这两段行数一致）。
+    while (old_cursor < old_upto && new_cursor < new_upto) {
+      begin_row(old_side_, old_cursor + 1, CodeEditor::LineMark::None, old_lines[old_cursor],
+                /*gutter_bar=*/false, {}, /*real=*/true);
+      begin_row(new_side_, new_cursor + 1, CodeEditor::LineMark::None, new_lines[new_cursor],
+                /*gutter_bar=*/false, {}, /*real=*/true);
+      ++old_cursor;
+      ++new_cursor;
+    }
+  };
+
+  for (std::size_t h = 0; h < diff_.hunks.size(); ++h) {
+    const text::DiffHunk& hunk = diff_.hunks[h];
+    // `old_start/new_start` 是 1 起；块内部的上下文行也算在块里，
+    // 所以块**实际占用**的起点要按 `context` 回退——不过 `diff_hunks` 的
+    // `old_start` 已经是“含上下文的第一行”（统一 diff 口径），直接用即可。
+    const std::size_t old_begin = hunk.old_count == 0 ? hunk.old_start : hunk.old_start - 1;
+    const std::size_t new_begin = hunk.new_count == 0 ? hunk.new_start : hunk.new_start - 1;
+    append_context(std::min(old_begin, old_lines.size()), std::min(new_begin, new_lines.size()));
+
+    // `hunk_rows` **总是**记（它是导航与 `current_hunk_line` 的依据，与画不画分隔条无关）。
+    old_side_.hunk_rows.push_back(old_side_.lines + 1);
+    new_side_.hunk_rows.push_back(new_side_.lines + 1);
+    if (show_separators_) {
+      separator_rows_.push_back(old_side_.lines + 1);
+      const std::string header =
+          std::format("@@ -{},{} +{},{} @@{}", hunk.old_start, hunk.old_count, hunk.new_start,
+                      hunk.new_count, hunk.section.empty() ? std::string{} : " " + hunk.section);
+      begin_row(old_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, header,
+                  /*gutter_bar=*/false, {}, /*real=*/false);
+      begin_row(new_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, {},
+                  /*gutter_bar=*/false, {}, /*real=*/false);
+    }
+
+    const std::vector<text::DiffRow> rows = text::build_rows(hunk, h);
+    for (const text::DiffRow& row : rows) {
+      {
+        const bool present = row.left >= 0;
+        const text::DiffLine* line =
+            present ? &hunk.lines[static_cast<std::size_t>(row.left)] : nullptr;
+        const bool show = line != nullptr;
+        CodeEditor::LineMark mark = CodeEditor::LineMark::Filler;
+        if (show) {
+          mark = line->kind == text::DiffLineKind::Removed ? CodeEditor::LineMark::Removed
+                                                          : CodeEditor::LineMark::None;
+        }
+        begin_row(old_side_, show ? line->old_line : (keep_numbers_ ? old_cursor + 1 : 0), mark,
+                  show ? line->text : std::string_view{}, false,
+                  show ? line->inline_old : std::vector<std::pair<std::size_t, std::size_t>>{},
+                  /*real=*/show);
+        if (show) old_cursor = std::max(old_cursor, static_cast<std::size_t>(line->old_line));
+      }
+      {
+        const bool present = row.right >= 0;
+        const text::DiffLine* line =
+            present ? &hunk.lines[static_cast<std::size_t>(row.right)] : nullptr;
+        const bool show = line != nullptr;
+        CodeEditor::LineMark mark = CodeEditor::LineMark::Filler;
+        if (show) {
+          mark = line->kind == text::DiffLineKind::Added ? CodeEditor::LineMark::Added
+                                                        : CodeEditor::LineMark::None;
+        }
+        begin_row(new_side_, show ? line->new_line : (keep_numbers_ ? new_cursor + 1 : 0), mark,
+                  show ? line->text : std::string_view{}, false,
+                  show ? line->inline_new : std::vector<std::pair<std::size_t, std::size_t>>{},
+                  /*real=*/show);
+        if (show) new_cursor = std::max(new_cursor, static_cast<std::size_t>(line->new_line));
+      }
+    }
+  }
+  // 末尾剩余（最后一个块之后的行）。
+  append_context(old_lines.size(), new_lines.size());
+}
+
+auto DiffView::split_lines_of(std::string_view text) -> std::vector<std::string_view> {
+  // 切行的一个口径：去掉行尾 `\r`。
+  //
+  // CRLF 文件里每一行都带它，而 `diff_hunks` 比的是去掉后的语义行——
+  // 两边口径不一致时，块内的行看着干净、块间的上下文行带着不可见的 `\r`，
+  // 自动对比就会把它们判成改动（实测：整篇一片红）。
+  std::vector<std::string_view> out;
+  std::size_t begin = 0;
+  const auto push = [&](std::size_t from, std::size_t to) {
+    while (to > from && (text[to - 1] == '\r' || text[to - 1] == '\n')) --to;
+    out.push_back(text.substr(from, to - from));
+  };
+  for (std::size_t index = 0; index < text.size(); ++index) {
+    if (text[index] == '\n') {
+      push(begin, index);
+      begin = index + 1;
+    }
+  }
+  // 末尾没有换行的最后一段也是内容；而**空文本**不该多出一行空行。
+  if (begin < text.size() || text.empty()) push(begin, text.size());
+  return out;
+}
+
+auto DiffView::logical_text(bool new_side) const -> std::string {
+  const Side& side = new_side ? new_side_ : old_side_;
+  // 从**当前编辑器里的文本**取行：它才是用户真的在编辑的那份（含新键入的行）。
+  //
+  // 为何不用 `side.text`：那是**上一次重建**的快照——用户刚打的字不在里面，
+  // 自动对比会永远比到旧内容（实测：“改了但加法数不变”）。
+  const CodeEditor* editor = new_side ? right_ : left_;
+  const std::string& current = editor != nullptr ? editor->text() : side.text;
+
+  // —— 没动过：快照与当前文本逐字节相同 ⇒ `real` 表直接逐行对应 ——
+  //
+  // 这是**唯一精确**的路径：填充行与真实行一一对上是重建时就知道的事实。
+  if (current == side.text) {
+    std::string out;
+    std::size_t begin = 0;
+    std::size_t row = 0;
+    const auto append = [&](std::size_t from, std::size_t to) {
+      if (row < side.real.size() && side.real[row] == 0) {
+        ++row;
+        return;
+      }
+      if (!out.empty()) out.push_back('\n');
+      while (to > from && (current[to - 1] == '\r' || current[to - 1] == '\n')) --to;
+      out.append(current, from, to - from);
+      ++row;
+    };
+    for (std::size_t index = 0; index < current.size(); ++index) {
+      if (current[index] == '\n') {
+        append(begin, index);
+        begin = index + 1;
+      }
+    }
+    append(begin, current.size());
+    return out;
+  }
+
+  // —— 动过了：按行级差异把当前行**映射回快照行** ——
+  //
+  // 为何不能继续按下标筛：`real` 表的行下标属于**快照**，而用户一按回车、
+  // 或用控制通道整体重设文本，行数就变了——从那一行起全部错位：
+  // 实测右栏只剩最后一行（前四行被当成填充行丢掉了），左栏则“四行全删”。
+  //
+  // 映射规则（与统一 diff 同构）：
+  //  · 两侧保留的行（Context）→ 与快照一一对，沿用它的 `real` 位；
+  //  · 只在新侧出现的行（Added）→ **用户新写的**，一律算真实内容；
+  //  · 只在快照侧出现的行（Removed）→ 快照行没了，与当前行无关，跳过。
+  const std::vector<std::string_view> snapshot = split_lines_of(side.text);
+  const std::vector<std::string_view> lines = split_lines_of(current);
+  const std::vector<text::DiffHunk> hunks = text::diff_hunks(side.text, current, 0);
+  std::vector<char> keep(lines.size(), 1);   // 默认保留（未被任何块覆盖的行）
+  std::size_t snapshot_at = 0;               // 下一个未消费的快照行（0 起）
+  std::size_t line_at = 0;                   // 下一个未消费的当前行（0 起）
+  const auto map_context = [&](std::size_t snapshot_upto, std::size_t line_upto) {
+    while (snapshot_at < snapshot_upto && line_at < line_upto) {
+      // 填充行随之被筛掉；真实行保留（默认就是 1，这里只负责与快照同步前进）。
+      if (snapshot_at < side.real.size() && side.real[snapshot_at] == 0) keep[line_at] = 0;
+      ++snapshot_at;
+      ++line_at;
+    }
+  };
+  for (const text::DiffHunk& hunk : hunks) {
+    // `old_start/new_start` 是 1 起；0 行数的块（纯新增/纯删除）起点已在插入点，不再减 1。
+    const std::size_t snapshot_begin =
+        hunk.old_count == 0 ? hunk.old_start : hunk.old_start - 1;
+    const std::size_t line_begin = hunk.new_count == 0 ? hunk.new_start : hunk.new_start - 1;
+    map_context(std::min(snapshot_begin, snapshot.size()), std::min(line_begin, lines.size()));
+    for (const text::DiffLine& line : hunk.lines) {
+      if (line.kind == text::DiffLineKind::Removed) {
+        if (snapshot_at < snapshot.size()) ++snapshot_at;
+        continue;
+      }
+      // Context 行跟着快照走（快照耗完则无参照，保守地保留）；Added 行必然是真实内容。
+      if (line.kind == text::DiffLineKind::Context && snapshot_at < side.real.size() &&
+          side.real[snapshot_at] == 0) {
+        keep[line_at] = 0;
+      }
+      if (snapshot_at < snapshot.size() && line.kind == text::DiffLineKind::Context) ++snapshot_at;
+      if (line_at < lines.size()) ++line_at;
+    }
+  }
+  std::string out;
+  for (std::size_t index = 0; index < lines.size(); ++index) {
+    if (keep[index] == 0) continue;
+    if (!out.empty()) out.push_back('\n');
+    out.append(lines[index]);
+  }
+  return out;
+}
+
 void DiffView::begin_row(Side& side, std::size_t number, CodeEditor::LineMark mark,
-                         std::string_view text, bool gutter_bar,
-                         std::vector<std::pair<std::size_t, std::size_t>> inline_ranges) {
+                           std::string_view text, bool gutter_bar,
+  std::vector<std::pair<std::size_t, std::size_t>> inline_ranges, bool real) {
   CodeEditor::LineDecoration decoration;
   decoration.line = side.lines + 1;   // 装饰按**1 起**行号指定
   decoration.mark = mark;
-  if (side.staging && !side.checks.empty()) {
-    // ⚠ 取的是**最后一项**（调用方在调 `begin_row` 之前刚 push 的、属于这一行的那个），
-    // 而不是 `checks[side.lines]`。
-    //
-    // 第一版就是 `check_for(side.lines)`——那是 **off-by-one**：`side.lines` 在
-    // `begin_row` 里才自增，所以读取时下标指向"下一行"、而表里还没那一项，
-    // 于是**永远返回 None**（现象：开了逐行暂存模式却一个勾选框都看不到，
-    // 而 `staging` 状态、选择状态、补丁构造全都正常——最难查的那种）。
-    decoration.check = side.checks.back();
-  }
   decoration.number = number;
   decoration.gutter_bar = gutter_bar;
   // 行内改动区间（“这个字改了”）：数据来自 `DiffLine::inline_old`/`inline_new`。
@@ -181,17 +424,10 @@ void DiffView::begin_row(Side& side, std::size_t number, CodeEditor::LineMark ma
   // 行号表必须与显示行**逐一对应**（它是两栏对齐的权威数据，也是自动化的取样口）。
   // 把它放在这里而不是各调用点：三处调用点各推一次，早晚会漏（实测漏的正是分隔条那一行）。
   side.numbers.push_back(number);
+  side.real.push_back(real ? 1 : 0);
 }
 
 void DiffView::rebuild_side_by_side() {
-  // 勾选列**两栏都开**（2026-10-18 改：只开左栏时“新增行”根本无勾选框）。
-  old_side_.staging = staging_mode_;
-  old_side_.checks.clear();
-  old_side_.checkbox_targets.clear();
-  // 右栏也参与逐行暂存（新增行只在右侧有勾选框，见下方右侧分支的解释）。
-  new_side_.staging = staging_mode_;
-  new_side_.checks.clear();
-  new_side_.checkbox_targets.clear();
   for (std::size_t h = 0; h < diff_.hunks.size(); ++h) {
     const text::DiffHunk& hunk = diff_.hunks[h];
     const std::string header =
@@ -201,10 +437,12 @@ void DiffView::rebuild_side_by_side() {
     separator_rows_.push_back(old_side_.lines + 1);
     // 分隔条**不给行号**（`kNoNumber`）：它不属于任何一侧，不是代码行。
     // 旧写法给 0，而 0 的语义是“用本编辑器自己的行号”——截图里它就显示成了 1。
-    begin_row(old_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, header);
+    begin_row(old_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, header,
+                  /*gutter_bar=*/false, {}, /*real=*/false);
     // 右栏只占一行高度、**不重复显示 `@@`**（两栏同行本已是同一块的分隔线：
     // 右栏再画一遍会让人以为“右侧也有一段这样的内容”）。
-    begin_row(new_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, {});
+    begin_row(new_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, {},
+                  /*gutter_bar=*/false, {}, /*real=*/false);
     // `hunk_rows` 存「该块第一行」的 1 起行号（分隔条自己占它上面那一行）。
     old_side_.hunk_rows.push_back(old_side_.lines + 1);
     new_side_.hunk_rows.push_back(new_side_.lines + 1);
@@ -233,34 +471,10 @@ void DiffView::rebuild_side_by_side() {
         } else if (hidden) {
           mark = CodeEditor::LineMark::None;   // 藏起来的行：不留填充底（它是“被去掉的”）
         }
-        // 勾选态：**在推行时同步建立"显示行 → 勾选态"这一一对应表**。
-        // 放在这里而不是另起一遍遍历：显示行数由 `begin_row` 决定（含填充行），
-        // 另起一遍必然要对齐两套循环（而它们只要差一行，勾选框就会整体错位一格）。
-        if (old_side_.staging) {
-          CodeEditor::LineDecoration::Check check =
-              CodeEditor::LineDecoration::Check::None;
-          const auto line_index = static_cast<std::size_t>(row.left);
-          if (show) {
-            if (line->kind == text::DiffLineKind::Context) {
-              // 上下文行**不可选**：选了不产生任何改动（`build_partial_patch` 会丢掉），
-              // 画成灰框让"为什么点不动"一眼可见——比"点了没反应"强得多。
-              check = CodeEditor::LineDecoration::Check::Disabled;
-            } else {
-              check = is_line_selected(h, line_index)
-                          ? CodeEditor::LineDecoration::Check::Checked
-                          : CodeEditor::LineDecoration::Check::Unchecked;
-            }
-          }
-          old_side_.checks.push_back(check);
-          // 身份表与勾选态表**同批追加**（见字段说明：分家就会错位）。
-          old_side_.checkbox_targets.push_back(
-              show && line->kind != text::DiffLineKind::Context
-                  ? std::make_pair(h, line_index)
-                  : std::make_pair(kNoHunk, std::size_t{0}));
-        }
         begin_row(old_side_, show ? line->old_line : 0, mark,
                   show ? line->text : std::string_view{}, hidden,
-                  show ? line->inline_old : std::vector<std::pair<std::size_t, std::size_t>>{});
+                  show ? line->inline_old : std::vector<std::pair<std::size_t, std::size_t>>{},
+                  /*real=*/show);
       }
       // —— 右栏（新侧）——
       {
@@ -276,30 +490,10 @@ void DiffView::rebuild_side_by_side() {
         } else if (hidden) {
           mark = CodeEditor::LineMark::None;
         }
-        // 勾选列**两栏都画**（2026-10-18 修）：
-        // 只画在左栏时，用户能勾的只有“被删除的行”——
-        // “新增一行”在右侧，根本没有勾选框（实测：新增类型的改动无法逐行暂存）。
-        // 两栏共用同一份 `selected_`（身份是 `(hunk, line)`），所以勾任一侧
-        // 都会点亮整对改动，语义上就是“这一处改动”。
-        //
-        // ⚠ **无条件 push**（不管是填充行还是上下文行）：`begin_row` 取的是
-        // `checks.back()`，而 `checks` 的长度必须**等于显示行数**——少 push 一行，
-        // 从那里开始就会整体错位一格（画面上完全看不出）。
-        const bool checkable = show && line->kind != text::DiffLineKind::Context;
-        const std::size_t right_index = checkable ? static_cast<std::size_t>(row.right) : 0U;
-        CodeEditor::LineDecoration::Check right_check = CodeEditor::LineDecoration::Check::None;
-        if (checkable) {
-          right_check = is_line_selected(h, right_index)
-                            ? CodeEditor::LineDecoration::Check::Checked
-                            : CodeEditor::LineDecoration::Check::Unchecked;
-        }
-        new_side_.checks.push_back(right_check);
-        new_side_.checkbox_targets.push_back(checkable
-                                                ? std::make_pair(h, right_index)
-                                                : std::make_pair(kNoHunk, std::size_t{0}));
         begin_row(new_side_, show ? line->new_line : 0, mark,
                   show ? line->text : std::string_view{}, hidden,
-                  show ? line->inline_new : std::vector<std::pair<std::size_t, std::size_t>>{});
+                  show ? line->inline_new : std::vector<std::pair<std::size_t, std::size_t>>{},
+                  /*real=*/show);
       }
     }
   }
@@ -312,7 +506,8 @@ void DiffView::rebuild_unified() {
         std::format("@@ -{},{} +{},{} @@{}", hunk.old_start, hunk.old_count, hunk.new_start,
                     hunk.new_count, hunk.section.empty() ? std::string{} : " " + hunk.section);
     separator_rows_.push_back(old_side_.lines + 1);
-    begin_row(old_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, header);
+    begin_row(old_side_, CodeEditor::kNoNumber, CodeEditor::LineMark::None, header,
+                /*gutter_bar=*/false, {}, /*real=*/false);
     old_side_.hunk_rows.push_back(old_side_.lines + 1);
     for (const text::DiffLine& line : hunk.lines) {
       const bool hidden = line.kind == text::DiffLineKind::Removed
@@ -327,56 +522,75 @@ void DiffView::rebuild_unified() {
                                                         ? CodeEditor::LineMark::Removed
                                                         : CodeEditor::LineMark::None);
       begin_row(old_side_, number, mark, line.text, mark != CodeEditor::LineMark::None,
-                is_added ? line.inline_new : line.inline_old);
+                is_added ? line.inline_new : line.inline_old, /*real=*/true);
     }
   }
 }
 
 void DiffView::push_to_editors() {
   const bool side_by_side = layout_ == DiffLayout::SideBySide;
+  // 左栏可写的判据只算一次（两处都用）：内联模式左栏是**唯一**那一栏，它必须可写。
+  const bool left_writable = allow_left_edit_;
   if (left_ != nullptr) {
     left_->set_language("diff");
     left_->set_show_line_numbers(show_line_numbers_);
-    left_->set_read_only(read_only_ || !allow_left_edit_);
-    left_->set_text(old_side_.text);
-    left_->set_line_decorations(old_side_.marks);
-    // 勾选框被点 → 反查 `(hunk, line)` 并切换。
+    left_->set_read_only(read_only_ || !left_writable);
+    if (font_size_ > 0.0f) left_->set_font_size(font_size_);
+    // 滚动同步：两栏必须一起滚，且不能互相唤醒（见 `sync_scroll_from`）。
+    // 接在这里而不是 `arrange`：后者是布局，重复接线在切布局时会把回调覆盖成同一个。
+    left_->on_scroll = [this](float, float) { sync_scroll_from(*left_); };
+    // **保留光标与滚动**：重算会把整栏文本重新合成（带对齐填充行），
+    // 而用户正在改的地方必须待在眼皮底下。
     //
-    // 反查靠 `old_side_.checks`：它的第 i 项对应第 i 个显示行，而"第 i 个显示行属于
-    // 哪个 hunk 的哪一行"需要**另建一张表**——`checks` 只记了勾选态，没记身份。
-    // 这张 `old_side_.checkbox_targets` 与 `checks` 在同一次遍历里同步建立（见
-    // `rebuild_side_by_side`），所以两者的下标空间天然一致——不会出现
-    // "勾选框与身份错位一格"。
-    if (staging_mode_) {
-      left_->on_checkbox_toggle = [this](std::size_t row) {
-        if (row >= old_side_.checkbox_targets.size()) return;
-        const auto [hunk, line] = old_side_.checkbox_targets[row];
-        if (hunk == kNoHunk) return;   // 上下文行/填充行：不可选（画的就是灰框）
-        (void)toggle_line(hunk, line);
+    // ⚠ 这里用 `replace_text_keep_state` 而不是 `set_text`：后者语义是“换了一份文档”
+    // （光标归 0、滚动回顶、撤销栈清空）——逐键重算时就是“每敲一个字光标跳回行首”。
+    //
+    // ⚠ 必须把**两份 `real` 表**一起交上去：填充行的数量随重算变化，
+    // 只看显示行号会把光标定位到别的行上（实测：跑到当前行倒数第二个字符之后）。
+    left_->replace_text_keep_state(old_side_.text, pushed_real_left_, old_side_.real);
+    pushed_real_left_ = old_side_.real;
+    left_->set_line_decorations(old_side_.marks);
+    // 左栏也可写时（空白文本对比：两侧都是用户自己的内容）同样把“变了”交给宿主。
+    // 传**逻辑文本**：对齐填充行不是内容，带出去会把整篇当成改动。
+    if (left_writable) {
+      left_->on_change = [this](std::string_view /*text*/) {
+        if (on_left_text_edit) on_left_text_edit(logical_text(false));
       };
     } else {
-      left_->on_checkbox_toggle = nullptr;
+      left_->on_change = nullptr;
     }
   }
   if (right_ != nullptr) {
     // 内联模式右栏不参与：给它空文本（它此时也 `set_visible(false)`）。
     right_->set_language("diff");
     right_->set_show_line_numbers(show_line_numbers_);
-    right_->set_read_only(true);
-    right_->set_text(side_by_side ? new_side_.text : std::string{});
+    // 可编辑的判据：**并列模式**且非只读。内联模式只有左栏在画，右栏不可见也不该可写。
+    //
+    // ⚠ 两侧都可写场景（空白文本对比）不能靠 `!allow_left_edit_` 反推：
+    // 那个位只回答“左栏能不能写”，与右栏无关（当初就是在这里把右栏写死的）。
+    right_->set_read_only(read_only_ || !side_by_side);
+    if (font_size_ > 0.0f) right_->set_font_size(font_size_);
+    right_->on_scroll = [this](float, float) { sync_scroll_from(*right_); };
+    // 同左栏：保留光标与滚动（两份 `real` 表都交，见左栏那段说明）。
+    // 内联模式下右栏被清空，它不可见也不可写，位置无所谓。
+    right_->replace_text_keep_state(side_by_side ? new_side_.text : std::string{},
+                                    pushed_real_right_,
+                                    side_by_side ? new_side_.real : std::vector<char>{});
+    pushed_real_right_ = side_by_side ? new_side_.real : std::vector<char>{};
     right_->set_line_decorations(side_by_side ? new_side_.marks
                                               : std::vector<CodeEditor::LineDecoration>{});
-    // 右栏的勾选回调（2026-10-18 加）：新增行只在右侧有勾选框，
-    // 不装回调的话“点它没反应”（而左栏的勾选框是好的——最难查的那种半损坏）。
-    if (staging_mode_ && side_by_side) {
-      right_->on_checkbox_toggle = [this](std::size_t row) {
-        if (row >= new_side_.checkbox_targets.size()) return;
-        const auto [hunk, line] = new_side_.checkbox_targets[row];
-        if (hunk == kNoHunk) return;   // 上下文行/填充行：不可选
-        (void)toggle_line(hunk, line);
+    // **右栏可编辑**（只读关闭时）：它是「当前内容」那一侧。编辑后交给宿主重算差异
+    //（宿主才知道“跟什么比”）。
+    //
+    // ⚠ 传的是**本组件自己算的逻辑文本**（剔掉了对齐填充行与 `@@` 分隔行），
+    // 而不是 `right_->text()`：后者带着那些造出来的行，拿它去比会把整篇算成改动
+    //（实测：自动对比一次之后 +39 −283，画面上一片红——那正是这个坑）。
+    if (!read_only_) {
+      right_->on_change = [this](std::string_view /*text*/) {
+        if (on_text_edit) on_text_edit(logical_text(true));
       };
     } else {
-      right_->on_checkbox_toggle = nullptr;
+      right_->on_change = nullptr;
     }
   }
 }
@@ -404,18 +618,41 @@ auto DiffView::step_hunk(int delta) -> std::size_t {
 auto DiffView::goto_hunk(std::size_t index) -> bool {
   if (index >= diff_.hunks.size()) return false;
   current_hunk_ = index;
-  // 导航要**先有行高**：`scroll_to_line` 依赖行高缓存（首次绘制/排布前为 0）。
-  if (left_ != nullptr) {
-    const std::size_t row = hunk_first_line(index, false);
-    if (row != 0) left_->scroll_to_line(row);
+  // 导航要**先能算出非零偏移**。
+  //
+  // ⚠ `scroll_to_line` 内部会 `min(…, max_scroll_y())`，而 `max_scroll_y()` 依赖
+  // **本组件当前排布**（`bounds_.height`）——构建期调本函数时它还是 0，
+  // 于是 `scroll_y_` 被夹回 0：**静默不滚**（用户：“没有自动跳到第一处差异”）。
+  // 行高就绪也不够：两个条件都要（行高决定「滚到哪里」，视口高决定「最多滚多少」）。
+  if (!line_height_ready() || bounds_.height <= 0.0f) {
+    pending_scroll_hunk_ = index;
+    mark_dirty();
+    return true;
   }
-  if (layout_ == DiffLayout::SideBySide && right_ != nullptr) {
-    const std::size_t row = hunk_first_line(index, true);
-    if (row != 0) right_->scroll_to_line(row);
-  }
+  const auto scroll_to = [this, index](CodeEditor& editor, bool new_side) {
+    const std::size_t row = hunk_first_line(index, new_side);
+    if (row != 0) editor.scroll_to_line(row);
+  };
+  if (left_ != nullptr) scroll_to(*left_, false);
+  if (layout_ == DiffLayout::SideBySide && right_ != nullptr) scroll_to(*right_, true);
   if (on_hunk_change) on_hunk_change(index);
   mark_dirty();
   return true;
+}
+
+/// 行高是否真的量出来了（`scroll_to_line` 能不能算出非零偏移）。
+///
+/// 为何不能只看 `bounds().height > 0`：那是**本组件**的矩形，它非零不代表内部编辑器
+/// 已经把行高算出来了（还没 `measure`/`arrange` 过时行高缓存是 0）。
+auto DiffView::line_height_ready() const -> bool {
+  if (left_ == nullptr) return false;
+  const auto value = left_->get_property("line_height");
+  if (!value.has_value()) return false;
+  try {
+    return std::stof(*value) > 0.0f;
+  } catch (...) {
+    return false;
+  }
 }
 
 void DiffView::sync_scroll_from(CodeEditor& source) {
@@ -441,7 +678,8 @@ void DiffView::apply_theme(const Theme& theme) {
 
 void DiffView::measure(const RenderContext& context, const Constraints& constraints) {
   // 差异视图**不收缩**：它要吃掉给它的全部高度（内容可滚动，自然高度没有意义）。
-  const float height = constraints.max_height < kUnbounded ? constraints.max_height : kHeaderHeight;
+  const float header = show_header_ ? kHeaderHeight : 0.0f;
+  const float height = constraints.max_height < kUnbounded ? constraints.max_height : header;
   measured_ = math::Size{constraints.max_width, height};
   (void)context;
 }
@@ -449,38 +687,30 @@ void DiffView::measure(const RenderContext& context, const Constraints& constrai
 void DiffView::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
   const bool side_by_side = layout_ == DiffLayout::SideBySide;
-  const float body_y = rect.y + kHeaderHeight;
-  const float body_height = std::max(0.0f, rect.height - kHeaderHeight);
+  const float header_height = show_header_ ? kHeaderHeight : 0.0f;
+  const float body_y = rect.y + header_height;
+  const float body_height = std::max(0.0f, rect.height - header_height);
   const float half = side_by_side ? std::floor(rect.width * 0.5f) : rect.width;
 
   if (left_ == nullptr) {
     auto owned = std::make_unique<CodeEditor>();
     left_ = owned.get();
     left_->set_id("diff-left");
-    left_->set_show_line_numbers(show_line_numbers_);
-    left_->set_read_only(read_only_ || !allow_left_edit_);
-    left_->set_language("diff");
-    if (font_size_ > 0.0f) left_->set_font_size(font_size_);
-    left_->on_scroll = [this](float, float) { sync_scroll_from(*left_); };
-    left_->set_text(old_side_.text);
-    left_->set_line_decorations(old_side_.marks);
     add_child(std::move(owned));
   }
   if (side_by_side && right_ == nullptr) {
     auto owned = std::make_unique<CodeEditor>();
     right_ = owned.get();
     right_->set_id("diff-right");
-    right_->set_show_line_numbers(show_line_numbers_);
-    // 右栏**恒只读**：两侧都可写会让"同一份内容有两个真值源"（改哪边算改？）。
-    // 将来要支持"接受左侧"这类操作，也应经命令回流到文档，而不是让两栏各写一份。
-    right_->set_read_only(true);
-    right_->set_language("diff");
-    if (font_size_ > 0.0f) right_->set_font_size(font_size_);
-    right_->on_scroll = [this](float, float) { sync_scroll_from(*right_); };
-    right_->set_text(new_side_.text);
-    right_->set_line_decorations(new_side_.marks);
     add_child(std::move(owned));
   }
+  // 新建后统一走 `push_to_editors` 把文本/装饰/只读位/回调**一次配齐**。
+  //
+  // ⚠ 以前在 `arrange` 里自己写了一份（`set_read_only(true)` 写死等），
+  // 与 `push_to_editors` 的口径分叉——后果是右栏永远是只读的：
+  // 组件自己的 `editable` 属性报“可编辑”，实际那个编辑器却拒绕所有输入。
+  // 两处都设“同一个量”就是这类缺陷的温床，所以只留一处。
+  push_to_editors();
   if (right_ != nullptr) {
     // 切模式只翻可见位（子元素与其状态保留，切回来时滚动位置还在）。
     right_->set_visible(side_by_side);
@@ -516,6 +746,30 @@ void DiffView::arrange(const RenderContext& context, math::Rect rect) {
     }
   };
   const float line_height = line_height_of(*left_);
+
+  // —— 首次定位到第一个差异（待办，见 `set_auto_focus_first_hunk`）——
+  //
+  // 必须在这里（行高已经量出来之后）：`scroll_to_line` 乘的就是它。
+  // 一次性：消费后清标记，否则用户手动滚开之后每次重排都会被拉回去。
+  //
+  // ⚠ 不能 `return` 早退：下面要按**新的** `scroll_y` 重算分隔条矩形，
+  // 早退会让分隔条停在旧位置的矩形上（看着像“分隔条与内容错开一屏”）。
+  if (pending_scroll_hunk_ != kNoHunk && line_height > 0.0f &&
+      pending_scroll_hunk_ < diff_.hunks.size()) {
+    const std::size_t target = pending_scroll_hunk_;
+    pending_scroll_hunk_ = kNoHunk;
+    current_hunk_ = target;
+    if (left_ != nullptr) {
+      const std::size_t row = hunk_first_line(target, false);
+      if (row != 0) left_->scroll_to_line(row);
+    }
+    if (side_by_side && right_ != nullptr) {
+      const std::size_t row = hunk_first_line(target, true);
+      if (row != 0) right_->scroll_to_line(row);
+    }
+    if (on_hunk_change) on_hunk_change(target);
+  }
+
   separator_rects_.clear();
   separator_rects_.reserve(separator_rows_.size());
   if (line_height > 0.0f) {
@@ -536,15 +790,17 @@ auto DiffView::separator_rect(std::size_t index) const -> math::Rect {
 
 void DiffView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const Palette& colors = context.theme.colors();
-  canvas.fill_rect(math::Rect{bounds_.x, bounds_.y, bounds_.width, kHeaderHeight},
-                   raster::Paint::solid(colors.surface_alt), 0.0f);
   const TextPort* port = context.text;
-  if (port != nullptr) {
-    const float size = context.theme.metrics().font_sm;
-    const std::string label = summary();
-    const float text_y = bounds_.y + layout_line(*port, label, size, kHeaderHeight).origin_y;
-    port->draw(canvas, label, math::Point{bounds_.x + 8.0f, text_y}, size,
-               diff_.binary ? colors.text_muted : colors.text, text::FontRole::Proportional);
+  if (show_header_) {
+    canvas.fill_rect(math::Rect{bounds_.x, bounds_.y, bounds_.width, kHeaderHeight},
+                     raster::Paint::solid(colors.surface_alt), 0.0f);
+    if (port != nullptr) {
+      const float size = context.theme.metrics().font_sm;
+      const std::string label = summary();
+      const float text_y = bounds_.y + layout_line(*port, label, size, kHeaderHeight).origin_y;
+      port->draw(canvas, label, math::Point{bounds_.x + 8.0f, text_y}, size,
+                 diff_.binary ? colors.text_muted : colors.text, text::FontRole::Proportional);
+    }
   }
 
   // 分隔条：`@@ … @@` 那条带子；当前所在的差异块加一道主色竖条。
@@ -580,30 +836,25 @@ auto DiffView::semantics_text() const -> std::string { return summary(); }
 
 auto DiffView::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "hunks") return std::to_string(diff_.hunks.size());
-  // —— 逐行暂存的读面 ——
-  if (name == "staging") return staging_mode_ ? "true" : "false";
-  if (name == "selected_count") return std::to_string(selected_.size());
-  if (name == "selected_lines") {
-    // `hunk,line;hunk,line`（与 `input` 参数同口径）——补丁里的行序即此顺序。
-    std::string out;
-    for (const auto& [hunk, line] : selected_) {
-      if (!out.empty()) out.push_back(';');
-      out += std::format("{},{}", hunk, line);
-    }
-    return out;
-  }
   if (name == "current_hunk") {
     return current_hunk_ == kNoHunk ? std::string("-1") : std::to_string(current_hunk_);
   }
   if (name == "additions") return std::to_string(diff_.additions);
   if (name == "deletions") return std::to_string(diff_.deletions);
   if (name == "layout") return layout_ == DiffLayout::SideBySide ? "side_by_side" : "unified";
+  // 编辑开关的**可观测面**：e2e 靠它断言“打开对比视图时右栏可改”。
+  if (name == "editable") return read_only_ ? "false" : "true";
   if (name == "binary") return diff_.binary ? "true" : "false";
   if (name == "summary") return summary();
   if (name == "old_lines") return std::to_string(old_side_.lines);
   if (name == "new_lines") return std::to_string(new_side_.lines);
   if (name == "left_text") return left_ != nullptr ? left_->text() : std::string{};
   if (name == "right_text") return right_ != nullptr ? right_->text() : std::string{};
+  // **逻辑文本**（剔掉对齐填充行与 `@@` 分隔行后的真实内容）——
+  // 自动对比的输入就是这个，所以它必须是可观测的：
+  // “自动对比把整篇都算成改了”这种缺陷，不把输入暴露出来就只能靠猜。
+  if (name == "logical_left") return logical_text(false);
+  if (name == "logical_right") return logical_text(true);
   if (name == "scroll") {
     const float y = left_ != nullptr ? left_->scroll_offset().y : 0.0f;
     return std::format("{:.1f}", static_cast<double>(y));
@@ -707,47 +958,16 @@ auto DiffView::set_property(std::string_view name, std::string_view value) -> bo
 
 auto DiffView::property_names() const -> std::vector<std::string_view> {
   return {"hunks",      "current_hunk",       "additions",  "deletions", "layout",
-          "binary",     "summary",            "old_lines",  "new_lines", "numbers_old",
+          "editable",   "binary",             "summary",    "old_lines", "new_lines",
+          "logical_left", "logical_right",
+          "numbers_old",
           "numbers_new", "left_text",         "right_text", "scroll",    "disabled_old_lines",
-          "disabled_new_lines", "current_hunk_line",
-          // 逐行暂存的读面（2026-10-18 补）：不开这个，调用方拿不到“勾了哪几行”，
-          // 也就无法断言“暂存的是不是真的那几行”。
-          "staging", "selected_count", "selected_lines"};
+          "disabled_new_lines", "current_hunk_line"};
 }
 
 auto DiffView::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "next_hunk") return next_hunk() != kNoHunk;
   if (action == "previous_hunk") return previous_hunk() != kNoHunk;
-  // —— 逐行暂存的驱动面（2026-10-18 补）——
-  //
-  // 为何必须有（实测）：勾选态原本**只能靠鼠标点勾选框**——`selected_lines()`
-  // 只有 C++ 访问器，属性面与动作面都没有入口。于是“逐行暂存”对自动化
-  // （e2e / Agent）完全不可达：能看到按钮、能开模式，却无法勾中任何一行。
-  //
-  // 参数统一用 `hunk,line`（逗号分隔，与补丁里的坐标同口径）：
-  // `toggle_line "0,1"`。`select_all` / `clear_selection` 不带参数。
-  if (action == "toggle_line" || action == "select_line" || action == "deselect_line") {
-    const std::size_t comma = argument.find(',');
-    if (comma == std::string_view::npos) return false;
-    const auto parsed_hunk = st::parse_u64(argument.substr(0, comma));
-    const auto parsed_line = st::parse_u64(argument.substr(comma + 1));
-    if (!parsed_hunk.has_value() || !parsed_line.has_value()) return false;
-    const auto hunk = static_cast<std::size_t>(*parsed_hunk);
-    const auto line = static_cast<std::size_t>(*parsed_line);
-    const bool was_selected = is_line_selected(hunk, line);
-    if (action == "select_line" && was_selected) return true;
-    if (action == "deselect_line" && !was_selected) return true;
-    (void)toggle_line(hunk, line);
-    return true;
-  }
-  if (action == "select_all") {
-    set_all_selected(true);
-    return true;
-  }
-  if (action == "clear_selection") {
-    set_all_selected(false);
-    return true;
-  }
   if (action == "goto_hunk") {
     try {
       return goto_hunk(static_cast<std::size_t>(std::stoull(std::string(argument))));
@@ -761,135 +981,6 @@ auto DiffView::invoke_action(std::string_view action, std::string_view argument)
     return true;
   }
   return false;
-}
-
-/// 选择变化后的统一收尾：**重建装饰并推给编辑器**。
-///
-/// 为何必须重建（而不只是标脏）：勾选态是 `LineDecoration::check` 的一部分，
-/// 而装饰由 `rebuild()` 生成——只标脏的话屏幕上什么都不会变（实测：点了勾选框，
-/// 状态变了、画面没变）。
-void DiffView::refresh_checkboxes() {
-
-  if (!staging_mode_) return;
-  rebuild();
-  push_to_editors();
-  mark_dirty();
-}
-
-void DiffView::set_staging_mode(bool value) {
-  if (staging_mode_ == value) return;
-  staging_mode_ = value;
-  // ⚠ **必须重建**（不只是标脏）：勾选框是**装饰**的一部分，而装饰由 `rebuild()`
-  // 生成 —— 只标脏的话 `checks` 表还是旧的（全是 `None`），于是"开了模式却看不到
-  // 勾选框"。实测踩到：像素断言显示开/关模式的画面完全一样。
-  rebuild();
-  push_to_editors();
-  // 关掉模式时**保留选择**：用户可能只是切回去看一眼差异，回来接着挑。
-  // 清空选择是"取消操作"，那该由显式的动作承担（宿主可 `set_all_selected(false)`）。
-  mark_layout_dirty();
-}
-
-auto DiffView::is_line_selected(std::size_t hunk, std::size_t line) const -> bool {
-  for (const auto& item : selected_) {
-    if (item.first == hunk && item.second == line) return true;
-  }
-  return false;
-}
-
-auto DiffView::toggle_line(std::size_t hunk, std::size_t line) -> bool {
-  // 下面的状态变更都要**重建装饰**（勾选态画在装饰里，不重建就看不到变化）。
-  if (hunk >= diff_.hunks.size()) return false;
-  if (line >= diff_.hunks[hunk].lines.size()) return false;
-  // **只允许选中"可暂存"的行**：上下文行与删除行在"暂存"这个动作里语义不同——
-  // 上下文行没改（选了不产生任何改动，`build_partial_patch` 会丢掉它）；
-  // 而删除行选中是"这次要删掉它"（合法）。所以上下文行**如实拒绝**，
-  // 而不是"选上但不生效"（那会让按钮状态与实际结果对不上）。
-  //
-  // **勾"行"实际勾的是它所属的改动区段**（2026-10-18 修，实测驱动）：
-  // 勾选列只能画在一侧（本组件画在左栏，所以能点到的是删除行），
-  // 而用户看到的是“这一行变了”——只暂存删除部分等于把文件内容**删掉**
-  // （实测：勾 `line 2` 得到的补丁是 `-line 2`，而不是改成 `line 2 CHANGED_A`）。
-  // 真实用户对“一行改”的意图是**整对**（删旧 + 加新），所以选中单位取
-  // “相邻连续改动组成的区段”（遇到上下文行断开）——与 git 的 hunk 直觉一致。
-  if (diff_.hunks[hunk].lines[line].kind == text::DiffLineKind::Context) return false;
-  // 找出该行所在区段（同 hunk 内、非 Context 的连续行）。
-  const auto& all = diff_.hunks[hunk].lines;
-  std::size_t first = line;
-  while (first > 0 && all[first - 1].kind != text::DiffLineKind::Context) --first;
-  std::size_t last = line;
-  while (last + 1 < all.size() && all[last + 1].kind != text::DiffLineKind::Context) ++last;
-  const bool already = is_line_selected(hunk, line);
-  for (std::size_t at = first; at <= last; ++at) {
-    const std::pair<std::size_t, std::size_t> key{hunk, at};
-    const auto found = std::find(selected_.begin(), selected_.end(), key);
-    if (already) {
-      if (found != selected_.end()) selected_.erase(found);
-    } else if (found == selected_.end()) {
-      // 插入到**保持 (hunk, line) 升序**的位置：补丁里的行序必须按文件顺序，
-      // 而用户点选的顺序是任意的（先点第 5 行再点第 2 行很常见）。
-      auto position = selected_.begin();
-      while (position != selected_.end() && *position < key) ++position;
-      selected_.insert(position, key);
-    }
-  }
-  refresh_checkboxes();
-  if (on_selection_changed) on_selection_changed();
-  return !already;
-}
-
-void DiffView::set_hunk_selected(std::size_t hunk, bool selected) {
-  if (hunk >= diff_.hunks.size()) return;
-  // 先从选择里摘掉该 hunk 的现有项（保持其它 hunk 的选择不动）。
-  std::vector<std::pair<std::size_t, std::size_t>> kept;
-  for (const auto& item : selected_) {
-    if (item.first != hunk) kept.push_back(item);
-  }
-  selected_ = std::move(kept);
-  if (selected) {
-    for (std::size_t line = 0; line < diff_.hunks[hunk].lines.size(); ++line) {
-      if (diff_.hunks[hunk].lines[line].kind == text::DiffLineKind::Context) continue;
-      selected_.emplace_back(hunk, line);
-    }
-    // 整块选中后要重排（上面的追加是按行序的，但插入点在同一 hunk 尾部，
-    // 而其它 hunk 的项可能排在它之后）。
-    std::sort(selected_.begin(), selected_.end());
-  }
-  refresh_checkboxes();
-  if (on_selection_changed) on_selection_changed();
-}
-
-void DiffView::set_all_selected(bool selected) {
-  selected_.clear();
-  if (selected) {
-    for (std::size_t hunk = 0; hunk < diff_.hunks.size(); ++hunk) {
-      for (std::size_t line = 0; line < diff_.hunks[hunk].lines.size(); ++line) {
-        if (diff_.hunks[hunk].lines[line].kind == text::DiffLineKind::Context) continue;
-        selected_.emplace_back(hunk, line);
-      }
-    }
-  }
-  refresh_checkboxes();
-  if (on_selection_changed) on_selection_changed();
-}
-
-auto DiffView::build_stage_patch() const -> std::string {
-  if (selected_.empty()) return {};
-  // 把 `(hunk, line)` 对按 hunk 归组——`build_partial_patch` 收的正是那个形状。
-  //
-  // 选择单位已在 `toggle_line` 里抬成"改动区段"（勾一行 = 整对改动），
-  // 所以这里直接按选中的行列出即可；无需再做扩展。
-  std::vector<std::pair<std::size_t, std::vector<std::size_t>>> grouped;
-  std::size_t cursor = 0;
-  while (cursor < selected_.size()) {
-    const std::size_t hunk = selected_[cursor].first;
-    std::vector<std::size_t> lines;
-    while (cursor < selected_.size() && selected_[cursor].first == hunk) {
-      lines.push_back(selected_[cursor].second);
-      ++cursor;
-    }
-    grouped.emplace_back(hunk, std::move(lines));
-  }
-  return text::build_partial_patch(diff_, grouped);
 }
 
 }  // namespace st::ui
