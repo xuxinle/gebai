@@ -227,9 +227,12 @@ class TextRenderer {
   /// 折行（按空格与 CJK 断点；返回各行原文区间）。
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
       -> std::vector<std::string_view>;
-  /// 截断加省略号。
+  /// 截断加省略号（保留**头部**）。
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string;
+  /// 中段省略（保留头尾两段）——路径专用（见 `TextPort::ellipsize_middle`）。
+  [[nodiscard]] auto ellipsize_middle(std::string_view utf8, float size,
+                                      float max_width) const -> std::string;
   /// 单个字符的推进宽度（用于光标定位）。
   [[nodiscard]] auto advance_of(char32_t codepoint, float size,
                                 FontRole role = FontRole::Proportional) const -> float;

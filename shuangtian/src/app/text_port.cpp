@@ -54,6 +54,11 @@ auto RendererTextPort::ellipsize(std::string_view utf8, float size, float max_wi
   return renderer_.ellipsize(utf8, size, max_width);
 }
 
+auto RendererTextPort::ellipsize_middle(std::string_view utf8, float size,
+                                       float max_width) const -> std::string {
+  return renderer_.ellipsize_middle(utf8, size, max_width);
+}
+
 auto RendererTextPort::wrap(std::string_view utf8, float size, float max_width) const
     -> std::vector<std::string_view> {
   return renderer_.wrap(utf8, size, max_width);

@@ -138,6 +138,12 @@ auto NullTextPort::ellipsize(std::string_view utf8, float size, float max_width)
   return std::string(utf8);
 }
 
+// 无字体环境没有字宽概念，中段省略与尾部省略行为一致（量宽恒 0，也就无从省略）。
+auto NullTextPort::ellipsize_middle(std::string_view utf8, float size,
+                                   float max_width) const -> std::string {
+  return ellipsize(utf8, size, max_width);
+}
+
 auto NullTextPort::wrap(std::string_view utf8, float size, float max_width) const
     -> std::vector<std::string_view> {
   (void)size;

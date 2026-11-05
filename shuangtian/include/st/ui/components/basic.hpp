@@ -248,6 +248,16 @@ class Button : public Element {
   /// 内容横向对齐（默认居中；列表行传 `Start`）。
   void set_align(Align align) noexcept { content_align_ = align; }
   [[nodiscard]] auto align() const noexcept -> Align { return content_align_; }
+  /// 超长时用**中段省略**（保留头尾）——路径/长标识专用。
+  ///
+  /// 尾部省略用在路径上会把文件名砍掉：目录 `packages/agents/src/...` 先占满宽度，
+  /// 而用户看的恰恰是文件名（实测：“目录还在、文件名没了”）。
+  void set_ellipsize_middle(bool value) noexcept {
+    if (ellipsize_middle_ == value) return;
+    ellipsize_middle_ = value;
+    mark_dirty();
+  }
+  [[nodiscard]] auto ellipsize_middle() const noexcept -> bool { return ellipsize_middle_; }
   [[nodiscard]] auto variant() const noexcept -> Variant { return variant_; }
 
   /// **图标盒径**（逻辑 px）——与 `apply_theme` 同一入口写入，供测试/宿主读取。
@@ -293,6 +303,8 @@ class Button : public Element {
   /// 内容横向对齐（**与 `style_.align_items` 区分**：那个管的是“图标与文字在
   /// 交叉轴上如何对齐”，本字段管的是“整块内容在按钮里靠哪边”）。
   Align content_align_{Align::Center};
+  /// 超长时中段省略（见 `set_ellipsize_middle`；默认尾部省略）。
+  bool ellipsize_middle_{false};
 };
 
 /// 卡片容器：`surface` 底 + 描边 + 圆角 + 阴影 + 内边距。

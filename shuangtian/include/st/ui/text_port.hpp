@@ -93,8 +93,23 @@ class TextPort {
                     math::Color color, text::FontRole role = text::FontRole::Proportional,
                     float embolden = 0.0f, bool bold = false) const = 0;
   /// 字体栈是否提供**真粗体面**（没有时调用方仍可用合成加粗补足；默认无）。
-  [[nodiscard]] virtual auto has_real_bold() const -> bool { return false; }  [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
+  [[nodiscard]] virtual auto has_real_bold() const -> bool { return false; }
+  /// 尾部省略：保留**头部**，尾端接“…”（适用于句子、标题）。
+  [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string = 0;
+  /// **中段省略**：保留头尾两段，中间接“…”——路径与长标识专用。
+  ///
+  /// 为何必须有（2026-11-05，实测代价）：变更列表的路径用尾部省略时，
+  /// 目录 `packages/agents/src/agents/shuangtian/` 先把宽度占满，
+  /// 文件名全被砍光——用户看到的是“目录还在、文件名没了”（或反过来）。
+  /// 而路径的**两端**才是有用信息：头部定位“在哪个项目/哪一层”、
+  /// 尾部才是“哪个文件”。中间那截全项目一样，省掉不影响识别。
+  ///
+  /// 默认实现退化为尾部省略（无字体环境与旧实现行为一致，零行为变化）。
+  [[nodiscard]] virtual auto ellipsize_middle(std::string_view utf8, float size,
+                                              float max_width) const -> std::string {
+    return ellipsize(utf8, size, max_width);
+  }
   [[nodiscard]] virtual auto wrap(std::string_view utf8, float size, float max_width) const
       -> std::vector<std::string_view> = 0;
   /// 按最大行数折行（超出末行以省略号收尾）。
@@ -127,6 +142,8 @@ class NullTextPort final : public TextPort {
             math::Color color, text::FontRole role = text::FontRole::Proportional,
             float embolden = 0.0f, bool bold = false) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
+      -> std::string override;
+  [[nodiscard]] auto ellipsize_middle(std::string_view utf8, float size, float max_width) const
       -> std::string override;
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
       -> std::vector<std::string_view> override;

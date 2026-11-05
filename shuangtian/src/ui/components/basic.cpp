@@ -925,7 +925,10 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   // （按钮被父容器夹窄了，但文本宽度还是它自己的量法），于是相邻面板上会多出
   // 一截看不清源头的字——实测就是侧栏 Git 变更项的路径叠到了代码上。
   const float available = std::max(0.0f, bounds_.width - icon_extent);
-  const std::string clipped = port.ellipsize(label_, font_size, available);
+  // 省略位置：默认尾部（句子/标题）；**路径与长标识**用中段（保留文件名）。
+  const std::string clipped =
+      ellipsize_middle_ ? port.ellipsize_middle(label_, font_size, available)
+                        : port.ellipsize(label_, font_size, available);
   const float text_width = port.measure_width(clipped, font_size);
   const float total = text_width + icon_extent;
   // 横向对齐：默认居中（既有界面零变化）；**列表行**用 `Start` 贴左缘。

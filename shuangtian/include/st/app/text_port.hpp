@@ -45,6 +45,8 @@ class RendererTextPort final : public ui::TextPort {
             float embolden = 0.0f, bool bold = false) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override;
+  [[nodiscard]] auto ellipsize_middle(std::string_view utf8, float size,
+                                      float max_width) const -> std::string override;
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
       -> std::vector<std::string_view> override;
   [[nodiscard]] auto wrap_limited(std::string_view utf8, float size, float max_width,

@@ -82,19 +82,14 @@ struct GitChange {
     return slash == std::string::npos ? std::string{} : path.substr(0, slash);
   }
 
-  /// 展示用的路径（含目录段，便于用户区分同名文件）。
-  /// 超长路径截断中段（保留尾部的文件名 + 前两级目录）——变更列表窄，
-  /// 完整路径放不下，而“最尾部”才是用户在对账的部分。
-  [[nodiscard]] auto display_path() const -> std::string {
-    constexpr std::size_t kMax = 46;
-    if (path.size() <= kMax) return path;
-    const std::size_t slash = path.find_last_of('/');
-    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
-    const std::string dir = slash == std::string::npos ? std::string{} : path.substr(0, slash + 1);
-    if (name.size() + 2 >= kMax) return "…/" + name;
-    const std::size_t keep = kMax - name.size() - 2;
-    return "…" + dir.substr(dir.size() > keep ? dir.size() - keep : 0) + name;
-  }
+  /// 展示用的路径（完整相对路径，**不截断**）。
+  ///
+  /// 为何不在这里截：可用宽度只有布局那一步知道（侧栏宽窄、有无行内动作钮），
+  /// 而这里硬编一个字符上限必然二者对不上——实测就是“文件名被截成
+  /// `shuangtian_tools.tes...`，而右侧还有一大片空白”。
+  /// `Button` 已经按**实际可用宽度**走 `TextPort::ellipsize`（保尾部、中间省略），
+  /// 那才是唯一对的截断点（它知道字宽，也知道这里到底剩多少像素）。
+  [[nodiscard]] auto display_path() const -> const std::string& { return path; }
 
   /// 展示用的单字母（IDEA 的状态字母：M/A/D/R/U/?）。
   [[nodiscard]] auto display_code() const noexcept -> char {

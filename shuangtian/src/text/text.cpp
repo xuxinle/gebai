@@ -1900,4 +1900,52 @@ auto TextRenderer::ellipsize(std::string_view utf8, float size, float max_width)
   return out;
 }
 
+auto TextRenderer::ellipsize_middle(std::string_view utf8, float size,
+                                   float max_width) const -> std::string {
+  if (utf8.empty()) return {};
+  if (max_width <= 0.0f || max_width >= kUnbounded) return std::string(utf8);
+  if (measure_width(utf8, size) <= max_width) return std::string(utf8);
+
+  constexpr std::string_view kEllipsis = "…";
+  const float ellipsis_width = measure_width(kEllipsis, size);
+  if (ellipsis_width > max_width) return {};
+
+  // 头/尾分配：尾部（文件名）优先。
+  //
+  // 为何尾部优先：路径里“哪个文件”比“在哪个子目录”更常用（同名文件少，
+  // 但 `src/`、`include/` 这类中间层级几乎每条都一样）。
+  // 3/4 给头部（足够放下项目名 + 一级目录），1/4 保底给尾部。
+  const float budget = max_width - ellipsis_width;
+  const std::size_t total = utf8_length(utf8);
+  // 先在“尾部占 budget/4”的假设下算头能放多少，再逐级均衡——
+  // 但两段各自都是变宽字符，一次估算不准，故用**二分总长度、按比例劈开**：
+  // 先二分出“头+尾合计最多能放多少字符”，再在它内部按 3:1 劈开。
+  std::size_t low = 0;
+  std::size_t high = total;
+  while (low < high) {
+    const std::size_t middle = (low + high + 1) / 2;
+    const std::size_t head = (middle * 3) / 4;
+    const std::size_t tail = middle - head;
+    std::string probe(utf8_slice(utf8, 0, head));
+    probe.append(kEllipsis);
+    probe.append(utf8_slice(utf8, total - tail, tail));
+    if (measure_width(probe, size) <= max_width) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (low == 0) {
+    // 一个字符都放不下：退回纯尾部省略（至少给点东西，不返回空）。
+    return ellipsize(utf8, size, max_width);
+  }
+  const std::size_t head = (low * 3) / 4;
+  const std::size_t tail = low - head;
+  std::string out(utf8_slice(utf8, 0, head));
+  out.append(kEllipsis);
+  out.append(utf8_slice(utf8, total - tail, tail));
+  (void)budget;
+  return out;
+}
+
 }  // namespace st::text

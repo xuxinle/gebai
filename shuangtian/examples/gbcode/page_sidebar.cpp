@@ -737,8 +737,14 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
               (void)custom<Button>(c, [this, group_name, collapsed, count = items.size()](Button& b) {
                 b.set_id("git-group-" + group_name);
                 b.set_label(std::format("{} {}（{}）", collapsed ? "▸" : "▾", group_name, count));
+                // 左对齐：组标题与其下的文件行必须共用同一条左基准线。
+                // 默认是居中——实测截图里组标题居中、文件行靠左，两套对齐混在一栏，
+                // 看起来像两个不相干的列表。
+                b.set_align(Button::Align::Start);
                 b.set_variant(Button::Variant::Ghost);
                 b.set_size(Button::Size::Small);
+                // 同样去掉默认内边距（否则标题比文件行往右缩几像素）。
+                b.style().padding = st::math::Insets{0.0f, 0.0f, 0.0f, 0.0f};
                 b.on_click = [this, group_name] {
                   auto groups = git_collapsed_groups_.value();   // 拷贝改再 set（State 的写法）
                   const auto found = std::find(groups.begin(), groups.end(), group_name);
@@ -766,69 +772,38 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
               }
             });
             if (collapsed) continue;
-            // 组内条目：**两段式行**（IDEA 同款）——上行文件名（主色），
-            // 下行目录 + 状态字母（弱化），右侧悬停才出现的行内动作。
+            // 组内条目：**单行左对齐**——`状态字母 + 路径`一行写完，右侧是行内动作。
             //
-            // 为何不是一行 `M 目录/文件名`：目录会把文件名挤到中间，
-            // 扫列表时反而找不到“我改的是哪个文件”。IDEA 把“文件”当主语放首行，
-            // 目录作为副信息——眼睛只需扫一列文件名就能定位。
+            // 为何回到单行（用户 2026-11-05 明确要求）：两段式在这种窄侧栏里
+            // 行高翻倍、可用行数减半，而列表的主任务是“快速扫一堆文件名”——
+            // 单行能一眼看更多条。
             for (const auto& change : items) {
               (void)row(c, {.gap = 4.0f, .key = "git:" + change.path}, [&] {
                 const auto full_path = change.path;
                 const std::string name = change.file_name();
                 const std::string dir = change.dir_path();
                 const std::string code(1, change.display_code());
-                // 两段式行（IDEA 同款）：**整行可点 + 文字是叠在上面的透明层**。
+                // 版式：`状态 文件名  目录`——**文件名在前、目录在后**。
                 //
-                // 结构（两个框架能力都必须有，都是这轮补的）：
-                //  ① 绝对定位（`.absolute`）：文字层不参与 flex 流，
-                //     所以能盖在按钮的矩形上，而不是被排到它旁边；
-                //  ② `set_intercepts_input(false)`：点文字会**穿透**到下层按钮。
-                // 缺任一条就退回“把两行塞进 Button 的单行 label”（排版崩）或
-                // “只有文件名可点”（路径行成了死区）。
-                (void)custom_container<Panel>(
-                    c,
-                    [&] {
-                      // 下层：整行命中区（先声明 = 在底下）。
-                      (void)custom<Button>(c, [this, change, full_path](Button& b) {
-                        b.set_id("git-file-" + full_path);
-                        b.set_label("");
-                        b.set_variant(Button::Variant::Ghost);
-                        b.set_size(Button::Size::Small);
-                        b.style().grow = true;
-                        b.style().padding = st::math::Insets{0.0f, 0.0f, 0.0f, 0.0f};
-                        b.on_click = [this, change] { open_git_diff(change); };
-                      }, {.height = 40.0f, .grow = true, .key = "hit"});
-                      // 上层：两行文字（绝对定位 + 不拦截输入）。
-                      (void)column(c,
-                                   {.gap = 0.0f, .height = 34.0f, .absolute = true, .left = 8.0f,
-                                    .top = 4.0f, .right = 0.0f, .intercepts = false,
-                                    .key = "label"},
-                                   [&] {
-                                     (void)custom<Text>(c, [name](Text& t) {
-                                       t.set_id("git-name-" + name);
-                                       t.set_content(name);
-                                       t.set_weight(FontWeight::Medium);
-                                     }, {.height = 18.0f, .grow = true, .key = "name"});
-                                     (void)custom<Text>(c, [dir, code](Text& t) {
-                                       t.set_id("git-dir-" + dir);
-                                       t.set_content(dir.empty()
-                                                         ? code
-                                                         : std::format("{}  {}", code, dir));
-                                       t.set_tone(Tone::Muted);
-                                       t.set_font_size(11.0f);
-                                     }, {.height = 14.0f, .grow = true, .key = "dir"});
-                                   });
-                      // 两个子层都不吃鼠标：文本层要穿透，而容器本身也不该拦。
-                      // （容器是行主体，它拦了也不影响——点击目标是上面那层——
-                      //   但关掉更稳：以后子层重排时不会突然变成“点不动”。）
-                      (void)custom<Panel>(c, [](Panel&) {}, {.width = 0.0f, .height = 0.0f});
-                    },
-                    [](Panel& holder) {
-                      holder.style().grow = true;
-                      holder.style().height = 40.0f;
-                    },
-                    {.height = 40.0f, .grow = true, .key = "holder"});
+                // 为何这个顺序本身就是“先缩目录”的正确解（不需要额外机制）：
+                // `Button` 的超长处理是**尾部省略**（保留头部、尾端接“…”），
+                // 而目录恰好排在尾部——于是宽度不够时**被截掉的正是目录**，
+                // 文件名永远完整。旧版把目录放在前面，同一套尾部省略就把文件名砍了
+                //（实测：“目录还在、文件名没了”）。
+                //
+                // 状态字母在最前：它是最短的定长信息（M/A/D/?），占位稳定，
+                // 不会因文件长短而错位。
+                (void)custom<Button>(c, [this, change, name, dir, code](Button& b) {
+                  b.set_id("git-file-" + change.path);
+                  b.set_label(dir.empty() ? std::format("{}  {}", code, name)
+                                          : std::format("{}  {}    {}", code, name, dir));
+                  b.set_align(Button::Align::Start);   // 左对齐（居中会参差不齐）
+                  b.set_variant(Button::Variant::Ghost);
+                  b.set_size(Button::Size::Small);
+                  // 去掉默认内边距：列表行要贴左缘，与组标题、上方工具条同一条基线。
+                  b.style().padding = st::math::Insets{0.0f, 0.0f, 0.0f, 0.0f};
+                  b.on_click = [this, change] { open_git_diff(change); };
+                }, {.height = 24.0f, .grow = true, .key = "row"});
                 // 行内动作（悬停意图：VSCode 同款三键）。
                 if (change.has_unstaged_side() && !change.is_conflicted()) {
                   scm_icon_button(c, "stage-" + change.path, "plus", "暂存更改",
