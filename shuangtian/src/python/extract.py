@@ -380,10 +380,27 @@ def _extract_mesh_object(obj):
     bucket_order = []   # 保持首次出现的顺序（结果可复现，便于对照）
 
     # ① 先三角化并累计顶点法线（`positions` 的下标 → 累加法线）
-    triangles = []      # 每个元素：(mat_index, i0, i1, i2)
+    #
+    # ## 逐面的 `use_smooth` 必须尊重（2026-11-05 修）
+    #
+    # bpy 里 `poly.use_smooth` 是**逐面**的开关：立方体默认 False（平面着色，
+    # 棱角锋利），球默认 True（平滑）。
+    #
+    # 原实现**总是**平滑——后果是立方体的棱角被“磨圆”，每个方块看上去
+    # 像一个被吹胀的枕垫。实测在 2×2 对齐基准场景里非常明显（方块应当
+    # 有 6 个锋利的四边形面，实际渲出来是圆角六边形）。
+    #
+    # 而两个真渲染器都尊重这个开关（Blender 的 `shade_flat/smooth`、
+    # three 的 `computeVertexNormals` + `flatShading`）。
+    #
+    # 修法：
+    # - `use_smooth = True` 的面 → 参与顶点法线累加（平滑）
+    # - `use_smooth = False` 的面 → 不参与累加，直接用自己三角形的法线
+    triangles = []      # 每个元素：(mat_index, i0, i1, i2, smooth, flat_normal)
     accum = [None] * len(positions)   # 每个位置的法线累加器
     for poly in mesh.polygons:
         mat_index = poly.material_index if hasattr(poly, 'material_index') else 0
+        smooth = poly.use_smooth if hasattr(poly, 'use_smooth') else False
         for tri in _triangulate(poly.vertices, positions):
             i0, i1, i2 = tri
             p0 = positions[i0]
@@ -401,38 +418,43 @@ def _extract_mesh_object(obj):
             cy = az * bx - ax * bz
             cz = ax * by - ay * bx
             area = ((cx * cx + cy * cy + cz * cz) ** 0.5) * 0.5
-            for index in (i0, i1, i2):
-                slot = accum[index]
-                if slot is None:
-                    accum[index] = [n[0] * area, n[1] * area, n[2] * area]
-                else:
-                    slot[0] += n[0] * area
-                    slot[1] += n[1] * area
-                    slot[2] += n[2] * area
-            triangles.append((mat_index, i0, i1, i2))
+            if smooth:
+                for index in (i0, i1, i2):
+                    slot = accum[index]
+                    if slot is None:
+                        accum[index] = [n[0] * area, n[1] * area, n[2] * area]
+                    else:
+                        slot[0] += n[0] * area
+                        slot[1] += n[1] * area
+                        slot[2] += n[2] * area
+            triangles.append((mat_index, i0, i1, i2, smooth, n))
 
-    # ② 归一化累加结果
-    smooth = [None] * len(positions)
+    # ② 归一化累加结果（叫 `smooth_normals` 避免与“平滑开关”同名）
+    smooth_normals = [None] * len(positions)
     for index in range(len(positions)):
         slot = accum[index]
         if slot is None:
-            smooth[index] = (0.0, 0.0, 1.0)
+            smooth_normals[index] = (0.0, 0.0, 1.0)
             continue
         length = ((slot[0] * slot[0] + slot[1] * slot[1] + slot[2] * slot[2]) ** 0.5)
         if length < 1e-12:
-            smooth[index] = (0.0, 0.0, 1.0)
+            smooth_normals[index] = (0.0, 0.0, 1.0)
         else:
-            smooth[index] = (slot[0] / length, slot[1] / length, slot[2] / length)
+            smooth_normals[index] = (slot[0] / length, slot[1] / length, slot[2] / length)
 
-    # ③ 生成顶点表（每个三角形独立三顶点，法线用平滑值）
-    for mat_index, i0, i1, i2 in triangles:
+    # ③ 生成顶点表（每个三角形独立三顶点）
+    #
+    # 法线的取法取决于该面的 `use_smooth`：
+    # - 平滑 → 用累加后的顶点法线（球面、齿轮侧壁）
+    # - 平面 → 用三角形自己的法线（立方体的六个面）
+    for mat_index, i0, i1, i2, used_smooth, flat_normal in triangles:
         if mat_index not in buckets:
             buckets[mat_index] = []
             bucket_order.append(mat_index)
         base = len(vertices)
         for index in (i0, i1, i2):
             p = positions[index]
-            n = smooth[index]
+            n = smooth_normals[index] if used_smooth else flat_normal
             vertices.append((p[0], p[1], p[2], n[0], n[1], n[2]))
         buckets[mat_index].append((base, base + 1, base + 2))
 
