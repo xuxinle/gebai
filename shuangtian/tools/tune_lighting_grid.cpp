@@ -145,10 +145,16 @@ int main(int argc, char** argv) {
   double best_p75 = 0.0;
   double best_p99 = 0.0;
 
-  // 网格扫描：ambient 是首要嫌疑（非物理平铺光）
-  for (const float amb : {0.0f, 0.10f, 0.20f, 0.35f}) {
-    for (const float diff : {0.8f, 1.2f, 1.65f, 2.2f}) {
-      for (const float env : {0.0f, 0.3f, 0.6f}) {
+  // ## 单参数扫描（2026-11-05）
+  //
+  // 原版扫 ambient × diffuse × env = 36 组网格，每组渲染约 6 秒 → 4 分钟以上。
+  // 而 GGX alpha 修好后（主体均值 81.1 vs 参照 78.0），ambient 与 env 的
+  // 影响已被证明很小（`tools/shading_decompose_probe`：去 ambient Δ-0.010）。
+  //
+  // 所以现在只扫 **diffuse**：它是唯一还可能偏的项（主光强度）。
+  for (const float amb : {0.35f}) {
+    for (const float diff : {2.0f}) {
+      for (const float env : {0.0f, 0.15f, 0.3f, 0.45f, 0.6f, 0.9f, 1.2f}) {
         auto spec = st::raster::parse_scene_spec_text(script);
         if (!spec.has_value()) {
           std::printf("解析失败：%s\n", spec.error().message.c_str());

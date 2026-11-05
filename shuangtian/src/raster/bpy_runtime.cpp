@@ -171,8 +171,32 @@ auto read_lighting(const Json& items) -> Lighting {
                                    static_cast<float>(-direction[2])};
   // bpy 的 energy 是瓦特量级，本框架的 diffuse 是相对权重。除以 1000 归一到
   // 与默认值（0.75）同量级——bpy 点光默认 1000W 对应"正常亮度"。
+  // ## 主光强度标定（2026-11-05）
+  //
+  // 原式：`diffuse = energy/1000 × 0.75`——脚本写 `energy=2600` → `1.95`。
+  //
+  // 而拿真 Blender 参照图做**分位数标定**（`tools/tune_lighting_grid`）：
+  //
+  // | diffuse | p50 | p75 | 加权分位差 |
+  // |---|---|---|---|
+  // | 1.65 | 63 | 87 | 97.4 |
+  // | **2.00** | **68** | **92** | **81.4** |
+  // | 2.50 | 76 | 97 | 120.5 |
+  //
+  // 参照（真 Blender）分位：p50 67。所以 **2.00** 才是正确值
+  //（中位亮度 68 vs 67，几乎精确）。
+  //
+  // 系统 0.75 → 0.769：`2600/1000 × 0.769 = 2.00`。
+  //
+  // ## 为何不是“直接照搬 Blender 的 W/m²”
+  //
+  // 两者单位无法换算：Blender 的 SUN `energy` 是 W/m²（物理辐照度），
+  // 本框架的 `diffuse` 是**相对权重**。只能实测标定。
+  //
+  // 顺带记录：Blender 里 true `energy=3.0` 才不过曝（2600 会烧成纯白）——
+  // 那是 Blender 自己的尺度，与本框架无关。
   if (key_energy > 0.0) {
-    lighting.diffuse = static_cast<float>(key_energy / 1000.0) * 0.75f;
+    lighting.diffuse = static_cast<float>(key_energy / 1000.0) * 0.769f;
   }
 
   // `extra_lights` 是**定长 `std::array`**（渲染器按固定上限循环，
