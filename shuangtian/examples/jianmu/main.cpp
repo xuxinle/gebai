@@ -49,6 +49,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
+#include "st/raster/scene3d_script.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/scene_report.hpp"
@@ -158,16 +159,25 @@ struct SceneFile {
   std::string stem{};
   /// 上次读到的修改时间（纳秒）；-1 表示还没读过。
   std::int64_t stamp{-1};
+  /// 是否为**混合场景**声明（`.scene.json`）：内容是 SceneSpec 的一段 JSON，
+  /// 里面用 `bpy_script` / `three_script` 引用同目录的相对路径。
+  bool scene_json{false};
 };
 
-/// 列举目录下的三维脚本（按文件名排序，顺序稳定才可复现）。
+/// 列举目录下的三维场景（按文件名排序，顺序稳定才可复现）。
 ///
-/// 两种脚本都能装：`.js` 走 three.js 表达层，`.py` 走 bpy（Blender 的建模 API）。
-/// 它们产出的都是 `raster::ThreeScene`，所以下游（相机/拾取/高亮/两条渲染腿）
-/// 完全同源——一个预览器同时看懂两种脚本，正是本应用存在的意义。
+/// 三种输入都能装：
+/// · `.js` —— three.js 表达层（组装/层级/材质/动画）
+/// · `.py` —— bpy（Blender 的建模 API，精确建模）
+/// · `.scene.json` —— **混合场景**：一小份声明它引用哪个 `.py`（产几何）与哪个 `.js`
+///   （组装）。内容就是 `{"bpy_script":"a.py","three_script":"b.js"}`，
+///   与裁云/探针吃的是同一套 `SceneSpec` 字段。
 ///
-/// ⚠ 只认这两个扩展名（不扫 `.*`）：目录里可能放着资产 JSON、说明文档、
-/// 中间产物（`__ASSETS__` 展开结果），把它们列成“场景”会让列表变得没法用。
+/// 三种都产出 `raster::ThreeScene`，所以下游（相机/拾取/高亮/两条渲染腿）完全同源
+/// ——一个预览器同时看懂两条表达层及它们的组合，正是本应用存在的意义。
+///
+/// ⚠ 只认这三种（不扫 `.*`）：目录里会放着资产 JSON、说明文档、中间产物
+///（`__ASSETS__` 展开结果），把它们列成“场景”会让列表变得没法用。
 auto list_scenes(const std::string& dir) -> std::vector<SceneFile> {
   std::vector<SceneFile> out;
   std::error_code error;
@@ -175,12 +185,19 @@ auto list_scenes(const std::string& dir) -> std::vector<SceneFile> {
   if (error) return out;
   for (const auto& entry : iterator) {
     if (!entry.is_regular_file(error)) continue;
+    const std::string filename = entry.path().filename().string();
     const auto extension = entry.path().extension().string();
-    if (extension != ".js" && extension != ".py") continue;
+    const bool is_scene_json = filename.size() > 11 &&
+                               filename.compare(filename.size() - 11, 11, ".scene.json") == 0;
+    if (extension != ".js" && extension != ".py" && !is_scene_json) continue;
     SceneFile file;
     file.path = entry.path().string();
-    file.stem = entry.path().stem().string();
-    file.name = entry.path().filename().string();
+    // 混合场景的主名要去掉两段扩展名（`mixed_gears.scene.json` → `mixed_gears`）
+    // 否则 `--scene=mixed_gears` 匹配不上，而“带扩展名的全名”又长得像文件。
+    file.stem = is_scene_json ? filename.substr(0, filename.size() - 11)
+                              : entry.path().stem().string();
+    file.name = filename;
+    file.scene_json = is_scene_json;
     out.push_back(std::move(file));
   }
   std::sort(out.begin(), out.end(),
@@ -225,9 +242,84 @@ struct LabState {
     ++reloads;
     // 按**扩展名**分派（`.py` → bpy，其余 → three.js）：分派逻辑住在
     // `ThreeView`，调用方不需要知道有几种表达层（见 `load_script_file_kind`）。
-    const bool ok = view->load_script_file_kind(*source, scene->path);
+    bool ok = false;
+    if (scene->scene_json) {
+      // 混合场景：文件里是一份 `SceneSpec` JSON，其中 `bpy_script` / `three_script`
+      // 是**相对本文件目录**的路径。先把它展开成完整脚本内容再交给视口——
+      // 与裁云/探针走完全同一套 `parse_scene_spec_text`，不另写一份“混合”解释。
+      ok = load_scene_json(*source, *scene);
+      if (!ok) {
+        // ⚠ **不要把 `last_error` 盖掉**：`load_scene_json` 把具体原因（JSON 字段错、
+        // 引用文件读不到…）写进了本结构的 `last_error`，而视口的 `last_error()`
+        // 在这条路上是空的。实测踩到：混合场景加载失败，状态栏却显示“无错误”，
+        // 而画面留着上一个场景——现象是“切了场景但画面没变，也不报错”。
+        return true;
+      }
+    } else {
+      ok = view->load_script_file_kind(*source, scene->path);
+    }
     last_error = ok ? std::string() : view->last_error();
     return true;
+  }
+
+  /// 装载 `.scene.json`：把引用到的脚本读进来填进 JSON，再交给视口。
+  ///
+  /// ## 为何在这里“展开”，而不是让视口认识 JSON
+  ///
+  /// 视口的契约是“**脚本进、场景出**”（`ThreeView::load_script*`）。让"读同目录文件"
+  /// 进到视口会把文件系统带进 UI 层（而它现在完全无副作用，测试也好写）。
+  /// 展开也顺带让**热重载**天然成立：被引用的 `.py`/`.js` 改了，用户回到这个
+  /// 混合场景（或它自己的时间戳变了）就会重新读一遍。
+  auto load_scene_json(const std::string& text, const SceneFile& scene) -> bool {
+    const std::string dir = st::fs::parent(scene.path);
+    // 引用的脚本相对**这个 JSON** 的目录，而不是进程工作目录——
+    // 后者会“在仓库根能跑、双击就不行”。
+    // 做法是用 `asset_basis`：SceneSpec 解析器会把相对路径按它解析。
+    std::string json_text = text;
+    if (json_text.find("\"asset_basis\"") == std::string::npos) {
+      // 没写就补上（写了的尊重作者）：插在第一个 `{` 之后。
+      if (const std::size_t brace = json_text.find('{'); brace != std::string::npos) {
+        json_text.insert(brace + 1, std::format("\"asset_basis\":\"{}\",", dir));
+      }
+    }
+    auto spec = st::raster::parse_scene_spec_text(json_text);
+    if (!spec.has_value()) {
+      last_error = std::format("{}：{}", scene.name, spec.error().message);
+      return false;
+    }
+    // 把两个脚本文本读进 spec（解析器只认内联源码，不认路径——那是刻意的：
+    // 渲染层不做 IO，也不该因为文件消失而默默渲个空场景）。
+    if (!spec->bpy_script.empty()) {
+      const std::string path = st::fs::is_absolute(spec->bpy_script)
+                                   ? spec->bpy_script
+                                   : st::fs::join(dir, spec->bpy_script);
+      auto content = st::fs::read_text(path);
+      if (!content.has_value()) {
+        last_error = std::format("{}：读不到 {}", scene.name, path);
+        return false;
+      }
+      spec->bpy_script = *content;
+    }
+    if (!spec->three_script.empty()) {
+      const std::string path = st::fs::is_absolute(spec->three_script)
+                                   ? spec->three_script
+                                   : st::fs::join(dir, spec->three_script);
+      auto content = st::fs::read_text(path);
+      if (!content.has_value()) {
+        last_error = std::format("{}：读不到 {}", scene.name, path);
+        return false;
+      }
+      spec->three_script = *content;
+    }
+    if (spec->bpy_script.empty() && spec->three_script.empty()) {
+      last_error = std::format("{}：既没写 bpy_script 也没写 three_script", scene.name);
+      return false;
+    }
+    // 视口吃的是"脚本"这个粒度：混合场景就把两份脚本拼成一份真正的混合调用。
+    // 用 `load_script_file_kind` 不行（它只认一个文件），所以直接走混合入口。
+    const bool ok = view->load_mixed(spec->bpy_script, spec->three_script, scene.name);
+    last_error = ok ? std::string() : view->last_error();
+    return ok;
   }
 
   /// 切到第 `index` 个场景（越界忽略）。

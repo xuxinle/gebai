@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "shuangtian",
   "version": "0.1.0",
   "kind": "static_library",
@@ -829,6 +829,14 @@
                   "src/raster/bpy_runtime.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "对齐基准出图：给任何场景（.js/.py）出一张 1100x800 的 PNG，好与真 three.js / 真 Blender 的图并排看。中性的出图工具，不绑定特定判据"
+    },
+    "mixed_scene_probe": {
+      "kind": "executable",
+      "sources": ["tools/mixed_scene_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "bpy × three.js 混合工作流的判据：bpy 供几何（THREE.__assets）、three 决定最终场景。反证那条（单独跑组装脚本必失败）是“资产真的参与了”的关键——没有它，“资产读进来但物体没画”也能绿"
     },
     "ggx_alpha_probe": {
       "kind": "executable",

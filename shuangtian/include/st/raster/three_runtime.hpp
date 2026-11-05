@@ -157,6 +157,40 @@ struct ThreeScene {
   [[nodiscard]] auto empty() const noexcept -> bool { return objects.empty(); }
 };
 
+/// **bpy 产出的几何资产**：名字 → 一个可被 three.js 脚本当做 `BufferGeometry` 用的网格。
+///
+/// ## 为何需要这个类型（bpy × three.js 混合的关键）
+///
+/// 真实的三维工作流是分工的：bpy 擅长**精确几何**（bmesh 逐顶点、布尔、倒角、参数化齿形），
+/// three.js 擅长**组装与演示**（层级、材质变体、相机、动画）。两条路如果只能二选一，
+/// 那“用 bpy 造个齿轮、用 three.js 摆到传动组里”就得手工导出 JSON 再内联进脚本
+/// （见 `tools/inline_assets.py` 的说明：three 脚本没有文件系统，资产必须在**生成期**内联）。
+///
+/// 有了本类型，这条缝就补上了：一次求值里**先跑 bpy、再把几何交给 three.js**，
+/// 全程在进程内，无需中间文件。
+///
+/// ## 口径（写进 `THREE.__assets`）
+///
+/// ```js
+/// const gears = THREE.__assets;            // { gear_42t: BufferGeometry, ... }
+/// const mesh = new THREE.Mesh(gears.gear_42t, material);
+/// ```
+///
+/// 几何是**已烘焙的顶点表**（位置/法线/索引），来自 bpy 物体的世界变换前的本地空间——
+/// 与“导出资产 JSON 再内联”产出的是同一份数据，所以两条路可以互相替换。
+struct BpyAsset {
+  std::string name{};
+  Mesh mesh{};
+};
+
+/// 带资产的 three.js 求值参数。
+///
+/// 空资产 = 旧行为（完全兼容）：现有调用方不需要改。
+struct ThreeAssets {
+  std::vector<BpyAsset> items{};
+  [[nodiscard]] auto empty() const noexcept -> bool { return items.empty(); }
+};
+
 /// three.js 运行时（线程内单例，内部持有已加载 three.js 的脚本引擎）。
 ///
 /// 为什么不暴露"任意 eval"：本层的契约是**场景进、场景出**。放开任意执行会让
@@ -195,6 +229,16 @@ class ThreeRuntime {
   /// 错误：`Parse`（语法/运行时异常，消息含 three.js 侧的行号）、`Timeout`（超时）、
   /// `Invalid`（返回值不是场景）。
   [[nodiscard]] auto evaluate(std::string_view script, std::string_view filename = "<three>")
+      -> Result<ThreeScene>;
+
+  /// 带 bpy 资产的求值：脚本里用 `THREE.__assets.<名字>` 拿到 `BufferGeometry`。
+  ///
+  /// 这就是 **bpy × three.js 混合**的实现点：同一份场景里，bpy 负责几何、
+  /// three.js 负责组装与演示。实现只是把资产写成 `BufferGeometry` 对象挂到
+  /// `THREE` 命名空间上（见 `BpyAsset` 的口径说明）——没有新的渲染路径，
+  /// 所以两条腿（D3D11 / 软件）、拾取、动画全部自然可用。
+  [[nodiscard]] auto evaluate_with_assets(std::string_view script, const ThreeAssets& assets,
+                                          std::string_view filename = "<three>")
       -> Result<ThreeScene>;
 
   /// 本线程复用的运行时（首次调用会加载 three.js，约 55 ms）。

@@ -125,6 +125,38 @@ auto ThreeView::load_script_file_kind(std::string_view script, std::string_view 
   return load_script(script, source_name);
 }
 
+auto ThreeView::load_mixed(std::string_view bpy_script, std::string_view three_script,
+                            std::string_view source_name) -> bool {
+  // 退化：任一侧为空 → 就是纯脚本场景（与 SceneSpec 的叠加语义一致）。
+  if (three_script.empty()) return load_script_file_kind(bpy_script, std::string(source_name) + ".py");
+  if (bpy_script.empty()) return load_script(three_script, std::string(source_name) + ".js");
+
+  // 先跑 bpy：它的物体网格成为 three 可用的几何资产。
+  auto assets_scene = raster::BpySceneExtractor::extract(bpy_script);
+  if (!assets_scene.has_value()) {
+    // 失败语义与 `load_script` 一致：**不清空**已有场景，错误给 `last_error`。
+    // 混模式下这条尤其重要：几何跑挂了而 three 那侧还是好的，
+    // 清空会让用户看到“俩都坏了”（实际上只错了一个）。
+    load_error_ = std::format("bpy（资产）失败：{}", assets_scene.error().message);
+    source_name_ = std::string(source_name);
+    mark_dirty();
+    return false;
+  }
+  raster::ThreeAssets assets;
+  assets.items.reserve(assets_scene->objects.size());
+  for (auto& object : assets_scene->objects) {
+    if (object.mesh.vertices.empty()) continue;
+    std::string name = object.name;
+    if (name.empty()) name = std::format("asset_{}", assets.items.size());
+    assets.items.push_back(raster::BpyAsset{.name = std::move(name),
+                                            .mesh = std::move(object.mesh)});
+  }
+  return adopt_scene(
+      raster::ThreeRuntime::instance().evaluate_with_assets(three_script, assets,
+                                                          std::string(source_name) + ".js"),
+      source_name);
+}
+
 auto ThreeView::adopt_scene(Result<raster::ThreeScene> loaded,
                             std::string_view source_name) -> bool {
   if (!loaded.has_value()) {

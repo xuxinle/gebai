@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <format>
 #include <memory>
@@ -508,6 +510,17 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
   // 不是盲目加 return：若最后一句本身是 `return`/块/声明，就不改（那本来就无值）。
   const std::string original(script);
   const std::string script_name(filename);
+
+  // ## 每次求值前清掉上一轮的 bpy 资产（**跨场景不泄露**）
+  //
+  // `THREE` 命名空间属于线程内单例运行时，会跨求值残留。资产是**场景级**的
+  // （属于“这一次求值”），不清就会：上一个带资产的场景跑完，下一个不带资产的
+  // 脚本仍能拿到（实测踩到：反证用例——单独跑组装脚本应当失败——恒绿，
+  // 因为它拿到了上一轮残留的几何）。
+  //
+  // 一句 `= {}` 的开销可忽略，换来的语义是“场景之间互不影响”。
+  (void)impl_->eval_string("if (typeof THREE !== 'undefined') THREE.__assets = undefined;",
+                          "<reset-assets>");
 
   // 自动给最后一条“表达式语句”加 `return`。
   //
@@ -1386,5 +1399,137 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
 
   return scene;
 }
+
+// ————————————————————————————————————————————————————————————————————————
+// bpy × three.js 混合：把 bpy 几何写成 `BufferGeometry` 挂到 `THREE.__assets`
+// ————————————————————————————————————————————————————————————————————————
+//
+// ## 为何是“挂到 THREE 上”而不是给脚本传参
+//
+// three.js 脚本是**用户写的普通 JS**（它不知道本框架的存在）。要让它在不学新 API
+// 的前提下拿到 bpy 几何，最自然的入口就是它已经熟悉的命名空间：
+//
+// ```js
+// const gear = new THREE.Mesh(THREE.__assets.gear_42t, mat);   // ← 就像内置几何一样用
+// ```
+//
+// 传参方案（`function(scene, assets)`）会强制所有人改写法，而“用户写的就是它已经
+// 会写的东西”是这条路线的全部价值（见 `three_runtime.hpp` 顶部）。
+//
+// ## 为何用 `eval_string` 拼一段 JS 而不是直接建对象
+//
+// QuickJS 的 BufferAttribute/BufferGeometry 构造是纯 JS 逻辑（属性拷贝、包围盒、
+// 着色器 uniform 推导都在 JS 侧）。从 C++ 逐属性写会把那套逻辑重实现一遍，
+// 而任何一处漏项（`itemSize`、`normalized`、`boundingSphere`）都是**静默**的：
+// 几何看起来对、光照/拾取却错。拼一段 JS 让 three 自己走完整构造。
+namespace {
+
+/// 把 float 数组拼成 JS 字面量（保留 6 位有效小数：资产精度够，体积可控）。
+void append_floats(std::string& out, const std::vector<float>& values) {
+  out += '[';
+  char buffer[32];
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) out += ',';
+    const int written = std::snprintf(buffer, sizeof(buffer), "%.6g", static_cast<double>(values[i]));
+    if (written > 0) out.append(buffer, static_cast<std::size_t>(written));
+  }
+  out += ']';
+}
+
+/// 把 uint32 数组拼成 JS 字面量。
+void append_indices(std::string& out, const std::vector<std::uint32_t>& values) {
+  out += '[';
+  char buffer[16];
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) out += ',';
+    const int written = std::snprintf(buffer, sizeof(buffer), "%u", values[i]);
+    if (written > 0) out.append(buffer, static_cast<std::size_t>(written));
+  }
+  out += ']';
+}
+
+/// JS 字符串字面量（只逸引号/反斜杠/控制符——名字来自脚本，可能是中文）。
+void append_js_string(std::string& out, std::string_view text) {
+  out += '"';
+  for (const char ch : text) {
+    switch (ch) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default: out += ch;
+    }
+  }
+  out += '"';
+}
+
+}  // namespace
+
+auto ThreeRuntime::evaluate_with_assets(std::string_view script, const ThreeAssets& assets,
+                                        std::string_view filename) -> Result<ThreeScene> {
+  if (impl_ == nullptr || !impl_->ready) return evaluate(script, filename);   // 走原路报错
+
+  // ## 零资产也要走本条路（**清掉上一轮的残留**）
+  //
+  // 曾经这里写的是 `if (assets.empty()) return evaluate(...)`——那看似最安全
+  // （零资产 = 旧行为），但它不会清 `THREE.__assets`，而上一个场景可能刚把
+  // 几何写进去。于是“不带资产的脚本”能读到上一场景的几何去组装，
+  // 而现象是“换了场景但模型还是老的”。
+  //
+  // 代价：零资产时多跑一句 `THREE.__assets = {}`（微秒级），换来的语义是
+  // **每次求值都是干净的**。
+
+  // ## 先把资产装进一个**前缀脚本**，再与用户脚本一起求值
+  //
+  // 不能在 `evaluate` 之后装：那时的场景已经抽完了（`evaluate` 内部一次求值到底）。
+  // 也不能改 `evaluate` 的签名（它被大量现有调用方引用）——所以这条混合路径
+  // 用一个独立入口，内部拼一段前导 JS。
+  std::string header;
+  header.reserve(1024);
+  // ⚠ **每次都重置**：`ThreeRuntime` 是线程内**单例**（QuickJS 运行时不能重建），
+  // 所以 `THREE` 命名空间上的东西会跨求值残留。不重置的后果：上一次带资产的
+  // 场景跑完，下一个**不带资产**的脚本仍能拿到 `THREE.__assets`——
+  // 于是它默默用上一场景的几何去组装，而现象是“换了场景但模型还是老的”（实测踩到：
+  // 反证用例（单独跑组装脚本应当失败）一直绿，因为它拿到了上一轮残留的资产）。
+  header += "THREE.__assets = {};\n";
+  for (const auto& asset : assets.items) {
+    const Mesh& mesh = asset.mesh;
+    if (mesh.vertices.empty()) continue;
+    const std::size_t stride = Mesh::kVertexFloats;
+    std::vector<float> positions;
+    std::vector<float> normals;
+    positions.reserve(mesh.vertices.size() / stride * 3);
+    normals.reserve(mesh.vertices.size() / stride * 3);
+    for (std::size_t i = 0; i + stride <= mesh.vertices.size(); i += stride) {
+      positions.push_back(mesh.vertices[i + 0]);
+      positions.push_back(mesh.vertices[i + 1]);
+      positions.push_back(mesh.vertices[i + 2]);
+      normals.push_back(mesh.vertices[i + 3]);
+      normals.push_back(mesh.vertices[i + 4]);
+      normals.push_back(mesh.vertices[i + 5]);
+    }
+    if (positions.empty()) continue;
+
+    header += "(function(){\n  var g = new THREE.BufferGeometry();\n";
+    header += "  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(";
+    append_floats(header, positions);
+    header += "), 3));\n";
+    header += "  g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(";
+    append_floats(header, normals);
+    header += "), 3));\n";
+    if (!mesh.indices.empty()) {
+      header += "  g.setIndex(new THREE.BufferAttribute(new Uint32Array(";
+      append_indices(header, mesh.indices);
+      header += "), 1));\n";
+    }
+    header += "  THREE.__assets[";
+    append_js_string(header, asset.name);
+    header += "] = g;\n})();\n";
+  }
+
+  std::string combined = header;
+  combined += script;
+  return evaluate(combined, filename);}
 
 }  // namespace st::raster

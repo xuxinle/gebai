@@ -116,6 +116,15 @@ class ThreeView : public Element {
   /// 返回值的语义与 `load_script` 完全一致（失败不清空、错误给 `last_error`）。
   auto load_script_file_kind(std::string_view script, std::string_view source_name) -> bool;
 
+  /// 装载**混合场景**：`bpy_script` 只供几何（每个带 mesh 的物体成为
+  /// `THREE.__assets.<物体名>`），`three_script` 决定最终场景（相机/灯光/物体）。
+  ///
+  /// 任一为空则退化为只跑另一方（与 `SceneSpec` 的叠加语义一致）。
+  /// 这就是“bpy 建模 + three.js 组装”在**实时预览**里的入口：改任一份脚本，
+  /// 下一帧就是新场景，不必先导出资产 JSON 再内联进脚本。
+  auto load_mixed(std::string_view bpy_script, std::string_view three_script,
+                  std::string_view source_name) -> bool;
+
   /// 本框架能装载哪些脚本扩展名（供 UI 列举/提示；不含点号）。
   static constexpr std::string_view kScriptExtensions[] = {"js", "py"};
 

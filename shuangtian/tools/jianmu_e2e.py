@@ -489,6 +489,32 @@ def main():
             with open(py_scene, "w", encoding="utf-8") as handle:
                 handle.write(py_original)
 
+        # ── ⑫ 混合场景（.scene.json）：bpy 供几何 → three.js 组装 ──
+        #
+        # 三重判据：① 清单里有这个声明文件；② 它能装载且**物体数明显少于**
+        # 纯 bpy 场景（说明几何被 three 组装复用，而不是把 bpy 场景原样画一遍）；
+        # ③ 画出了内容。
+        scenes = client.ok("script", {"code": "app.lab.scenes()"}).get("result") or []
+        mixed_index = next((i for i, item in enumerate(scenes)
+                            if str(item.get("name", "")) == "mixed_gears.scene.json"), -1)
+        check("清单里含混合场景声明（.scene.json）", mixed_index >= 0,
+              f"{len(scenes)} 项")
+        if mixed_index >= 0:
+            client.ok("script", {"code": f"app.lab.select({mixed_index})"})
+            time.sleep(3.0)   # bpy + three 两趟求值
+            mixed_error = prop_of(client, "viewport", "error")
+            check("混合场景装载无错", not mixed_error, str(mixed_error)[:70])
+            mixed_objects = int(prop_of(client, "viewport", "objects") or "0")
+            # 组装脚本只建 5 个物体（主轮/惰轮/铜陈列/橡胶垫/地台），
+            # 而 bpy 资产侧的两个齿轮本身就有几十个面——物体数对得上就说明
+            # 几何真的进了 three 那侧（而不是 bpy 场景被画了两遍）。
+            check("混合场景物体数对得上组装脚本", mixed_objects == 5, f"{mixed_objects} 个")
+            mixed_shot = os.path.join(SHOTS, "09-mixed.png")
+            client.ok("capture", {"encode": "file", "path": mixed_shot})
+            mixed_painted = painted_ratio(mixed_shot)
+            check("混合场景画出内容（覆盖 > 3%）", mixed_painted > 0.03,
+                  f"{mixed_painted * 100:.1f}%")
+
         try:
             client.ok("shutdown")
         except Exception:

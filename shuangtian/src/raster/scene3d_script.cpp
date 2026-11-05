@@ -1318,9 +1318,11 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
   spec.three_script_name = json_get_string(json, "three_script_name", "");
 
   if (!spec.bpy_script.empty() && !spec.three_script.empty()) {
-    ST_LOG_WARN("场景同时写了 bpy_script 与 three_script：以 bpy_script 为准，three_script 被忽略");
-    spec.three_script.clear();
-    spec.three_script_name.clear();
+    // 叠加语义（见 `bpy_script` 的字段说明）：不丢弃任何一方。
+    // 旧版在这里 warn 并清掉 three_script；那会让“想混合”的配置静默变成
+    // “只跑了 bpy”，而现象是“three.js 的布局完全没生效”。
+    ST_LOG_INFO("场景同时写了 bpy_script 与 three_script：bpy 供几何（THREE.__assets），"
+                "three.js 决定最终场景（相机/灯光/物体）");
   }
   // 脚本模式 = 任一脚本非空（后续建树/约束逻辑对它们天然空转）
   const bool script_mode = !spec.bpy_script.empty() || !spec.three_script.empty();
@@ -1997,10 +1999,38 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
   //
   // 差异只在前三行（取哪份 `ThreeScene`）；后面的渲染流程逐行相同。
   if (!spec.bpy_script.empty() || !spec.three_script.empty()) {
-    const bool bpy_mode = !spec.bpy_script.empty();
-    auto script_scene = bpy_mode
-        ? BpySceneExtractor::extract(spec.bpy_script)
-        : ThreeRuntime::instance().evaluate(spec.three_script, spec.three_script_name);
+    // ## 两种脚本的叠加规则（见 `bpy_script` 字段说明）
+    //
+    // | 写了什么 | 跑什么 | 最终场景的权威 |
+    // |---|---|---|
+    // | 只 bpy | bpy | bpy（它就是完整场景） |
+    // | 只 three | three | three |
+    // | 两者都写 | 先 bpy（产资产）→ 再 three | **three**（bpy 只供几何） |
+    //
+    // 第三条是混合工作流：bpy 建模、three.js 组装。相机/灯光/物体全以 three 为准，
+    // 所以“两个场景各带相机、谁生效”这个旧问题在叠加模式下不存在。
+    Result<ThreeScene> script_scene =
+        st::unexpected(ErrorCode::Unsupported, "未选择脚本");
+    if (!spec.bpy_script.empty() && !spec.three_script.empty()) {
+      auto assets_scene = BpySceneExtractor::extract(spec.bpy_script);
+      if (!assets_scene.has_value()) return st::forward_error(assets_scene.error());
+      ThreeAssets assets;
+      assets.items.reserve(assets_scene->objects.size());
+      for (auto& object : assets_scene->objects) {
+        if (object.mesh.vertices.empty()) continue;
+        // 名字缺省时给个稳定名字：无名资产拿不到（`THREE.__assets.undefined`）。
+        std::string name = object.name;
+        if (name.empty()) name = std::format("asset_{}", assets.items.size());
+        assets.items.push_back(BpyAsset{.name = std::move(name), .mesh = std::move(object.mesh)});
+      }
+      script_scene = ThreeRuntime::instance().evaluate_with_assets(
+          spec.three_script, assets,
+          spec.three_script_name.empty() ? "<mixed>" : spec.three_script_name);
+    } else if (!spec.bpy_script.empty()) {
+      script_scene = BpySceneExtractor::extract(spec.bpy_script);
+    } else {
+      script_scene = ThreeRuntime::instance().evaluate(spec.three_script, spec.three_script_name);
+    }
     if (!script_scene.has_value()) return st::forward_error(script_scene.error());
 
     // ## 相机：场景自带 vs 图层覆盖
@@ -2036,8 +2066,11 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     // 修法：用 `spec.lighting`（它已在 `scene_spec_from_bpy` /
     // `scene_spec_from_three` 里从脚本值初始化过，所以不丢信息）。
     scene.set_lighting(spec.lighting);
+    // 警告标记来源：三者组合时以 three.js 为准（它才是最终场景的权威）。
+    const char* source_label = spec.three_script.empty() ? "bpy"
+                                 : (spec.bpy_script.empty() ? "three" : "bpy+three");
     for (const auto& warning : script_scene->warnings) {
-      ST_LOG_WARN("{} 场景：{}", bpy_mode ? "bpy" : "three", warning);
+      ST_LOG_WARN("{} 场景：{}", source_label, warning);
     }
     // ## 整体姿态：乘在世界矩阵**后面**
     //
