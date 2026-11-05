@@ -180,6 +180,23 @@ class _Collection:
     def remove(self, item):
         self._items.remove(item)
 
+    def clear(self):
+        """清空（供脚本开头重置场景用）。
+
+        ## 为什么需要
+
+        bpy 兼容层的 `bpy.data` 是**模块级单例**，跨 `run` 存活
+        （那是刻意的：场景状态得住住，否则跑完脚本就没了）。
+
+        代价是：连续跑两个脚本时，第二个会看到第一个留下的对象。
+        症状是 `ValueError: 已存在同名数据块：'Cube'`——看起来像
+        "脚本重名了"，实际是**上一个脚本的残留**。
+
+        用户脚本里显式调 `reset()`（见 `bpy_ops_ns.py` 的 `scene.reset`）
+        即可；宿主侧（`BpySceneExtractor::extract`）每次抽取前也会调。
+        """
+        self._items = []
+
     def __len__(self):
         return len(self._items)
 

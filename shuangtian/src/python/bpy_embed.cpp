@@ -29,6 +29,8 @@ const st_bpy_unit_t kUnits[] = {
      b::embed<"src/python/bpy_ops.py">().size()},
     {"bpy_ops_ns.py", b::embed<"src/python/bpy_ops_ns.py">().data(),
      b::embed<"src/python/bpy_ops_ns.py">().size()},
+    {"extract.py", b::embed<"src/python/extract.py">().data(),
+     b::embed<"src/python/extract.py">().size()},
     {"bpy_module.py", b::embed<"src/python/bpy_module.py">().data(),
      b::embed<"src/python/bpy_module.py">().size()},
 };

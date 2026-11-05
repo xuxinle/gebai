@@ -30,7 +30,7 @@
   ],
   "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs",
             "src/python/prelude.py", "src/python/bpy_data.py", "src/python/bpy_ops.py",
-            "src/python/bpy_ops_ns.py", "src/python/bpy_module.py"],
+            "src/python/bpy_ops_ns.py", "src/python/extract.py", "src/python/bpy_module.py"],
   "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c",
                           "third_party/micropython/py/*.c"],
   "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
@@ -788,6 +788,14 @@
                   "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "内嵌 MicroPython 的端到端判据：语言基础 + mathutils + bpy.data/ops + bmesh。它是整条 bpy 链路的地基。`.c` 源必须显式列出：不会被自动源集合纳入"
+    },
+    "bpy_scene_probe": {
+      "kind": "executable",
+      "sources": ["tools/bpy_scene_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "bpy 脚本 → ThreeScene 端到端：建几何、抽场景、验顶点数与包围盒"
     },
     "python_features_probe": {
       "kind": "executable",

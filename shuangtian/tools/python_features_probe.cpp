@@ -43,6 +43,7 @@ int main() {
       {"sum 生成器带条件", "result = sum(i for i in range(6) if i % 2 == 0)"},
       {"dict keys", "d = {'a': 1}\nresult = ','.join(d.keys())"},
       {"异常捕获", "try:\n    1 / 0\nexcept Exception as e:\n    result = 'caught'"},
+      {"类内双下划线属性", "class A:\n    def __init__(self, n):\n        self.__name__ = n\nresult = A('x').__name__"},
       {"super()", "class A:\n    def f(self):\n        return 1\nclass B(A):\n    def f(self):\n        return super().f() + 1\nresult = B().f()"},
   };
   int failed = 0;

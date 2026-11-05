@@ -208,11 +208,69 @@ st build bpy_load_probe        && ./build/dev/bin/bpy_load_probe
 | `python_features_probe` | 20 项 Python 特性逐条探测（定位"缺哪个开关"） |
 | `bpy_load_probe` | `sys.modules` 状态（诊断"装载成功但 import 失败"） |
 
-## 八、下一步
+## 八、抽取：bpy 场景 → `ThreeScene`
 
-1. **bpy 场景 → `ThreeScene` 抽取器**：把 `bpy.data.objects` 里带 mesh 的
-   对象（顶点 + 面 + 材质 + 世界矩阵）转成 `ThreeObject` 列表
-2. **接进 `scene3d_script`**：加 `bpy_script` 字段，与 `three_script` / JSON
-   三路并存
-3. 面三角化（bpy 支持多边形，本框架渲染只吃三角形）
-4. 端到端：用 bpy 写一个真实资产（齿轮箱/涡轮盘），与 three.js 版本对照
+`BpySceneExtractor::extract(script)` 一次做四件事：
+
+```
+bpy.data.reset()          ① 重置场景（避免上个脚本的残留）
+      ↓
+跑脚本                  ② 建出 bpy 场景
+      ↓
+_st_extract.extract_json()  ③ Python 侧抽取 → 扁平 JSON
+      ↓
+parse_extracted_json()  ④ C++ 侧搬进 ThreeScene
+```
+
+### 为什么抽取写在 Python 里
+
+C++ 侧读 bpy 对象要逐层调 MicroPython API：
+
+```cpp
+mp_obj_t obj = mp_obj_dict_get(...);
+mp_obj_t loc = mp_load_attr(obj, MP_QSTR_location);   // 每个属性一次查表
+mp_obj_t x   = mp_load_attr(loc, MP_QSTR_x);          // 还要再查一层
+double vx = mp_obj_get_float(x);
+```
+
+三层深度的对象（`obj.data.vertices[0].co.x`）就是四五次查表 + 类型检查，
+每个调用点都要写错误处理。而 Python 侧写就是自然表达：
+
+```python
+for v in obj.data.vertices:
+    out.append(v.co.x)
+```
+
+所以分工是：**Python 理解 bpy，C++ 搬数据**。
+
+### 抽取里三个容易错的地方（都已钉进探针判据）
+
+| 项 | 错法 | 症状 |
+|---|---|---|
+| 矩阵布局 | bpy 行主序 vs `Mat4` 列主序 | 位置对但旋转/缩放错位 |
+| `fov_y` 单位 | bpy 弧度 vs `Camera.fov_y_degrees` 角度 | 视野极窄、只看到一角 |
+| 灯光方向 | `Light.direction` 是**指向光源**（与相机 -Z 视线相反） | 物体被从背面照亮 |
+
+### 已知边界
+
+- **面三角化用扇形**：凸多边形正确，凹多边形会出错（`primitive_*` 与
+  bmesh 建的面绝大多数是凸的）
+- **多材质只取第 0 个槽**：本框架 `Mesh` 是单一材质
+- **父子关系不抽**：`matrix_world` 已是绝对变换，父子只影响那个矩阵
+- **顶点留局部空间**：变换由 `ThreeObject::world` 承担——两处都变换就是变换两遍
+
+### 验证
+
+```sh
+st build bpy_scene_probe && ./build/dev/bin/bpy_scene_probe
+```
+
+10 条判据：立方体顶点/索引数、世界矩阵平移、材质 PBR 参数、bmesh 三角面、
+相机 fov 单位转换、错误路径可读性。
+
+## 九、下一步
+
+1. **接进 `scene3d_script`**：加 `bpy_script` 字段，与 `three_script` / JSON
+   三路并存（抽取器已就绪，只差入口派发）
+2. **端到端出图**：用 bpy 写一个真实资产（齿轮箱/涡轮盘），与 three.js
+   版本对照像素

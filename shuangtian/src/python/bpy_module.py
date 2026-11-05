@@ -67,6 +67,23 @@ class _Data:
         self.cameras = _Collection(Camera)
         self.lights = _Collection(Light)
 
+    def reset(self):
+        """清空场景（新脚本开始前调）。
+
+        ## 为什么需要
+
+        `bpy.data` 是**模块级单例**，跨 `run` 存活（刻意的：否则
+        “跑完脚本场景就没了”）。代价是连续跑两个脚本时第二个会看到
+        第一个的残留，报 `ValueError: 已存在同名数据块`。
+
+        宿主侧 `BpySceneExtractor::extract` 每次跑脚本前会调它。
+        """
+        self.meshes.clear()
+        self.objects.clear()
+        self.materials.clear()
+        self.cameras.clear()
+        self.lights.clear()
+
 
 _data = _Data()
 _context = _Context()
@@ -93,6 +110,23 @@ _bmesh.verts = _BMVertSeq
 _bmesh.faces = _BMFaceSeq
 
 
+# ---- 抽取器（内部模块）----
+#
+# ## 为何是独立模块而不是直接给 bpy 加方法
+#
+# 抽取是**宿主侧的活**，不是 bpy 的功能。真实 Blender 里没有
+# `bpy.export_to_three()` 这种东西，把它挂在 `bpy` 上会让模型以为
+# 那是 bpy 的 API（然后去用，然后在真 Blender 里失败）。
+#
+# 用下划线开头的内部模块名，表达"这是实现细节"。
+_st_extract = _Module('_st_extract')
+# 注入宿主（`bind` 是 `extract.py` 里的全局函数，不是模块方法——
+# 写成 `_st_extract.bind(...)` 会报 `AttributeError: no such attribute`，
+# 而 `_Module` 是个普通对象，那个报错不会告诉你是哪个属性）
+bind(_data, _context, Camera, Light)
+_st_extract.extract = extract
+_st_extract.extract_json = extract_json
+
 # ---- 注册到 sys.modules ----
 #
 # ## 为什么必须注册
@@ -104,3 +138,4 @@ import sys as _sys
 _sys.modules['mathutils'] = _mathutils
 _sys.modules['bpy'] = _bpy
 _sys.modules['bmesh'] = _bmesh
+_sys.modules['_st_extract'] = _st_extract

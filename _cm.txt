@@ -1,81 +1,78 @@
-feat(python): bpy 兼容层可用 —— mathutils / bpy.data / bpy.ops / bmesh
+feat(bpy): 场景抽取 —— bpy 脚本 → ThreeScene
 
-在已内嵌的 MicroPython 上落出可用的 bpy 子集。判据 18/18 全过。
+打通 bpy 脚本到渲染器的最后一段：抽取器把 `bpy.data` 里的场景转成
+`ThreeScene`，与 three.js 那条路的下游完全一致。
 
-## 为什么 bpy 用 Python 实现而不是 C 扩展
+判据 10/10 全过（`tools/bpy_scene_probe`）。
 
-上一条提交里 C 类型那条路卡在一个具体的坑：`MP_DEFINE_CONST_OBJ_TYPE`
-产出的类型一旦通过 `MP_ROM_PTR` 进入模块导出表，进程就在 `mp_init()`
-阶段访问违例（0xC0000005），无任何输出。
+## 为什么抽取写在 Python 里
 
-已排除：所有槽位单独加都正常、四种注册方式（运行期三种 + 编译期
-MP_REGISTER_MODULE）全试过、拿掉那个导出就一切正常。判断是 MinGW 下
-const 数据段跨单元重定位的问题。
+C++ 侧读 bpy 对象要逐层调 MicroPython API：三层深度的对象
+（`obj.data.vertices[0].co.x`）就是四五次查表 + 类型检查，每个调用点
+都要写错误处理——代码量极大且易错。
 
-按"性能后置"的原则改走 Python 实现：零 C 类型注册、风险归零，
-代价是慢 3~8 倍（相对渲染可接受）。脚手架保留在 git 历史里。
+而 Python 侧写是自然表达：
 
-## 完成的能力
+    for v in obj.data.vertices:
+        out.append(v.co.x)
 
-- **mathutils**：Vector（属性读写/全部运算/dot/cross/normalize）、
-  Matrix（Identity/Translation/Scale/Rotation/matmul）、Euler、Quaternion
-- **bpy.data**：meshes / objects / materials / cameras / lights
-  （`.new()`、按名与下标索引、拒绝重名）
-- **bpy.context**：active_object / selected_objects / scene
-- **bpy.ops.mesh**：cube / cylinder / cone / uv_sphere / plane / torus / grid
-- **bpy.ops.object**：select_all / delete / origin_set
-- **bmesh**：new / verts / faces / to_mesh / from_mesh / free
+所以分工是：**Python 理解 bpy，C++ 搬数据**（后者只做 dict → struct）。
 
-## 架构
+```
+bpy.data.reset()          ① 重置场景
+      ↓
+跑脚本                    ② 建出 bpy 场景
+      ↓
+_st_extract.extract_json()  ③ Python 抽取 → 扁平 JSON
+      ↓
+parse_extracted_json()    ④ C++ 搬进 ThreeScene
+```
 
-四层，每层只做一件事：
+## 实现要点
 
 | 文件 | 职责 |
 |---|---|
-| `src/python/*.py` | bpy 语义（类/函数/子集边界）——改它只需改文本 |
-| `bpy_bridge.c` | 按依赖顺序 exec 源码（C，因为要碰 MicroPython 类型） |
-| `bpy_embed.cpp` | `b::embed` 编译期取 .py 内容（C++，因为它是模板） |
-| `mp_bridge.c` | 解释器生命周期 + exec + 取回 result |
+| `src/python/extract.py` | 遍历场景、三角化、算世界矩阵、材质/相机/灯光 → JSON |
+| `src/raster/bpy_runtime.cpp` | JSON → `ThreeScene`（纯数据搬运，无 bpy 知识） |
+| `include/st/raster/bpy_runtime.hpp` | 对外契约 + 用法 |
+| `parse_extracted_json` | 单独暴露给测试（不必每次跑 Python） |
 
-Python 源码用 `b::embed` 而不是 C 字符串字面量：后者要逐行转义、
-中文注释要处理编码，可读性极差。
+## 抽取里三个容易错的地方（都钉进判据）
 
-## 三条硬边界（文档写清，不静默）
+| 项 | 错法 | 症状 |
+|---|---|---|
+| 矩阵布局 | bpy 行主序 vs `Mat4` 列主序 | 位置对但旋转/缩放错位 |
+| `fov_y` 单位 | bpy 弧度 vs `Camera.fov_y_degrees` 角度 | 视野极窄、只看到一角 |
+| 灯光方向 | `Light.direction` 是**指向光源**（与相机 -Z 视线相反） | 物体被从背面照亮 |
 
-1. **`@` 运算符不可用** —— MicroPython 1.24 的编译器不支持 PEP 465
-   （`py/compile.c` 里没有 `MP_TOKEN_OP_AT` 分支）。兼容层内部一律用
-   `Matrix.matmul()` / `Vector.dot()`；不做源码改写（要写 Python 词法器
-   区分装饰器/字符串/注释，风险大于收益）
-2. **`sys` / `property` 必须显式打开** —— 默认值都是
-   `AT_LEAST_CORE_FEATURES`，MINIMUM 档下为 0 → 整块代码被条件编译掉。
-   症状极具误导性：`import sys` 报 ModuleNotFound（看起来像没编 modsys.c）、
-   `@property` 报 `NameError: name not defined`（没说是哪个名字）
-3. **genhdr 改了配置必须重生成** —— 已入库（10 KB）避免构建期 Python
-   依赖，但改 `mpconfigport.h` 或加自己的 `MP_QSTR_*` 后要重跑
-   `tools/micropython_genhdr.py`
+这三条都不是"会崩"而是"画面有点不对没人报错"——所以探针用可断言的量
+（顶点数、包围盒、材质值、fov 角度）把抽取钉住。
 
-## 这轮又修掉的 5 个生成器缺陷
+## 这轮修掉的问题
 
-1. **root pointer 只扫 mpstate.h** —— 报 `'mp_state_vm_t' has no member
-   named 'sys_mutable'`，看起来像"mpstate.h 定义不全"
-2. **相邻宏被合并** —— `MP_REGISTER_MODULE` 紧跟 `..._DELEGATION` 时
-   split 把它们算成一段，生成出坏代码；要自己按括号配平取第一条
-3. **`MP_REGISTER_MODULE_DELEGATION` 被误当模块** —— 同上
-4. **strategy: 模块表漏 `sys`** —— 因为它整块在 `#if MICROPY_PY_SYS` 里
-5. **C 文件里用了 C++ lambda** —— `expected expression before ']' token`，
-   错误位置在初始化器里，很难看出根因是"这个文件得按 C 编"
+1. **输出缓冲 8 KB 太小** —— 场景 JSON 有数 MB，截断后报
+   `JSON 解析失败（第 8192 字节）… unexpected end of input`，
+   看起来像"序列化器写错了"，实际是**读回来时被截断了**。改 4 MB
+2. **`MICROPY_PY_JSON` 在 MINIMUM 档没有** —— `import json` 报 ModuleNotFound。
+   而抽取结果全是自己构造的简单类型，所以手写 60 行序列化器（无依赖、好查）
+3. **`bpy.data` 跨 run 存活导致数据累积** —— 第二个脚本报
+   `ValueError: 已存在同名数据块：'Cube'`，看起来像"脚本重名了"，
+   实际是上一个脚本的残留。加 `bpy.data.reset()`，抽取器每次跑脚本前调
+4. **`_Module.bind(...)` 误当方法** —— `bind` 是 `extract.py` 的全局函数，
+   写成 `_st_extract.bind(...)` 报 `AttributeError: no such attribute`
+   （而 `_Module` 是普通对象，那个报错不说是哪个属性）
 
-## 新增探针
+## 已知边界（写进 docs/python.md）
 
-- `tools/python_features_probe`：20 项 Python 特性逐条探测，
-  定位"缺哪个开关"（失败信息只有 `NameError: name not defined`，
-  不说哪个名字，只能一条条试）
-- `tools/bpy_load_probe`：查 `sys.modules` 状态，诊断"装载成功但
-  import 失败"
+- 面三角化用**扇形**：凸多边形正确，凹多边形会错（`primitive_*` 与 bmesh
+  建的面绝大多数是凸的）
+- 多材质只取第 0 个槽（本框架 `Mesh` 是单一材质）
+- 父子关系不抽（`matrix_world` 已是绝对变换）
+- 顶点留局部空间（变换由 `ThreeObject::world` 承担，两处都变换就是两遍）
 
 ## 验证
 
-- `python_embed_probe`：**18/18**（语言基础 10 + mathutils 5 + bpy 3 + bmesh 1）
-- `python_features_probe`：19/20（唯一失败是 f-string，MicroPython 默认不带）
-- 全量 17 分片 0 失败
-- 文档：`docs/python.md`（能力边界 + 七个生成器坑 + 用户可见的三条边界）
+- `bpy_scene_probe`：**10/10**（立方体顶点/索引数、世界矩阵平移、
+  材质 PBR 参数、bmesh 三角面、相机 fov 单位转换、错误路径）
+- `python_embed_probe`：18/18 仍全过
+- 全量 16 分片 0 失败
