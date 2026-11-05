@@ -508,12 +508,7 @@ auto run_app(int argc, char** argv) -> int {
   // 编辑器最终装回了**另一个文件的内容**（标签高亮 sample.cpp、正文是 renderer.cpp）。
   // 改成把路径记下来、**第一帧之后**再打开（那时宿主已就绪，时序干净）。
   if (!options.open_path.empty()) page->set_pending_open_path(options.open_path);
-  // 主题的两个口子（**同一处装配**、依赖方向依然是单向的）：
-  // 读 = `UiRoot::theme()`（真值源）；写 = `Application::set_theme_mode`
-  // （它会连带处理字号缩放与文本 gamma——直接改 `root().theme()` 会把
-  // `--ui-font-scale` 调好的字号悄悄还原）。
   page->theme_mode = [&app] { return app.root().theme().mode(); };
-  page->theme_setter = [&app](ThemeMode mode) { app.set_theme_mode(mode); };
   // 慢内容异步排版的调度器（Markdown 预览大文档不冻结主窗）。
   page->layout_tasks_ = &app.tasks();
   // 页面缩放 = DPI 缩放（见 `CodeEditorPage::device_scale_setter` 的说明）：

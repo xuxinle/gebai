@@ -29,7 +29,7 @@ assert port, "控制通道未就绪"
 try:
     reply = call_with_token(port, "capture", {"encode": "file", "path": SHOT}, token)
     print("截图:", (reply.get("result") or {}).get("path", reply))
-    for element_id in ("app-root", "titlebar", "app-title", "theme-toggle", "dpi-toggle",
+    for element_id in ("app-root", "titlebar", "app-title", "theme-picker", "dpi-toggle",
                        "btn-capture", "content-root", "nav-components"):
         reply = call_with_token(port, "get", {"id": element_id}, token)
         result = reply.get("result") or {}

@@ -563,10 +563,11 @@ auto run_app(int argc, char** argv) -> int {
     frame_ptr->title_bar()->add_trailing(std::move(badge));
   }
 
-  auto theme_button = std::make_unique<Button>("暗色", Button::Variant::Ghost, Button::Size::Small);
-  theme_button->set_id("theme-toggle");
-  theme_button->set_icon("moon");
-  auto* theme_button_ptr = theme_button.get();
+  // 主题入口**只在标题栏**（`TitleBar` 内嵌的 `ThemePicker`：点画笔图标弹色卡墙，
+  // 内置主题一次选完）。这里不再放“亮色/暗色”两档按钮——
+  // 它与色卡墙是同一个能力的两个入口，而两档按钮只是内置主题库的子集，
+  // 两个入口并存会让人以为“只有两档可切”。
+  //
   // 按钮标签与**实际缩放**必须同一份事实：`dpi_label()` 是唯一入口，
   // 初值也由它给出（写死 "DPI 1x" 与后端解析出的 scale 无关，启动即错）。
   auto scale_button =
@@ -580,9 +581,8 @@ auto run_app(int argc, char** argv) -> int {
   shot_button->set_icon("image");
   auto* shot_button_ptr = shot_button.get();
 
-  // 三个按钮进标题栏尾部槽（顺序：主题 · DPI · 截图，与控制按钮同排不重叠）。
+  // 两个按钮进标题栏尾部槽（顺序：DPI · 截图，与控制按钮同排不重叠）。
   if (frame_ptr->title_bar() != nullptr) {
-    frame_ptr->title_bar()->add_trailing(std::move(theme_button));
     frame_ptr->title_bar()->add_trailing(std::move(scale_button));
     frame_ptr->title_bar()->add_trailing(std::move(shot_button));
   }
@@ -777,14 +777,6 @@ auto run_app(int argc, char** argv) -> int {
   // 这里只设高亮、不改状态栏文案：启动时"就绪"比"已切到「概览」"更合适。
   nav_ptrs[0]->set_variant(Button::Variant::Soft);
 
-  theme_button_ptr->on_click = [app_ptr, theme_button_ptr, status_right_ptr, root_ptr]() {
-    const bool dark = app_ptr->root().theme().mode() == st::ui::ThemeMode::Light;
-    app_ptr->set_theme_mode(dark ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light);
-    theme_button_ptr->set_label(dark ? "亮色" : "暗色");
-    theme_button_ptr->set_icon(dark ? "sun" : "moon");
-    status_right_ptr->set_content(dark ? "主题 dark · 视觉令牌已切换" : "主题 light · 视觉令牌已切换");
-    root_ptr->mark_dirty_all();
-  };
   scale_button_ptr->on_click = [app_ptr, scale_button_ptr, status_ptr, status_right_ptr,
                                 refresh_runtime, root_ptr]() {
     const float current = app_ptr->device_scale();

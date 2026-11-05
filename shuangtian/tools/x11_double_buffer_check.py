@@ -314,7 +314,9 @@ def main() -> int:
                 checks.append(f"局部上屏生效（{partials_seen}/{tried} 次 hover 上报了局部面积）")
 
             # —— ③ 一次**整屏**改动：切主题（两块槽都会被整屏写） ——
-            call("invoke", {"id": "theme-toggle", "action": "click"}, timeout=20)
+            # 走控制通道的 `theme.toggle`（不是某个按钮）：整屏重绘的来源不重要，
+            # 而按钮会随界面演进而增删——用通道才能长期稳定。
+            call("theme", {"mode": "toggle"}, timeout=20)
             call("wait", {"for": "stable", "stable_ms": 300, "timeout_ms": 3000}, timeout=10)
             note_after = call("metrics", {}).get("result", {}).get("present_note", "")
             m2 = re.search(r"完成事件 (\d+) 个", note_after)

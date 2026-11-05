@@ -340,8 +340,6 @@ namespace gbcode_ui {
       sidebar_visible_.set(!sidebar_visible_.value());
     } else if (menu == "view" && item == "find") {
       open_find();
-    } else if (menu == "view" && item == "toggle-theme") {
-      toggle_theme();
     } else if (menu == "view" && (item == "zoom-in" || item == "zoom-out" || item == "zoom-reset")) {
       zoom_page(item == "zoom-in" ? 1 : (item == "zoom-out" ? -1 : 0));
     } else if (menu == "run" && (item == "run-task" || item == "run-test" || item == "run-lint")) {
@@ -1348,8 +1346,9 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         b.on_click = [this] { toggle_blame(); };
       }, {.width = 28.0f, .height = 22.0f, .key = "status-blame"});
       (void)text(c, [this] { return status_.value(); }, {.id = "status"});
-      (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
-                   {.id = "btn-theme"});
+      // 末尾**不再有**「亮色/暗色」切换按钮：主题入口统一在标题栏的
+      // `ThemePicker`（画笔图标 → 内置主题色卡墙）。状态栏是“看一眼”的地方，
+      // 不宜再放一个只能在两档间来回的重复入口。
     });
   }
 

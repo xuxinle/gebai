@@ -83,7 +83,7 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
             ("find", {"selector": "Button", "limit": 50}),
             ("visual", {}),
             ("capture", {"encode": "file", "path": f"{SHOTS}/{app}-{profile}-light.png"}),
-            ("invoke", {"id": {"gallery": "btn-submit", "gbcode": "btn-theme"}[app],
+            ("invoke", {"id": {"gallery": "btn-submit", "gbcode": "view.toggle-sidebar"}[app],
                         "action": "click"}),
             ("input.mouse", {"kind": "click", "x": 420, "y": 720}),
             ("input.text", {"text": "霜天 · DPI 与流式",
@@ -93,10 +93,10 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
             # 放在"主题切换"之前：改完文本紧接着截图，人眼能立刻确认脚本真的生效了。
             *([("script", {"code": "$('#status').set({text: '脚本已驱动界面 ✓'}); "
                                    "$('#editor').props.language"})] if app == "gbcode" else []),
-            *([("script", {"selector": "#btn-theme", "event": "click",
+            *([("script", {"selector": "#status", "event": "click",
                            "on": "() => $('#status').set({text:'JS 捕获了点击 ✓'})"})]
               if app == "gbcode" else []),
-            *([("invoke", {"id": "btn-theme", "action": "click"})] if app == "gbcode" else []),
+            *([("input.mouse", {"kind": "click", "x": 700, "y": 748})] if app == "gbcode" else []),
             *([("get", {"id": "status"})] if app == "gbcode" else []),
             *([("script", {"state": True})] if app == "gbcode" else []),
             ("theme", {"mode": "dark"}),

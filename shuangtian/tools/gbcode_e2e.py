@@ -196,8 +196,12 @@ def main():
         for want in ("editor-page", "titlebar", "menubar", "activity-bar", "sidebar",
                      "editor-lower", "terminal", "terminal-tabs",
                      "statusbar",
-                     "status", "btn-theme", "language-label", "cursor-label", "sidebar-split"):
+                     "status", "language-label", "cursor-label", "sidebar-split"):
             check(client.count("#" + want) == 1, f"缺少元素 #{want}")
+        # 主题入口已收到标题栏：`#theme-picker` 就是那个色卡墙（`ThemePicker`）。
+        # 它是窗口级能力（与控制按钮同排），不再在状态栏里重复占一格。
+        check(client.count("#theme-picker") == 1, "缺主题选择器 #theme-picker（标题栏）")
+        check(client.count("#btn-theme") == 0, "状态栏仍有亮/暗切换按钮（应已删除）")
         check(client.count("#editor") == 0, "空启动不该有编辑器（没有打开任何文件）")
         print("[1] 五层骨架与兼容钩子 id 齐备（空启动无编辑器，符合预期）")
 
@@ -374,26 +378,38 @@ def main():
         ratio1 = float(client.ok("get", {"id": "sidebar-split"})["props"]["ratio"])
         check(ratio1 > ratio0, f"分栏比例未变化: {ratio0} → {ratio1}")
 
-        # 主题切换：**断言真值源与像素**，而不是按钮文案。
+        # 主题切换：**断言真值源与像素**，而不是那个已删除的按钮。
         #
-        # 旧断言只看 `label in ("亮色","暗色")`——而缺陷恰恰是「文案翻转、画面不动」：
-        # 页面维护了一个从不落地到主题的影子状态 `dark_`，于是这条断言**恒为真**，
+        # 历史：旧断言只看 `label in ("亮色","暗色")`——而缺陷恰恰是「文案翻转、画面不动」：
+        # 页面维护了一个从不落地到主题的影子状态 `dark_`，于是那条断言**恒为真**，
         # 把一个完全不能用的功能报成通过（用户实测发现时就是这样）。
+        #
+        # 现在主题入口只有标题栏的 `ThemePicker`（内置主题库），走的是与控制通道
+        # `theme` 同一个 `host_apply_theme` 管线。这里两条都验：
+        #   ① 选一个内置主题 → 真值变化 + 像素变化（选择器真的落地了）；
+        #   ② `theme.toggle` → 来回可逆（两档切换仍然可用）。
+        theme_picker = client.ok("get", {"id": "theme-picker"})["props"]
+        options = (theme_picker.get("options") or "").split("|")
+        check(len(options) >= 3, f"主题选择器没列出内置主题：{theme_picker.get('options')!r}")
+        # 选一个与当前不同的内置主题（优先 ink：亮色底，像素差最明显）。
+        current_theme = theme_picker.get("value") or ""
+        target_theme = "ink" if "ink" in options and current_theme != "ink" else next(
+            (o for o in options if o and o != current_theme), "")
         mode_before = client.ok("theme", {})["mode"]
         pixels_before = client.ok("capture.hash", {})["hash"]
-        client.ok("invoke", {"id": "btn-theme", "action": "click"})
-        time.sleep(0.6)
-        mode_after = client.ok("theme", {})["mode"]
-        pixels_after = client.ok("capture.hash", {})["hash"]
-        check(mode_after != mode_before,
-              f"主题按钮未切换主题真值: {mode_before} → {mode_after}")
-        check(pixels_after != pixels_before, "主题切换后画面没有变化")
-        # 再切回，确认是**双向**可用（只能单向切也是坏的）
-        client.ok("invoke", {"id": "btn-theme", "action": "click"})
-        time.sleep(0.6)
+        check(bool(target_theme), f"没有可切换的内置主题（当前 {current_theme!r}）")
+        client.ok("invoke", {"id": "theme-picker", "action": "change", "argument": target_theme})
+        time.sleep(0.7)
+        applied = client.ok("theme", {})
+        check(applied.get("name") == target_theme,
+              f"主题选择器没落地到真值源: 期望 {target_theme}，实际 {applied.get('name')}")
+        check(client.ok("capture.hash", {})["hash"] != pixels_before, "切主题后画面没有变化")
+        # 复原：回到 light/dark 两档基线（后续用例依赖起始主题）。
+        client.ok("theme", {"mode": mode_before})
+        time.sleep(0.5)
         check(client.ok("theme", {})["mode"] == mode_before,
               f"主题切不回原档: 期望 {mode_before}，实际 {client.ok('theme', {})['mode']}")
-        print(f"[8] 分栏可拖（{ratio0:.2f} → {ratio1:.2f}）+ 主题真值来回切换（{mode_before} ⇄ {mode_after}）")
+        print(f"[8] 分栏可拖（{ratio0:.2f} → {ratio1:.2f}）+ 标题栏主题库切换（{current_theme} → {target_theme}，已复原 {mode_before}）")
 
         # —— 8b. 状态栏子元素占满行高 ——
         #
@@ -401,7 +417,7 @@ def main():
         # 图标与文字全被压扁，而容器自身尺寸「正确」（单看容器 bounds 看不出问题）。
         # 判据：固定高度的行里，子元素必须拿到几乎全部可用高度。
         bar = client.ok("find", {"selector": "#statusbar"})["matches"][0]["bounds"]
-        button = client.ok("find", {"selector": "#btn-theme"})["matches"][0]["bounds"]
+        button = client.ok("find", {"selector": "#status-encoding"})["matches"][0]["bounds"]
         check(button["height"] >= bar["height"] - 2,
               f"状态栏子元素被内边距压扁: 容器 {bar['height']:.0f}px，按钮 {button['height']:.0f}px")
         # 且按钮真的能被点到（压扁时 y 中心偏出自身范围）
@@ -409,14 +425,11 @@ def main():
                                         "x": button["x"] + button["width"] / 2,
                                         "y": button["y"] + button["height"] / 2,
                                         "button": 1})
-        check(hit.get("hit", {}).get("id") == "btn-theme",
+        check(hit.get("hit", {}).get("id") == "status-encoding",
               f"状态栏按钮命中异常: {hit.get('hit', {}).get('id')}")
-        # 上面那次真实点击会翻转主题：显式切回，别让后续步骤依赖隐式状态。
-        time.sleep(0.5)
-        if client.ok("theme", {})["mode"] != mode_before:
-            client.ok("invoke", {"id": "btn-theme", "action": "click"})
-            time.sleep(0.5)
-        check(client.ok("theme", {})["mode"] == mode_before, "状态栏用例未能复原主题")
+        client.ok("invoke", {"id": "theme-picker", "action": "close"})
+        time.sleep(0.3)
+        check(client.ok("theme", {})["mode"] == mode_before, "状态栏用例改动了主题（不应发生）")
         print(f"[8b] 状态栏子元素占满行高（{bar['height']:.0f}px 容器 / {button['height']:.0f}px 按钮）且可点击")
 
         # —— 9. 截图（视觉核验素材）——
@@ -621,9 +634,9 @@ def main():
         time.sleep(0.3)
         # 用**侧栏开合**触发一次重组（以前用底部标签切换）——不碰终端面板，
         # 否则后面的拖拽测例会因面板已收起而失去分栏（实测踩到）。
-        client.ok("invoke", {"id": "btn-theme", "action": "click"})
+        client.ok("theme", {"mode": "toggle"})
         time.sleep(0.6)
-        client.ok("invoke", {"id": "btn-theme", "action": "click"})
+        client.ok("theme", {"mode": "toggle"})
         time.sleep(0.6)
         props = client.ok("get", {"id": "editor"})["props"]
         check(props["language"] == "python", f"重组后语言被重置: {props['language']}")

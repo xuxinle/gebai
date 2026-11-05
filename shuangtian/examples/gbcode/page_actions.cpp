@@ -29,8 +29,6 @@ namespace gbcode_ui {
     const OpenBuffer kNoBuffer{};
   }
 
-  std::function<void(ThemeMode)> theme_setter{};
-
   // —— 会话（最近打开 + 关窗恢复）——
 
   void CodeEditorPage::open_recent(const std::string& path) {
@@ -312,18 +310,6 @@ namespace gbcode_ui {
     if (refused_binary > 0) message += std::format("；{} 个二进制文件拒绕写盘", refused_binary);
     if (failed > 0) message += std::format("；{} 个写入失败", failed);
     status_.set(message);
-  }
-
-
-  /// 切换亮/暗主题。  ///
-  /// 唯一的真值源是 `UiRoot::theme()`（App 持有）：这里**读**它算下一档、
-  /// **写回**它（经 `theme_setter` → `Application::set_theme_mode`，后者会连带
-  /// 处理好字号缩放与文本 gamma），然后只更新本页的文案。
-  /// 不在这里维护自己的 `dark_`——那正是故障的来源（影子状态永不落地到主题）。
-  auto CodeEditorPage::toggle_theme() -> void {
-    const bool next_dark = !theme_is_dark();
-    if (theme_setter) theme_setter(next_dark ? ThemeMode::Dark : ThemeMode::Light);
-    status_.set(next_dark ? "主题 dark · 视觉令牌已切换" : "主题 light · 视觉令牌已切换");
   }
 
 
@@ -2873,8 +2859,6 @@ void CodeEditorPage::load_active_text() {
       zoom_page(0);
     } else if (id == "view.toggle-sidebar") {
       sidebar_visible_.set(!sidebar_visible_.value());
-    } else if (id == "view.toggle-theme") {
-      toggle_theme();
     } else if (id == "view.toggle-indent-guides") {
       if (editor != nullptr) {
         editor->set_indent_guides(!editor->indent_guides());

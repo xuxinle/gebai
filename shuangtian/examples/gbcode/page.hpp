@@ -73,15 +73,8 @@ struct CodeEditorPage : Component {
       : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
         workspace_(std::move(workspace)) {}
 
-  /// 真值源读取口（`run_app` 注入为 `UiRoot::theme().mode()`）。
-  ///
-  /// **主题不在页面里存影子状态**：真值源是 `UiRoot::theme()`（由 App 持有）。
-  /// 页面自存一个 `dark_` 会与它**静默分岔**——按钮文案与状态栏都跟着影子走，
-  /// 而画面一点没变（实测故障：按了「暗色」、状态栏还报「视觉令牌已切换」）。
-  /// 本页只负责「按当前真值算出下一档」，像个按钮该做的那样。
+  /// 当前画面是否暗色（读真值源）——本页用它做与主题相关的分支判断。
   std::function<ThemeMode()> theme_mode{};
-  /// 主题切换出口（`run_app` 注入为 `Application::set_theme_mode`）。
-  std::function<void(ThemeMode)> theme_setter{};
   /// 页面缩放出口（`run_app` 注入为 `Application::set_device_scale`）。
   ///
   /// 为什么"缩放页面"就是 DPI 缩放：霜天的**全自绘**意味着界面里没有第二套
@@ -1876,8 +1869,7 @@ auto shutdown() -> void;
             {.separator = true},
             {.id = "toggle-sidebar", .label = "切换侧栏可见性（Ctrl+B）"},
             {.id = "find", .label = "查找（Ctrl+F）"},
-            {.id = "toggle-terminal", .label = "切换底部面板（Ctrl+J）"},
-            {.id = "toggle-theme", .label = "切换亮/暗主题"}}},
+            {.id = "toggle-terminal", .label = "切换底部面板（Ctrl+J）"}}},
           {"run", "运行",
            {{.id = "run-task", .label = "运行任务：构建 gallery"},
             {.id = "run-test", .label = "运行任务：st test"},
