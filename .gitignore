@@ -264,3 +264,10 @@ tmpmsg
 # 教训：**凡是被 `git add -A` 可能扫到的工作文件，都要显式忽略**，
 # 不能只靠“我记得别 add 它”。
 _cm.txt
+
+# 探测/调试临时脚本（shuangtian/_*.py、shuangtian/_*.js）——它们用来快速验证一个 API
+# 或一组参数，验证完就废。**不入库**：曾经有一批（19 个）被 git add -A 带进版本库，
+# 里面是半成品表达式与硬编码的测试值，对后来者毫无价值。
+shuangtian/_*
+shuangtian/_*.py
+shuangtian/_*.js
