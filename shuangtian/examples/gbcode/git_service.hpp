@@ -283,8 +283,24 @@ struct ContentAt {
 /// `end` 为 `Worktree` 时读磁盘；`Index` 读暂存区（`git show :0:<path>`）；
 /// `Revision` 读该提交（`git show <rev>:<path>`）。
 /// **文件在那一侧不存在不是错误**（新增/删除就是这种情况）：`ok=false` + `missing=true`。
+///
+/// ⚠ `cwd` 是**仓库根**而不是“用户打开的工作区目录”：git 命令会自己向上找仓库，
+/// 但 `Worktree` 分支是**直接拼磁盘路径**的，它不会。两者不同时（工作区是仓库的
+/// 子目录）拼出来的路径会多套一层——表现是“文件读不到” ⇒ 被判成**删除文件**，
+/// 右栏只剩对齐用的空填充行（实测：gbcode 工作区是 `gebai/shuangtian`、
+/// 仓库根是 `gebai`，点开 page.hpp 显示“（删除文件）+0 −2132”、右侧全空白）。
+/// 调用方取仓库根用 `read_repo_root()`。
 [[nodiscard]] auto read_content_at(const std::string& cwd, const DiffEndpoint& end,
                                    const std::string& path) -> ContentAt;
+
+/// 仓库根目录（`git rev-parse --show-toplevel`）。
+///
+/// 为何需要它：git 输出的所有路径（`status --porcelain`、`--numstat`…）都相对**仓库根**，
+/// 而用户打开的“工作区”可以是仓库里的任意子目录。两者不等时，任何“按路径读盘”的操作
+/// 都会拼错（见 `read_content_at` 的说明）。
+///
+/// 非仓库 / git 不可用时返回空串（调用方退回传入目录——那是唯一能给的最佳猜测）。
+[[nodiscard]] auto read_repo_root(const std::string& cwd) -> std::string;
 
 /// **冲突文件的三份内容**（`merge`/`rebase` 撞冲突后的“我方 / 共同祖先 / 他方”）。
 ///
@@ -436,18 +452,6 @@ enum class WriteOp : std::uint8_t {
   Continue,       ///< `git <op> --continue`
   Skip,           ///< `git <op> --skip`
   Abort,          ///< `git <op> --abort`
-  /// **部分暂存**：`git apply --cached -`（补丁走 **stdin**）。
-  ///
-  /// 为何单独一个 op 而不是复用 Stage：补丁不能走 argv——
-  /// ① 它可能有几十 KB（超出命令行长度限制）；
-  /// ② 路径以 `-` 开头时会被当成选项。
-  /// 所以这一项构造的是「到 `--` 为止的命令」，补丁本体由 `run_write` 从 stdin 喂。
-  StagePatch,
-  /// **部分取消暂存**：`git apply --cached --reverse -`（同样走 stdin）。
-  ///
-  /// 它删的是**暂存区**的改动（不碰工作区），所以危险度是 `None`——
-  /// 取消暂存随时可以再暂存回去。
-  UnstagePatch,
 };
 
 /// 一次写操作的意图（参数全在这里；空参数按各 op 的默认语义处理）。
@@ -461,12 +465,7 @@ struct WriteIntent {
   bool amend{false};         ///< 提交时改写 HEAD（危险：会改写已推送的历史）
   bool allow_empty{false};   ///< 允许空提交
   bool hard{false};          ///< `git branch -D` / `git tag -d` 之外的强制位
-  bool annotated{false};     ///< 建标签时用注解标签
-  /// `StagePatch`/`UnstagePatch` 的**补丁本体**（走 stdin，见那两个 op 的说明）。
-  ///
-  /// 为何不放在 `path` 里或另加一个路径字段：它是**内容**而不是路径，
-  /// 且可能几十 KB——混进路径字段会让“这是文件还是补丁”在调用处看不出来。
-  std::string patch{};
+    bool annotated{false};   ///< 建标签时用注解标签
 };
 
 /// 构造写操作的**命令行**（不含 `git` 本身，第一个元素是子命令）。

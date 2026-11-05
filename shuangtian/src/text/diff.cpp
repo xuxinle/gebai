@@ -179,8 +179,15 @@ auto diff_hunks(std::string_view old_text, std::string_view new_text, std::size_
   // 规模上限：两侧乘积超过阈值就不再求 LCS。**不做静默截断**——
   // 退化成「整文件替换」是如实反映「这两份差得太远」，而截断会显示出一个
   // 「看起来正常但少了几行」的假差异。
-  const bool too_large = (old_lines.size() + 1) * (new_lines.size() + 1) > kMaxLcsCells;
-  std::vector<DiffHunk> hunks;
+  //
+  // ⚠ 判据必须用**剪掉公共前后缀之后**的行数：否则一个 2000 行的文件（只改了 3 行）
+  // 两侧乘积就是 4.004M，恰好越过上限，于是被报成“整篇重写”
+  //（实测：gbcode 点开 page.hpp 的差异，左栏全红、右栏全绿、看不到任何真实改动）。
+  // 剪完之后真正要算 LCS 的往往只剩几十行。
+  const detail::CommonSpan span = detail::common_span(old_lines, new_lines);
+  const std::size_t old_middle = old_lines.size() - span.prefix - span.suffix;
+  const std::size_t new_middle = new_lines.size() - span.prefix - span.suffix;
+  const bool too_large = (old_middle + 1) * (new_middle + 1) > detail::kMaxLcsCells;  std::vector<DiffHunk> hunks;
   if (too_large) {
     DiffHunk hunk;
     hunk.old_start = old_lines.empty() ? 0 : 1;
@@ -206,7 +213,35 @@ auto diff_hunks(std::string_view old_text, std::string_view new_text, std::size_
     return hunks;
   }
 
-  const std::vector<OpItem> ops = backtrack(old_lines, new_lines);
+  // —— LCS：**只对剪掉公共前后缀后的中间段求** ——
+  //
+  // 为何必须剪（不只是优化）：`lcs_backtrack` 的 DP 表是 (n+1)×(m+1) 个 `uint32`，
+  // 直接对整份求则在 2000×2000 时就是 16MB 分配 + 400 万格逐格填充，
+  // 而两个相近文件的中间段通常只有几十行。
+  //
+  // 剪枝**不改变结果**：公共前后缀里的行必然在 LCS 里（一一相等且顺序一致），
+  // 所以拼回去与“整份求 LCS”等价。行号由后面的前缀和自然得出，不用额外偏移。
+  std::vector<OpItem> ops;
+  ops.reserve(span.prefix + old_middle + new_middle + span.suffix);
+  for (std::size_t i = 0; i < span.prefix; ++i) {
+    ops.push_back(OpItem{.op = Op::Equal, .old_index = i, .new_index = i});
+  }
+  if (old_middle > 0 || new_middle > 0) {
+    const std::vector<std::string_view> old_part(old_lines.begin() + static_cast<std::ptrdiff_t>(span.prefix),
+                                                 old_lines.end() - static_cast<std::ptrdiff_t>(span.suffix));
+    const std::vector<std::string_view> new_part(new_lines.begin() + static_cast<std::ptrdiff_t>(span.prefix),
+                                                 new_lines.end() - static_cast<std::ptrdiff_t>(span.suffix));
+    for (const OpItem& item : backtrack(old_part, new_part)) {
+      ops.push_back(OpItem{.op = item.op,
+                           .old_index = item.old_index + span.prefix,
+                           .new_index = item.new_index + span.prefix});
+    }
+  }
+  for (std::size_t k = 0; k < span.suffix; ++k) {
+    ops.push_back(OpItem{.op = Op::Equal,
+                         .old_index = old_lines.size() - span.suffix + k,
+                         .new_index = new_lines.size() - span.suffix + k});
+  }
   std::vector<std::size_t> changed;
   changed.reserve(ops.size());
   for (std::size_t k = 0; k < ops.size(); ++k) {

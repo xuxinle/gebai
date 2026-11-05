@@ -783,6 +783,19 @@ auto read_upstream(const std::string& cwd) -> std::string {
   return std::string(st::trim(*out));
 }
 
+auto read_repo_root(const std::string& cwd) -> std::string {
+  // git 自己会向上找仓库，所以这里传“用户打开的目录”就对了。
+  const auto out = git(cwd, {"rev-parse", "--show-toplevel"});
+  if (!out.has_value()) return {};
+  std::string root = std::string(st::trim(*out));
+  // Windows 上 git 给的是 `/c/foo` 形态（MSYS 路径），拼磁盘路径前要换回来。
+  if (root.size() >= 3 && root[0] == '/' && root[2] == '/') {
+    root = std::string(1, static_cast<char>(root[1])) + ":" + root.substr(2);
+    std::ranges::replace(root, '/', '\\');
+  }
+  return root;
+}
+
 auto read_content_at(const std::string& cwd, const DiffEndpoint& end, const std::string& path)
     -> ContentAt {
   ContentAt result;
@@ -872,23 +885,6 @@ auto write_args(const WriteIntent& intent) -> std::optional<std::vector<std::str
     case WriteOp::Stage:
       if (!need(intent.path)) return std::nullopt;
       return std::vector<std::string>{"add", "--", intent.path};
-    case WriteOp::StagePatch:
-    case WriteOp::UnstagePatch: {
-      // 补丁写成**临时文件**再交给 `git apply`（而不是走 stdin）：本应用的写操作
-      // 统一经终端作业通道执行（输出实时回流、可中止），那是一条**命令字符串**，
-      // 喂不了 stdin。落文件还带来两个好处：命令在终端里可读、可复现（直接拷去跑）。
-      //
-      // ⚠ 临时文件必须落在 `.git/` 下（而不是系统临时目录）：前者在仓库内、
-      // 与仓库同生命周期，也不会因跨盘路径在 git 眼里变成另一个位置；
-      // 且 `.git/` 天然不会被 `git status` 看见。
-      if (intent.patch.empty()) return std::nullopt;
-      const std::string target = ".git/st-stage.patch";
-      std::vector<std::string> args{"apply", "--cached"};
-      if (intent.op == WriteOp::UnstagePatch) args.emplace_back("--reverse");
-      args.emplace_back("--whitespace=nowarn");
-      args.emplace_back(target);
-      return args;
-    }
     case WriteOp::Unstage:
       if (!need(intent.path)) return std::nullopt;
       return std::vector<std::string>{"restore", "--staged", "--", intent.path};
