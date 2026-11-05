@@ -104,6 +104,21 @@ class ThreeView : public Element {
   /// 而用户以为程序坏了）；错误留给 `last_error()`，界面角标会显示它。
   auto load_script(std::string_view script, std::string_view source_name = "<inline>") -> bool;
 
+  /// 按**来源名称的扩展名**装载脚本：`.py` 走 bpy，其余当 three.js。
+  ///
+  /// ## 为何由视图自己分派
+  ///
+  /// 两种脚本产出**同一个 `raster::ThreeScene`**（见 `bpy_runtime.hpp` 的图），
+  /// 所以下游（相机/拾取/高亮/动画/两条渲染腿）完全同源——差别只在“谁把
+  /// 脚本变成场景”。把这个分派放在调用方意味着每个用户（预览器/裁云/探针）
+  /// 都要各写一遍扩展名判断与错误归因，而那正是最容易写成“只认 js”的地方。
+  ///
+  /// 返回值的语义与 `load_script` 完全一致（失败不清空、错误给 `last_error`）。
+  auto load_script_file_kind(std::string_view script, std::string_view source_name) -> bool;
+
+  /// 本框架能装载哪些脚本扩展名（供 UI 列举/提示；不含点号）。
+  static constexpr std::string_view kScriptExtensions[] = {"js", "py"};
+
   /// 最近一次装载是否成功的原因（成功时为空）。
   [[nodiscard]] auto last_error() const -> const std::string& { return load_error_; }
   /// 当前场景的物体数。
@@ -167,6 +182,14 @@ class ThreeView : public Element {
   /// 所以损坏登记必须发生在**绘制之外**——由宿主在主循环里每帧调一次。
   /// 返回 true 表示本帧有变化（调用方可据此重绘）。
   auto tick_animation() -> bool;
+
+  /// 把一份已求值的场景装进来（`load_script` 与 bpy 通路的共用下半段）。
+  ///
+  /// 抽出来是为了让两条表达层（three.js / bpy）**共享同一套接手逻辑**：
+  /// 失败不清空、拾取缓存重建、换场景才重新取景。两条路各写一遍的话，
+  /// 必然有一边会漏一项（而且漏了不报错，只表现为“bpy 场景镜头不对”）。
+  auto adopt_scene(Result<raster::ThreeScene> loaded, std::string_view source_name)
+      -> bool;
 
   void set_orbit_enabled(bool enabled) noexcept { orbit_enabled_ = enabled; }
   void set_zoom_enabled(bool enabled) noexcept { zoom_enabled_ = enabled; }

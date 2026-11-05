@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 
+#include "st/raster/bpy_runtime.hpp"
 #include "st/raster/pick.hpp"
 #include "st/raster/three_runtime.hpp"
 #include "st/test/test.hpp"
@@ -450,4 +451,47 @@ ST_TEST(three_view_pick_enabled_switch_works) {
   }
   ST_CHECK(!view->hovered().has_value());
   ST_CHECK(view->hover_events() == events);
+}
+
+// ————————————————————————————————————————————————————————————————
+// 按扩展名分派两种表达层（bpy / three.js）
+// ————————————————————————————————————————————————————————————————
+
+ST_TEST(three_view_dispatches_py_to_bpy_and_js_to_three) {
+  // 这个用例钉住一件很容易写错的事：**分派按扩展名，而不是按内容嗅探**。
+  // 反例（曾经的真实写法）：所有脚本都走 ThreeRuntime → `.py` 报一堆 JS 语法错，
+  // 而现象只是"画面没变"，很容易被当成"热重载坏了"（e2e 实测踩过）。
+  //
+  // 两个脚本用**同样的物体名**，但几何来源完全不同：
+  //   · `.js` 用 three.js 生成一个立方体；
+  //   · `.py` 用 bpy.ops 生成一个立方体。
+  // 判据不能只看"有物体"（两边都有），要看**扩展名真的改变了执行路径**：
+  // `.py` 脚本喂给 three 引擎会语法错，所以若分派错了，`last_error()` 必然非空。
+  constexpr const char* kBpyScene = R"py(
+import bpy
+bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, 0.0, 0.0))
+obj = bpy.context.active_object
+obj.name = 'bpy_cube'
+result = 'dispatch'
+)py";
+  auto view = std::make_unique<ThreeView>();
+  if (!st::raster::BpySceneExtractor::available()) {
+    ST_CHECK(true);   // bpy 不可用的构建（无 MicroPython）不算失败
+    return;
+  }
+  ST_REQUIRE(view->load_script_file_kind(kBpyScene, "scene.py"));
+  ST_CHECK(view->last_error().empty());
+  ST_REQUIRE(!view->scene().objects.empty());
+  ST_CHECK(view->scene().objects[0].name == "bpy_cube");
+
+  // 同一份 bpy 脚本**走 three.js 那条路**必然失败——这条是"分派真的发生了"的反证。
+  // 没有它，一个"永远走 bpy"的实现也能让上面两条通过。
+  auto wrong = std::make_unique<ThreeView>();
+  ST_CHECK(!wrong->load_script(kBpyScene, "scene.py"));
+  ST_CHECK(!wrong->last_error().empty());
+
+  // `.js` 仍然走 three.js（不能被新分派抢走）
+  auto js_view = std::make_unique<ThreeView>();
+  ST_REQUIRE(js_view->load_script_file_kind(kScene, "scene.js"));
+  ST_CHECK(js_view->scene().objects.size() >= 3);
 }

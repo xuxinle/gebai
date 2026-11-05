@@ -15,7 +15,7 @@ MicroPython 在 MINIMUM 档下**异常信息不完整**：
 
 ## 用法
 
-    py tools/bpy_script_check.py examples/threelab/scenes/bpy_watch.py
+    py tools/bpy_script_check.py examples/jianmu/scenes/bpy_watch.py
 
 退出码 0 = 脚本在 CPython 下能跑通（bpy 打桩）。
 """

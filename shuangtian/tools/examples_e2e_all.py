@@ -58,6 +58,8 @@ SEQUENCE = [
     "gbcode_usability_e2e.py",
     "louyue_e2e.py",
     "caiyun_e2e.py",
+    # 建木：三维脚本实时预览（.js 走 three.js、.py 走 bpy）+ 热重载 + 拾取
+    "jianmu_e2e.py",
     # 同一二进制的另一面：**改文件即生效**（改 XML/JS 保存就重载，写错不清界面）。
     # 宿主是相期（它也走 `HotReload`，且是常驻应用，更能暴露重载后状态没清干净的问题）。
     "hot_reload_e2e.py",

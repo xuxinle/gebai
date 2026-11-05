@@ -133,7 +133,7 @@
 | [`bpy-assets.md`](bpy-assets.md) | **bpy 做资产 → three.js 组装**：两步分工、资产 JSON 格式、三步生成、两个踩坑（资产尺寸要量不要猜、`camera.up`） | 详读 | 活 |
 | [`python.md`](python.md) | **内嵌 MicroPython 与 bpy 兼容层**：可用子集、三条硬边界（`@` 运算符 / 内置函数要显式开 / genhdr 重生成）、已知缺口 | 详读 | 活·**接口** |
 | [`render_alignment.md`](render_alignment.md) | **渲染对齐的方法与结论**：三路基准（本框架 / 真 three.js / 真 Blender）、为何用分位数不用均值、已修缺陷链、已知差异 | 详读 | 活 |
-| [`threelab.md`](threelab.md) | **threelab 示例应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、控制通道驱动、e2e 验收 | 速查 | 活 |
+| [`jianmu.md`](jianmu.md) | **jianmu 示例应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、控制通道驱动、e2e 验收 | 速查 | 活 |
 | [`cross_platform.md`](cross_platform.md) | 跨平台会怎么错、提交前逐条自查什么 | 速查 | 活 |
 | [`declarative.md`](declarative.md) | 声明式 UI（`st::ui::dsl` + `declarative.js`）的设计与**调用方契约** | 详读 | 活·**接口** |
 | [`perceptual_changes.md`](perceptual_changes.md) | 观感类改动怎么做：正交量、量尺三坑、八步循环 | 详读 | 活 |

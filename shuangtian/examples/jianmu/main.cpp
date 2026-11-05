@@ -1,4 +1,8 @@
-/// **threelab** —— 实时编辑并预览 three.js 场景的示例应用。
+/// **建木（jianmu）** —— 三维建模与演示工作台：实时编辑并预览 **three.js / bpy** 两种脚本。
+///
+/// 名字取意《山海经》的建木：「众帝所自上下」——它是天地的**通道**，
+/// 正合这个应用的定位：一边是建模（bpy/参数化几何），一边是演示（three.js 组装/布光）。
+/// 旧名 `threelab` 只说了 three.js 那一半，所以改名。
 ///
 /// ## 这个示例检验什么
 ///
@@ -24,8 +28,10 @@
 ///
 /// ## 文件在哪
 ///
-/// 默认 `examples/threelab/scenes/*.js`，可用 `--dir` 指定。
-/// 脚本是**普通 three.js 代码**，不需要任何本框架的 API——这是整件事的关键：
+/// 默认 `examples/jianmu/scenes/`，可用 `--dir` 指定。两种脚本同权：
+/// · `*.js` —— **普通 three.js 代码**（组装、布光、动画、实例化）
+/// · `*.py` —— **bpy 脚本**（Blender 的建模 API：布尔/倒角/挤出/参数化齿形）
+/// 两者都不需要任何本框架的 API——这是整件事的关键：
 /// 模型/用户写的是它已经会写的东西。
 
 #include <algorithm>
@@ -141,12 +147,27 @@ auto parse_options(int argc, char** argv) -> Options {
 /// 一个场景文件的登记项。
 struct SceneFile {
   std::string path{};
+  /// 展示名（**带扩展名**：`quad.js` / `quad.py`）。
+  ///
+  /// 为何不用裸主名：同一个场景常常有两种写法并存（`quad.js` 与 `quad.py`
+  /// 逐参数同构，就是用来对比的），裸主名会让清单里出现两个 "quad"——
+  /// 选中哪个无法分辨，`--scene=quad` 也只能命中前一个（实测：e2e 选 bpy 场景
+  /// 却选中了 js，于是“改 .py 画面没变”看起来像热重载坏了）。
   std::string name{};
+  /// 不带扩展名的主名（`quad`）——`--scene` 的宽容匹配用它。
+  std::string stem{};
   /// 上次读到的修改时间（纳秒）；-1 表示还没读过。
   std::int64_t stamp{-1};
 };
 
-/// 列举目录下的 `.js` 场景（按文件名排序，顺序稳定才可复现）。
+/// 列举目录下的三维脚本（按文件名排序，顺序稳定才可复现）。
+///
+/// 两种脚本都能装：`.js` 走 three.js 表达层，`.py` 走 bpy（Blender 的建模 API）。
+/// 它们产出的都是 `raster::ThreeScene`，所以下游（相机/拾取/高亮/两条渲染腿）
+/// 完全同源——一个预览器同时看懂两种脚本，正是本应用存在的意义。
+///
+/// ⚠ 只认这两个扩展名（不扫 `.*`）：目录里可能放着资产 JSON、说明文档、
+/// 中间产物（`__ASSETS__` 展开结果），把它们列成“场景”会让列表变得没法用。
 auto list_scenes(const std::string& dir) -> std::vector<SceneFile> {
   std::vector<SceneFile> out;
   std::error_code error;
@@ -155,10 +176,11 @@ auto list_scenes(const std::string& dir) -> std::vector<SceneFile> {
   for (const auto& entry : iterator) {
     if (!entry.is_regular_file(error)) continue;
     const auto extension = entry.path().extension().string();
-    if (extension != ".js") continue;
+    if (extension != ".js" && extension != ".py") continue;
     SceneFile file;
     file.path = entry.path().string();
-    file.name = entry.path().stem().string();
+    file.stem = entry.path().stem().string();
+    file.name = entry.path().filename().string();
     out.push_back(std::move(file));
   }
   std::sort(out.begin(), out.end(),
@@ -201,7 +223,9 @@ struct LabState {
       return false;
     }
     ++reloads;
-    const bool ok = view->load_script(*source, scene->path);
+    // 按**扩展名**分派（`.py` → bpy，其余 → three.js）：分派逻辑住在
+    // `ThreeView`，调用方不需要知道有几种表达层（见 `load_script_file_kind`）。
+    const bool ok = view->load_script_file_kind(*source, scene->path);
     last_error = ok ? std::string() : view->last_error();
     return true;
   }
@@ -276,17 +300,17 @@ auto run_app(int argc, char** argv) -> int {
   // 场景目录：默认相对可执行文件/工作目录的两个常见位置都试
   std::string scene_dir = options.dir;
   if (scene_dir.empty()) {
-    for (const char* candidate : {"examples/threelab/scenes", "scenes"}) {
+    for (const char* candidate : {"examples/jianmu/scenes", "scenes"}) {
       if (st::fs::exists(candidate)) {
         scene_dir = candidate;
         break;
       }
     }
-    if (scene_dir.empty()) scene_dir = "examples/threelab/scenes";
+    if (scene_dir.empty()) scene_dir = "examples/jianmu/scenes";
   }
 
   st::app::AppOptions app_options;
-  app_options.title = "threelab · three.js 实时预览";
+  app_options.title = "建木 · 三维建模与演示";
   app_options.width = options.width;
   app_options.height = options.height;
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
@@ -299,9 +323,9 @@ auto run_app(int argc, char** argv) -> int {
   // 脚本宿主：本示例的界面联动靠 JS（与 xmlapp 同一形态）
   app_options.enable_script = true;
 
-  st::app::Application app("threelab", "0.1.0", app_options);
+  st::app::Application app("jianmu", "0.1.0", app_options);
 
-  auto frame = std::make_unique<st::ui::WindowFrame>("threelab · three.js 实时预览");
+  auto frame = std::make_unique<st::ui::WindowFrame>("建木 · 三维建模与演示");
   frame->set_id("window-frame");
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) frame->title_bar()->set_id("titlebar");
@@ -355,9 +379,9 @@ auto run_app(int argc, char** argv) -> int {
   state.view = view_ptr;
   state.scenes = list_scenes(scene_dir);
 
-  st::log::out("threelab：场景目录 {}（{} 个 .js）\n", scene_dir, state.scenes.size());
+  st::log::out("建木：场景目录 {}（{} 个脚本）\n", scene_dir, state.scenes.size());
   if (state.scenes.empty()) {
-    st::log::out("  提示：往该目录放一个 .js（普通 three.js 代码，最后一句是 scene）即可\n");
+    st::log::out("  提示：往该目录放一个 .js（three.js）或 .py（bpy）即可\n");
   }
 
   // 选初始场景：`--scene=<名字>` 优先；其次优先打开 04-watch（精机剖面，
@@ -365,17 +389,28 @@ auto run_app(int argc, char** argv) -> int {
   // 都没有则取第一个。
   if (options.scene.empty()) {
     for (std::size_t i = 0; i < state.scenes.size(); ++i) {
-      if (state.scenes[i].name == "04-watch") {
+      if (state.scenes[i].stem == "04-watch") {
         state.current = i;
         break;
       }
     }
   }
   if (!options.scene.empty()) {
+    // `--scene` 接受**文件名**（`quad.py`）或**裸主名**（`quad`）。
+    // 裸主名有歧义时（同名 js/py 并存）优先精确文件名——这是调用方
+    // 能表达的“我要那个具体的”。
     for (std::size_t i = 0; i < state.scenes.size(); ++i) {
       if (state.scenes[i].name == options.scene) {
         state.current = i;
         break;
+      }
+    }
+    if (state.scenes[state.current].name != options.scene) {
+      for (std::size_t i = 0; i < state.scenes.size(); ++i) {
+        if (state.scenes[i].stem == options.scene) {
+          state.current = i;
+          break;
+        }
       }
     }
   }
@@ -443,7 +478,7 @@ auto run_app(int argc, char** argv) -> int {
     app.pace_loop(frame_start);
   }
 
-  st::log::out("threelab 退出：{} 帧，场景重载 {} 次\n", static_cast<int>(ticks), state.reloads);
+  st::log::out("建木退出：{} 帧，场景重载 {} 次\n", static_cast<int>(ticks), state.reloads);
   return 0;
 }
 

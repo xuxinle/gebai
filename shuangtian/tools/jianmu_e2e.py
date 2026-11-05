@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""threelab 端到端验收：**热重载 + 交互 + 拾取**三件事真的成立吗。
+"""建木（jianmu）端到端验收：**热重载 + 交互 + 拾取**三件事真的成立吗。
+
+覆盖两种脚本表达层：`.js`（three.js）与 `.py`（bpy）——后者是本应用新增的
+那半边，判据必须能证明“py 场景真的被装载并画出了东西”，而不只是“没报错”。
 
 ## 这个脚本要证的四件事（每件都能独立失败）
 
@@ -31,8 +34,8 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "threelab.exe")
-SHOTS = os.path.join(ROOT, "build", "e2e-threelab")
+DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "jianmu.exe")
+SHOTS = os.path.join(ROOT, "build", "e2e-jianmu")
 
 
 class Client:
@@ -109,12 +112,12 @@ def viewport_center(client):
 
 def start(binary):
     os.makedirs(SHOTS, exist_ok=True)
-    ctl = os.path.join(SHOTS, "threelab-ctl.json")
+    ctl = os.path.join(SHOTS, "jianmu-ctl.json")
     try:
         os.remove(ctl)
     except FileNotFoundError:
         pass
-    log_path = os.path.join(SHOTS, "threelab.log")
+    log_path = os.path.join(SHOTS, "jianmu.log")
     log = open(log_path, "wb")
     argv = [binary, "--headless", "--control-port", "0", "--control-file", ctl,
             "--width", "960", "--height", "640"]
@@ -244,7 +247,7 @@ def main():
 
     process = None
     original_source = None
-    scene_path = os.path.join(ROOT, "examples", "threelab", "scenes", "01-product.js")
+    scene_path = os.path.join(ROOT, "examples", "jianmu", "scenes", "01-product.js")
     try:
         process, client, log_path = start(binary)
         client.hello()
@@ -423,6 +426,69 @@ def main():
             time.sleep(0.25)
         check("修回脚本后错误清除", recovered)
 
+        # ── ⑪ bpy 场景（.py）：同一条视口能力面必须都成立 ──
+        #
+        # 这一节直接检验本应用新加的那半边：扩展名 `.py` → `BpySceneExtractor`。
+        # 判据要点是“真装进去了并且看得见”——只断言“没报错”会被“默默没装”骗过
+        #（版本兼容/兜底默认都能让它看起来正常）。
+        py_scene = os.path.join(ROOT, "examples", "jianmu", "scenes", "quad.py")
+        py_original = open(py_scene, encoding="utf-8").read()
+        try:
+            # 切到 bpy 场景（下标由 `lab.scenes` 清单决定，不能写死：
+            # 目录里有多少个 .js/.py 是会变的）
+            scenes = client.ok("script", {"code": "app.lab.scenes()"}).get("result") or []
+            # ⚠ 判据用**带扩展名的文件名**（`quad.py`）：清单里同一场景
+            # 常常有两种写法并存（`quad.js` / `quad.py`），裸主名匹配会选错。
+            py_index = next((i for i, item in enumerate(scenes)
+                             if str(item.get("name", "")) == "quad.py"), -1)
+            check("场景清单里包含 .py 脚本", py_index >= 0,
+                  f"清单 {len(scenes)} 项：{[s.get('name') for s in scenes][:6]}…")
+            if py_index < 0:
+                raise RuntimeError("没有 .py 场景可测")
+            client.ok("script", {"code": f"app.lab.select({py_index})"})
+            time.sleep(2.2)   # bpy 要跑 MicroPython + 抽取，比 js 慢一个数量级
+            py_error = prop_of(client, "viewport", "error")
+            check("bpy 场景装载无错", not py_error, str(py_error)[:70])
+            objects_py = int(prop_of(client, "viewport", "objects") or "0")
+            check("bpy 场景有物体", objects_py >= 1, f"{objects_py} 个")
+            py_shot = os.path.join(SHOTS, "06-bpy.png")
+            client.ok("capture", {"encode": "file", "path": py_shot})
+            py_painted = painted_ratio(py_shot)
+            check("bpy 场景画出内容（覆盖 > 3%）", py_painted > 0.03,
+                  f"{py_painted * 100:.1f}%")
+
+            # bpy 也走热重载：改 .py → reloads 增长 + 画面变
+            py_shot_b = os.path.join(SHOTS, "07-bpy-before-edit.png")
+            time.sleep(0.4)
+            client.ok("capture", {"encode": "file", "path": py_shot_b})
+            py_baseline = pixel_diff_ratio(py_shot, py_shot_b)
+            py_reloads0 = 0
+            _status = client.ok("script", {"code": "app.lab.status()"}).get("result") or {}
+            if isinstance(_status, dict):
+                py_reloads0 = int(_status.get("reloads") or 0)
+            with open(py_scene, "w", encoding="utf-8") as handle:
+                handle.write(py_original.replace("(0.55, 0.62, 0.75), 0.00, 0.50",
+                                                "(0.85, 0.20, 0.95), 0.00, 0.50"))
+            # 先等“重载真的发生了”（py 要跑 MicroPython + 抽取，比 js 慢一个量级），
+            # 再截图——只 sleep 固定时长会把“慢”测成“没生效”。
+            py_reloads_before = int(prop_of(client, "viewport", "objects") or "0")
+            deadline = time.time() + 12.0
+            while time.time() < deadline:
+                value = client.ok("script", {"code": "app.lab.status()"}).get("result") or {}
+                if isinstance(value, dict) and value.get("reloads", 0) >= py_reloads0 + 1:
+                    break
+                time.sleep(0.25)
+            time.sleep(0.5)
+            py_shot_c = os.path.join(SHOTS, "08-bpy-after-edit.png")
+            client.ok("capture", {"encode": "file", "path": py_shot_c})
+            py_changed = pixel_diff_ratio(py_shot_b, py_shot_c)
+            check("改 .py 后画面变化（> 基线噪声 3 倍）",
+                  py_changed > max(py_baseline * 3, 0.01),
+                  f"{py_changed * 100:.1f}% vs 基线 {py_baseline * 100:.2f}%")
+        finally:
+            with open(py_scene, "w", encoding="utf-8") as handle:
+                handle.write(py_original)
+
         try:
             client.ok("shutdown")
         except Exception:
@@ -443,7 +509,7 @@ def main():
     if failures:
         print(f"失败 {len(failures)} 项：{', '.join(failures)}")
         return 1
-    print("threelab e2e 全部通过")
+    print("建木 e2e 全部通过")
     return 0
 
 

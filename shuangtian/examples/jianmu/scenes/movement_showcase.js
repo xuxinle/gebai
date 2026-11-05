@@ -3,7 +3,7 @@
 // ----------------------------------------------------------------------------
 // 这是「bpy 做资产、js 组装」的**组装端**。
 //
-// 几何全部来自 `assets_gears.json`——那是 `examples/threelab/scenes/gears_asset.py`
+// 几何全部来自 `assets_gears.json`——那是 `examples/jianmu/scenes/gears_asset.py`
 // 由 bpy 生成、再由 `tools/bpy_export_asset` 导出的零件表。本文件**不含
 // 任何顶点数据**，它只做组装该做的事：
 //

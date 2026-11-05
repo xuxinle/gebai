@@ -10,7 +10,7 @@
 #include "st/raster/three_runtime.hpp"
 
 int main(int argc, char** argv) {
-  const std::string path = argc > 1 ? argv[1] : "examples/threelab/scenes/04-watch.js";
+  const std::string path = argc > 1 ? argv[1] : "examples/jianmu/scenes/04-watch.js";
   const auto source = st::fs::read_text(path);
   if (!source.has_value()) {
     std::printf("读不到 %s\n", path.c_str());

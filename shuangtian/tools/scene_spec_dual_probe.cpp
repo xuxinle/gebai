@@ -3,7 +3,7 @@
 // ## 为什么这组判据重要
 //
 // 它是**裁云联动的唯一接口**：裁云的 `model_script` 字段、三维预览、
-// 自检三条路都走这个函数。如果它只认 JSON，那 threelab 里写的场景
+// 自检三条路都走这个函数。如果它只认 JSON，那 jianmu 里写的场景
 // 就进不了片子——而那正是"联动"的全部意义。
 #include <cstdio>
 #include <string>
@@ -36,7 +36,7 @@ int main() {
   ]
 })json");
 
-  // ② three.js 源码（新路，threelab 写的就是这种）
+  // ② three.js 源码（新路，jianmu 写的就是这种）
   describe("② three.js 源码", R"js(
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(38, 16 / 9, 0.1, 100);

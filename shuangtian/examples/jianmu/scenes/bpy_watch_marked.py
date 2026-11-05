@@ -1,4 +1,4 @@
-"""机械腕表轮系 —— bpy 版（对照 examples/threelab/scenes/04-watch.js）
+"""机械腕表轮系 —— bpy 版（对照 examples/jianmu/scenes/04-watch.js）
 
 ## 这个场景为什么选轮系
 
@@ -47,6 +47,8 @@ TAU = 6.283185307179586
 # ── 齿轮生成器 ──────────────────────────────────────────────────────────
 
 
+
+result = 'MARK-A 常量与 import 完成'
 def gear_profile(teeth, module, rim_width, tooth_fraction=0.44):
     """齿轮外轮廓（XY 平面，Z=0）。返回点列表。
 
@@ -88,6 +90,8 @@ def gear_profile(teeth, module, rim_width, tooth_fraction=0.44):
             profile.append((cos(a) * root_radius, sin(a) * root_radius))
     return profile, pitch_radius, root_radius
 
+
+result = 'MARK-B gear_profile 定义完成'
 
 def make_gear(name, teeth, module, rim_width, depth,
               bore=0.11, spokes=5, hub_scale=2.8):
@@ -247,31 +251,11 @@ def make_gear(name, teeth, module, rim_width, depth,
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
-    # ## 平滑着色（2026-11-05 补）
-    #
-    # 真 Blender 参照（`tools/blender_reference.py:242`）对同一齿轮设了
-    # `poly.use_smooth = True`，而本脚本**没有**。
-    #
-    # 后果（实测，四格里唯一“绝对错”的一格）：
-    #
-    # | | 主体均值 | 暗部 | **亮部** |
-    # |---|---|---|---|
-    # | 本脚本（平面法线） | 69.5 | 78.2% | **0.0%** |
-    # | 真 Blender（平滑） | 78.0 | 34.5% | **2.9%** |
-    #
-    # **亮部 0.0%** ——整个画面一个高光像素都没有。而均值 69.5 看上去
-    # “接近”78.0，实际是因为暗部占 78.2%、整片均匀发暗把均值拉到了
-    # 看似合理的区间。这正是「判据选错缺陷会藏起来」的典型：只看均值时
-    # 它是四格里最“准”的（差 8.5），看亮部才发现它是最坏的。
-    #
-    # 根因：齿轮的平面法线让每个面只有一个朝向，而 GGX 高光只在
-    # `n·h` 接近 1 的极少数面上出现。加上齿侧、轮辐、盘面全是不同平面，
-    # 高光被稀释到统计意义上为零。
-    for poly in mesh.polygons:
-        poly.use_smooth = True
     obj = bpy.data.objects.new(name, mesh)
     return obj, pitch_radius
 
+
+result = 'MARK-C make_gear 定义完成'
 
 def _hub_at_angle(angle, ring, steps):
     """在轮毂环上取给定角度**最近**的顶点（轮辐用它连到轮毂）。"""
@@ -309,6 +293,8 @@ MAT_COPPER = make_material('copper', (0.66, 0.32, 0.18), 0.45, 0.35)
 MAT_GOLD = make_material('gold', (0.90, 0.72, 0.30), 0.98, 0.15)
 
 
+result = 'MARK-D 材质完成'
+
 # ── 轮系规格（照搬 three.js 版，便于对照）──────────────────────────────
 
 MODULE = 0.21
@@ -330,6 +316,8 @@ IDLERS = [
 
 
 # ── 建轮系 ──────────────────────────────────────────────────────────────
+
+result = 'MARK-E 规格表完成'
 
 built = []
 for (name, teeth, module, rim, depth, spokes, material) in SPECS:
@@ -386,18 +374,22 @@ for index, (x, y, z) in enumerate(idler_positions):
     built[5 + index][0].rotation_euler = Euler(0.0, 0.0, index * 0.7)
 
 
+
+result = 'MARK-F 布局完成'
 # ── 相机 ────────────────────────────────────────────────────────────────
 
 cam_data = bpy.data.cameras.new('main_cam')
-cam_data.lens = 55.0
+cam_data.lens = 62.0
 cam_data.clip_start = 0.05
 cam_data.clip_end = 200.0
 cam_obj = bpy.data.objects.new('main_cam', cam_data)
-cam_obj.location = Vector((1.5, -1.0, 26.0))
+cam_obj.location = Vector((0.0, -0.4, 13.5))
 # 略微俯视：相机看 -Z，所以绕 X 转一个小的正角
 cam_obj.rotation_euler = Euler(math.radians(8.0), 0.0, 0.0)
 
 
+
+result = 'MARK-G 相机完成'
 # ── 灯光（三盏：主光 + 补光 + 轮廓光）──────────────────────────────────
 
 

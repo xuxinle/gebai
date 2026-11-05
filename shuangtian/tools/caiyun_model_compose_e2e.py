@@ -19,7 +19,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CAIYUN = os.path.join(ROOT, "build", "dev", "bin", "caiyun.exe")
 OUT = os.path.join(ROOT, "build", "e2e-caiyun-model")
-SCENE = os.path.join(ROOT, "examples", "threelab", "scenes", "04-watch.js")
+SCENE = os.path.join(ROOT, "examples", "jianmu", "scenes", "04-watch.js")
 
 
 def decode_png(path):

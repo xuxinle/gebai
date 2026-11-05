@@ -1,6 +1,7 @@
 #include "st/ui/components/three_view.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "st/core/log.hpp"
+#include "st/raster/bpy_runtime.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/mesh_ops.hpp"
 #include "st/raster/pick.hpp"
@@ -99,6 +101,32 @@ ThreeView::~ThreeView() = default;
 
 auto ThreeView::load_script(std::string_view script, std::string_view source_name) -> bool {
   auto loaded = raster::ThreeRuntime::instance().evaluate(script, source_name);
+  return adopt_scene(std::move(loaded), source_name);
+}
+
+auto ThreeView::load_script_file_kind(std::string_view script, std::string_view source_name)
+    -> bool {
+  // 扩展名只看最后一段（`a/b/c.py` → `py`），且大小写不敏感。
+  std::string_view extension;
+  if (const std::size_t dot = source_name.find_last_of('.'); dot != std::string_view::npos) {
+    if (source_name.find_first_of("/\\", dot) == std::string_view::npos) {
+      extension = source_name.substr(dot + 1);
+    }
+  }
+  std::string lowered;
+  lowered.reserve(extension.size());
+  for (const char ch : extension) {
+    lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+  if (lowered == "py") {
+    return adopt_scene(raster::BpySceneExtractor::scene_from_script(script), source_name);
+  }
+  // 其余（`js` 与无扩展名）都走 three.js：这是历史行为，不能因为多了 bpy 而改。
+  return load_script(script, source_name);
+}
+
+auto ThreeView::adopt_scene(Result<raster::ThreeScene> loaded,
+                            std::string_view source_name) -> bool {
   if (!loaded.has_value()) {
     // ## 失败**不清空**已有场景
     //

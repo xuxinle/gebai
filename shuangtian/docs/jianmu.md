@@ -1,16 +1,33 @@
-# threelab —— three.js 场景实时预览器（示例应用）
+# 建木（jianmu）—— 三维建模与演示工作台（示例应用）
 
-一个常驻的三维预览窗口：**改 `.js` 文件 → 画面立刻变**，并且可以旋转、缩放、平移、悬浮、点选。
+一个常驻的三维工作窗口：**改脚本 → 画面立刻变**，并且可以旋转、缩放、平移、悬浮、点选。
+
+两种脚本**同权**：
+
+| 扩展名 | 表达层 | 擅长 |
+|---|---|---|
+| `.js` | three.js | 组装/层级/材质变体/动画/实例化（“在引擎里搭场景”） |
+| `.py` | bpy（Blender 建模 API） | 精确建模：bmesh 逐顶点、布尔/倒角/挤出、参数化几何 |
+
+名字取意《山海经》的建木（“众帝所自上下”）——它是**通道**：一边建模、一边演示。
+旧名 `threelab` 只说了 three.js 那一半，所以改名。
+
+两种脚本产出**同一个 `raster::ThreeScene`**，所以下游（相机/拾取/高亮/动画/两条渲染腿）
+完全同源——分派只在“脚本 → 场景”这一段（`ThreeView::load_script_file_kind`）。
 
 ## 跑起来
 
 ```bash
-st build threelab
-./build/dev/bin/threelab                  # 有窗口（默认读 examples/threelab/scenes/）
-./build/dev/bin/threelab --dir=我的场景    # 换目录
+st build jianmu
+./build/dev/bin/jianmu                  # 有窗口（默认读 examples/jianmu/scenes/）
+./build/dev/bin/jianmu --dir=我的场景    # 换目录
+./build/dev/bin/jianmu --scene=quad.py   # 直开某个脚本（裸主名也能匹，如 --scene=quad）
 ```
 
-然后编辑 `examples/threelab/scenes/*.js`，保存即可看到变化（文件监听默认开）。
+然后编辑 `examples/jianmu/scenes/*.js` 或 `*.py`，保存即可看到变化（文件监听默认开）。
+
+> ⚠ 目录里的场景名**带扩展名**：同名两种写法（`quad.js` / `quad.py`）是常见情形
+>（就是要对比两条路），用裸主名会让清单里出现两个 "quad"，选中哪个没法分辨。
 
 ## 这个示例检验什么
 
@@ -28,6 +45,8 @@ st build threelab
 控制通道与测试都能直接读——不必靠截图猜。
 
 ## 场景脚本怎么写
+
+### three.js（`.js`）
 
 **就是普通 three.js 代码**，不需要任何本框架的 API：
 
@@ -64,6 +83,53 @@ scene;                          // ← 最后一句就是场景
 
 内置三个示例：`01-product.js`（产品展示）、`02-generative.js`（参数化几何）、
 `03-materials.js`（PBR 参数对照表）。
+
+### bpy（`.py`）
+
+**就是普通 bpy 脚本**（Blender 的 Python 建模 API），同样不需要本框架的 API：
+
+```python
+import bpy
+from mathutils import Euler
+
+bpy.ops.mesh.primitive_cube_add(size=1.4, location=(-2.7, -0.9, 0.0))
+obj = bpy.context.active_object
+obj.name = 'brass'
+obj.rotation_euler = Euler(0.42, 0.62, 0.0)
+
+mat = bpy.data.materials.new('brass_mat')
+mat.diffuse_color = (0.72, 0.55, 0.24, 1.0)
+mat.metallic = 0.95
+mat.roughness = 0.22
+obj.material_slots.append(mat)
+
+# 相机/灯光同 bpy 习惯：bpy.data.cameras.new / bpy.data.lights.new
+```
+
+四条契约：
+
+| 项 | 规则 |
+|---|---|
+| 返回值 | 最后一个表达式给一个 `str`（场景名）或留空都行；**不返回 `Scene` 不报错** |
+| 坐标系 | bpy 是 **Z-up**（three.js 是 Y-up），转换已在抽取层做完 |
+| 色调映射 | bpy 来源默认 **AgX**（与 Blender 4.x 默认一致），three 来源默认 None |
+| 能写什么 | MicroPython 子集 + `bpy.data` / `bpy.ops` / `bmesh` / `mathutils`（见 `docs/python.md` 的已知边界） |
+
+内置 bpy 示例：`quad.py`（金属度/粗糙度阶梯，与 `quad.js` 逐参数同构，
+用来对比两条表达层）、`bpy_watch.py`（机械腕表轮系，bpy 的能力分水岭）。
+
+### 两条表达层怎么选
+
+| 要做的事 | three.js | bpy |
+|---|---|---|
+| 一个球浮在底座上 | 好写 | 好写 |
+| 按模数生成 60 齿齿轮 | 要手算顶点 + `Shape` 挖孔 | `bmesh` 逐顶点，与 Blender 语料同构 |
+| 倒角、布尔、挤出 | 没有 | `bpy.ops` / 修改器 |
+| 布局、层级、动画、实例化 | 好写 | 要手算 |
+
+典型的**混合工作流**：bpy 产资产（几何）→ three.js 组装（摆位、材质变体、相机）。
+资产侧的导出工具是 `tools/bpy_export_asset.cpp`（产出 JSON 资产），
+再用 `tools/inline_assets.py` 内联进组装脚本——见 `docs/render_alignment.md`。
 
 ## 操作
 
@@ -162,7 +228,7 @@ Mesh 的**名字**里，C++ 侧从 `ThreeObject::name` 读回：
 
 ```bash
 # 启动并拿到端口
-./build/dev/bin/threelab --headless --control-port 0 --control-file /tmp/ctl.json
+./build/dev/bin/jianmu --headless --control-port 0 --control-file /tmp/ctl.json
 
 # 常用方法
 get    {"id":"viewport"}                           # 全部属性（含 objects/picked/error）
@@ -183,12 +249,13 @@ capture {"encode":"file","path":"shot.png"}
 ## 端到端验收
 
 ```bash
-py tools/threelab_e2e.py
+py tools/jianmu_e2e.py
 ```
 
-17 条判据，覆盖：渲染出图、状态面可查、**基线噪声**（不改文件连拍两张必须几乎相同，
+20 条判据，覆盖：渲染出图、状态面可查、**基线噪声**（不改文件连拍两张必须几乎相同，
 否则后面的"改后差异"证明不了任何事）、热重载生效、滚轮缩放、拖拽旋转、
-悬浮命中具体物体、点击选中、脚本写坏不清空、修回后错误清除。
+悬浮命中具体物体、点击选中、脚本写坏不清空、修回后错误清除，
+以及 **bpy 那一半**：`.py` 场景能装载并出图、改 `.py` 也热重载、两个扩展名都在场景清单里。
 
 单元测试：`tests/ui_three_view_test.cpp`（11 用例 / 46 断言）覆盖相机球坐标映射、
 俯仰夹取、射线方向、拾取、拖拽 vs 点击的区分、加载失败保留旧场景。
@@ -197,11 +264,19 @@ py tools/threelab_e2e.py
 
 | 文件 | 作用 |
 |---|---|
-| `main.cpp` | 应用装配：窗口 + 视口 + 状态栏 + 文件监听 + 脚本桥 |
-| `scenes/*.js` | 三个示例场景（普通 three.js 代码） |
-| `include/st/ui/components/three_view.hpp` | 视口组件（本示例的核心，框架级可复用） |
+| `main.cpp` | 应用装配：窗口 + 视口 + 状态栏 + 文件监听（`.js`/`.py`）+ 脚本桥 |
+| `scenes/*.js` / `scenes/*.py` | 示例场景（普通 three.js 代码 / 普通 bpy 脚本） |
+| `include/st/ui/components/three_view.hpp` | 视口组件（本示例的核心，框架级可复用；含按扩展名分派） |
 | `src/ui/components/three_view.cpp` | 实现：轨道相机 + 拾取 + 高亮 + HUD |
 | `tests/ui_three_view_test.cpp` | 组件回归 |
-| `tools/threelab_e2e.py` | 端到端验收 |
+| `tools/jianmu_e2e.py` | 端到端验收 |
 
-底层能力见 [`docs/three3d.md`](three3d.md)（three.js 表达层、语义翻译表、`three_check`）。
+底层能力见 [`three3d.md`](three3d.md)（three.js 表达层、语义翻译表、`three_check`）
+与 [`python.md`](python.md)（bpy 兼容层的能力边界）。
+
+## 一个别踩的坑：同名场景
+
+`quad.js` 与 `quad.py` 逐参数同构（就是要对比两条表达层）。场景清单里的名字
+**带扩展名**，`--scene` 也优先精确文件名：曾经用裸主名做身份，清单里出现两个
+"quad"、选中哪个无法分辨，`app.lab.select(idx)` 选到了 js 却以为是 py——
+于是"改 .py 画面不变"看起来像热重载坏了（e2e 实测踩过）。

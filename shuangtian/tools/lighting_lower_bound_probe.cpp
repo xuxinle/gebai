@@ -100,7 +100,7 @@ auto render(const st::raster::SceneSpec& spec) -> st::codec::PngImage {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string path = argc > 1 ? argv[1] : "examples/threelab/scenes/bpy_watch.py";
+  const std::string path = argc > 1 ? argv[1] : "examples/jianmu/scenes/bpy_watch.py";
   const auto script = read_file(path);
   if (script.empty()) {
     std::printf("读不到 %s\n", path.c_str());

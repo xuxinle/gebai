@@ -5658,7 +5658,7 @@ gallery（用 3D）仍保留 3D 符号 54 个、体积从 ≈9.5 MB → **6.56 M
 
 ```json
 "all": { "kind": "group",
-         "libraries": ["gallery", "gbcode", "louyue", "caiyun", "threelab", "xiangqi", "cefu", "gedou"] }
+         "libraries": ["gallery", "gbcode", "louyue", "caiyun", "jianmu", "xiangqi", "cefu", "gedou"] }
 ```
 
 - `kind: "group"` 的目标**不编译任何单元**，只是把 `libraries` 里列的成员**依次**构建。
