@@ -825,6 +825,34 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       const auto target = vec3("target");
       scene.camera.eye = eye;
       scene.camera.target = target;
+      // ## `up` 必须读（2026-11-05 修）——漏了这行整个 Z-up 场景会“躺倒”
+      //
+      // three 的相机默认 `up = (0, 1, 0)`（Y 轴朝上），而三维美术与 bpy
+      // 的通用约定是 **Z 轴朝上**。脚本里写 `camera.up.set(0,0,1)` 就是为了
+      // 让相机按 Z-up 算视图矩阵。
+      //
+      // 而这里原本**只读 eye 与 target，完全忽略 up**——于是脚本设的
+      // `camera.up` 被默默丢弃，视图矩阵仍按 Y-up 算。
+      //
+      // 后果（小卖部示例实测）：竖直的侧墙渲染成一条从左上到右下的**斜板**，
+      // 地台变成两个 L 形白块，屋顶横插进货架上方。
+      //
+      // 它**看起来像「几何建错了」或「相机角度不对」**——我为此改了三轮
+      // 相机位置与 `lookAt` 目标，甚至怀疑过资产里的 z 坐标约定，全都没用。
+      // 真正的错因是这里少了一行。
+      //
+      // 注：抽取端（`three_runtime` 的 JS 段第 683 行）**一直是输出 up 的**，
+      // 断链只在这一处。
+      {
+        JsRef up_array{impl_->context,
+                       JS_GetPropertyStr(impl_->context, camera.get(), "up")};
+        if (JS_IsObject(up_array.get()) && !JS_IsUndefined(up_array.get())) {
+          const math::Vec3 up = read_color(impl_->context, up_array.get());
+          // 全零的 up 会让 `look_at` 退化（叉积为零）——只在长度足够时才采用
+          const float length_sq = up.x * up.x + up.y * up.y + up.z * up.z;
+          if (length_sq > 1e-6f) scene.camera.up = up;
+        }
+      }
       scene.camera.fov_y_degrees = static_cast<float>(get_double(impl_->context, camera.get(),
                                                                  "fov", 45.0));
       scene.camera.near_z = static_cast<float>(get_double(impl_->context, camera.get(), "near",
