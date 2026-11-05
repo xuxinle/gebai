@@ -73,6 +73,15 @@ namespace gbcode_ui {
       view.set_working_directory(workspace_);
       // **真终端**：起一条真 shell（伪终端 + ANSI 屏幕 + 字节级输入）。
       // 组件自己去重：已有一条就不重复开。
+      //
+      // ⚠ **只在面板真的可见时才起**（用户要求“启动默认不打开终端”）：
+      // 面板收起是“隐藏子树”而不是拆子树，所以不判断的话首帧就会 spawn 一个 shell——
+      // 用户看到的是“我没开终端，但进程里已经挂着一个”（而且它占着工作目录与句柄）。
+      // 切到可见时本函数会重跑，那时才真正拉起。
+      if (!bottom_visible_.value()) {
+        terminal_ptr = &view;
+        return;
+      }
       view.open_shell();
       // 忙闲变化 → 状态栏（"中止"钮的忙闲同步在组件内自动做）。
       view.on_busy_change = [this](bool busy) {

@@ -75,7 +75,6 @@ KNOWN_EXCLUDED = {
     "events_e2e.py",            # 控制通道事件流原语（跑 gallery 但断框架能力）
     "framework_gaps_e2e.py",    # ui.create/remove 能力面
     "input_action_e2e.py",      # Input 单行动作面原语
-    "partial_patch_e2e.py",     # git 数据面（build_partial_patch 真仓验证）
     "split_view_e2e.py",        # SplitView 拖拽原语
     "theme_file_e2e.py",        # --theme-file 装载接线
     "visual_assert_e2e.py",     # 视觉断言原语（capture.hash/visual.diff）

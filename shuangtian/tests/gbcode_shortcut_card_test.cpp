@@ -246,11 +246,11 @@ ST_TEST(gbcode_shortcut_table_baseline_counts) {
     ++should_register;
     if (spec.show && spec.alias_of.empty()) ++card_rows;
   }
-  // 基线计数（2026-10-19 更新：+3 条页面缩放快捷键 zoom-in/out/reset，
-  // 三条都是 Never 守卫 → total +3、should_register +3、never 不变）。
-  ST_CHECK_EQ(total, std::size_t{44});
+  // 基线计数（2026-11-05 更新：+2 条差异文件导航 next/prev-diff-file（Alt+F7 家族）；
+  // 两条都是 Consume 守卫 → total +2、should_register +2、never 不变）。
+  ST_CHECK_EQ(total, std::size_t{46});
   ST_CHECK_EQ(never, std::size_t{3});
-  ST_CHECK_EQ(should_register, std::size_t{41});
+  ST_CHECK_EQ(should_register, std::size_t{43});
   // 注册面实测：真注册一遍后 shortcut_count == should_register。
   auto root_holder = make_registered_root();
   UiRoot& root = *root_holder;

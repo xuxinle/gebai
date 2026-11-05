@@ -66,12 +66,30 @@ struct CodeEditorPage : Component {
                  float editor_font_scale = kEditorFontScale,
                  float editor_line_spacing = CodeEditor::kDefaultLineSpacing)
       : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
-        tool_root_(std::move(tool_root)), workspace_(std::move(workspace)) {}
+        tool_root_(std::move(tool_root)), workspace_(std::move(workspace)) {
+    // 仓库根在这里就解析：构造期不能起子进程吗？能——它不在渲染期（构造发生在 app 启动）。
+    // 早于“首帧”的好处是视图第一帧就能拿到正确路径（否则第一帧会读到“删除文件”）。
+    if (!workspace_.empty()) {
+      repo_root_ = gbcode::read_repo_root(workspace_);
+      if (repo_root_.empty()) repo_root_ = workspace_;
+    }
+  }
 
   CodeEditorPage(std::string workspace, float editor_font_scale = kEditorFontScale,
                  float editor_line_spacing = CodeEditor::kDefaultLineSpacing)
       : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
-        workspace_(std::move(workspace)) {}
+        workspace_(std::move(workspace)) {
+    if (!workspace_.empty()) {
+      repo_root_ = gbcode::read_repo_root(workspace_);
+      if (repo_root_.empty()) repo_root_ = workspace_;
+    }
+  }
+
+  /// **git 路径的实际根**：有仓库根就用它，否则退回工作区。
+  /// 所有“拼磁盘路径去读 git 报告的相对路径”的地方都必须经它（见 `repo_root_`）。
+  [[nodiscard]] auto path_root() const -> const std::string& {
+    return repo_root_.empty() ? workspace_ : repo_root_;
+  }
 
   /// 当前画面是否暗色（读真值源）——本页用它做与主题相关的分支判断。
   std::function<ThemeMode()> theme_mode{};
@@ -129,7 +147,12 @@ struct CodeEditorPage : Component {
   State<std::size_t> active_{0};
   State<bool> sidebar_visible_{true};
   State<std::size_t> activity_{0};        ///< 活动栏选中项（0=资源管理器 … 4=扩展）
-  State<bool> bottom_visible_{true};      ///< 终端面板开合（收起 = 隐藏下半，子树与状态保留）
+  /// 终端面板开合（收起 = 隐藏下半，子树与状态保留）。
+  ///
+  /// **默认关**（用户 2026-11-05 要求“启动默认不打开终端”）：终端是任务型面板，
+  /// 打开 IDE 的第一件事 seldom 是“跟 shell 说话”；而它常驻下半屏会挤掉代码区。
+  /// Ctrl+` / 活动栏按钮随时叫回来。
+  State<bool> bottom_visible_{false};
   State<std::string> status_{"就绪"};
   State<std::string> cursor_text_{"Ln 1, Col 1"};
   State<std::string> selection_text_{""};
@@ -357,22 +380,63 @@ struct CodeEditorPage : Component {
   std::string diff_pending_path_{};
   /// 差异视图实例（当前帧有效）——`hunk` 导航靠它。
   DiffView* diff_view_ptr{nullptr};
-  /// 空白差异对比：左侧文本实例（当前帧有效；带惯编辑完成后置回 null）。
-  CodeEditor* compare_left_ptr{nullptr};
-  /// 空白差异对比：右侧文本实例（同上）。
-  CodeEditor* compare_right_ptr{nullptr};
-  /// 逐行暂存模式（差异视图上方多一条工具条）。
+  /// 合并视图实例（当前帧有效）——F7 冲突导航靠它。
   ///
-  /// 为何是模式而不是"永远显示勾选列"：勾选列会占掉左侧栏宽度（本来就窄），
-  /// 而"挑着提交几行"是阶段性动作（做完就回到"看差异"）。
-  State<bool> diff_staging_{false};
-/// 差异视图里已勾选的行数（由组件的 `on_selection_changed` 同步）。
-///
-/// 为何要把它抬成 `State`（实测）：工具条的「暂存选中行」按钮按选中数算 enabled，
-/// 而`enabled` 是**构建期写入**的。勾选发生在 `DiffView` 内部（自绘命中），
-/// 不经过声明式状态——不把计数变成响应式的话，勾了一行按钮仍然 disabled，
-/// 用户点不动（看上去像“勾选没生效”）。
-  State<std::size_t> diff_selected_count_{0};
+  /// 以前只声明不使用：`main.cpp` 的 `next-hunk` 只查 `diff_view_ptr`，
+  /// 于是合并标签里的 F7 **按了没反应**（而说明卡里写着“F7 下一个冲突”）。
+  MergeView* merge_view_ptr{nullptr};
+  /// 空白对比视图实例（当前帧有效）——空白对比标签的 F7 靠它。
+  DiffView* compare_view_ptr{nullptr};
+  /// 差异导航的**重组信号**（当前块变了 ⇒ 工具条上的“第 i / N 处”要跟着变）。
+  ///
+  /// 为何需要它：`current_hunk_` 是 `DiffView` 的**私有状态**，不在声明式依赖里；
+  /// 点“上一处/下一处”后组件自己改了它，但宿主不知道 ⇒ 序号文本不刷新。
+  /// 递增这个 `State` 就是“告诉声明式：又跳了一次”。
+  State<std::uint64_t> diff_hunk_revision_{0};
+  /// 当前差异块序号（0 起；宿主自己的副本）。
+  ///
+  /// 为何要存：工具条上的“第 i / N 处”必须显示**组件当前的块**，
+  /// 而工具条在 `custom<DiffView>` **之前**构建——那时本帧的视图实例还没拿到
+  /// （`build` 开头则把指针置了空）。存在宿主这里，两处都能读。
+  std::size_t diff_current_hunk_{0};
+  /// 差异视图布局（true = 内联单栏，false = 左右并列）。
+  ///
+  /// VSCode/IDEA 都是“默认并列、可切内联”（截屏钉内存），所以这里也是开关。
+  State<bool> diff_unified_{false};
+  /// 差异右栏被编辑后**需要重算**（帧首泵消费；防抖在 `ensure_diff` 里）。
+  bool diff_auto_refresh_{false};
+  /// “打开就跳到第一个差异”的**意图序号**（每次真的打开 +1）。
+  ///
+  /// 为何用序号而不是 bool：重开**同一个**文件时 `diff_key_`/`diff_file_` 都没变，
+  /// 声明式不会重组，构建回调根本不会跑——一个 bool 会永远挂在那儿没人消费。
+  /// 序号进了依赖表，重开就一定能触发一次重组（而重组里一次性消费）。
+  State<std::size_t> diff_focus_seq_{0};
+  /// 已经落实到视图上的序号（与 `diff_focus_seq_` 比对，一次性）。
+  std::size_t diff_focus_applied_{0};
+  /// 上一次自动重算的时间（毫秒；`0` = 没在防抖窗口内）。
+  std::int64_t diff_refresh_at_ms_{0};
+  /// 打开差异时的**左栏原始文本**（自动重算的基线）。
+  ///
+  /// 为何不拿 `left_editor()->text()`：并列模式里左栏是**显示行**（含对齐用的
+  /// 占位空行与 `@@` 分隔行），拿它去比会把整篇比成“全变了”。
+  std::string diff_old_text_{};
+  /// 右栏的**当前文本**（文件的“新侧”全文；编辑后自动对比用）。
+  ///
+  /// 为何是两个普通成员而不是 `State`：声明式每帧都会把它回写到编辑器里，
+  /// 用户正在打的字会被逐帧抹掉（与空白对比那对成员同一理由）。
+  std::string diff_current_text_{};
+  /// 空白对比：“打开就跳第一处差异”的意图序号（与 `diff_focus_seq_` 同一手法）。
+  State<std::size_t> compare_focus_seq_{0};
+  std::size_t compare_focus_applied_{0};
+
+  /// 空白对比：上次编辑的时间戳（0 = 无需重算）。
+  std::int64_t compare_refresh_at_ms_{0};
+  /// 空白对比的**内容版本号**：停笔防抖后 +1，用来让声明式重建视图。
+  ///
+  /// 为何需要它：两侧文本是普通成员（不能用 `State`，否则每帧回写会抹掉用户输入），
+  /// 而“普通成员变了”声明式看不见——视图就永远停在打开时那份文本上。
+  /// 用 `State` 作**信号**而不作数据：值的语义只是“又该算一次了”。
+  State<std::uint64_t> compare_revision_{0};
 
   // —— 空白差异对比（用户自己粘两段文本比）——
   //
@@ -385,6 +449,7 @@ struct CodeEditorPage : Component {
   // 每帧把它们回写到编辑器里（用户正在打字的那个字就被重置了）。
   State<std::string> compare_key_{};         ///< 空 = 不是空白对比标签
   State<bool> compare_split_{true};          ///< true = 左右并列，false = 行内
+  /// 两侧文本（**普通成员**，见上面的说明；两侧都是用户自己的内容）。
   std::string compare_left_text_{};
   std::string compare_right_text_{};
 
@@ -404,8 +469,6 @@ struct CodeEditorPage : Component {
   /// 需求打开合并视图（帧首泵取三仝内容——渲染期起子进程会崩，与差异同理）。
   bool merge_wanted_{false};
   std::string merge_pending_path_{};
-  /// 合并视图实例（当前帧有效）——F7 冲突导航靠它。
-  MergeView* merge_view_ptr{nullptr};
   /// 三仝内容是否已装载（避免每帧重算划分）。
   bool merge_loaded_{false};
   /// 「选择变了、等帧首落盘」的标记。
@@ -1425,6 +1488,13 @@ auto shutdown() -> void;
   /// 而且将来做“与 HEAD 比当前未保存内容”时不用再换实现。
    void ensure_diff();
 
+  /// 右栏被编辑后重算差异（新侧取**编辑器里的文本**，不重读磁盘）。
+  ///
+  /// 为何不调 `ensure_diff()`：那条路会重新读两端（`read_content_at`），
+  /// 于是“改了没保存”这一瞬的自动对比会弹回去（右侧变回旧内容），
+  /// 用户看到的是“我刚改的东西被吞了”。这里只重算结构。
+  void refresh_diff_from_editor();
+
 
   /// 打开一个**并列差异**标签（`options` 描述两端；`path` 是文件）。
   ///
@@ -1444,7 +1514,18 @@ auto shutdown() -> void;
    void flush_merge_write();
 
 
-   void open_diff(std::string title, const gbcode::CompareOptions& options, std::string path);
+   /// 当前 diff 在清单里的序号（空 = 不在清单里）。
+  std::vector<std::string> diff_file_list_{};
+  /// “差异文件导航”的键位入口：在变更清单里按当前端点逐项打开上一个/下一个。
+  ///
+  /// 为何要它：一份改动跨十几个文件时，“逐个文件过一遍”是审阅的基本动作。
+  /// 而 F7/Shift+F7 只在**一个文件内**跳差异——跨文件的那一层从前不存在（只能
+  /// 一个文件一个文件点回去），而那正是 VSCode/IDEA 都提供的“上下有差异的文件”。
+  ///
+  /// 返回是否真的跳了（没清单或只有一个文件时返回 false，让位给其他处理）。
+  auto step_diff_file(int delta) -> bool;
+
+  void open_diff(std::string title, const gbcode::CompareOptions& options, std::string path);
 
 
   /// 打开一个**空白差异对比**标签：两侧都是空文本，用户自己粘。
@@ -1468,7 +1549,12 @@ auto shutdown() -> void;
   void clear_compare_sides();
 
 
-  /// 把两侧文本实例的当前内容拍回成员（见 `compare_left_text_` 的注释）。
+  /// 空白对比：视图已经自己把两侧的**逻辑文本**上报给成员了（`on_left_text_edit` /
+  /// `on_text_edit`），所以“拍回”只剩下一个用途：**刚打开标签、视图还没建**时
+  /// 把两侧文本同步给新视图（见 `open_compare_blank`）。
+  ///
+  /// 为何不再从编辑器实例读：那两个指针已不存在了——两侧文本就在一体视图里的
+  /// 两个编辑器里，而组件已经在编辑时把逻辑文本交出来了。
   void pull_compare_texts();
 
 
@@ -1484,19 +1570,6 @@ auto shutdown() -> void;
   ///（内容写完后由用户自己 `git add`，那一步再走 git 通道——两件事分开，
   /// 出问题时能看出是哪一步错）。
    void apply_merge_result(const std::string& text);
-
-
-  /// 逐行暂存：把差异视图里勾选的行构造成补丁并提交到暂存区。
-  ///
-  /// ⚠ 两个容易错的地方，都在这里处理：
-  /// ① **补丁从视图现取**（`diff_view_ptr->build_stage_patch()`）——它在选择变化后
-  ///    才准，缓存会拿到过期的选择；
-  /// ② 补丁为空时**如实报状态**（`build_partial_patch` 在"只选了上下文行"时返回空，
-  ///    而那正是"选了但不产生改动"的情形，硬发一条命令会让 git 报无关的错）。
-   void stage_selected_diff_lines(bool unstage = false);
-
-
-   void unstage_selected_diff_lines();
 
 
   /// —— 写操作的**唯一入口** ——
@@ -2000,6 +2073,13 @@ auto shutdown() -> void;
   /// 霜天仓库根（`--tool-root`）：PATH 上没有 `st` 时到它下面 `build/bin/st[.exe]` 找。
   std::string tool_root_{};
   std::string workspace_{};
+  /// **仓库根**（`git rev-parse --show-toplevel`；非仓库/未探测时为空）。
+  ///
+  /// 为何与 `workspace_` 分开：git 输出的路径（`status`、`--numstat`…）都相对**仓库根**，
+  /// 而用户打开的目录可以是仓库里的**子目录**。按路径读盘必须用前者——用后者会拼出
+  /// “多套一层”的路径，文件读不到 ⇒ 差异视图判成“删除文件”、右栏全空白
+  /// （实测：工作区 `gebai/shuangtian` / 仓库根 `gebai`）。
+  std::string repo_root_{};
   std::vector<Problem> problems_{};
   /// `problems_` 的指纹（`problems_fingerprint`）：变了才真正重建问题列表。
   /// “打开文件后计数刷不出来”的根因正是缺这个——各路径各刷各的、时机不齐，

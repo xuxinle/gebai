@@ -98,7 +98,7 @@ struct ShortcutSpec {
 /// ⚠ 新增/改键位的**唯一入口**是这张表：改这里 = 注册 + 帮助卡 + 对账测试三处
 /// 同步变。在 main.cpp 里另行 `register_shortcut` 会绕过对账——启动时的
 /// `log_shortcut_drift` 会把它点名出来（表外注册进卡片「其他」节兜底可见）。
-inline constexpr std::array<ShortcutSpec, 44> kShortcutSpecs{
+inline constexpr std::array<ShortcutSpec, 46> kShortcutSpecs{
     // —— 文件 ——
     ShortcutSpec{.id = "save", .key = "s", .ctrl = true,
                  .label = "Ctrl+S", .description = "保存",
@@ -224,6 +224,16 @@ inline constexpr std::array<ShortcutSpec, 44> kShortcutSpecs{
                  .label = "Shift+F7", .description = "上一个差异",
                  .group = "差异视图", .reg = ShortcutSpec::Reg::Consume,
                  .show = false},   // 键位已写进 next-hunk 的 label
+    // 跨文件导航：一个文件内的“下一处/上一处”与“下一个/上一个文件”是两层导航，
+    // 用 Alt 递增（与 F12 家族同一习惯），不会把“我还在看这个文件”的意图拽走。
+    ShortcutSpec{.id = "next-diff-file", .key = "f7", .alt = true,
+                 .label = "Alt+F7 / Alt+Shift+F7",
+                 .description = "下一个 / 上一个有差异的文件",
+                 .group = "差异视图", .reg = ShortcutSpec::Reg::Consume},
+    ShortcutSpec{.id = "prev-diff-file", .key = "f7", .shift = true, .alt = true,
+                 .label = "Alt+Shift+F7", .description = "上一个有差异的文件",
+                 .group = "差异视图", .reg = ShortcutSpec::Reg::Consume,
+                 .show = false},   // 键位已写进 next-diff-file 的 label
     // —— 查看 ——
     ShortcutSpec{.id = "toggle-bottom", .key = "j", .ctrl = true,
                  .label = "Ctrl+J", .description = "切换底部面板",

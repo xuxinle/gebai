@@ -214,11 +214,10 @@ namespace gbcode_ui {
     // 看的是什么就关什么）——不先判会让 Ctrl+W 在差异视图下静默关掉背后的文件标签。
     if (!compare_key_.value().empty()) {
       compare_key_.set({});
-      compare_left_ptr = nullptr;
-      compare_right_ptr = nullptr;
       status_.set("已关闭文本对比");
       return;
-    }    if (!merge_key_.value().empty()) {
+    }
+    if (!merge_key_.value().empty()) {
       merge_key_.set({});
       merge_view_ptr = nullptr;
       status_.set("已关闭合并标签");
@@ -601,8 +600,6 @@ void CodeEditorPage::load_active_text() {
     }
     if (!compare_key_.value().empty() && key == compare_key_.value()) {
       compare_key_.set({});
-      compare_left_ptr = nullptr;
-      compare_right_ptr = nullptr;
       status_.set("已关闭文本对比");
       return;
     }
@@ -1195,13 +1192,14 @@ void CodeEditorPage::load_active_text() {
   void CodeEditorPage::ensure_file_history() {
     if (!history_wanted_) return;
     history_wanted_ = false;
-    if (workspace_.empty() || history_path_.empty()) return;
-    std::error_code ec;
-    const auto path = std::filesystem::path(history_path_);
-    std::string relative = history_path_;
-    if (const auto rel = std::filesystem::relative(path, workspace_, ec); !ec) {
-      relative = rel.generic_string();
-    }
+      if (workspace_.empty() || history_path_.empty()) return;
+  std::error_code ec;
+  const auto path = std::filesystem::path(history_path_);
+  std::string relative = history_path_;
+  // 相对路径必须相对**仓库根**（git 只认仓库根口径的路径）。
+  if (const auto rel = std::filesystem::relative(path, path_root(), ec); !ec) {
+    relative = rel.generic_string();
+  }
     history_entries_.set(gbcode::read_file_history(workspace_, relative, 100));
     const std::size_t count = history_entries_.value().size();
     status_.set(count == 0 ? "该文件没有历史（未跟踪 / 不在仓库里）"
@@ -1416,6 +1414,24 @@ void CodeEditorPage::load_active_text() {
   /// 两者都靠 `DiffLine.old_line/new_line`。统一到“取文本 + 本地比”只剩一条路，
   /// 而且将来做“与 HEAD 比当前未保存内容”时不用再换实现。
   void CodeEditorPage::ensure_diff() {
+    // —— 自动对比（右栏编辑后重算）——
+    //
+    // ⚠ **必须排在 `diff_wanted_` 之前判断“路径是否变了”**：
+    // 双击变更项会走两次 `open_git_diff`（Click + DoubleClick 都调 `activate`），
+    // 第二次换了 pending 路径。若此时防抖标记还挂着（上一个文件刚被编辑过），
+    // 就会拿**新路径 + 旧编辑器内容**去算 ⇒ 内容错配
+    //（实测：双击后摘要变“（新增文件）+200 −0”、左栏全是空填充行）。
+    // 换文件时直接作废防抖意图。
+    if (diff_auto_refresh_ && diff_refresh_at_ms_ != 0 && diff_wanted_) {
+      diff_auto_refresh_ = false;
+      diff_refresh_at_ms_ = 0;
+    }
+    if (diff_auto_refresh_ && st::time::now_ms() - diff_refresh_at_ms_ >= 180) {
+      diff_auto_refresh_ = false;
+      if (!diff_key_.value().empty() && !diff_pending_path_.empty()) {
+        refresh_diff_from_editor();
+      }
+    }
     if (!diff_wanted_) return;
     diff_wanted_ = false;
     if (workspace_.empty() || diff_pending_path_.empty()) return;
@@ -1428,8 +1444,17 @@ void CodeEditorPage::load_active_text() {
       from = gbcode::DiffEndpoint::parse("INDEX");
       to = gbcode::DiffEndpoint::parse("WORKTREE");
     }
-    const auto old_side = gbcode::read_content_at(workspace_, from, diff_pending_path_);
-    const auto new_side = gbcode::read_content_at(workspace_, to, diff_pending_path_);
+    // 两侧内容：用**仓库根**拼路径（git 报告的都是相对仓库根的路径）。
+    //
+    // ⚠ 不能用 `workspace_`：它可以是仓库里的子目录（用户打开的文件夹），
+    // 那样拼出来会多套一层 ⇒ 文件读不到 ⇒ 被判定为“删除文件”，
+    // 右栏只剩对齐填充行（实测：工作区 `gebai/shuangtian` / 仓库根 `gebai`）。
+    const std::string& root = path_root();
+    const auto old_side = gbcode::read_content_at(root, from, diff_pending_path_);
+    const auto new_side = gbcode::read_content_at(root, to, diff_pending_path_);
+    // 记下两侧**原文**：整文件模式的两栏内容 + 自动重算的基线。
+    diff_old_text_ = old_side.text;
+    diff_current_text_ = new_side.text;
     st::text::FileDiff file;
     file.old_path = diff_pending_path_;
     file.new_path = diff_pending_path_;
@@ -1456,6 +1481,34 @@ void CodeEditorPage::load_active_text() {
   }
 
 
+  /// 右栏被编辑后重算差异（新侧 = 编辑器里的当前文本）。
+  ///
+  /// 与 `ensure_diff` 的分工：那条路会两边都重读（开标签/换文件时该如此），
+  /// 而“用户正在改”时右栏的真值在编辑器里——重读磁盘会把刚打的字抹回去。
+  void CodeEditorPage::refresh_diff_from_editor() {
+    if (diff_key_.value().empty() || diff_pending_path_.empty()) return;
+    if (diff_view_ptr == nullptr) return;
+    // 新侧的真值在编辑器里（“改了没保存”也要能看到）；旧侧基线是开标签时读到的原文。
+    diff_current_text_ = diff_view_ptr->logical_text(true);
+    // 基线：若没记（例如历史条目那条路），退回旧侧的逻辑文本（它已剔过填充行）。
+    const std::string baseline = !diff_old_text_.empty() ? diff_old_text_
+                                                         : diff_view_ptr->logical_text(false);
+    st::text::FileDiff file;
+    file.old_path = diff_pending_path_;
+    file.new_path = diff_pending_path_;
+    file.hunks = st::text::diff_hunks(baseline, diff_current_text_, diff_pending_options_.context);
+    const auto [additions, deletions] = st::text::count_changes(file.hunks);
+    file.additions = additions;
+    file.deletions = deletions;
+    file.binary = false;
+    file.added = false;
+    file.deleted = false;
+    diff_file_.set(file);
+    status_.set(std::format("自动对比：{} · {} 处改动 · +{} −{}", diff_pending_path_,
+                            file.hunks.size(), file.additions, file.deletions));
+  }
+
+
   /// 打开一个**并列差异**标签（`options` 描述两端；`path` 是文件）。
   ///
   /// 与旧版“把 `git diff` 敲进只读标签”的区别：这里是**结构**（两栏对齐、双行号、
@@ -1467,8 +1520,8 @@ void CodeEditorPage::load_active_text() {
   void CodeEditorPage::ensure_merge() {
     if (!merge_wanted_) return;
     merge_wanted_ = false;
-    if (workspace_.empty() || merge_pending_path_.empty()) return;
-    const auto sides = gbcode::read_conflict_sides(workspace_, merge_pending_path_);
+      if (workspace_.empty() || merge_pending_path_.empty()) return;
+  const auto sides = gbcode::read_conflict_sides(path_root(), merge_pending_path_);
     if (!sides.any()) {
       // 不是冲突文件（或路径写错）：**如实报状态**，不要开一个空的三栏视图。
       status_.set("该文件没有冲突三仝内容：" + merge_pending_path_);
@@ -1504,6 +1557,25 @@ void CodeEditorPage::load_active_text() {
 
 
   void CodeEditorPage::open_diff(std::string title, const gbcode::CompareOptions& options, std::string path) {
+    // **同文件重开**：双击变更项会走两次 `open_git_diff`（Click + DoubleClick 都触发
+    // `Button::activate`），第二次的 key 与第一次**完全相同** ⇒ 声明式不重组，
+    // 而 `diff_pending_path_` 已被改过 ⇒ 后续“自动重算”按新 path 去读旧编辑器内容
+    // ⇒ 内容错配（实测：双击后左栏只剩 199 字、摘要变“新增文件”）。
+    //
+    // 判据用“路径 + 标题”而不是只路径：历史条目那条路可能同一路径不同端点。
+    const std::string next_key = "diff:" + path + "|" + title;
+    if (diff_key_.value() == next_key && diff_wanted_) {
+      // 还没被消费的重复打开：保持原状（不要重复排队，也不要动 inten 序号）。
+      // 但**仍要重新定位第一处**——用户双击同一项往往就是想“回去从头看”。
+      diff_focus_seq_.set(diff_focus_seq_.value() + 1);
+      return;
+    }
+    if (diff_key_.value() == next_key && !diff_wanted_) {
+      // 同一文件已打开且已装载：只要“回到第一处”，**不重读两侧**
+      // （重读会把用户可能有的未保存编辑抺回旧内容）。
+      diff_focus_seq_.set(diff_focus_seq_.value() + 1);
+      return;
+    }
     // 特殊标签（差异/合并）互斥：同一时刻最多一个。开差异时关掉合并标签
     //（合并是处置动作，看完差异可从变更面板重新点开）。
     if (!merge_key_.value().empty()) {
@@ -1513,8 +1585,49 @@ void CodeEditorPage::load_active_text() {
     diff_pending_title_ = std::move(title);
     diff_pending_options_ = options;
     diff_pending_path_ = std::move(path);
+    // 自动对比的基线要随文件重置（否则新文件会拿旧文件的左栏去比）。
+    diff_old_text_.clear();
+    diff_auto_refresh_ = false;
     diff_key_.set("diff:" + diff_pending_path_ + "|" + diff_pending_title_);
     diff_wanted_ = true;
+    // “打开就跳第一处”：递增意图序号（见 `diff_focus_seq_` 的说明）。
+    diff_focus_seq_.set(diff_focus_seq_.value() + 1);
+  }
+
+
+  /// 上一个/下一个**有差异的文件**（Alt+F7 / Alt+Shift+F7）。
+  ///
+  /// 清单来源：变更面板的当前快照（`git_.changes`，与 UI 分组同一份顺序），
+  /// 而提交详情里的文件清单是另一套上下文——这里只在“有变更清单”时生效，
+  /// 因为那是“逐个文件审阅当前改动”的真实场景。
+  auto CodeEditorPage::step_diff_file(int delta) -> bool {
+    const auto changes = git_.changes;
+    if (changes.size() < 2) return false;
+    // 定位当前打开的文件；没开差异时从清单头/尾进入。
+    std::ptrdiff_t index = -1;
+    for (std::size_t i = 0; i < changes.size(); ++i) {
+      if (changes[i].path == diff_pending_path_) {
+        index = static_cast<std::ptrdiff_t>(i);
+        break;
+      }
+    }
+    const auto size = static_cast<std::ptrdiff_t>(changes.size());
+    std::ptrdiff_t next = 0;
+    if (index < 0) {
+      next = delta >= 0 ? 0 : size - 1;
+    } else {
+      next = index + (delta >= 0 ? 1 : -1);
+      // **不环绕**：审阅是线性的——“到头了”比“回到第一个”更符合“过完了”的直觉。
+      // 越界时如实返回 false（状态栏提示），不做事也不报错。
+      if (next < 0 || next >= size) {
+        status_.set(delta >= 0 ? "已到最后一个改动文件" : "已到第一个改动文件");
+        return false;
+      }
+    }
+    const gbcode::GitChange& target = changes[static_cast<std::size_t>(next)];
+    status_.set(std::format("差异文件 {}/{}：{}", next + 1, size, target.path));
+    open_git_diff(target);
+    return true;
   }
 
 
@@ -1555,6 +1668,7 @@ void CodeEditorPage::load_active_text() {
     compare_left_text_.clear();
     compare_right_text_.clear();
     compare_key_.set("compare:blank");
+    compare_focus_seq_.set(compare_focus_seq_.value() + 1);   // 打开即跳第一个差异
     status_.set("已打开空白差异对比：两侧各粘一段文本（或直接在该面板里输入）");
   }
 
@@ -1578,16 +1692,13 @@ void CodeEditorPage::load_active_text() {
   }
 
 
-  /// 把两侧文本实例的当前内容拍回成员。
+  /// 空白对比：两侧文本就存在 `compare_left_text_/compare_right_text_`，
+  /// 由视图的编辑回调实时维护（见 `on_left_text_edit`/`on_text_edit`）——
+  /// 所以这里**不需要再向编辑器要一次**。
   ///
-  /// 为何要有“拍回”这一步：编辑器里的文本是**运行时状态**（用户打的字在
-  /// `CodeEditor` 内部），而重建对比结果要的是全文。
-  /// ⚠ 不在 `on_change` 里直接写成员：那会让每敲一个字都重算全量差异
-  ///（`diff_hunks` 是 O(ND)，大文本下会卡）。改为只在“重建/交换/清空”时拍。
-  void CodeEditorPage::pull_compare_texts() {
-    if (compare_left_ptr != nullptr) compare_left_text_ = compare_left_ptr->text();
-    if (compare_right_ptr != nullptr) compare_right_text_ = compare_right_ptr->text();
-  }
+  /// 保留函数是为了调用处的语义（“该把当前内容定下来了吧”）：
+  /// 唯一还需要它的是「交换两侧」，而那两个成员本来就已是最新值。
+  void CodeEditorPage::pull_compare_texts() {}
 
 
   /// 把冲突文件的合结果写回磁盘（经撤销栈与行尾保持——见 `CodeEditor` 的写盘路径）。
@@ -1596,8 +1707,10 @@ void CodeEditorPage::load_active_text() {
   ///（内容写完后由用户自己 `git add`，那一步再走 git 通道——两件事分开，
   /// 出问题时能看出是哪一步错）。
   void CodeEditorPage::apply_merge_result(const std::string& text) {
-    if (merge_pending_path_.empty() || workspace_.empty()) return;
-    const std::string full = st::fs::join(workspace_, merge_pending_path_);
+  if (merge_pending_path_.empty() || workspace_.empty()) return;
+  // 用**仓库根**拼路径：冲突路径是 git 报的（相对仓库根），不是相对打开的目录。
+  // 用 `workspace_` 拼在“工作区是仓库子目录”时会写到错位置（多套一层）。
+  const std::string full = st::fs::join(path_root(), merge_pending_path_);
     if (auto written = st::fs::write_text(full, text); !written) {
       status_.set("写入合并结果失败：" + merge_pending_path_);
       return;
@@ -1608,37 +1721,6 @@ void CodeEditorPage::load_active_text() {
     git_refresh_pending_ = true;
     merge_loaded_ = false;
   }
-
-
-  /// 逐行暂存：把差异视图里勾选的行构造成补丁并提交到暂存区。
-  ///
-  /// ⚠ 两个容易错的地方，都在这里处理：
-  /// ① **补丁从视图现取**（`diff_view_ptr->build_stage_patch()`）——它在选择变化后
-  ///    才准，缓存会拿到过期的选择；
-  /// ② 补丁为空时**如实报状态**（`build_partial_patch` 在"只选了上下文行"时返回空，
-  ///    而那正是"选了但不产生改动"的情形，硬发一条命令会让 git 报无关的错）。
-  void CodeEditorPage::stage_selected_diff_lines(bool unstage) {
-    if (diff_view_ptr == nullptr) {
-      status_.set("逐行暂存：差异视图不在（先打开一个文件差异）");
-      return;
-    }
-    const std::string patch = diff_view_ptr->build_stage_patch();
-    if (patch.empty()) {
-      status_.set("逐行暂存：选中的行不足以形成改动（只选上下文行不产生变化）");
-      return;
-    }
-    gbcode::WriteIntent intent;
-    intent.op = unstage ? gbcode::WriteOp::UnstagePatch : gbcode::WriteOp::StagePatch;
-    intent.patch = patch;
-    if (run_write(intent, unstage ? "unstage-partial" : "stage-partial")) {
-      status_.set(std::format("{} {} 行（{}）", unstage ? "已取消暂存" : "已暂存",
-                              diff_view_ptr->selected_count(), diff_pending_path_));
-      // 暂存后选择**保留**：用户可以继续挑下一批（清空会让人以为"操作没生效"）。
-    }
-  }
-
-
-  void CodeEditorPage::unstage_selected_diff_lines() { stage_selected_diff_lines(true); }
 
 
   /// —— 写操作的**唯一入口** ——
@@ -1659,18 +1741,7 @@ void CodeEditorPage::load_active_text() {
                               label.empty() ? std::string("缺少必填项") : std::string(label)));
       return false;
     }
-    // 部分暂存：补丁要先**落盘**再交给 `git apply`（写操作统一经终端命令通道，
-    // 那是一条命令字符串、喂不了 stdin）。落盘失败就**不执行**——
-    // 宁可不做，也不要让 git 去读一个不存在的补丁。
-    if (intent.op == gbcode::WriteOp::StagePatch ||
-        intent.op == gbcode::WriteOp::UnstagePatch) {
-      const std::string patch_path = st::fs::join(workspace_, ".git/st-stage.patch");
-      if (auto written = st::fs::write_text(patch_path, intent.patch); !written) {
-        status_.set("部分暂存失败：补丁写盘被拒（" + patch_path + "）");
-        return false;
-      }
-    }
-    const std::string display = gbcode::to_display_line(*args);
+      const std::string display = gbcode::to_display_line(*args);
     (void)display;
     // 不可逆操作：**先把备份分支建好再动手**。备份失败就不执行
     //（宁可不做，也不要“做了但没退路”——备份的成本是一次 `branch`）。
@@ -1860,8 +1931,11 @@ void CodeEditorPage::load_active_text() {
       status_.set("不是目录：" + path);
       return;
     }
-    workspace_ = path;
-    gbcode::push_recent(recent_folders_, path);   // 最近打开的文件夹（菜单/下次恢复共用）
+      workspace_ = path;
+  // 仓库根：git 输出的路径都相对它（不是相对 `workspace_`——后者可以是仓库子目录）。
+  repo_root_ = gbcode::read_repo_root(path);
+  if (repo_root_.empty()) repo_root_ = path;   // 非仓库：退回打开目录
+  gbcode::push_recent(recent_folders_, path);   // 最近打开的文件夹（菜单/下次恢复共用）
     dialog_start_dir_.clear();   // 换工作区：文件对话框的"上次目录"跟着重置
     lsp_.set_workspace(path);    // 语言服务的根跟着换（旧索引属于旧项目）
     dir_expanded_.set(std::vector<std::string>{});   // 新根：展开状态重来

@@ -233,8 +233,8 @@ namespace gbcode_ui {
     // 编辑器实例可能在本次重组中新建/换绑：先置空，由 `build_editor_area` 重新取得
     editor = nullptr;
     diff_view_ptr = nullptr;   // 同上：差异视图实例每帧重建
-    compare_left_ptr = nullptr;    // 空白对比的两个编辑器也是每帧重建
-    compare_right_ptr = nullptr;
+    merge_view_ptr = nullptr;  // 合并视图（F7 冲突导航）
+    compare_view_ptr = nullptr;  // 空白对比视图（F7 差异导航）
     // **浮层里的输入框**：它们在上一次重组里被销毁，本帧还没重建。
     //
     // 不置空就会踩到已释放的 Input——实测（无头 E2E，转到行浮层）：
@@ -837,12 +837,16 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
           // **按文档类型放按钮**：不适用的类型什么都不放（尾部槽按目标态清空）。
           // 每个按钮都走 `sync_trailing_button`（同一个 key 复用同一个槽位），
           // 不会像 `add_trailing_button` 那样每帧追加。
-          if (is_md) {
-            (void)widget->sync_trailing_button(
-                "eye",
-                md_preview_.value() ? "关闭 Markdown 预览（Ctrl+Shift+V）"
-                                    : "预览 Markdown（Ctrl+Shift+V）",
-                [this] { toggle_md_preview(); });
+              if (is_md) {
+      (void)widget->sync_trailing_button(
+          "eye",
+          md_preview_.value() ? "关闭 Markdown 预览（Ctrl+Shift+V）"
+                              : "预览 Markdown（Ctrl+Shift+V）",
+          [this] { toggle_md_preview(); },
+          /*enabled=*/true,
+          // 激活态：预览开着时高亮（胶囊底 + 主色图标）——
+          // 旧实现只把状态藏在 tooltip 文案里，用户看不出“它正在生效”。
+          /*active=*/md_preview_.value());
           }
           if (is_table) {
             // 表格：列对齐提示（纯展示）。当前编辑器不做列对齐，
@@ -915,77 +919,118 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         return;
       }
       if (!diff_key_.value().empty()) {
-        // 差异视图外面包一层列：上面是逐行暂存工具条（仅在需要时出现），下面才是视图。
+        // 差异视图外面包一层列：上面是工具条，下面才是视图。
         //
         // 为何工具条放在**外面**而不是让 `DiffView` 自己画头部：那条工具条上的按钮要
-        // 触发的是**应用层的写操作**（`run_write` + 审计），而组件不该知道 git 是什么。
+        // 触发的是**应用层动作**（切布局/跳差异），而组件不该知道宿主怎么组织工作台。
         (void)column(c, {.grow = true, .id = "diff-column"}, [&] {
-          // 入口：**必须有**一个把 `diff_staging_` 置真的东西。
-          // 这里原本只有“退出逐行暂存”（`set(false)`），没有任何开关——
-          // 于是整套逐行暂存（数据层 + 工具条 + 单测）在当前应用里**不可达**。
-          (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "diff-staging-toggle-row"}, [&] {
+          // —— 差异工具条 ——
+          //
+          // 两组东西：布局开关（内联/并列）与差异导航（上/下一处 + 当前位置）。
+          // 这是 VSCode/IDEA 差异编辑器头部的标配——没有它们的差异视图只能靠
+          // 滚轮逐行看，而“一个差异一个差异地过”本来就是差异审阅的基本动作。
+          (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "diff-toolbar"}, [&] {
             (void)custom<Button>(c, [this](Button& b) {
-              b.set_id("diff-staging-toggle");
-              b.set_label(diff_staging_.value() ? "退出逐行暂存" : "逐行暂存…");
+              b.set_id("diff-layout-toggle");
+              b.set_label(diff_unified_.value() ? "并列对比" : "内联对比");
               b.set_size(Button::Size::Small);
-              b.on_click = [this] { diff_staging_.set(!diff_staging_.value()); };
-            }, {.height = 24.0f, .id = "diff-staging-toggle-btn"});
-            if (!diff_staging_.value()) {
-              (void)text(c, [] { return std::string("挑着提交几行时用"); },
-                         {.grow = true, .id = "diff-staging-hint"});
-            }
+              b.set_variant(diff_unified_.value() ? Button::Variant::Soft : Button::Variant::Ghost);
+              b.on_click = [this] { diff_unified_.set(!diff_unified_.value()); };
+            }, {.height = 24.0f, .id = "diff-layout-toggle-btn"});
+            (void)custom<Button>(c, [this](Button& b) {
+              b.set_id("diff-prev-hunk");
+              b.set_label("↑ 上一处");
+              b.set_size(Button::Size::Small);
+              // ⚠ 判据不能用 `diff_view_ptr != nullptr`：它在本帧的 `build()` 开头刚被置空，
+              // 而赋值发生在**同一帧稍后**的 `custom<DiffView>` 回调里——
+              // 于是按钮从出生起就禁用，点了没反应（用户：“上一处/下一处跳转没有用”）。
+              // 改用**数据面**：有差异块就能跳。
+              b.set_enabled(diff_file_.value().hunks.size() > 0U);
+              b.on_click = [this] {
+                if (diff_view_ptr == nullptr) return;   // 理论上不会：按钮启用时已有差异数据
+                const std::size_t landed = diff_view_ptr->previous_hunk();
+                if (landed != DiffView::kNoHunk) diff_current_hunk_ = landed;
+                diff_hunk_revision_.set(diff_hunk_revision_.value() + 1);
+              };
+            }, {.height = 24.0f, .id = "diff-prev-hunk-btn"});
+            (void)custom<Button>(c, [this](Button& b) {
+              b.set_id("diff-next-hunk");
+              b.set_label("↓ 下一处");
+              b.set_size(Button::Size::Small);
+              // ⚠ 判据不能用 `diff_view_ptr != nullptr`：它在本帧的 `build()` 开头刚被置空，
+              // 而赋值发生在**同一帧稍后**的 `custom<DiffView>` 回调里——
+              // 于是按钮从出生起就禁用，点了没反应（用户：“上一处/下一处跳转没有用”）。
+              // 改用**数据面**：有差异块就能跳。
+              b.set_enabled(diff_file_.value().hunks.size() > 0U);
+              b.on_click = [this] {
+                if (diff_view_ptr == nullptr) return;   // 理论上不会：按钮启用时已有差异数据
+                const std::size_t landed = diff_view_ptr->next_hunk();
+                if (landed != DiffView::kNoHunk) diff_current_hunk_ = landed;
+                diff_hunk_revision_.set(diff_hunk_revision_.value() + 1);
+              };
+            }, {.height = 24.0f, .id = "diff-next-hunk-btn"});
+            // 当前块序号 / 总数：跳转有没有生效一眼可见（也是 e2e 的断言点）。
+            //
+            // ⚠ 不能在这里读 `diff_view_ptr`：本行在 `custom<DiffView>` **之前**构建，
+            // 而 `diff_view_ptr` 本帧开头刚被置空 ⇒ 永远拿到空串（序号永远不显示）。
+            // 改用宿主自己维护的 `diff_current_hunk_`（帧首与按钮跳转时更新）。
+            (void)diff_hunk_revision_.value();
+            (void)text(c, [this] {
+              const std::size_t total = diff_file_.value().hunks.size();
+              if (total == 0U) return std::string("无差异");
+              return std::format("第 {} / {} 处", diff_current_hunk_ + 1, total);
+            }, {.id = "diff-hunk-position"});
+            (void)spacer(c);
           });
-          if (diff_staging_.value()) {
-            (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "diff-staging-bar"}, [&] {
-              const std::size_t count =
-                  diff_view_ptr == nullptr ? 0U : diff_view_ptr->selected_count();
-              (void)text(c, [count] {
-                return count == 0U ? std::string("逐行暂存：勾选行后点右侧按钮")
-                                   : std::format("已选 {} 行", count);
-              }, {.grow = true, .id = "diff-staging-count"});
-              (void)custom<Button>(c, [this](Button& b) {
-                b.set_id("diff-stage-selected");
-                b.set_label("暂存选中行");
-                b.set_size(Button::Size::Small);
-                // 未选任何行时就**如实禁用**（按了没反应比看得见的禁用更差）。
-                // 读 State 而非直读组件：`selected_count()` 是组件内部值，
-                // 不用 State 的话勾选变化不会触发重组，按钮永远不解除禁用（实测）。
-                b.set_enabled(diff_selected_count_.value() > 0U);
-                b.on_click = [this] { stage_selected_diff_lines(); };
-              }, {.height = 24.0f, .id = "diff-stage-selected-btn"});
-              (void)custom<Button>(c, [this](Button& b) {
-                b.set_id("diff-unstage-selected");
-                b.set_label("取消暂存选中");
-                b.set_size(Button::Size::Small);
-                b.set_enabled(diff_selected_count_.value() > 0U);
-                b.on_click = [this] { unstage_selected_diff_lines(); };
-              }, {.height = 24.0f, .id = "diff-unstage-selected-btn"});
-              (void)custom<Button>(c, [this](Button& b) {
-                b.set_id("diff-staging-close");
-                b.set_label("退出逐行暂存");
-                b.set_size(Button::Size::Small);
-                b.on_click = [this] { diff_staging_.set(false); };
-              }, {.height = 24.0f, .id = "diff-staging-close-btn"});
-            });
-          }
           (void)custom<DiffView>(c, [this](DiffView& view) {
             view.set_id("diff-view");
-            view.set_read_only(true);
+            // **可编辑**：右栏是“当前内容”那一侧——改了就地重算对比（见 `on_text_edit`）。
+            // 左栏恒只读（它是对照基线），这个约束在 `DiffView::set_read_only` 里。
+            view.set_read_only(false);
             view.set_font_size(0.0f);
-            view.set_staging_mode(diff_staging_.value());
-            view.set_diff(diff_file_.value());
-            // 勾选变化 → **必须触发一次重组**。
+            // 整文件模式下不画 `@@` 分隔条（VSCode/IDEA 同款：整份文件在眼前时它是噪声）。
+            view.set_show_hunk_separators(false);
+            // 摘要带也关掉：工具条上已经写了“第 i / N 处 + 增删”，再一条就重复了。
+            view.set_show_header(false);
+            // 内联/并列：与工具条那个开关同源（用户要求“两样都能看”）。
+            view.set_layout(diff_unified_.value() ? DiffLayout::Unified : DiffLayout::SideBySide);
+            // —— 内容：**整文件模式**（不是只给 `@@` 附近的几行）——
             //
-            // 为何（实测）：工具条上的「暂存选中行」按 `selected_count()` 算 enabled，
-            // 而 `enabled` 是**构建期写入**的属性。勾选发生在组件内部（自绘命中），
-            // 不经过声明式的状态，于是没有重组——按钮永远停在初始的 disabled，
-            // 用户勾了行也点不动（看上去像“勾选没生效”）。这里用一个应用层计数 State
-            // 把“组件内部选择变了”抬成响应式信号。
-            view.on_selection_changed = [this] {
-              const std::size_t count =
-                  diff_view_ptr == nullptr ? 0U : diff_view_ptr->selected_count();
-              if (diff_selected_count_.value() != count) diff_selected_count_.set(count);
+            // 为何必须这样（用户要求“编辑器内容与对比一体”）：差异块模式只显示片段，
+            // 于是右栏不是“文件的当前内容”——就地编辑必然把整篇算成改动，
+            // 而且看差异时没法读到块之间的内容。基线就是开标签时读到的原文。
+            //
+            // 一次性的“跳第一处”用**序号**比对而不是 bool：重开同一个文件时
+            // 内容没变、本回调未必重跑，而序号是依赖表里的值，一变就重组。
+            (void)diff_focus_seq_.value();
+            view.set_full_texts(diff_old_text_, diff_current_text_, diff_pending_path_);
+            if (diff_focus_applied_ != diff_focus_seq_.value()) {
+              diff_focus_applied_ = diff_focus_seq_.value();
+              view.request_focus_first_hunk();
+            }
+            // ⚠ **不再调 `set_diff(diff_file_)`**：整文件模式下差异结构由
+            // `set_full_texts` 从两份全文现算（否则两边真值源冲突：
+            // `set_diff` 吃的是“暂存区↔工作区”那份，而全文是另一对）。
+            // 编辑后重算：只记“需要重算 + 时间”，真正的重算在帧首泵（防抖 180ms）。
+            //
+            // 为何不在回调里直接算：`diff_hunks` 是 O(ND)，大文件会把事件派发卡住；
+            // 而回调是在 `CodeEditor::insert_text` 里的同步路径上。
+            view.on_text_edit = [this](std::string_view text) {
+              // 回调给的是**逻辑文本**（已剔掉填充行）；直接覆盖：`set_full_texts`
+              // 的入参必须与它同口径（否则会把上一次的填充行重新带回来）。
+              diff_current_text_ = std::string(text);
+              diff_auto_refresh_ = true;
+              diff_refresh_at_ms_ = st::time::now_ms();
+              status_.set("编辑中：停笔 0.2 秒后自动对比");
             };
+            // 勾选暂存已下线（用户 2026-11-05 要求去掉逐行暂存）：
+            // 差异视图现在只负责“看与改”，暂存/提交走变更面板的整文件操作。
+            //
+            // **同步当前块序号到宿主**：F7 / 点分隔条 / 动作面等路径都绕过两个按钮，
+            // 但它们同样会改组件内部的 `current_hunk_` —— 工具条上的序号必须跟着它们。
+            diff_current_hunk_ = view.current_hunk() == DiffView::kNoHunk
+                                     ? 0U
+                                     : view.current_hunk();
             diff_view_ptr = &view;   // F7（下一个差异）靠它
           }, {.grow = true, .id = "diff-view-host"});
         });
@@ -1141,16 +1186,17 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
 
   /// 空白差异对比：上面两个可编辑文本框（左/右），下面结构化对比视图。
   ///
-  /// ## 为何两侧是**可编辑编辑器**而不是只读展示
+  /// ## 形态：**与文件差异完全同一个一体视图**
   ///
-  /// 需求就是“用户自己粘内容对比”。黏贴进只读视图做不到，而重新开对话框
-  /// 再载入又回到了“必须有文件”。这边就是两块可直接编辑/粘贴的文本。
+  /// 早期实现是“上面两块输入框 + 下面一个只读差异视图”，它与文件差异长得不一样——
+  /// 而用户对“对比视图”只有一个心智模型（VSCode/IDEA 那种：差异就在可编辑的文本里）。
+  /// 现在两边都是 `DiffView` 的可编辑栏：没有单独的输入区，改哪里都就地重算。
   ///
-  /// ## 为何差异结果**不每帧重算**
+  /// ## 为何差异结果不在每帧重算
   ///
-  /// `diff_hunks` 是 O(ND)：大文本（几万行日志）下会卡帧。所以只在
-  /// “交换 / 清空 / 用户明确要求重算”时拍一次全文；编辑中不重算。
-  /// 每次重组本函数都会跑，所以差异本身仍从成员文本现算（纯函数、只读）。
+  /// `diff_hunks` 是 O(ND)：大文本（几万行日志）下会卡帧。所以改成了
+  /// **防抖自动重算**：编辑后等 250ms 再拍一次全文重算（与文件差异视图同一个口径）；
+  /// 「比对」按钮保留——它是一个“立刻算”的知情入口（也是 e2e 的稳定触发点）。
   void CodeEditorPage::build_compare_blank(Composer& c) {
     (void)column(c, {.grow = true, .id = "compare-column"}, [&] {
       // —— 工具条 ——
@@ -1173,11 +1219,9 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         tool("compare-clear", "清空", Button::Variant::Ghost, [this] { clear_compare_sides(); });
         tool("compare-layout", compare_split_.value() ? "行内对比" : "左右对比",
              Button::Variant::Ghost, [this] { compare_split_.set(!compare_split_.value()); });
-        // 重算：编辑过程中不重算（见函数注释），用户粘完点这一下。
-        tool("compare-run", "比对", Button::Variant::Primary, [this] {
-          pull_compare_texts();
-          status_.set("已重新对比");
-        });
+        // 没有“比对”按钮：一体视图里**编辑即对比**（`on_*_text_edit` 一改就重算）。
+        // 早期形态是“两块输入框 + 一个结果区”，需要按钮告诉程序“我粘完了”；
+        // 现在就地改、就地看，按钮只会让人以为“不点就不生效”。
         (void)spacer(c);
         // 差异摘要：一眼看出“到底差多少行”，免得只看到滚不完的视图。
         (void)text(c, [this] {
@@ -1188,40 +1232,53 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         }, {.id = "compare-summary"});
       });
       (void)divider(c);
-      // —— 两栏输入 ——
-      (void)row(c, {.gap = 0.0f, .height = 200.0f, .id = "compare-inputs"}, [&] {
-        const auto side = [this, &c](const char* id, const char* host_id, std::string& seed,
-                                     CodeEditor** slot) {
-          (void)custom<CodeEditor>(c, [this, id, seed_copy = seed, slot](CodeEditor& ed) {
-            ed.set_id(id);
-            ed.set_language("text");
-            ed.set_font_size(0.0f);
-            // ⚠ `grow` 必须写在**组件自己的 style** 上：`BoxProps.grow` 对
-            // `custom<T>` 不生效（实测：两栏宽度都是 0，面板上只剩一条空白）。
-            ed.style().grow = true;
-            // 只在“内容还没进过编辑器”时灌种子文本。
-            // ⚠ 条件必须存在：声明式每帧重建这个回调，无条件 `set_text`
-            // 会把用户正在输的内容逐帧抹回种子（实测同款坑：read_only/font 被回写）。
-            if (ed.text().empty() && !seed_copy.empty()) ed.set_text(seed_copy);
-            // 编辑后不自动重算（大文本会卡），但要让摘要与实际内容一致：
-            // 编辑时不进 `on_change` 重算，用户按「比对」或交换时算。
-            *slot = &ed;
-          }, {.grow = true, .id = host_id});
-        };
-        side("compare-left", "compare-left-host", compare_left_text_, &compare_left_ptr);
-        side("compare-right", "compare-right-host", compare_right_text_, &compare_right_ptr);
-      });
-      (void)divider(c);
-      // —— 结构化对比结果 ——
+      // —— 一体视图：**两侧都是可编辑的编辑器**（与文件差异同一个组件、同一个形态）——
       //
-      // 用与文件差异**同一个组件**：用户已经在“看差异”时熟悉它的配色、行号与
-      // 逐差异跳转（F7/F8），再另做一个对比视图只会多一套要学的东西。
+      // 不再有单独的“输入框 + 下方结果”两层：那种布局与文件差异视图不一致，
+      // 而且用户改完要自己往下看结果。
       (void)custom<DiffView>(c, [this](DiffView& view) {
         view.set_id("compare-view");
-        view.set_read_only(true);
+        // 两侧都可写：这两段都是用户自己的内容，没有“基线”一侧。
+        view.set_both_sides_editable(true);
+        view.set_read_only(false);
         view.set_font_size(0.0f);
+        view.set_show_hunk_separators(false);
+        // 摘要带也关掉：工具条右侧已有“N 处改动 · +A −D”，再画一条就重复了。
+        view.set_show_header(false);
         view.set_layout(compare_split_.value() ? DiffLayout::SideBySide : DiffLayout::Unified);
-        view.set_diff(st::text::make_file_diff(compare_left_text_, compare_right_text_));
+        // 打开/换内容即跳到第一个差异（与 git 差异视图同一口径）。
+        //
+        // 一次性：只在“刚打开这个标签”时置位。无条件调会让用户每滚开一点
+        // 就被下一个重组拽回去——而本函数**每帧都跑**。
+        (void)compare_focus_seq_.value();
+        // 这一句让**视图内容随编辑更新**：`compare_revision_` 是依赖表里的值，
+        // 停笔 250ms 后帧首泵会递增它 → 本回调重跑 → 新文本进视图。
+        (void)compare_revision_.value();
+        view.set_full_texts(compare_left_text_, compare_right_text_, {}, /*keep_numbers=*/true);
+        if (compare_focus_applied_ != compare_focus_seq_.value()) {
+          compare_focus_applied_ = compare_focus_seq_.value();
+          view.request_focus_first_hunk();
+        }
+        // 编辑后**立即重算**：递增版本号让声明式重生视图，下一次构建就把新文本
+        // 交给 `set_full_texts`（它自己会算差异）。
+        //
+        // 为何不做防抖（文件差异那边做了）：文件差异要读**整个文件**、且可能是几十万行；
+        // 而这里是用户手输/粘的两段文本，规模小得多，而多一轮“停笔才更新”的延迟
+        // 反而让人以为“没生效”。（若将来发现大段粘贴卡顿，再加阈值也不迟。）
+        //
+        // ⚠ 曾踩的坑：回调只记时间戳（普通成员）——没有任何 `State` 变化，
+        // 就不会有下一帧，帧首泵的防抖判据永远没人检查：两边都输了字，差异块仍是 0。
+        view.on_left_text_edit = [this](std::string_view text) {
+          compare_left_text_ = std::string(text);
+          compare_revision_.set(compare_revision_.value() + 1);
+        };
+        view.on_text_edit = [this](std::string_view text) {
+          compare_right_text_ = std::string(text);
+          compare_revision_.set(compare_revision_.value() + 1);
+        };
+        compare_view_ptr = &view;   // F7 / Shift+F7（差异跳转）靠它
+        // 左侧/右侧两个编辑器的指针（动作面与 e2e 要用）：组件内部按 id 暴露
+        // （`diff-left`/`diff-right`）——这里不需要额外存。
       }, {.grow = true, .id = "compare-view-host"});
     });
   }

@@ -278,6 +278,16 @@ def main():
         # —— 4. 终端面板（问题/输出面板已删；2026-10-09 起新增「终端 | Git」双标签）——
         check(client.count("#problems-list") == 0, "问题面板应已删除")
         check(client.count("#output-text") == 0, "输出面板应已删除")
+        # **启动默认不开终端**（用户 2026-11-05 要求）：面板收起时是“隐藏但不拆”，
+        # 而且**不起 shell**（不白占一个 PTY）。先显式展开，再断言它是真终端。
+        check(client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "true",
+              "启动时底部面板应默认收起（不默认打开终端）")
+        check(client.ok("get", {"id": "terminal"})["props"].get("pty") != "true",
+              "面板收起时不该起 shell（PTY 应为空）")
+        client.ok("invoke", {"id": "activity-terminal", "action": "click"})
+        time.sleep(1.2)
+        check(client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false",
+              "展开后底部面板应可见")
         # 真终端：PTY 属性为真、组件内标签栏就位、「+」在。
         check(client.ok("get", {"id": "terminal"})["props"].get("pty") == "true",
               "终端未进入 PTY 模式")
@@ -996,20 +1006,27 @@ def main():
               f"搜“两段文本”没有命中任何命令（match_count={palette.get('match_count')}）")
         client.ok("input.key", {"key": "Enter"})
         time.sleep(0.7)
-        for want in ("compare-column", "compare-left", "compare-right",
-                     "compare-view", "compare-summary", "compare-swap"):
+        # 形态与文件差异**完全同一个一体视图**（用户 2026-11-05 要求）：
+        # 不再有“两块单独输入框”——两侧就是差异视图自己的两栏，`compare-left/right`
+        # 这两个旧 id 已不存在，改用组件内的 `diff-left`/`diff-right`。
+        for want in ("compare-column", "compare-view", "compare-summary", "compare-swap"):
             check(client.count("#" + want) == 1, f"文本对比缺少 #{want}")
-        # 两侧是**可编辑**编辑器（用户要能在里面直接粘/打）。
-        left_props = client.ok("get", {"id": "compare-left"})["props"]
+        check(client.count("#compare-inputs") == 0, "不应再有单独的输入框区（应是一体视图）")
+        # 两侧都是**可编辑**编辑器（用户要能在里面直接粘/打）。
+        left_props = client.ok("get", {"id": "diff-left"})["props"]
+        right_props = client.ok("get", {"id": "diff-right"})["props"]
         check(left_props.get("read_only") == "false",
               f"左侧文本不可编辑（{left_props.get('read_only')}）")
+        check(right_props.get("read_only") == "false",
+              f"右侧文本不可编辑（{right_props.get('read_only')}）")
         left_text = "alpha\nbeta\ngamma"
         right_text = "alpha\nBETA\ngamma\ndelta"
-        client.ok("set", {"id": "compare-left", "props": {"text": left_text}})
-        client.ok("set", {"id": "compare-right", "props": {"text": right_text}})
-        time.sleep(0.3)
-        client.ok("invoke", {"id": "compare-run", "action": "click"})
-        time.sleep(0.6)
+        client.ok("set", {"id": "diff-left", "props": {"text": left_text}})
+        client.ok("set", {"id": "diff-right", "props": {"text": right_text}})
+        time.sleep(0.9)
+        # 没有“比对”按钮：编辑即自动对比（这一点本身也是断言的一部分）。
+        check(client.count("#compare-run") == 0, "不应再有“比对”按钮（编辑即对比）")
+        time.sleep(0.4)
         summary = client.text("compare-summary")
         # 期望值手算依据：left={alpha,beta,gamma} / right={alpha,BETA,gamma,delta}
         # → 改 1 行（beta→BETA）+ 新增 1 行（delta）= 1 处改动、+2 −1。

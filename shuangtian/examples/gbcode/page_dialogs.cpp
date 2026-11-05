@@ -885,6 +885,9 @@ namespace gbcode_ui {
     options.to = gbcode::DiffEndpoint::parse(entry.hash);
     diff_pending_options_ = options;
     diff_wanted_ = true;
+    diff_focus_seq_.set(diff_focus_seq_.value() + 1);   // 打开就跳第一处差异
+    diff_old_text_.clear();       // 基线随新内容重置（见 `diff_old_text_`）
+    diff_auto_refresh_ = false;
     status_.set("文件历史：打开 " + entry.hash);
   }
 

@@ -656,16 +656,46 @@ auto run_app(int argc, char** argv) -> int {
     // “下一个差异 / 上一个差异”是差异视图最常用的两个动作，必须有键盘入口：
     // 否则就只能靠鼠标滚——而“一个差异一个差异地看”本来就是顺序行为。
     // 无差异视图时返回 false 让路（原行为：不能消费不属于自己场景的键）。
+    //
+    // 三种“有差异”的内容都要覆盖（用户要求“git 的差异视图都用这种模式”）：
+    // 文件差异、空白文本对比、（合并视图的冲突段用同一对键）。
     bind("next-hunk", [page] {
-      if (page->diff_view_ptr == nullptr) return false;
-      page->diff_view_ptr->next_hunk();
-      return true;
+      if (page->diff_view_ptr != nullptr) {
+        page->diff_view_ptr->next_hunk();
+        return true;
+      }
+      if (page->compare_view_ptr != nullptr) {
+        page->compare_view_ptr->next_hunk();
+        return true;
+      }
+      if (page->merge_view_ptr != nullptr) {
+        (void)page->merge_view_ptr->next_pending_conflict();
+        return true;
+      }
+      return false;
     });
     bind("prev-hunk", [page] {
-      if (page->diff_view_ptr == nullptr) return false;
-      page->diff_view_ptr->previous_hunk();
-      return true;
+      if (page->diff_view_ptr != nullptr) {
+        page->diff_view_ptr->previous_hunk();
+        return true;
+      }
+      if (page->compare_view_ptr != nullptr) {
+        page->compare_view_ptr->previous_hunk();
+        return true;
+      }
+      if (page->merge_view_ptr != nullptr) {
+        (void)page->merge_view_ptr->previous_pending_conflict();
+        return true;
+      }
+      return false;
     });
+    // Alt+F7 / Alt+Shift+F7：上一个/下一个**有差异的文件**。
+    //
+    // 为何不另占 F7：一个文件内的“上下差异”与“跨文件”是两层导航，
+    // 用户按 F7 时心里想的是“这一处的下一处”，不该被拽到另一个文件去。
+    // Alt 是同一键位族的递增修饰（与 F12 家族同一习惯）。
+    bind("next-diff-file", [page] { return page->step_diff_file(1); });
+    bind("prev-diff-file", [page] { return page->step_diff_file(-1); });
     // F12：跳定义；Shift+F12：找引用；Alt+F12：声明；Ctrl+F12：实现；
     // Alt+Left：返回上一个光标位置（浏览器同源的“返回”）。
     // 键位对齐 VSCode 的 F12 家族直觉；同键位族靠修饰键区分（登记名同为 f12）。

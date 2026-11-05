@@ -547,56 +547,6 @@ def main() -> int:
               "Ctrl+S 不改写二进制文件（字节级）")
         check("二进制" in client.text("status"), f"状态栏说明为何没保存（{client.text('status')}）")
 
-        # —— 11. 增量暂存：勾“一处改动”真的只暂存那一处 ——
-        #
-        # 必须验到 git 侧（`git diff --cached`），而不是只看状态栏文案：
-        # 这条链路最容易出的错是“勾了删行就只暂存了删除”——于是文件被改坏
-        # （内容被删）而不是改成新值。
-        lines = [f"line {i}" for i in range(1, 41)]
-        (workspace / "multi.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        git("add", "multi.txt")
-        git("commit", "-qm", "add multi")
-        lines[1] = "line 2 CHANGED_A"
-        lines[35] = "line 36 CHANGED_B"
-        (workspace / "multi.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        # id 里带 `.` 会被选择器当 CSS 语法拆开，精确匹配要写 `[id=…]`。
-        multi_selector = "[id=git-file-multi.txt]"
-        if not client.count(multi_selector):
-            open_scm_panel()
-            if client.count("[id=scm-refresh-toolbar]"):
-                client.invoke("scm-refresh-toolbar", "click")
-                time.sleep(1.8)
-        if client.count(multi_selector):
-            client.invoke("git-file-multi.txt", "click")
-            time.sleep(1.6)
-            client.invoke("diff-staging-toggle", "click")
-            time.sleep(1.0)
-            check(client.get("diff-view").get("staging") == "true", "逐行暂存模式可开（属性可读）")
-            client.invoke("diff-view", "clear_selection")
-            time.sleep(0.5)
-            # 第 0 个 hunk 的第一处改动（零坐标：动作面按 (hunk,line) 精确指定）
-            client.invoke("diff-view", "toggle_line", "0,1")
-            time.sleep(0.6)
-            selected = client.get("diff-view").get("selected_lines")
-            check(bool(selected), f"勾选行可读回（{selected}）")
-            enabled = client.get("diff-stage-selected").get("enabled")
-            # ⚠ `enabled` 是**布尔**（不是字符串 "true"）——属性面里布尔型直传。
-            check(enabled is True, f"勾选后「暂存选中行」按钮解除禁用（enabled={enabled}）")
-            client.invoke("diff-stage-selected", "click")
-            time.sleep(2.5)
-            cached = git("diff", "--cached")
-            check("CHANGED_A" in cached, "暂存区含勾选的那处改动（含新增行）")
-            check("CHANGED_B" not in cached, "未勾选的改动不进暂存区")
-            # “只删不加”的识别：该处只有 `-line 2` 而**没有**对应的 `+line 2 CHANGED_A`。
-            # （注意：整对形态下 `-line 2` 本来就该在——它是“删旧”那一半。）
-            added_a = [l for l in cached.splitlines() if l.startswith("+") and "CHANGED_A" in l]
-            removed_plain = [l for l in cached.splitlines() if l == "-line 2"]
-            check(bool(added_a) and bool(removed_plain),
-                  "该处是“整对改动”（既有删旧也有加新，不是把内容删掉）")
-            git("reset", "-q")
-        else:
-            check(False, "变更面板应列出 multi.txt")
-
         # —— 12. 截图（人眼核验用）——
         shot = shots / "gbcode-usability.png"
         client.ok("capture", {"encode": "file", "path": str(shot)})
