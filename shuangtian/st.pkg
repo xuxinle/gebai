@@ -1,9 +1,10 @@
-{
+﻿{
   "name": "shuangtian",
   "version": "0.1.0",
   "kind": "static_library",
   "cxx_standard": 23,
-  "include_dirs": ["include", "third_party", "third_party/sqlite"],
+  "include_dirs": ["include", "third_party", "third_party/sqlite",
+                   "third_party/micropython"],
   "modules": ["core", "math", "codec", "geom", "raster", "text", "md", "xml", "ui", "shell", "control", "app", "pkg", "ext", "edit", "lsp", "perf"],
   "sources": [
     "src/core/*.cpp",
@@ -24,10 +25,12 @@
     "src/ext/*.cpp",
     "src/edit/*.cpp",
     "src/lsp/*.cpp",
-    "src/perf/*.cpp"
+    "src/perf/*.cpp",
+    "src/python/*.cpp"
   ],
   "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs"],
-  "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c"],
+  "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c",
+                          "third_party/micropython/py/*.c"],
   "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
   "tests": ["tests/*_test.cpp"],
   "flags": [
@@ -776,6 +779,12 @@
       "sources": ["tools/geometry_coverage_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "逐个确认 three 几何在抽取后**真的有面**（顶点数/三角形数）。存在的理由：“物体存在但画不出来”完全不会报错，而多零件模型里少一层叶片很难从截图看出来"
+    },
+    "python_embed_probe": {
+      "kind": "executable",
+      "sources": ["tools/python_embed_probe.cpp", "src/python/mp_bridge.c"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "最小闭环：内嵌 MicroPython 能跑 Python 并取回结果（算术/数据结构/函数类/math/异常/命名空间隔离）。它是整条 bpy 链路的地基，先验它再做后面的事。`mp_bridge.c` 必须显式列出：`.c` 源不会被自动源集合纳入"
     },
     "cylinder_theta_probe": {
       "kind": "executable",
