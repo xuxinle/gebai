@@ -66,7 +66,40 @@
 #define MICROPY_PY_SYS (1)
 #define MICROPY_PY_SYS_MODULES (1)
 
-// ## `property` 必须打开
+// ## `max` / `min` 必须打开
+//
+// 默认值是 `AT_LEAST_CORE_FEATURES`，MINIMUM 档下为 0。
+//
+// 这是本移植里**最险的一个开关**：`max`/`min` 是 Python 最常用的内建之一，
+// 而缺它时的报错是 `NameError: name not defined`（没有名字）。
+//
+// 实测经过（值得记）：一个 400 行的齿轮脚本在 `make_gear` 里写了
+// `max(bore * hub_scale, root_radius * 0.26)`，于是整个场景建不出来，
+// 而报错只有“name not defined”——花了很久才通过“逐名 eval 探测”
+// 定位到是 `max`（参见 `tools/st_py` 那个调试入口的用法）。
+//
+// 教训：**MINIMUM 档剪掉的内建远多于直觉**。凡是 bpy 语料里常见的
+// 内建（`max`/`min`/`abs`/`sum`/`sorted`/`enumerate`…）都要验一遍。
+// 判据在 `tools/python_features_probe`。
+#define MICROPY_PY_BUILTINS_MIN_MAX (1)
+
+// ## MINIMUM 档剪掉的其他常用内建
+//
+// 全是同一个默认值（`AT_LEAST_CORE_FEATURES`）→ MINIMUM 下为 0。
+// 逐条在 `tools/python_features_probe` 里有判据。
+//
+// 为何全部打开而不是“用到了再加”：
+// 缺它们的报错都是 `NameError: name not defined`（**没有名字**），
+// 而从报错到定位往往要花几十分钟（本仓实测：一个 `max` 找了很久）。
+// 它们加起来只有几 KB，全开是划算的。
+#define MICROPY_PY_BUILTINS_REVERSED (1)
+#define MICROPY_PY_BUILTINS_ENUMERATE (1)
+#define MICROPY_PY_BUILTINS_FILTER (1)
+#define MICROPY_PY_BUILTINS_SET (1)
+#define MICROPY_PY_BUILTINS_FROZENSET (1)
+#define MICROPY_PY_BUILTINS_SLICE (1)
+
+// `property` 必须打开
 //
 // 默认值同样是 `AT_LEAST_CORE_FEATURES`，MINIMUM 档下为 0——
 // 于是 `@property` 装饰器本身不存在，类定义时报

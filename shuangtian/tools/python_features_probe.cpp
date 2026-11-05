@@ -44,6 +44,31 @@ int main() {
       {"dict keys", "d = {'a': 1}\nresult = ','.join(d.keys())"},
       {"异常捕获", "try:\n    1 / 0\nexcept Exception as e:\n    result = 'caught'"},
       {"类内双下划线属性", "class A:\n    def __init__(self, n):\n        self.__name__ = n\nresult = A('x').__name__"},
+      // ## 内建函数：MINIMUM 档剪掉的比直觉多得多
+      //
+      // 实测踩到 `max` 缺失：一个 400 行的齿轮脚本因此整个建不出来，
+      // 而报错只有 `NameError: name not defined`（没有名字）。
+      // 所以把 bpy 语料里常见的内建全列出来逐条验。
+      {"max", "result = max(1, 2)"},
+      {"min", "result = min(1, 2)"},
+      {"abs", "result = abs(-3)"},
+      {"sum", "result = sum([1, 2, 3])"},
+      {"round", "result = round(1.6)"},
+      {"pow", "result = pow(2, 3)"},
+      {"divmod", "result = divmod(7, 2)[0]"},
+      {"sorted", "result = sorted([3, 1, 2])[0]"},
+      {"reversed", "result = list(reversed([1, 2]))[0]"},
+      {"enumerate", "result = list(enumerate([7]))[0][0]"},
+      {"zip", "result = list(zip([1], [2]))[0][0]"},
+      {"map", "result = list(map(str, [1]))[0]"},
+      {"filter", "result = list(filter(None, [1]))[0]"},
+      {"any", "result = any([0, 1])"},
+      {"all", "result = all([1, 1])"},
+      {"isinstance", "result = isinstance(1, int)"},
+      {"hasattr", "result = hasattr([], 'append')"},
+      {"set", "result = len(set([1, 1, 2]))"},
+      {"tuple", "result = len(tuple([1, 2]))"},
+      {"frozenset", "result = len(frozenset([1, 1]))"},
       {"super()", "class A:\n    def f(self):\n        return 1\nclass B(A):\n    def f(self):\n        return super().f() + 1\nresult = B().f()"},
   };
   int failed = 0;

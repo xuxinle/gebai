@@ -28,6 +28,7 @@
     "src/perf/*.cpp",
     "src/python/*.cpp",
     "src/python/mp_bridge.c",
+    "third_party/micropython/shared/runtime/gchelper_generic.c",
     "src/python/bpy_bridge.c"
   ],
   "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs",
@@ -790,6 +791,26 @@
                   "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "内嵌 MicroPython 的端到端判据：语言基础 + mathutils + bpy.data/ops + bmesh。它是整条 bpy 链路的地基。`.c` 源必须显式列出：不会被自动源集合纳入"
+    },
+    "st_py": {
+      "kind": "executable",
+      "sources": ["tools/st_py.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "通用调试入口：跑一个 .py 文件并打印 result 或错误。排查具体脚本时的 python 替代品（判据型探针不适合这个用途）"
+    },
+    "bpy_script_bisect": {
+      "kind": "executable",
+      "sources": ["tools/bpy_script_bisect.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "按顶层块二分执行大脚本，定位 MicroPython 报 NameError 的具体位置（MINIMUM 档不说名字，只能二分）"
+    },
+    "bpy_watch_probe": {
+      "kind": "executable",
+      "sources": ["tools/bpy_watch_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "bpy 真实资产（机械腕表轮系）：验「用它真能造出复杂东西」——渐开线齿轮、多轮啮合布局、轮辐窗口。机制通不等于造得出东西，这个探针是那条分界线"
     },
     "bpy_script_probe": {
       "kind": "executable",

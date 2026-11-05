@@ -110,20 +110,42 @@ token，但 `py/compile.c` 里**没有任何 `MP_TOKEN_OP_AT` 的语法处理分
 
 真实 bpy 脚本若用了 `@`，需要把它改成 `.matmul()` / `.dot()`。
 
-### 4.2 `sys` / `property` 必须显式打开
+### 4.2 `sys` / `property` / 常用内建必须显式打开
 
-`MICROPY_PY_SYS` 与 `MICROPY_PY_BUILTINS_PROPERTY` 的默认值都是
-`AT_LEAST_CORE_FEATURES`，而本移植用 MINIMUM 档 → 值为 0 → 整块代码
-**被条件编译掉**。
+本移植用 MINIMUM 档，而**被剪掉的东西比直觉多得多**。
 
-症状极具误导性：
+症状统一而致命：全部报 `NameError: name not defined`（**没有名字**）——
+因为 MINIMUM 档连异常参数格式化也剪了。
 
 | 缺什么 | 报什么 | 看起来像 |
 |---|---|---|
-| `sys` | `import sys` → `ImportError: module not found` | "没编 modsys.c"（实际它在编译，只是代码被剪了） |
-| `property` | `@property` → `NameError: name not defined` | "我写错了"（没说哪个名字，因为 MINIMUM 档连异常参数格式化都剪了） |
+| `sys` | `import sys` → `ImportError: module not found` | “没编 modsys.c”（实际代码被条件编译掉了） |
+| `property` | `@property` → `NameError: name not defined` | “我写错了” |
+| **`max` / `min`** | `max(a, b)` → `NameError: name not defined` | 同上 |
+| `reversed` / `enumerate` / `filter` / `set` / `frozenset` | 同上 | 同上 |
 
-判据：`tools/python_features_probe` 逐条探测 20 项语言特性。
+### 实测代价（必读）
+
+一个 400 行的齿轮脚本在 `make_gear` 里写了 `max(bore * hub_scale, root_radius * 0.26)`。
+因为 `max` 缺失，**整个场景建不出来**，而报错只有 `NameError: name not defined`。
+
+定位过程（花了很久）：
+
+1. 先怀疑语法/名字拼错 → 用真 CPython 跑（`tools/bpy_script_check.py`）→ **完全通过**
+2. 再逐行截断二分 → 卡在“切点落在 docstring 里”而一直不准
+3. 最后用**逐名 `eval` 探测**才定位到是 `max`
+
+所以本仓现在有四个诊断入口（都在 `tools/`）：
+
+| 工具 | 用途 |
+|---|---|
+| `st_py` | 跑一个 .py 文件并打印 result/错误（排查时的 `python` 替代品） |
+| `bpy_script_check.py` | 用**真 CPython** 跑脚本（bpy 打桩），语法/名字问题一步到位 |
+| `python_features_probe` | 逐条探测 41 项 Python 特性（定位“缺哪个开关”） |
+| `bpy_load_probe` | 查 `sys.modules` 状态 |
+
+**教训**：MINIMUM 档下“能力缺失”与“我写错了”的报错长得一模一样。
+先用 CPython 排除后者，再用 `python_features_probe` 确认前者。
 
 ### 4.3 genhdr 是构建期生成的，已入库
 
@@ -155,12 +177,18 @@ cp build/mpgen/genhdr/* third_party/micropython/genhdr/
 
 | 坑 | 症状 | 原因 |
 |---|---|---|
+| **GC 根扫描手搬栈** | 大场景报 `Assertion failed: ATB_GET_KIND(area, block) == AT_HEAD, gc.c:914` | `gc_collect_root` 要求**精确的指针数组**，而栈里混着非指针数据 → GC 误标后链表被破坏。正解用上游的 `gc_helper_collect_regs_and_stack()`（同时扫寄存器 + 栈） |
 | `mp_hal_stdout_tx_strn_cooked` 返回 void 而 `_strn` 返回 `mp_uint_t` | `conflicting types`（只在 3 个文件报） | 上游两者签名不同，别"统一" |
 | `mp_hal_pin_obj_t` 是**宏**检查 | 找不到 `extmod/virtpin.h` | 写 `typedef` 不管用，必须 `#define` |
 | `mp_obj_dict_get` 键不存在**抛异常** | `KeyError: result` 而脚本没问题 | 不是返回 NULL，要用 `mp_map_lookup` |
 | Windows 默认 GBK | `UnicodeDecodeError: 'gbk'` | 上游生成脚本读文件不指定编码，需 `PYTHONUTF8=1` |
 | 运行期往模块表塞会崩 | `mp_init()` 访问违例 | 模块表是编译期常量，走生成器 |
 | 读 `camera.target` 当方向 | 判断"角度减半"（假缺陷） | 那是**点**不是方向；`target = eye + dir` |
+| 相机对象被当 mesh 抽取 | 日志里假警告 `对象 'cam' 抽取失败` | `obj.data` 是 `Camera` 而非 `Mesh`，读 `.vertices` 抛异常。假警告会淹没真警告 |
+| 输出缓冲 8 KB | `JSON 解析失败（第 8192 字节）… unexpected end of input` | 场景 JSON 有数 MB，读回来被截断（看起来像序列化器错了） |
+| `bpy.data` 跳 run 存活 | 第二个脚本报 `已存在同名数据块：'Cube'` | 模块级单例是刻意设计（场景状态要住住），需 `bpy.data.reset()` |
+| `src/python/*.c` 未入源集合 | `st test` 报 `undefined symbol: st_mp_init` | 框架里 `.c` **从不自动纳入**，必须显式列 |
+| 堆 16 MB 不够真实资产 | `Assertion failed: ATB_GET_KIND…`（与 GC 根扫描是两回事） | 8 个齿轮场景撞上堆顶；而且 MicroPython GC 分配失败时**直接 assert 而不是抛 MemoryError**。提到 64 MB |
 
 ## 六、怎么用
 

@@ -37,6 +37,9 @@
 #include "py/mpstate.h"
 #include "py/runtime.h"
 #include "py/stackctrl.h"
+/* GC 根扫描（寄存器 + 栈）：上游 `ports/unix/gccollect.c` 用同一个 helper。
+ * 自己手搬栈会因“非指针数据混入”而弄坏 GC 链表，见下文 gc_collect 的说明。*/
+#include "shared/runtime/gchelper.h"
 
 #include "st/python/mp_bridge.h"
 
@@ -57,13 +60,58 @@ int st_bpy_bootstrap(mp_obj_t globals);
  * `nlr_jump_fail` 同理：`longjmp` 失败（通常意味着 nlr 链断了，
  * 这是内部不变量被破坏）时的最后一道。嵌入场景里没有更好的处理，
  * 直接让进程终止——安静地继续跑下去只会得到更难查的内存破坏。*/
+
+/* 栈顶与寄存器现场：交给上游的 `gc_helper_collect_regs_and_stack()`（见下）。
+ *
+ * ## 踩过的坑（值得完整读一遍）
+ *
+ * 最初的实现只登记**一个栈字**：
+ *
+ *     gc_collect_root((void*)sp, 1);
+ *
+ * 后来改成扫 `[sp, 栈顶]` 整段。两者都错，而且**小场景看不出来**——
+ * 单个圆柱压根不触发 GC；而真实资产（轮系 8 个齿轮）立刻崩：
+ *
+ *     Assertion failed: ATB_GET_KIND(area, block) == AT_HEAD, gc.c:914
+ *
+ * 那行在 `gc_free` 里（“要释放的块头不是合法块”），看起来像“GC 实现有 bug”。
+ * 根因是 `gc_collect_root` 的契约要求**一个 `void*` 数组**，而栈区间里
+ * 混着非指针数据：GC 会把某些整数当指针误标、又把已释放的块当活物，
+ * 最终把链表结构弄坏。
+ *
+ * 结论：**不要手搓栈扫描**。上游 `ports/unix/gccollect.c` 的 `gc_collect`
+ * 只有一行实质内容 `gc_helper_collect_regs_and_stack()`，它同时处理
+ * 寄存器与栈（`setjmp` 把寄存器现场落到栈上再扫），边界与对齐都是验证过的。*/
+
 void gc_collect(void) {
   gc_collect_start();
-  /* `mp_stack_top` / `mp_stack_limit` 在 `mp_stack_ctrl_init` 后由
-   * MicroPython 维护（`py/stackctrl.h`）。把我们自己的栈区间报上去，
-   * 否则栈上的局部引用会被当成垃圾回收——症状是“用着用着对象突然没了”。*/
-  mp_uint_t sp = (mp_uint_t)(uintptr_t)&sp;
-  gc_collect_root((void*)sp, 1);
+  /* ## 用上游的 `gc_helper_collect_regs_and_stack()`（不是手搓栈扫描）
+   *
+   * 它是 `ports/unix/gccollect.c` 里 `gc_collect` 的全部内容。自己做两步：
+   *
+   * | 步 | 为何必须 |
+   * |---|---|
+   * | 扫 **寄存器** | 当前活着的对象可能**只在寄存器里**（刚算出的临时值、即将返回的引用）。只扫栈会漏掉它们，然后当垃圾回收 |
+   * | 扫 **栈** | 局部变量、未完成的表达式 |
+   *
+   * 实现上它用 `setjmp` 把当前寄存器现场落到栈上再扫（`MICROPY_GCREGS_SETJMP`
+   * 路径），所以跨平台/跨编译器都可靠。
+   *
+   * ## 踩过的坑（重要）
+   *
+   * 本文件原先手写了栈扫描（`gc_collect_root((void**)low, n)`）。
+   * 小场景正常（根本没触发 GC），**大场景就直接崩**：
+   *
+   *     Assertion failed: ATB_GET_KIND(area, block) == AT_HEAD, gc.c:914
+   *
+   * 那行在 `gc_free` 里，意思是“要释放的块头不是合法块”——而根因是
+   * 搬进 `gc_collect_root` 的**不是精确的指针数组**：里面混了非指针数据，
+   * 于是 GC 把一些地址误标成对象、又把已释放的东西当活物。
+   *
+   * `gc_collect_root` 的契约是“一个 `void*` 数组”——它不区分“这个字看起来像指针”
+   * 与“它真的是指针”。而我们扫的栈区间里两者都有。上游的 helper 做同样的事，
+   * 但**保守扫描的边界与对齐**是它处理过的，比自己拼多一层保证。*/
+  gc_helper_collect_regs_and_stack();
   gc_collect_end();
 }
 
@@ -73,8 +121,26 @@ void nlr_jump_fail(void* val) {
   abort();
 }
 
-/* 堆：16 MB。理由见 include/st/python/runtime.hpp 里 kHeapBytes 的说明。 */
-#define ST_MP_HEAP_BYTES (16u * 1024u * 1024u)
+/* 堆：64 MB。
+ *
+ * ## 为何从 16 MB 涨到 64
+ *
+ * 16 MB 跑单个圆柱够，但**真实资产不够**：机械腕表轮系（8 个齿轮 ×
+ * 数千面 × 每面若干顶点对象）会撞上堆顶，报
+ *
+ *     Assertion failed: ATB_GET_KIND(area, block) == AT_HEAD, py/gc.c:914
+ *
+ * 那条断言看起来像“GC 实现有 bug”，实际是**堆用完**——MicroPython 的 GC
+ * 在分配失败时直接 assert，而不是抛 MemoryError。
+ *
+ * 64 MB = “几何量再大 4 倍”的余量。它按需提交（Windows 堆 / POSIX mmap），
+ * 所以“给 64 MB”不等于占 64 MB 物理内存。
+ *
+ * ## 为何不无限大
+ *
+ * 堆越大，一次 GC 要扫的标记区域越大。而且它真被用尽时报 assert 而不是
+ * MemoryError（见上），所以留足余量比“刚好够”安全。 */
+#define ST_MP_HEAP_BYTES (64u * 1024u * 1024u)
 
 /* 外部提供的模块（`src/python/mathutils_module.c`） */
 
@@ -116,6 +182,8 @@ int st_mp_init(char* err, size_t err_cap) {
     }
     return -1;
   }
+  /* 栈控制：与上游 `ports/unix/main.c` 一致（`gc_collect` 的根扫描由
+   * `gc_helper_collect_regs_and_stack()` 做，见上方说明）*/
   mp_stack_ctrl_init();
   mp_stack_set_limit(512u * 1024u);
   gc_init(s_heap, s_heap + s_heap_words);

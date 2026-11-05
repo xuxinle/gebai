@@ -1,73 +1,86 @@
-feat(bpy): 接入 scene3d_script —— bpy_script 三路并存
+feat(bpy): 真实资产 —— 机械腕表轮系（齿轮建出来了）
 
-bpy 脚本现在能像 three.js 一样直接写进场景 JSON，端到端出像素。
+用 bpy 写了一个真实资产：8 个按模数生成的齿轮（齿形 + 轮辐窗口 + 轴孔），
+按啮合中心距布局。这是 bpy 路线价值的最终检验——机制通不等于造得出东西。
 
-## 三条表达路径（按优先级）
+判据 7/7（`tools/bpy_watch_probe`），出图 `bpy_watch_render.png`。
 
-| 字段 | 优先级 | 说明 |
-|---|---|---|
-| `bpy_script` | 1 | bpy 源码（Blender Python API） |
-| `three_script` | 2 | three.js 源码 |
-| `objects` | 3 | 声明式 JSON（原有路径） |
+## 资产内容
 
-### 自动识别（文本入口）
+| 齿轮 | 齿数 | 三角形 | 材质 |
+|---|---|---|---|
+| barrel_wheel | 42 | 2204 | 黄铜 |
+| center_wheel | 26 | ~1400 | 黄铜 |
+| third_wheel | 18 | ~1000 | 金 |
+| fourth_wheel | 14 | ~860 | 金 |
+| escape_wheel | 15 | ~900 | 蓝钢 |
+| 3 个惰轮 | 12/10/16 | 860+ | 黄铜/紫铜 |
 
-`parse_scene_spec_text()` 是裁云 `model_script` / 三维预览 / 自检三条路的
-共同入口，按顺序分流：
+几何契约与 three.js 版一致：分度圆 = 模数 × 齿数，中心距 = m(z1+z2)/2，
+齿相位按 `2π/z` 均分并对齐齿槽。
 
-1. 先试 JSON（合法且是对象 ⇒ 声明式）
-2. 行首含 `import bpy` / `import bmesh` / `from mathutils` ⇒ bpy
-3. 否则 ⇒ three.js
+## 这轮抓到的两个大坑
 
-靠 import 语句而不是语法分析：真要做"Python 还是 JS"得写两个词法器，
-而一个三维脚本不可能不 import 它的库。两个特征都稳。
+### 1. MINIMUM 档没有 `max` / `min`
 
-### 渲染路径统一
+`max` 是 Python 最常用的内建之一，而 MINIMUM 档剪掉了它。症状：
 
-两条脚本路**共用同一段**渲染代码（只在前三行决定取哪份 `ThreeScene`）：
+    NameError: name not defined
 
-    auto script_scene = bpy_mode ? BpySceneExtractor::extract(spec.bpy_script)
-                                : ThreeRuntime::instance().evaluate(...);
-    // 以下逐行相同：camera_override / extra_transform / material_override / end_frame
+**没有名字**（MINIMUM 档连异常参数格式化也剪了）。于是一个 400 行的齿轮
+脚本因为 `max(bore * hub_scale, root_radius * 0.26)` 整个建不出来。
 
-好处：裁云的镜头编排（推拉/机位/整体姿态/统一材质）**自动对 bpy 生效**
-——否则要写两套，而那正是"改一处漏一处"的源头。
+定位过程（花了很久）：
+1. 先怀疑语法/名字拼错 → 用真 CPython 跑（新写的 `tools/bpy_script_check.py`）
+   → 完全通过，排除
+2. 逐行截断二分 → 卡在"切点落在 docstring 里"，三轮都没修准
+3. 最后用**逐名 `eval` 探测**（把 bpy 相关名字列出来一个个试）才定位到 `max`
 
-### 同时写两个脚本
+顺带查出还缺 `reversed` / `enumerate` / `filter` / `set` / `frozenset`。
+全部打开（加起来几 KB），并要求 `python_features_probe` 逐条验（现 41 项）。
 
-不报错，**bpy 胜**，记一条 warn。理由：两者同时写一定是误操作，而模型从
-两个例子各拿一段是常见情形；报错会让一份"其实能跑"的配置失败，给确定顺序
-加警告更有用。
+### 2. GC 根扫描：不能手搬栈
 
-## 这轮修掉的问题
+之前 `gc_collect` 里手写：
 
-1. **`src/python/*.c` 从来没进过库目标** —— 探针各自显式列了它们，
-   所以探针能跑；而 `st test` 的测试目标链不到 `st_mp_init` /
-   `st_mp_deinit` / `st_mp_run`，报 `undefined symbol`。
-   根因：`sources` 的通配 `src/python/*.cpp` 不含 `.c`（框架里 `.c`
-   从不自动纳入源集合）。改成显式列出两个 `.c`
-2. **相机/灯光被当 mesh 抽取** —— `obj.data` 是 `Camera` 对象，
-   读 `.vertices` 抛 AttributeError，被外层 try 捕获成一条**假警告**。
-   假警告会淹没真警告，所以加 `isinstance(mesh, Mesh)` 判型
-3. **探针覆盖率判据恒 100%** —— 原判据拿传入的 `background` 比，
-   但渲染背景经色调映射后会变，差值恒 > 阈值。改成拿**画布角落像素**
-   作参照（背景是均匀的，角落就是背景色）
+    gc_collect_root((void**)low, bytes / sizeof(void*));
+
+小场景正常（根本不触发 GC），真实资产立刻崩：
+
+    Assertion failed: ATB_GET_KIND(area, block) == AT_HEAD, gc.c:914
+
+那行在 `gc_free` 里，看起来像"GC 实现有 bug"。根因是 `gc_collect_root` 的
+契约要求**精确的指针数组**，而栈区间里混着非指针数据 —— GC 把某些整数当指针
+误标、又把已释放的块当活物，最终把链表结构弄坏。
+
+正解：用上游 `ports/unix/gccollect.c` 里那一行 `gc_helper_collect_regs_and_stack()`
+（它同时扫**寄存器 + 栈**，用 setjmp 把寄存器现场落到栈上）。把
+`shared/runtime/gchelper_generic.c` 纳入 third_party。
+
+> 教训：**不要手搓栈扫描**。上游有专门的 helper，而"哪些内存是根"这件事
+> 的边界比想象中难。
+
+## 另外两处调整
+
+- **堆 16 MB → 64 MB**：8 齿轮场景撞上堆顶。而 MicroPython GC 分配失败时
+  **直接 assert 而不是抛 MemoryError**，所以留足余量比"刚好够"安全
+- 相机对象被当 mesh 抽取 → 加 `isinstance(mesh, Mesh)` 判型，消掉假警告
+
+## 新增诊断工具
+
+| 工具 | 用途 |
+|---|---|
+| `tools/st_py` | 跑一个 .py 文件并打印 result/错误（排查时的 `python` 替代品） |
+| `tools/bpy_script_check.py` | 用**真 CPython** 跑脚本（bpy 打桩），语法/名字问题一步到位 |
+| `tools/python_features_probe` | 41 项 Python 特性逐条探测 |
+
+前两个是这轮"找 `max`"的实际产物：MINIMUM 档下"能力缺失"与"我写错了"的
+报错长得一模一样，必须有工具把两者分开。
 
 ## 验证
 
-`bpy_script_probe`：**7/7**
-
-1. 纯 Python 文本自动走 bpy 分支（three_script 未被误填）
-2. 出像素（非背景 18%）
-3. 相机覆盖对 bpy 生效（18% → 52%）
-4. 材质覆盖对 bpy 生效（亮红 17.9%）
-5. 优先级 bpy > three
-6. 错误路径可读
-
-为何第 2 条必须用像素判据：`draw_mesh` 只提交到内部缓冲，合成到画布发生在
-`end_frame`。漏了它，`draw_calls` 会涨、内部缓冲也有内容，但画布上一个
-像素都没有（本仓实测过一次：抽取出 3 个方块、位置全对，像素计数为 0）。
-
-- 另有：`bpy_scene_probe` 10/10、`python_embed_probe` 18/18
+- `bpy_watch_probe`：7/7（8 个物体、每个 860~2204 三角形、非背景 19.6%）
+- `python_features_probe`：40/41（唯一失败是 f-string，MicroPython 默认不带）
+- `bpy_script_probe` 7/7、`bpy_scene_probe` 10/10、`python_embed_probe` 18/18
 - 全量 17 分片 0 失败
-- 文档：`docs/python.md` 第九～十一节（三路并存 / 验证 / 下一步）
+- 文档：`docs/python.md` §4.2（MINIMUM 档剪掉了什么 + 实测代价）、§5（坑表）
