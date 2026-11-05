@@ -83,12 +83,58 @@ void Table::set_columns(std::vector<TableColumn> columns) {
 void Table::add_row(std::vector<std::string> cells) {
   if (!columns_.empty()) cells.resize(columns_.size());
   rows_.push_back(std::move(cells));
+  // 色调/泳道表跟着长：否则后调的 `set_cell_tone` 会因行数不够而静默失效，
+  // 而“设了不生效”是最难查的一类缺陷（属性面也看不到）。
+  cell_tones_.emplace_back(columns_.size(), CellTone::Inherit);
+  row_lanes_.push_back(-1);
+  mark_layout_dirty();
+}
+
+void Table::set_column_tones(std::vector<CellTone> tones) {
+  column_tones_ = std::move(tones);
+  column_tones_.resize(columns_.size(), CellTone::Inherit);
+  mark_dirty();
+}
+
+void Table::set_cell_tone(std::size_t row, std::size_t column, CellTone tone) {
+  if (row >= rows_.size()) return;
+  if (cell_tones_.size() <= row) cell_tones_.resize(row + 1);
+  if (cell_tones_[row].size() <= column) {
+    cell_tones_[row].resize(std::max(column + 1, rows_[row].size()), CellTone::Inherit);
+  }
+  cell_tones_[row][column] = tone;
+  mark_dirty();
+}
+
+auto Table::cell_tone(std::size_t row, std::size_t column) const -> CellTone {
+  // 个别覆盖优先，其次是列默认。
+  if (row < cell_tones_.size() && column < cell_tones_[row].size() &&
+      cell_tones_[row][column] != CellTone::Inherit) {
+    return cell_tones_[row][column];
+  }
+  if (column < column_tones_.size()) return column_tones_[column];
+  return CellTone::Inherit;
+}
+
+void Table::set_row_lanes(std::vector<int> lanes) {
+  row_lanes_ = std::move(lanes);
+  row_lanes_.resize(rows_.size(), -1);
+  mark_dirty();
+}
+
+void Table::set_lane_column_width(float width) {
+  // 夹到合理范围：太窄画不出线、太宽就是在抢内容区。
+  lane_column_width_ = std::clamp(width, 8.0f, 80.0f);
   mark_layout_dirty();
 }
 
 void Table::clear_rows() {
   if (rows_.empty()) return;
   rows_.clear();
+  // ⚠ 色调/泳道表**同样要清**：否则下一次 `add_row` 后旧数据还挂着，
+  // 新行会拿到上一批的行位（颜色/泳道错位，而画面看着“有值只是不对”）。
+  cell_tones_.clear();
+  row_lanes_.clear();
   hovered_row_ = kNoRow;
   selected_row_ = std::nullopt;  // 数据没了：选中索引必然悬空
   mark_layout_dirty();
@@ -389,8 +435,21 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
       const math::Rect box = cell_rect(row, column);
       // 列剔除：与裁剪区无交叠的列不画（也不付 `ellipsize`/`measure_width`）。
       if (box.right() <= clip_left || box.x >= clip_right) continue;
+      // 单元格色调：一列一色是“主/次信息分层”的唯一手段——
+      // 提交信息主色、作者/日期弱化，否则全表一个颜色只能靠列位置猜重点。
+      // 选中行/显式覆盖仍优先（它们是更强的意图）。
+      math::Color cell_color = text_color;
+      if (!is_selected && !text_color_override().has_value()) {
+        switch (cell_tone(row, column)) {
+          case CellTone::Inherit:
+          case CellTone::Normal: break;
+          case CellTone::Muted: cell_color = colors.text_muted; break;
+          case CellTone::Accent: cell_color = colors.primary; break;
+          case CellTone::Danger: cell_color = colors.danger; break;
+        }
+      }
       draw_cell_text(context, canvas, cell(row, column), box, kCellPadding,
-                     columns_[column].align, style_.font_size, text_color);
+                     columns_[column].align, style_.font_size, cell_color);
     }
   }
   // 表头文本（同样列剔除）。字号按既有比例跟随覆盖（表头/正文 = font_xs/font_base，
@@ -402,6 +461,39 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
     if (box.right() <= clip_left || box.x >= clip_right) continue;
     draw_cell_text(context, canvas, columns_[column].name, box, kCellPadding,
                    columns_[column].align, header_font, colors.text_muted);
+  }
+
+  // —— 行首泳道标记（图形分支线）——
+  //
+  // 画在**最左侧**（表头不占这一块），每个提交一个圆点 + 一条竖线：
+  //   竖线：连接同一泳道的相邻提交（lane 相同就连）；
+  //   圆点：该提交本身（主干主色、分支 muted）。
+  // 为何进框架：泳道是**行属性**，它要和行高/滚动/斑马纹同一套几何算；
+  // 应用自己画得不到 `row_rect` 的内部知识（现在屏幕上第几像素）。
+  for (std::size_t row = first_row; row < last_row; ++row) {
+    if (row >= row_lanes_.size() || row_lanes_[row] < 0) continue;
+    const math::Rect row_box = row_rect(row);
+    if (row_box.height <= 0.0f) continue;
+    const float lane_x = bounds_.x + 10.0f + static_cast<float>(row_lanes_[row]) * 12.0f;
+    const float cy = row_box.y + row_box.height * 0.5f;
+    if (lane_x >= clip_right || lane_x <= clip_left) continue;
+    // 竖线：连到**下一条同泳道**的行（相邻行不同泳道时断开，如实反映分支）。
+    const bool next_same = row + 1 < row_lanes_.size() && row_lanes_[row + 1] == row_lanes_[row];
+    const bool prev_same = row > 0 && row_lanes_[row - 1] == row_lanes_[row];
+    const math::Color lane_color =
+        row_lanes_[row] == 0 ? colors.primary : colors.border_strong;
+    const float half = row_box.height * 0.5f;
+    if (prev_same) {
+      canvas.fill_rect(math::Rect{lane_x - 0.5f, row_box.y, 1.0f, half},
+                       raster::Paint::solid(lane_color));
+    }
+    if (next_same) {
+      canvas.fill_rect(math::Rect{lane_x - 0.5f, cy, 1.0f, half},
+                       raster::Paint::solid(lane_color));
+    }
+    // 圆点（半径 3）。
+    canvas.fill_rect(math::Rect{lane_x - 3.0f, cy - 3.0f, 6.0f, 6.0f},
+                     raster::Paint::solid(lane_color), 3.0f);
   }
 
   // 横向滚动指示（内容超出容器时）。

@@ -39,10 +39,35 @@ class Table : public Element {
   static constexpr float kScrollBarHeight{3.0f};    ///< 横向滚动指示条高（px）
   static constexpr float kSelectedAccentWidth{3.0f};///< 选中行左缘主色条宽（px）
 
+  /// 单元格**色调**（主/次信息分层）。
+  ///
+  /// 为何需要它（2026-11-05，做 Git 日志表时）：一列一色的表格读不了——
+  /// 提交信息该是主色（用户在看的东西）、作者与日期该是弱化色（背景信息）。
+  /// 全用同一色就只能靠列位置区分，而“哪一部分是重点”正是列表要表达的。
+  /// 设为 `inherit` 时跟表格自身的文字色（旧行为，零影响）。
+  enum class CellTone : std::uint8_t { Inherit, Normal, Muted, Accent, Danger };
+
   explicit Table(std::vector<TableColumn> columns = {});
 
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Table"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Table; }
+
+  /// 设定列的**默认色调**（每列一个；未设则 `Inherit`）。
+  /// 与 `set_cell_tone` 的分工：这里定“这一列大体是什么角色”，那里做个别覆盖。
+  void set_column_tones(std::vector<CellTone> tones);
+  /// 设某个单元格的色调（个别覆盖列默认；越界忽略）。
+  void set_cell_tone(std::size_t row, std::size_t column, CellTone tone);
+  [[nodiscard]] auto cell_tone(std::size_t row, std::size_t column) const -> CellTone;
+
+  /// 行首**泳道标记**（图形分支线）：每行一个列号（0 起），负值 = 不画。
+  ///
+  /// 为何进框架而不是应用自己画：泳道是**行属性**，它要和行高/滚动/斑马纹
+  /// 同一套几何算——应用自己画就得到表格外面去覆一层，而覆层拿不到
+  /// “第 n 行现在在屏幕上第几个像素”（那是 `row_rect` 的内部知识）。
+  /// 取值语义与 git 泳道图一致：0 = 主干，n = 第 n 条分支线。
+  void set_row_lanes(std::vector<int> lanes);
+  /// 在该列位置画泳道（负值保持默认 28px；0 会吃掉列宽，不要传）。
+  void set_lane_column_width(float width);
 
   // —— 数据 ——
   /// 设定列（会清空既有列宽缓存；行数据保留）。
@@ -130,6 +155,12 @@ class Table : public Element {
   std::vector<TableColumn> columns_{};
   std::vector<std::vector<std::string>> rows_{};
   std::vector<float> column_widths_{};
+  /// 每列的默认色调 / 行×列的个别覆盖（与 `rows_` 同形，缺省 `Inherit`）。
+  std::vector<CellTone> column_tones_{};
+  std::vector<std::vector<CellTone>> cell_tones_{};
+  /// 每行的泳道列号（`-1` = 不画）。
+  std::vector<int> row_lanes_{};
+  float lane_column_width_{28.0f};
   std::function<void(std::size_t)> on_row_click_{};
   float total_width_{0.0f};
   float row_height_{kDefaultRowHeight};
