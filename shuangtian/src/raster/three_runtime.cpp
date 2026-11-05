@@ -590,32 +590,32 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
     // |---|---|---|
     // | 表达式**跨行**（`new THREE.Mesh(\n  geo, mat)`） | `return new THREE.Mesh(` + 换行 | `unexpected token in expression` |
     // | 一行里多个语句（`s.add(l);s.add(x);s;`） | `return s.add(l);s.add(x);s;` | 只返回第一个结果 |
-    // | 末行是块结尾（`}` 后面的换行） | 识别为空行 → 不加 return | 场景丢 |
+    // | 末行是块结尾（`闭花括号` 后面的换行） | 识别为空行 → 不加 return | 场景丢 |
     //
     // 实测：一组 20 条能力脚本里有 9 条因此报“语法错”，而它们写的都是合法 JS。
     // 最坑的是错误信息指向用户完全无辜的最后一行。
     //
     // ## 现在怎做
     //
-    // 逐字符扫描（跳过字符串/模板/正则/注释），按**顶层 `;`与顶层平衡的 `}`**
+    // 逐字符扫描（跳过字符串/模板/正则/注释），按**顶层 `;`与顶层平衡的 `闭花括号`**
     // 切出语句边界，取最后一段非空语句。然后分三种情形：
     //
     // 1. 以 `;` 结尾 → 它就是一条语句，直接加 `return `；
-    // 2. 以 `}` 结尾（块结构，如 `for(...){...}`）→ **不加** return：
-    //    块无值，而且 `return {...}` 会把一个块当对象字面量解析（语义完全不同）；
+    // 2. 以 `闭花括号` 结尾（块结构，如 `for(...)开花括号...闭花括号`）→ **不加** return：
+    //    块无值，而且 `return 开花括号...闭花括号` 会把一个块当对象字面量解析（语义完全不同）；
     // 3. 其余（末尾无分号）→ 也加 `return `（ASI 风格的最后一行表达式）。
     //
     // 已有 `return`/声明/控制流关键字的，一律不加。
     const auto as_iife = [](const std::string& source) -> std::string {
       // ── 扫描器：找到“最后一个顶层语句”的起始位置 ──
           std::size_t statement_start = 0;
-      // 块语句的起点（`for (...) { ... }` 的 `for` 位置）。
+      // 块语句的起点（`for (...) 开花括号 ... 闭花括号` 的 `for` 位置）。
       //
       // ## 为何需要单独一个游标（实测代价）
       //
-      // 顶层 `}` 也意味着“一条语句结束”，但它结束的那条语句 **从块的头部开始**，
-      // 不是从 `}` 之后。旧写法直接 `statement_start = i + 1`，于是遇到
-      // “末行是 `}` 后面的换行”时就把最后一条顶层语句当成了空串——
+      // 顶层 `闭花括号` 也意味着“一条语句结束”，但它结束的那条语句 **从块的头部开始**，
+      // 不是从 `闭花括号` 之后。旧写法直接 `statement_start = i + 1`，于是遇到
+      // “末行是 `闭花括号` 后面的换行”时就把最后一条顶层语句当成了空串——
       // 场景因此丢掉（而错误里什么都没有，最难查）。
       //
       // 现在两个游标分工：
@@ -626,7 +626,7 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       int depth_paren_last = 0;
       (void)depth_paren_last;
     int depth_paren = 0;   // ( )
-      int depth_brace = 0;   // { }
+      int depth_brace = 0;   // 开花括号 闭花括号
       int depth_bracket = 0; // [ ]
       bool in_string = false;
       bool in_template = false;
@@ -681,7 +681,7 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
           case '[': ++depth_bracket; break;
           case ']': --depth_bracket; break;
           case '{':
-            // 顶层 `{` **第一次**出现的位置就是 block 语句的开头（`for (...) {`）。
+            // 顶层 `开花括号` **第一次**出现的位置就是 block 语句的开头（`for (...) 开花括号`）。
             if (depth_paren == 0 && depth_brace == 0 && depth_bracket == 0) {
               block_statement_start = statement_start;
             }
@@ -699,8 +699,8 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
             break;
           default: break;
         }
-        // 顶层 `}` 收尾一个块（`for { ... }` / `function { ... }`）：块本身就是一条语句。
-        // 它结束的语句**从块头开始**（不是从 `}` 之后）——这是上面两个游标存在的原因。
+        // 顶层 `闭花括号` 收尾一个块（`for 开花括号 ... 闭花括号` / `function 开花括号 ... 闭花括号`）：块本身就是一条语句。
+        // 它结束的语句**从块头开始**（不是从 `闭花括号` 之后）——这是上面两个游标存在的原因。
         if (ch == '}' && depth_paren == 0 && depth_brace == 0 && depth_bracket == 0) {
           last_completed_statement = block_statement_start;
           statement_start = i + 1;
@@ -715,24 +715,24 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       // 三种尾巴都要对：
       // · `scene;`      → 尾巴是空白，用 `last_completed_statement`（即 `scene`）
       // · `scene`       → 尾巴就是 `scene`
-      // · `for(){...}` → `}` 已把 `last_completed_statement` 设为块头
+      // · `for()开花括号...闭花括号` → `闭花括号` 已把 `last_completed_statement` 设为块头
       const std::size_t trailing_start = statement_start;
       const std::size_t last_statement_start =
           source.find_first_not_of(" \t\r\n", trailing_start) == std::string::npos
               ? last_completed_statement
               : trailing_start;
-    // ⚠ **`return ` 后面紧跟 `{` 会把块变成对象字面量**——所以这里的目标是“最后一条
-    // 顶层语句”，而块结构（以 `{` 开头、`}` 结尾）本身就不该加 return。
-    // 旧实现里那条 “以 `}` 或 `{` 结尾就不碰” 的判定保留下来，但现在它作用在
+    // ⚠ **`return ` 后面紧跟 `开花括号` 会把块变成对象字面量**——所以这里的目标是“最后一条
+    // 顶层语句”，而块结构（以 `开花括号` 开头、`闭花括号` 结尾）本身就不该加 return。
+    // 旧实现里那条 “以 `闭花括号` 或 `开花括号` 结尾就不碰” 的判定保留下来，但现在它作用在
     // **整条语句**上（而不是一行），于是多行块也能正确识别。
-      std::size_t begin = last_statement_start;
+      auto begin = last_statement_start;
       while (begin < source.size() &&
              (source[begin] == ' ' || source[begin] == '\t' || source[begin] == '\n' ||
               source[begin] == '\r')) {
         ++begin;
       }
       // 末尾向前跳过空白
-      std::size_t end = source.size();
+      auto end = source.size();
       while (end > begin && (source[end - 1] == '\n' || source[end - 1] == '\r' ||
                              source[end - 1] == ' ' || source[end - 1] == '\t')) {
         --end;
@@ -752,7 +752,7 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       }
 
       const std::string text(tail);
-      std::string head = text;
+      auto head = text;
       while (!head.empty() && (head.back() == ';' || head.back() == ' ' || head.back() == '\t')) {
         head.pop_back();
       }
@@ -770,7 +770,7 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
             break;
           }
         }
-        // 以 `}` 结尾：块结构无值。**必须不加**——`return { … }` 会被解析成
+        // 以 `闭花括号` 结尾：块结构无值。**必须不加**——`return 开花括号 … 闭花括号` 会被解析成
         // 对象字面量，而块里的语句全部失效（语义静默地变了）。
         if (needs_return && (head_trimmed.back() == '}' || head_trimmed.back() == '{')) {
           needs_return = false;
