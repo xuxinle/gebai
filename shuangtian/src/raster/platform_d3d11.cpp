@@ -3697,20 +3697,34 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     float sky_t = saturate(0.5 + 0.5 * r.y);
     float3 env_color = lerp(env_ground, env_sky, sky_t);
 
-    // 粗糙度把锐利反射打散成模糊一片（向均值靠拢、变暗）
+    // 粗糙度把锐利反射打散成模糊一片（向均值靠拢）。
+    //
+    // ⚠ 它**不改变强度**——原实现多乘了 `(0.35 + 0.65×blur)` 是错的
+    //（详见下方 weight 的说明）。
     float rough = saturate(roughness);
-    float blur = 1.0 - rough;
     float3 env_mean = (env_sky + env_ground) * 0.5;
     env_color = lerp(env_color, env_mean, rough * g_env_ground.w);
 
-    // 金属映环境本色，非金属映“环境×固有色”
-    float3 tinted = env_color * (0.45 + 0.55 * base * metallic);
+    // ## 反射色：金属映固有色（=F0），非金属映 0.04（与 C++ 侧同步，2026-11-05）
+    //
+    // 原式 `env_color * (0.45 + 0.55 * base * metallic)` 把固有色当**增益**。
+    // 对黄铜 base=(0.72,0.55,0.24)、metallic=0.95：
+    //
+    // | 通道 | 原式 | 正确（=F0） | 倍数 |
+    // |---|---|---|---|
+    // | R | 0.83 | 0.72 | 1.15× |
+    // | G | 0.74 | 0.55 | 1.35× |
+    // | B | 0.58 | 0.24 | **2.4×** |
+    //
+    // B 通道差 2.4 倍 → 黄铜发灰、整体偏亮。
+    float3 f0_tint = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
+    float3 tinted = env_color * f0_tint;
     // 强度：显式 `env_strength` 优先；未配置时回退到 `ambient` 挂钩
     // （与 C++ 侧 `shade_surface` 的 `ambient_strength` 逐字对应）
     float ambient_strength = g_env.w > 0.0
                                  ? g_env.w
                                  : (0.30 + 0.70 * (0.5 + 0.5 * n.y)) * (g_light.w + 0.55);
-    float weight = ambient_strength * fresnel * (0.35 + 0.65 * blur);
+    float weight = ambient_strength * fresnel;
     lit += tinted * weight;
   }
 

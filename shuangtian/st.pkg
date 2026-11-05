@@ -820,6 +820,38 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "诊断：把抽出来的灯光/材质/分组数值打出来。全黑时分不清是光反了、强度 0、还是基色没设"
     },
+    "tune_lighting_grid": {
+      "kind": "executable",
+      "sources": ["tools/tune_lighting_grid.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "网格扫 ambient/diffuse/env，用加权分位差做目标函数。均值只会说“偏亮”，而分位差能区分“整体偏移”与“对比不足”"
+    },
+    "normal_sweep_probe": {
+      "kind": "executable",
+      "sources": ["tools/normal_sweep_probe.cpp", "src/raster/software_scene.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "法线扫描：找出哪个法线角度得到 132 级（本框架亮带），以及去环境/去 rim 的贡献。定位“同一部位差 53.5 级”的来源"
+    },
+    "histogram_diff": {
+      "kind": "executable",
+      "sources": ["tools/histogram_diff.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "主体亮度直方图逐档对比：定位“哪一段偏亮”。均值差只说明整体偏亮，标准差说明分布宽度（层次感）"
+    },
+    "shading_decompose_probe": {
+      "kind": "executable",
+      "sources": ["tools/shading_decompose_probe.cpp", "src/raster/software_scene.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "逐项拆解主体亮度来源：AO 已排除（只降 5.4），剩下的候选是 ambient(0.35) 与 rim(0.25) 这两个非物理项"
+    },
+    "ao_benefit_probe": {
+      "kind": "executable",
+      "sources": ["tools/ao_benefit_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "量 AO 的理论收益：用亮度梯度当深度代理，看“交界处变暗”能拉近多少。先量再做——CPU 上的逐像素 AO 代价不低"
+    },
     "world_env_probe": {
       "kind": "executable",
       "sources": ["tools/world_env_probe.cpp", "src/python/mp_bridge.c",

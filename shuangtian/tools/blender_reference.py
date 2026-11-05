@@ -324,7 +324,7 @@ def main():
     cam_obj = bpy.data.objects.new('main_cam', cam_data)
     bpy.context.collection.objects.link(cam_obj)
     cam_obj.location = (1.5, -1.0, 26.0)
-    cam_obj.rotation_euler = (0.0, 0.0, 0.0)
+    cam_obj.rotation_euler = (math.radians(8.0), 0.0, 0.0)
     bpy.context.scene.camera = cam_obj
 
     lamp = bpy.data.lights.new('key', 'SUN')

@@ -398,9 +398,11 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
                                ground.y + (sky.y - ground.y) * sky_t,
                                ground.z + (sky.z - ground.z) * sky_t};
 
-    // 粗糙度把锐利反射打散成“模糊的一整片”：越粗糙越向环境均值靠拢、越暗。
+    // 粗糙度把锐利反射打散成“模糊的一整片”：越粗糙越向环境均值靠拢。
+    //
+    // ⚠ 注意：它**不改变强度**——原实现额外乘了 `(0.35 + 0.65×blur)`
+    // 当作强度倍数，那是错的（详见下方 `weight` 处的说明）。
     const float rough = std::clamp(roughness, 0.0f, 1.0f);
-    const float blur = 1.0f - rough;
     const math::Vec3 env_mean{(sky.x + ground.x) * 0.5f, (sky.y + ground.y) * 0.5f,
                               (sky.z + ground.z) * 0.5f};
     // `env_rough_falloff` 控制“越粗糙越弥散”的强度（默认 0.6）。
@@ -409,17 +411,55 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
                            env_color.y + (env_mean.y - env_color.y) * mix_to_mean,
                            env_color.z + (env_mean.z - env_color.z) * mix_to_mean};
 
-    // 反射颜色：金属映环境本色，非金属映“环境×固有色”（弱得多）。
-    const math::Vec3 tinted{env_sampled.x * (0.45f + 0.55f * base_color.x * metallic),
-                            env_sampled.y * (0.45f + 0.55f * base_color.y * metallic),
-                            env_sampled.z * (0.45f + 0.55f * base_color.z * metallic)};
+    // ## 反射色：金属映**固有色**（不是“固有色当增益”）
+    //
+    // 物理上：金属的反射率 = F0 = 固有色；非金属的 F0 ≈ 0.04。
+    //
+    // ## 原实现的错（2026-11-05 修）
+    //
+    // 原式：`env_color × (0.45 + 0.55 × base_color × metallic)`
+    //
+    // 对黄铜 base=(0.72,0.55,0.24)、metallic=0.95：
+    //
+    // | 通道 | 原式系数 | 正确系数（= base） | 倍数 |
+    // |---|---|---|---|
+    // | R | 0.45 + 0.55×0.72×0.95 = **0.83** | 0.72 | 1.15× |
+    // | G | 0.45 + 0.55×0.55×0.95 = 0.74 | 0.55 | 1.35× |
+    // | B | 0.45 + 0.55×0.24×0.95 = 0.58 | 0.24 | **2.4×** |
+    //
+    // B 通道差 2.4 倍——于是颜色被抽淡（黄铜发灰而不是金黄），
+    // 同时整块亮度被抬高。这直接相关「主体均值 99.9 vs 78.1」：
+    // 金属盘面（大面积）的亮度几乎全来自环境反射（漫反射权重 0.05）。
+    const auto reflect_tint = [&](float env_c, float base_c) noexcept -> float {
+      // 金属用 F0 = 固有色；非金属用 F0 ≈ 0.04（按 metallic 插值）
+      const float f0_c = 0.04f + (base_c - 0.04f) * metallic;
+      return env_c * f0_c;
+    };
+    const math::Vec3 tinted{reflect_tint(env_sampled.x, base_color.x),
+                            reflect_tint(env_sampled.y, base_color.y),
+                            reflect_tint(env_sampled.z, base_color.z)};
 
     // 强度：显式配置的 `env_strength` 优先；未配置时沿用旧的 `ambient` 挂钩。
+    //
+    // ## `(0.35 + 0.65 × blur)` 这个因子是错的（2026-11-05 修）
+    //
+    // 原式把粗糙度当成**强度倍数**：`blur = 1 - roughness`，于是
+    // 粗糙度越低（越光）→ blur 越大 → **反射越强**。
+    //
+    // 物理上粗糙度影响的是反射的**锐利度**，不是强度：
+    // 低粗糙度 → 反射集中在一个方向（镜面）；高粗糙度 → 反射弥散。
+    // 两者在**能量上都是 F0 比例**，不会因为“更光”而“更亮”。
+    //
+    // 对黄铜（roughness 0.22）：blur = 0.78，因子 = 0.35 + 0.65×0.78 = **0.857**
+    // ——凭空多给 86% 的反射能量。这也是“主体偏亮”的一部分。
+    //
+    // 修法：去掉这个因子。粗糙度的效果已经由 `env_sampled`
+    //（向环境均值弥散）表达。
     const float ambient_strength = lighting.env_strength > 0.0f
                                        ? lighting.env_strength
                                        : (0.30f + 0.70f * (0.5f + 0.5f * n.y)) *
                                              (lighting.ambient + 0.55f);
-    const float weight = ambient_strength * fresnel * (0.35f + 0.65f * blur);
+    const float weight = ambient_strength * fresnel;
     result.x += tinted.x * weight;
     result.y += tinted.y * weight;
     result.z += tinted.z * weight;
