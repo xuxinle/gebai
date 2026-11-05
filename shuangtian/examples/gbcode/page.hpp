@@ -288,6 +288,12 @@ struct CodeEditorPage : Component {
   /// ⚠ 必须 `State`：普通 vector 改了不触发重组，组头点下去**没反应**
   ///（这是 LSP 阶段 4 的 `completion_open_` 同一个坑——bool 版实测过）。
   State<std::vector<std::string>> git_collapsed_groups_{{}};
+  /// 当前悬停的变更项路径（空 = 没有悬停）。行内动作（暂存/取消暂存/放弃）
+  /// 只在它等于自己那一行时**才声明**。
+  ///
+  /// 为何是 State：悬停变化必须摇重组，否则按钮不会出现/消失。
+  /// 为何共享一条而不是每行一个 bool：同一时刻只可能悬停一行。
+  State<std::string> scm_hovered_path_{std::string{}};
   /// 多步操作状态（merge/rebase 中时给“继续/跳过/中止”入口）。
   gbcode::OperationState git_operation_{};
   /// 标签 / 远程 / 暂存（stash）/ 引用清单（底部各视图的数据面）。

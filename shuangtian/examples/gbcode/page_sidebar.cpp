@@ -783,6 +783,12 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
                 const std::string name = change.file_name();
                 const std::string dir = change.dir_path();
                 const std::string code(1, change.display_code());
+                // 悬停才显示行内动作（用户要求；IDEA/VSCode 同行为）。
+                //
+                // 为何用**一条共享的路径 State** 而不是每行一个 bool：
+                // 同一时刻只可能悬停一行，而“哪一行在悬停”就是一个值。
+                // 每行一个 bool 会让 N 个 State 在悬停时全部重算。
+                const bool row_hovered = scm_hovered_path_.value() == change.path;
                 // 版式：`状态 文件名  目录`——**文件名在前、目录在后**。
                 //
                 // 为何这个顺序本身就是“先缩目录”的正确解（不需要额外机制）：
@@ -802,20 +808,39 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
                   b.set_size(Button::Size::Small);
                   // 去掉默认内边距：列表行要贴左缘，与组标题、上方工具条同一条基线。
                   b.style().padding = st::math::Insets{0.0f, 0.0f, 0.0f, 0.0f};
+                  // 悬停 → 记下“这一行在悬停”；离开 → 只有当它还是当前行时才清空。
+                  //
+                  // ⚠ 必须比一下再清：鼠标从 A 快速滑到 B 时，A 的 HoverOut 可能
+                  // **晚于** B 的 HoverIn 到达；不比就把 B 刚写进去的值清掉，
+                  // 表现为“悬停在 B 上却没有按钮”。
+                  const std::string path = change.path;
+                  b.set_on_hover([this, path](bool entered) {
+                    if (entered) {
+                      scm_hovered_path_.set(path);
+                    } else if (scm_hovered_path_.value() == path) {
+                      scm_hovered_path_.set(std::string{});
+                    }
+                  });
                   b.on_click = [this, change] { open_git_diff(change); };
                 }, {.height = 24.0f, .grow = true, .key = "row"});
-                // 行内动作（悬停意图：VSCode 同款三键）。
-                if (change.has_unstaged_side() && !change.is_conflicted()) {
-                  scm_icon_button(c, "stage-" + change.path, "plus", "暂存更改",
-                                  [this, path = change.path] { git_stage(path, true); });
-                }
-                if (change.has_staged_side()) {
-                  scm_icon_button(c, "unstage-" + change.path, "minus", "取消暂存",
-                                  [this, path = change.path] { git_stage(path, false); });
-                }
-                if (!change.has_staged_side() || change.has_unstaged_side()) {
-                  scm_icon_button(c, "discard-" + change.path, "undo", "放弃更改",
-                                  [this, change] { git_discard(change); });
+                // 行内动作：**只在该行悬停时存在**。
+                //
+                // 用 `set_visible(false)` 会留下占位（行宽仍是“按钮也在”的那份），
+                // 于是文件名被白挤窄一截——所以这里干脆不声明。
+                // （外层是 `row(...)` 的 lambda，`continue` 在那里不合法，故用 if 包住。）
+                if (row_hovered) {
+                  if (change.has_unstaged_side() && !change.is_conflicted()) {
+                    scm_icon_button(c, "stage-" + change.path, "plus", "暂存更改",
+                                    [this, path = change.path] { git_stage(path, true); });
+                  }
+                  if (change.has_staged_side()) {
+                    scm_icon_button(c, "unstage-" + change.path, "minus", "取消暂存",
+                                    [this, path = change.path] { git_stage(path, false); });
+                  }
+                  if (!change.has_staged_side() || change.has_unstaged_side()) {
+                    scm_icon_button(c, "discard-" + change.path, "undo", "放弃更改",
+                                    [this, change] { git_discard(change); });
+                  }
                 }
               });
             }
