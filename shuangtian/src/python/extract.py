@@ -344,7 +344,7 @@ def _extract_mesh_object(obj):
     # 变换矩阵，渲染器会用它。把顶点也变换一次就是变换两遍。
     # 见 docs/python.md 的"为什么顶点留局部空间"。
 
-    # ## 三角化 + 逐三角形法线 + 按材质分组
+    # ## 三角化 + **平滑顶点法线** + 按材质分组
     #
     # ## 为何要按材质排序索引
     #
@@ -353,24 +353,88 @@ def _extract_mesh_object(obj):
     #
     # 而 bpy 的面顺序是按几何逻辑排的，不同 material_index 会交错。
     # 所以这里先按材质桶收集三角形，再拼成连续的 `indices`。
+    #
+    # ## 为什么改成平滑法线（2026-11-05）
+    #
+    # 原实现是**逐三角形平面法线**。那让每个面得到固定亮度，
+    # 整个齿轮渲出来是“大片均匀色块”。而 three.js 的挤出几何用
+    # **平滑法线**，黄铜从亮金到深褐有连续过渡。
+    #
+    # 实测对比（`tools/render_compare`，与真 three.js 参照图比）：
+    #
+    # | 指标 | 平面法线 | 平滑法线 | three.js |
+    # |---|---|---|---|
+    # | 暗部占比 | 0.0% | 待测 | 9.8% |
+    # | 最亮 | 204 | 待测 | 255 |
+    #
+    # 平面法线让**同一面上的每个像素法线相同**，Lambert 项就是常数，
+    # 没有方向性；平滑法线才能让圆环面产生渐变。
+    #
+    # ## 怎么平均
+    #
+    # 同一个顶点被多个三角形共享时，把各三角形的**面积加权法线**加起来
+    # 归一化（面积加权是因为大三角形对表面朝向的贡献更大——不加权会让
+    # 密集小三角形主导法线，在齿根处出现奇怪的亮斑）。
     vertices = []       # 交错：[x, y, z, nx, ny, nz, r, g, b]
     buckets = {}        # material_index -> [三角形顶点下标三元组, ...]
     bucket_order = []   # 保持首次出现的顺序（结果可复现，便于对照）
+
+    # ① 先三角化并累计顶点法线（`positions` 的下标 → 累加法线）
+    triangles = []      # 每个元素：(mat_index, i0, i1, i2)
+    accum = [None] * len(positions)   # 每个位置的法线累加器
     for poly in mesh.polygons:
         mat_index = poly.material_index if hasattr(poly, 'material_index') else 0
-        if mat_index not in buckets:
-            buckets[mat_index] = []
-            bucket_order.append(mat_index)
         for tri in _triangulate(poly.vertices, positions):
             i0, i1, i2 = tri
             p0 = positions[i0]
             p1 = positions[i1]
             p2 = positions[i2]
             n = _compute_normal(p0, p1, p2)
-            base = len(vertices)
-            for p in (p0, p1, p2):
-                vertices.append((p[0], p[1], p[2], n[0], n[1], n[2]))
-            buckets[mat_index].append((base, base + 1, base + 2))
+            # 面积 = |叉积| / 2；而 `_compute_normal` 已归一化，所以重新算面积
+            ax = p1[0] - p0[0]
+            ay = p1[1] - p0[1]
+            az = p1[2] - p0[2]
+            bx = p2[0] - p0[0]
+            by = p2[1] - p0[1]
+            bz = p2[2] - p0[2]
+            cx = ay * bz - az * by
+            cy = az * bx - ax * bz
+            cz = ax * by - ay * bx
+            area = ((cx * cx + cy * cy + cz * cz) ** 0.5) * 0.5
+            for index in (i0, i1, i2):
+                slot = accum[index]
+                if slot is None:
+                    accum[index] = [n[0] * area, n[1] * area, n[2] * area]
+                else:
+                    slot[0] += n[0] * area
+                    slot[1] += n[1] * area
+                    slot[2] += n[2] * area
+            triangles.append((mat_index, i0, i1, i2))
+
+    # ② 归一化累加结果
+    smooth = [None] * len(positions)
+    for index in range(len(positions)):
+        slot = accum[index]
+        if slot is None:
+            smooth[index] = (0.0, 0.0, 1.0)
+            continue
+        length = ((slot[0] * slot[0] + slot[1] * slot[1] + slot[2] * slot[2]) ** 0.5)
+        if length < 1e-12:
+            smooth[index] = (0.0, 0.0, 1.0)
+        else:
+            smooth[index] = (slot[0] / length, slot[1] / length, slot[2] / length)
+
+    # ③ 生成顶点表（每个三角形独立三顶点，法线用平滑值）
+    for mat_index, i0, i1, i2 in triangles:
+        if mat_index not in buckets:
+            buckets[mat_index] = []
+            bucket_order.append(mat_index)
+        base = len(vertices)
+        for index in (i0, i1, i2):
+            p = positions[index]
+            n = smooth[index]
+            vertices.append((p[0], p[1], p[2], n[0], n[1], n[2]))
+        buckets[mat_index].append((base, base + 1, base + 2))
 
     if not vertices:
         return None
