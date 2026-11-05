@@ -3635,7 +3635,17 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     float n_dot_h = max(dot(n, h), 0.0);
     float v_dot_h = max(dot(view_dir, h), 0.0);
     if (n_dot_v > 0.0 && n_dot_l > 0.0) {
-      float alpha = max(roughness, 1e-3);
+      // ## alpha = roughness²（与 C++ 侧同步，2026-11-05）
+      //
+      // 原实现把 `roughness` 直接当 alpha。标准 GGX 的定义是
+      // `alpha = roughness²`，用 roughness 直接当 alpha 会让瓣宽得多
+      //（rough=0.22 的实际瓣宽相当于标准映射下的 rough≈0.47）。
+      //
+      // 实测（`tools/ggx_lobe_width_probe`）：瓣内跨度 **95°**（扫到哪都在瓣内），
+      // 最低相对峰值 0.59。后果是每个朝向的面都拿到接近同样的高光，
+      // 画面没有明暗层次——这正是分位数对比里「p50 +25 / p75 +48」的形状。
+      float r_rough = max(roughness, 1e-3);
+      float alpha = max(r_rough * r_rough, 1e-3);
       float a2 = alpha * alpha;
       float denom_d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
       float D = a2 / (3.14159265 * denom_d * denom_d);

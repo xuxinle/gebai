@@ -263,8 +263,31 @@ auto shade_terms_at(math::Vec3 normal, math::Vec3 color, const Lighting& lightin
 /// 实测：不夹时 `roughness=0` 会输出 NaN，整幅变黑（NaN 在色调映射里传插）。
 constexpr float kMinAlpha = 1e-3f;
 
+/// ## alpha 的映射必须是 roughness²（2026-11-05 修，这是个关键缺陷）
+///
+/// 原实现把 `roughness` **直接当 alpha**。标准 GGX（Disney / Cook-Torrance）
+/// 的定义是：
+///
+///     alpha = roughness²
+///     D(h) = alpha² / (π · ((n·h)²(alpha²-1) + 1)²)
+///
+/// 用 `roughness` 当 alpha 会让瓣**宽得多**：`rough=0.22` 的实际瓣宽
+/// 相当于标准映射下的 `rough≈0.47`。
+///
+/// 实测后果（`tools/ggx_lobe_width_probe`）：
+///
+/// | | 瓣内跨度（>10% 峰值） | 最低相对峰值 |
+/// |---|---|---|
+/// | 修前 | **95°**（扫到哪都在瓣内） | 0.59 |
+/// | 标准 GGX | 约 30~40° | 应 < 0.1 |
+///
+/// 瓣太宽的后果是**每个朝向的面都拿到接近同样的高光** —— 画面没有明暗
+/// 层次（"平"）。这正是分位数对比里「p50 +25、p75 +48」的形状：
+/// 中层被抬高、高层没拉开。
 auto ggx_distribution(float n_dot_h, float roughness) noexcept -> float {
-  const float alpha = std::max(roughness, kMinAlpha);
+  const float r = std::max(roughness, kMinAlpha);
+  // ⚠ 这里是 roughness²，不是 roughness。改这一行会改变所有金属的观感。
+  const float alpha = std::max(r * r, kMinAlpha);
   const float a2 = alpha * alpha;
   const float nh = std::max(n_dot_h, 0.0f);
   const float nh2 = nh * nh;
@@ -275,7 +298,11 @@ auto ggx_distribution(float n_dot_h, float roughness) noexcept -> float {
 
 auto ggx_geometry(float n_dot_v, float n_dot_l, float roughness) noexcept -> float {
   // Smith 的 Schlick-GGX 近似：k = (alpha+1)²/8（直接光照用这个，IBL 用 alpha²/2）
-  const float alpha = std::max(roughness, kMinAlpha);
+  //
+  // ⚠ alpha 与 `ggx_distribution` 必须用**同一个映射**（roughness²），
+  // 否则 D 与 G 的瓣宽不一致，高光形状会怪（实测会看到"亮环"）。
+  const float r_geom = std::max(roughness, kMinAlpha);
+  const float alpha = std::max(r_geom * r_geom, kMinAlpha);
   const float k = (alpha + 1.0f) * (alpha + 1.0f) * 0.125f;
   const float nv = std::max(n_dot_v, 0.0f);
   const float nl = std::max(n_dot_l, 0.0f);
