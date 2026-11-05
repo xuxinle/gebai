@@ -99,6 +99,43 @@ def _generate_version_header(mp_root, py_dir, genhdr):
          "--repo-path", mp_root, target], cwd=mp_root)
 
 
+
+def _first_register_module(frag):
+    """从一段 .module 片段里取出**第一个** MP_REGISTER_MODULE(...) 的 (name, obj)。
+
+    ## 为什么要自己配平括号
+
+    `makeqstrdefs.py split module` 的切分是按**行**归并的，相邻两条宏
+    （比如 `modsys.c` 里的 `MP_REGISTER_MODULE(...)` 紧跟
+    `MP_REGISTER_MODULE_DELEGATION(...)`）会被合并成一段。直接取
+    `text[:-1]` 会把两条宏都当成参数，生成出
+    `MP_ROM_PTR(&mp_module_sys);\nMP_REGISTER_MODULE_DELEGATION(...)`
+    这种坏代码——而错误位置在 genhdr 里，看不出根因。
+
+    所以这里扫描出第一个括号配平的 `MP_REGISTER_MODULE(...)`，忽略后面
+    的内容（DELEGATION 那条本框架用不上：它只是给模块加属性委托）。
+    """
+    marker = "MP_REGISTER_MODULE("
+    start = frag.find(marker)
+    if start < 0:
+        return None
+    i = start + len(marker)
+    depth = 1
+    while i < len(frag) and depth > 0:
+        ch = frag[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    inner = frag[start + len(marker):i - 1]
+    parts = [piece.strip() for piece in inner.split(",", 1)]
+    if len(parts) != 2:
+        return None
+    return parts[0], parts[1]
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -285,14 +322,10 @@ def main():
         # genhdr 里，第一眼很难看出根本原因。
         entries = []
         for frag in module_fragments:
-            text = frag.strip().rstrip(";").strip()
-            if not text.startswith("MP_REGISTER_MODULE("):
+            parsed = _first_register_module(frag)
+            if parsed is None:
                 continue
-            inner = text[len("MP_REGISTER_MODULE("):-1]
-            parts = [piece.strip() for piece in inner.split(",", 1)]
-            if len(parts) != 2:
-                continue
-            name, obj = parts
+            name, obj = parsed
             entries.append("    { MP_ROM_QSTR(%s), MP_ROM_PTR(&%s) }" % (name, obj))
 
         joined = ", \\\n".join(entries)
@@ -304,13 +337,9 @@ def main():
         # 不补会报 `'mp_module_math' undeclared`——而错误位置在 genhdr 里，
         # 第一眼看上去像“生成器写错了”，实际是“缺声明”。
         for frag in module_fragments:
-            text = frag.strip().rstrip(";").strip()
-            if not text.startswith("MP_REGISTER_MODULE("):
-                continue
-            inner = text[len("MP_REGISTER_MODULE("):-1]
-            parts = [piece.strip() for piece in inner.split(",", 1)]
-            if len(parts) == 2:
-                out.write("extern const mp_obj_module_t %s;\n" % parts[1])
+            parsed = _first_register_module(frag)
+            if parsed is not None:
+                out.write("extern const mp_obj_module_t %s;\n" % parsed[1])
 
         out.write("#define MICROPY_REGISTERED_MODULES \\\n")
         if entries:
@@ -324,11 +353,34 @@ def main():
     #
     # 根指针清单：GC 从这里出发扫描。上游由 `make_root_pointers.py` 从
     # 指定文件里抽 `MP_REGISTER_ROOT_POINTER(...)`。
-    root_sources = [os.path.join(py_dir, "mpstate.h")]
+    # ## root pointer 必须扫**所有** py/*.c，不只是 mpstate.h
+    #
+    # `MP_REGISTER_ROOT_POINTER(...)` 声明"这个全局变量是 GC 根（别回收它）"。
+    # 它们散落在各个 .c 里（`modsys.c` 有 `sys_mutable` / `mp_sys_argv_obj` /
+    # `cur_exception` 等）。
+    #
+    # 只扫 mpstate.h 会漏掉它们，症状是编译报
+    # `'mp_state_vm_t' has no member named 'sys_mutable'` ——
+    # 因为 `MP_STATE_VM(x)` 展开成 `mp_state_ctx.vm.x`，而那个成员正是
+    # 由 root_pointers.h 生成的。报错看起来像“mpstate.h 定义不全”，
+    # 实际是“生成器扫漏了”。
+    root_sources = [os.path.join(py_dir, name)
+                    for name in sorted(os.listdir(py_dir))
+                    if name.endswith(".c")]
+    # `make_root_pointers.py` 只接**一个**输入文件，所以先把散落的
+    # `MP_REGISTER_ROOT_POINTER(...)` 行抽出来汇到一份临时文件里。
+    collected = os.path.join(out_root, "root_pointers.collected.h")
+    with open(collected, "w", encoding="utf-8", newline="\n") as out:
+        for source in root_sources:
+            with open(source, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if stripped.startswith("MP_REGISTER_ROOT_POINTER("):
+                        out.write(stripped + "\n")
     with open(os.path.join(genhdr, "root_pointers.h"), "w", encoding="utf-8",
               newline="\n") as out:
-        text = run([sys.executable, os.path.join(py_dir, "make_root_pointers.py")]
-                   + root_sources)
+        text = run([sys.executable, os.path.join(py_dir, "make_root_pointers.py"),
+                    collected])
         out.write(text)
 
     print("已生成 genhdr：%s" % genhdr)

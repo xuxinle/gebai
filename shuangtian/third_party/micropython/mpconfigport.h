@@ -52,6 +52,31 @@
 #define MICROPY_PY_MATH (1)
 #define MICROPY_PY_BUILTINS_STR_OP_MODULO (1)
 
+// ## `sys` 必须打开
+//
+// 默认值是 `MICROPY_CONFIG_ROM_LEVEL_AT_LEAST_CORE_FEATURES`，而我们是
+// MINIMUM 档 → 它为 0 → 整个 `py/modsys.c` 被条件编译掉。
+//
+// 症状很隐蔽：`import sys` 报 `ImportError: module not found`，
+// 而 `py/modsys.c` 明明在编译（它在文件列表里）。实际是**那块代码
+// 被 `#if MICROPY_PY_SYS` 包着，直接没生成 ELF**。
+//
+// 为什么必须要：bpy 兼容层靠 `sys.modules` 注册三个模块（见
+// `src/python/bpy_module.py`），没有 `sys` 就什么都 import 不进来。
+#define MICROPY_PY_SYS (1)
+#define MICROPY_PY_SYS_MODULES (1)
+
+// ## `property` 必须打开
+//
+// 默认值同样是 `AT_LEAST_CORE_FEATURES`，MINIMUM 档下为 0——
+// 于是 `@property` 装饰器本身不存在，类定义时报
+// `NameError: name not defined`（**没说是哪个名字**，因为 MINIMUM 档
+// 连异常参数格式化都剪了）。
+//
+// 为什么必须要：bpy 的 `Vector.x/y/z/w`、`Mesh.vertices` 全是 property——
+// 而 `v.x` 这种写法在 bpy 语料里到处都是。
+#define MICROPY_PY_BUILTINS_PROPERTY (1)
+
 // 关掉"冻结模块"：bpy 兼容层用 C 模块实现（性能与可控性都更好），
 // 不走 .mpy 冻结字节码那条路
 #define MICROPY_MODULE_FROZEN_MPY (0)

@@ -1,0 +1,81 @@
+feat(python): bpy 兼容层可用 —— mathutils / bpy.data / bpy.ops / bmesh
+
+在已内嵌的 MicroPython 上落出可用的 bpy 子集。判据 18/18 全过。
+
+## 为什么 bpy 用 Python 实现而不是 C 扩展
+
+上一条提交里 C 类型那条路卡在一个具体的坑：`MP_DEFINE_CONST_OBJ_TYPE`
+产出的类型一旦通过 `MP_ROM_PTR` 进入模块导出表，进程就在 `mp_init()`
+阶段访问违例（0xC0000005），无任何输出。
+
+已排除：所有槽位单独加都正常、四种注册方式（运行期三种 + 编译期
+MP_REGISTER_MODULE）全试过、拿掉那个导出就一切正常。判断是 MinGW 下
+const 数据段跨单元重定位的问题。
+
+按"性能后置"的原则改走 Python 实现：零 C 类型注册、风险归零，
+代价是慢 3~8 倍（相对渲染可接受）。脚手架保留在 git 历史里。
+
+## 完成的能力
+
+- **mathutils**：Vector（属性读写/全部运算/dot/cross/normalize）、
+  Matrix（Identity/Translation/Scale/Rotation/matmul）、Euler、Quaternion
+- **bpy.data**：meshes / objects / materials / cameras / lights
+  （`.new()`、按名与下标索引、拒绝重名）
+- **bpy.context**：active_object / selected_objects / scene
+- **bpy.ops.mesh**：cube / cylinder / cone / uv_sphere / plane / torus / grid
+- **bpy.ops.object**：select_all / delete / origin_set
+- **bmesh**：new / verts / faces / to_mesh / from_mesh / free
+
+## 架构
+
+四层，每层只做一件事：
+
+| 文件 | 职责 |
+|---|---|
+| `src/python/*.py` | bpy 语义（类/函数/子集边界）——改它只需改文本 |
+| `bpy_bridge.c` | 按依赖顺序 exec 源码（C，因为要碰 MicroPython 类型） |
+| `bpy_embed.cpp` | `b::embed` 编译期取 .py 内容（C++，因为它是模板） |
+| `mp_bridge.c` | 解释器生命周期 + exec + 取回 result |
+
+Python 源码用 `b::embed` 而不是 C 字符串字面量：后者要逐行转义、
+中文注释要处理编码，可读性极差。
+
+## 三条硬边界（文档写清，不静默）
+
+1. **`@` 运算符不可用** —— MicroPython 1.24 的编译器不支持 PEP 465
+   （`py/compile.c` 里没有 `MP_TOKEN_OP_AT` 分支）。兼容层内部一律用
+   `Matrix.matmul()` / `Vector.dot()`；不做源码改写（要写 Python 词法器
+   区分装饰器/字符串/注释，风险大于收益）
+2. **`sys` / `property` 必须显式打开** —— 默认值都是
+   `AT_LEAST_CORE_FEATURES`，MINIMUM 档下为 0 → 整块代码被条件编译掉。
+   症状极具误导性：`import sys` 报 ModuleNotFound（看起来像没编 modsys.c）、
+   `@property` 报 `NameError: name not defined`（没说是哪个名字）
+3. **genhdr 改了配置必须重生成** —— 已入库（10 KB）避免构建期 Python
+   依赖，但改 `mpconfigport.h` 或加自己的 `MP_QSTR_*` 后要重跑
+   `tools/micropython_genhdr.py`
+
+## 这轮又修掉的 5 个生成器缺陷
+
+1. **root pointer 只扫 mpstate.h** —— 报 `'mp_state_vm_t' has no member
+   named 'sys_mutable'`，看起来像"mpstate.h 定义不全"
+2. **相邻宏被合并** —— `MP_REGISTER_MODULE` 紧跟 `..._DELEGATION` 时
+   split 把它们算成一段，生成出坏代码；要自己按括号配平取第一条
+3. **`MP_REGISTER_MODULE_DELEGATION` 被误当模块** —— 同上
+4. **strategy: 模块表漏 `sys`** —— 因为它整块在 `#if MICROPY_PY_SYS` 里
+5. **C 文件里用了 C++ lambda** —— `expected expression before ']' token`，
+   错误位置在初始化器里，很难看出根因是"这个文件得按 C 编"
+
+## 新增探针
+
+- `tools/python_features_probe`：20 项 Python 特性逐条探测，
+  定位"缺哪个开关"（失败信息只有 `NameError: name not defined`，
+  不说哪个名字，只能一条条试）
+- `tools/bpy_load_probe`：查 `sys.modules` 状态，诊断"装载成功但
+  import 失败"
+
+## 验证
+
+- `python_embed_probe`：**18/18**（语言基础 10 + mathutils 5 + bpy 3 + bmesh 1）
+- `python_features_probe`：19/20（唯一失败是 f-string，MicroPython 默认不带）
+- 全量 17 分片 0 失败
+- 文档：`docs/python.md`（能力边界 + 七个生成器坑 + 用户可见的三条边界）

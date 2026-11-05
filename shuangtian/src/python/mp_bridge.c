@@ -40,6 +40,12 @@
 
 #include "st/python/mp_bridge.h"
 
+/* bpy 兼容层装载（实现于 `src/python/bpy_bridge.c`）
+ *
+ * 参数是一个干净的 globals dict：装载过程中定义的名字不该泄漏到
+ * 用户脚本的命名空间里。 */
+int st_bpy_bootstrap(mp_obj_t globals);
+
 /* ── GC 与 nlr 的移植侧钩子 ────────────────────────────────────────────────
  *
  * `py/gc.h` 里写着 “A given port must implement gc_collect”——它不在上游实现，
@@ -114,7 +120,8 @@ int st_mp_init(char* err, size_t err_cap) {
   mp_stack_set_limit(512u * 1024u);
   gc_init(s_heap, s_heap + s_heap_words);
   mp_init();
-  /* 模块注册走构建期生成（genhdr/moduledefs.h）；本钩子保留为空。 */
+  /* 装载 bpy 兼容层（Python 实现，见 src/python/prelude.py） */
+  register_extra_modules();
   s_initialized = 1;
   return 0;
 }
@@ -141,8 +148,18 @@ int st_mp_init(char* err, size_t err_cap) {
  * 所以本函数只留作**诊断钩子**（报告模块是否真的注册上了），不做注册。
  */
 static void register_extra_modules(void) {
-  /* 实际注册由 `MICROPY_REGISTERED_MODULES`（生成的 moduledefs.h）完成，
-   * 这里无需动作。保留空函数是为了让 `st_mp_init` 的调用点稳定。 */
+  /* ## 装载 bpy 兼容层（Python 实现）
+   *
+   * 详见 `src/python/bpy_bridge.c` 与 `src/python/prelude.py` 的说明。
+   *
+   * 给一个**干净**的 globals：装载过程中定义的名字（那些类和函数）
+   * 不该泄漏到用户脚本的命名空间里。 */
+  nlr_buf_t nlr;
+  if (nlr_push(&nlr) == 0) {
+    mp_obj_t boot_globals = mp_obj_new_dict(64);
+    (void)st_bpy_bootstrap(boot_globals);
+    nlr_pop();
+  }
 }
 
 void st_mp_deinit(void) {
@@ -167,6 +184,23 @@ int st_mp_run(const char* source, size_t source_len,
   s_out_cap = out_cap;
   s_out_len = 0;
   if (out != NULL && out_cap > 0) out[0] = '\0';
+
+  /* ## `@` 运算符：MicroPython 编译器的能力边界
+   *
+   * 实测确认：MicroPython 1.24 的 **编译器不支持 `@` 运算符**（PEP 465）。
+   * `py/lexer.c` 认这个 token，但 `py/compile.c` 里**没有任何
+   * `MP_TOKEN_OP_AT` 的语法处理分支**，所以 `a @ b` 直接报
+   * `TypeError: unsupported type for operator`。
+   *
+   * 这对 bpy 是实际影响：语料里 `rot @ v`（矩阵×向量）到处都是。
+   *
+   * 处理方式：在**兼容层的 Python 源码里**不依赖 `@`，改用显式方法
+   * （`Vector.dot()` / `Matrix.matmul()`），并提供 `__matmul__` 方法——
+   * 它虽然不会被 `@` 语法调到，但可以用 `a.__matmul__(b)` 显式调用。
+   *
+   * 不做源码改写：那要写一个 Python 词法器（区分装饰器/字符串/注释里的
+   * `@`），复杂度和“改坏正确脚本”的风险都比“少一种语法糖”大。
+   * 这条边界写进文档，比静默改写诚实。 */
 
   /* ## 每次 run 用干净命名空间
    *

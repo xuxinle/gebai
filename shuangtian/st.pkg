@@ -28,7 +28,9 @@
     "src/perf/*.cpp",
     "src/python/*.cpp"
   ],
-  "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs"],
+  "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs",
+            "src/python/prelude.py", "src/python/bpy_data.py", "src/python/bpy_ops.py",
+            "src/python/bpy_ops_ns.py", "src/python/bpy_module.py"],
   "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c",
                           "third_party/micropython/py/*.c"],
   "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
@@ -782,9 +784,24 @@
     },
     "python_embed_probe": {
       "kind": "executable",
-      "sources": ["tools/python_embed_probe.cpp", "src/python/mp_bridge.c"],
+      "sources": ["tools/python_embed_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
       "exclude_sources": ["src/pkg/*"],
-      "//note": "最小闭环：内嵌 MicroPython 能跑 Python 并取回结果（算术/数据结构/函数类/math/异常/命名空间隔离）。它是整条 bpy 链路的地基，先验它再做后面的事。`mp_bridge.c` 必须显式列出：`.c` 源不会被自动源集合纳入"
+      "//note": "内嵌 MicroPython 的端到端判据：语言基础 + mathutils + bpy.data/ops + bmesh。它是整条 bpy 链路的地基。`.c` 源必须显式列出：不会被自动源集合纳入"
+    },
+    "python_features_probe": {
+      "kind": "executable",
+      "sources": ["tools/python_features_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "逐条探测 MINIMUM 档支持哪些 Python 特性（__slots__/property/staticmethod/推导式/继承…）。存在的理由：失败信息只有 NameError: name not defined（没说是哪个名字），只能一条条试"
+    },
+    "bpy_load_probe": {
+      "kind": "executable",
+      "sources": ["tools/bpy_load_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "诊断 bpy 兼容层为何装载成功但 import 失败：直接跑 Python 看 sys.modules 里有什么、能不能写。存在的理由：“装载无报错但 import 失败”完全靠猜是猜不出来的"
     },
     "cylinder_theta_probe": {
       "kind": "executable",

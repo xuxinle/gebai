@@ -80,7 +80,77 @@ int main() {
     if (!ok) ++failures;
   }
 
-  // ⑥ 命名空间隔离：上一次的 result 不该泄漏到下一次
+  // ⑥ mathutils（bpy 语料的第一行就是它）
+  check("mathutils 向量",
+        "from mathutils import Vector\n"
+        "v = Vector((3, 4, 0))\n"
+        "result = v.length",
+        "5");
+  check("mathutils 运算",
+        "from mathutils import Vector\n"
+        "a = Vector((1, 2, 3)) + Vector((4, 5, 6))\n"
+        "result = a.x",
+        "5");
+  // `@` 运算符：MicroPython 编译器不支持（PEP 465），所以用显式方法名。
+  // 这条边界写进 docs/python.md——不静默改写源码，而是如实告知。
+  check("mathutils 点乘（dot）",
+        "from mathutils import Vector\n"
+        "result = Vector((1, 0, 0)).dot(Vector((2, 3, 4)))",        "2");
+  check("mathutils 叉乘",
+        "from mathutils import Vector\n"
+        "v = Vector((1, 0, 0)).cross(Vector((0, 1, 0)))\n"
+        "result = '%g,%g,%g' % (v.x, v.y, v.z)",
+        "0,0,1");
+  check("mathutils 归一化与属性写",
+        "from mathutils import Vector\n"
+        "v = Vector((3, 0, 0))\n"
+        "v.normalize()\n"
+        "v.z = 7\n"
+        "result = '%g,%g' % (v.x, v.z)",
+        "1,7");
+
+  // ⑦ bpy.data / bpy.ops（真 bpy 脚本的写法）
+  check("bpy 建基本体",
+        "import bpy\n"
+        "bpy.ops.mesh.primitive_cube_add(size=2.0)\n"
+        "obj = bpy.context.active_object\n"
+        "result = '%s:%d:%d' % (obj.name, len(obj.data.vertices), len(obj.data.polygons))",
+        "Cube:8:6");
+  check("bpy 圆柱轴沿 Z",
+        "import bpy\n"
+        "bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=1.0, depth=2.0)\n"
+        "v = bpy.context.active_object.data.vertices[0]\n"
+        "result = '%g,%g' % (v.co.x, v.co.z)",
+        "1,-1");
+  check("bpy 对象变换与矩阵",
+        "import bpy\n"
+        "from mathutils import Vector\n"
+        "bpy.ops.mesh.primitive_plane_add(size=2.0)\n"
+        "obj = bpy.context.active_object\n"
+        "obj.location = Vector((10, 0, 0))\n"
+        "result = obj.matrix_world[0][3]",
+        "10");
+  check("bpy.data 按名查找",
+        "import bpy\n"
+        "bpy.ops.mesh.primitive_uv_sphere_add(segments=8, ring_count=4, radius=1.0)\n"
+        "result = bpy.data.objects['Sphere'].name",
+        "Sphere");
+
+  // ⑧ bmesh（逐顶点建模，齿轮/叶片靠它）
+  check("bmesh 建面",
+        "import bpy, bmesh\n"
+        "mesh = bpy.data.meshes.new('M')\n"
+        "bm = bmesh.new()\n"
+        "v0 = bm.verts.new((0, 0, 0))\n"
+        "v1 = bm.verts.new((1, 0, 0))\n"
+        "v2 = bm.verts.new((0, 1, 0))\n"
+        "bm.faces.new((v0, v1, v2))\n"
+        "bm.to_mesh(mesh)\n"
+        "bm.free()\n"
+        "result = '%d:%d' % (len(mesh.vertices), len(mesh.polygons))",
+        "3:1");
+
+  // ⑨ 命名空间隔离：上一次的 result 不该泄漏到下一次
   {
     auto& runtime = st::mp::Runtime::instance();
     (void)runtime.run("result = 'leaked'");
