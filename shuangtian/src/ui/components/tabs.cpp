@@ -345,9 +345,10 @@ auto Tabs::trailing_rect(std::size_t slot) const -> math::Rect {
 }
 
 auto Tabs::add_trailing_button(std::string icon, std::string tooltip,
-                               std::function<void()> on_click, bool enabled) -> std::size_t {
+                               std::function<void()> on_click, bool enabled,
+                               bool active) -> std::size_t {
   trailing_.push_back(TrailingButton{std::move(icon), std::move(tooltip), std::move(on_click),
-                                     enabled, false});
+                                     enabled, active, false});
   mark_layout_dirty();
   mark_dirty();
   return trailing_.size() - 1;
@@ -381,7 +382,8 @@ void Tabs::begin_trailing_sync() {
 }
 
 auto Tabs::sync_trailing_button(std::string icon, std::string tooltip,
-                                std::function<void()> on_click, bool enabled) -> std::size_t {
+                                std::function<void()> on_click, bool enabled,
+                                bool active) -> std::size_t {
   // 声明式每帧重建尾部区的**唯一正确入口**（begin…逐个 sync…finish）。
   //
   // 为什么需要它：`add_trailing_button` 是可变追加，声明式重组每帧跳同一个
@@ -399,17 +401,20 @@ auto Tabs::sync_trailing_button(std::string icon, std::string tooltip,
   const std::size_t slot = trailing_sync_used_++;
   if (slot < trailing_.size()) {
     TrailingButton& dst = trailing_[slot];
+    // `active` 必须进变更检测：它是**开关状态**，不进的话“预览开了但图标不亮”
+    //（置位不重绘，只在下一帧碰巧因别的理由重绘时才亮）。
     const bool changed = dst.icon != icon || dst.tooltip != tooltip ||
-                         dst.enabled != enabled;
+                         dst.enabled != enabled || dst.active != active;
     dst.icon = std::move(icon);
     dst.tooltip = std::move(tooltip);
     dst.on_click = std::move(on_click);
     dst.enabled = enabled;
+    dst.active = active;
     if (changed) mark_dirty();
     return slot;
   }
   trailing_.push_back(TrailingButton{std::move(icon), std::move(tooltip), std::move(on_click),
-                                     enabled, false});
+                                     enabled, active, false});
   mark_layout_dirty();
   mark_dirty();
   return trailing_.size() - 1;
@@ -751,14 +756,20 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     const math::Rect zone = trailing_rect(slot);
     if (zone.is_empty()) continue;
     const TrailingButton& button = trailing_[slot];
-    if (button.hovered && button.enabled) {
+    // 激活态（开关型钮，如 md 预览）：胶囊底 `primary_soft`——与活动标签底、
+    // `Button::Variant::Soft` 同一套 token，三处一个视觉语言。
+    if (button.enabled && (button.active || button.hovered)) {
       const math::Rect backdrop = zone.inset(
           math::Insets{1.0f, metrics.space_xs, 1.0f, metrics.space_xs});
       if (!backdrop.is_empty()) {
-        canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface_alt), radius);
+        canvas.fill_rect(backdrop,
+                         raster::Paint::solid(button.active ? colors.primary_soft
+                                                            : colors.surface_alt),
+                         radius);
       }
     }
     const math::Color tint = !button.enabled ? colors.text_faint
+                              : button.active  ? colors.primary
                               : button.hovered ? colors.text
                                                : colors.text_muted;
     // 图标盒径取主题令牌（与 `Button` 的 `Size::Small` **同一档**）：尾部钮
@@ -934,6 +945,21 @@ auto Tabs::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "scroll") return std::format("{}", scroll_offset_);
   if (name == "show_add") return show_add_ ? std::string("true") : std::string("false");
   if (name == "max_tab_width") return std::format("{:.0f}", max_tab_width_);
+  // 尾部钮的**可观测面**：`图标:激活:可用`，逗号分隔。
+  //
+  // 为何要暴露：“预览钮在激活时高亮”是**像素级**产物（高亮色截图上不好断言），
+  // 而开关状态本身是数据——把它读出来，e2e 就能断言“点了预览之后这个槽真的 active 了”，
+  // 剩下“active 就画成 primary_soft”由组件单测阀住。
+  if (name == "trailing") {
+    std::string joined;
+    for (const auto& button : trailing_) {
+      if (!joined.empty()) joined.push_back(',');
+      joined += button.icon;
+      joined += button.active ? ":1:" : ":0:";
+      joined += button.enabled ? "1" : "0";
+    }
+    return joined;
+  }
   if (name == "options") {
     std::string joined;
     for (const auto& label : labels_) {
@@ -998,7 +1024,7 @@ auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
 }
 
 auto Tabs::property_names() const -> std::vector<std::string_view> {
-  return {"active", "label", "options", "scroll", "show_add", "max_tab_width"};
+  return {"active", "label", "options", "scroll", "show_add", "max_tab_width", "trailing"};
 }
 
 auto Tabs::invoke_action(std::string_view action, std::string_view argument) -> bool {

@@ -1008,6 +1008,19 @@ void UiRoot::apply_cursor(MouseCursor wanted) {
   if (cursor_sink) cursor_sink(cursor_);
 }
 
+void UiRoot::publish_ime_caret() {
+  if (!ime_caret_sink) return;
+  const math::Rect caret = focused_ != nullptr ? focused_->caret_rect() : math::Rect{};
+  // 只在**几何真的变了**才下发：鼠标在编辑器里划过、或每帧都会走的派发收尾
+  // 若无条件调，等于每帧一次 `ImmSetCandidateWindow`（那是跨进程的输入法调用）。
+  if (caret.x == ime_caret_.x && caret.y == ime_caret_.y && caret.width == ime_caret_.width &&
+      caret.height == ime_caret_.height) {
+    return;
+  }
+  ime_caret_ = caret;
+  ime_caret_sink(caret);
+}
+
 void UiRoot::revalidate_pointer_state() {
   // 指针不在窗口内：没有可信坐标，重算无意义（等后端的新 MouseMove 重建）。
   if (!has_pointer_) return;
@@ -1229,7 +1242,8 @@ auto UiRoot::dispatch(Event& event) -> bool {
       break;
     }
     case EventKind::KeyUp:
-    case EventKind::TextInput: {
+    case EventKind::TextInput:
+    case EventKind::ImeComposition: {
       set_focus_ring_visible(true);
       handled = focused_ != nullptr && dispatch_to(*focused_, event);
       break;
@@ -1261,6 +1275,15 @@ auto UiRoot::dispatch(Event& event) -> bool {
       break;
   }
   if (handled) ++version_;
+  // 键/文本/组合三类事件都可能挪动光标（方向键、组合串变长、点击定位）——
+  // 一次派发结束后统一上报插入点：输入法候选窗跟着光标走靠的就是这一步。
+  // 放在这里而不是每个分支里：分支已有七八个，逐个加必漏（而漏的那个分支
+  // 就是“某种情况下候选窗跑到屏幕左上角”）。
+  if (event.kind == EventKind::KeyDown || event.kind == EventKind::TextInput ||
+      event.kind == EventKind::ImeComposition || event.kind == EventKind::MouseDown ||
+      event.kind == EventKind::Click) {
+    publish_ime_caret();
+  }
   reap_overlays();
   return handled;
 }
@@ -1394,6 +1417,9 @@ auto UiRoot::set_focus(Element* element) -> bool {
   // 焦点变更是状态变更源（"哪个元素被选中/可输入"是界面状态的一部分）：登记进变更清单。
   if (element != nullptr) note_changed(*element);
   ++version_;
+  // 焦点换了 ⇒ 打字位置也换了：立刻把新插入点告诉后端，否则输入法候选窗
+  // 还停在**上一个**输入框那里（切标签/点另一个输入框时最明显）。
+  publish_ime_caret();
   (void)context;
   return true;
 }

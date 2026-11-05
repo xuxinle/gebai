@@ -277,6 +277,14 @@ void ScrollView::measure(const RenderContext& context, const Constraints& constr
   measured_ = math::Size{width, height};
 }
 
+auto ScrollView::cursor_at(math::Point point) const noexcept -> MouseCursor {
+  if (bar_ != nullptr && !bar_->bounds().is_empty() && bar_->bounds().contains(point)) {
+    return MouseCursor::Scroll;
+  }
+  // 其余区域交回给子节点（`Arrow` = 没意见，由 `UiRoot` 继续向下/向上问）。
+  return MouseCursor::Arrow;
+}
+
 void ScrollView::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
   view_height_ = std::max(0.0f, rect.height - style_.padding.vertical());

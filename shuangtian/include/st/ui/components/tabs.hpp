@@ -141,7 +141,8 @@ class Tabs : public Element {
   /// 需要复杂控件的场景用 `set_trailing_content`。
   /// 按钮由本组件自绘（图标 + hover 提亮），`enabled = false` 时置灰不接命中。
   auto add_trailing_button(std::string icon, std::string tooltip,
-                           std::function<void()> on_click, bool enabled = true) -> std::size_t;
+                           std::function<void()> on_click, bool enabled = true,
+                           bool active = false) -> std::size_t;
   /// 改某个槽的可用态（如"中止"只在忙时可用）。
   void set_trailing_enabled(std::size_t slot, bool enabled);
   /// 摘除某个槽（越界忽略；后续槽位前移）。
@@ -166,7 +167,8 @@ class Tabs : public Element {
   /// 声明一个尾部钮：落在当前槽——已有则**复用并更新**（icon/tooltip/callback/enabled），
   /// 没有则追加。在 begin/finish 之外调用会退化为追加并告警（手搭路径兼容）。
   auto sync_trailing_button(std::string icon, std::string tooltip,
-                            std::function<void()> on_click, bool enabled = true) -> std::size_t;
+                            std::function<void()> on_click, bool enabled = true,
+                            bool active = false) -> std::size_t;
   /// 结束本轮：本轮未覆盖到的尾部槽移除（目标态比旧态短时收尾）。
   void finish_trailing_sync();
 
@@ -242,6 +244,13 @@ class Tabs : public Element {
     std::string tooltip{};
     std::function<void()> on_click{};
     bool enabled{true};
+    /// **开关型**尾部钮的激活态（如 gbcode 的 Markdown 预览钮）。
+    ///
+    /// 为何需要：尾部钮原本只有「禁用 / hover / 常态」三态，于是把一个
+    /// **持续状态**（预览开着）藏在 tooltip 文案里——用户看不到“它在生效”，
+    /// 只能靠点一下画面变没变来判断。激活态与活动标签胶囊同一套 token
+    ///（`primary_soft` 底 + `primary` 图标），三处同一个视觉语言。
+    bool active{false};
     mutable bool hovered{false};
   };
   std::vector<TrailingButton> trailing_{};

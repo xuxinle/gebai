@@ -227,6 +227,16 @@ enum class EventKind : std::uint8_t {
   /// 元素上（高亮不灭、手型光标被带出窗口）。后端检测到离开后发本事件，
   /// 由 UiRoot 统一收尾。
   WindowLeave,
+  /// **输入法组合中**（IME preedit）。`text` = 预编辑串，`preedit_cursor` = 串内光标（码点偏移）。
+  ///
+  /// 为何不把预编辑当成 `TextInput` 直接插入文本：预编辑是**尚未确定**的内容——
+  /// 用户按 Esc 会丢弃、按空格选字会整体替换成别的串。若每次组合都 `insert_text`，
+  /// 一次输入就会进撤销栈几十次，而且“取消”无法回退（因为已经落盘）。
+  /// 所以它是一条**独立的、非持久的显示态**：组件只把它画在光标处，
+  /// 真正的提交仍走 `TextInput`（后端在 `GCS_RESULTSTR` 时发一条）。
+  ///
+  /// 空串 = 组合结束（无东西可画）。
+  ImeComposition,
 };
 
 /// 鼠标指针形态（**语义名**，不是平台常量）。
@@ -256,6 +266,13 @@ enum class MouseCursor : std::uint8_t {
   Move,
   Crosshair,
   NotAllowed,
+  /// 可拖拽滚动（垂直/水平滚动条的轨道与滑块）。
+  ///
+  /// 为何不只复用 `Arrow`：`Arrow` 在 `Element::cursor_at` 里还兼着**“我没意见，交给上层”**
+  /// 的含义，必须留空；给了 `Scroll` 才能明确宣告“我这里就是滚动条”，
+  /// 否则光标会沿父链回退到编辑器的 I-beam（实测：代码编辑器自绘的滚动条一直显 I 形光标）。
+  /// 各后端映射：Win32/`X11`/Wayland 都用各自的**默认箭头**（与 VSCode 一致）。
+  Scroll,
 };
 
 /// 语义名的稳定短串（控制通道属性面 / 日志 / 测试断言用）。
@@ -274,6 +291,7 @@ enum class MouseCursor : std::uint8_t {
     case MouseCursor::Move: return "move";
     case MouseCursor::Crosshair: return "crosshair";
     case MouseCursor::NotAllowed: return "not-allowed";
+    case MouseCursor::Scroll: return "scroll";
   }
   return "arrow";
 }
@@ -287,6 +305,12 @@ struct Event {
   std::string key{};
   std::string code{};
   std::string text{};
+  /// 预编辑串内的光标位置（**码点**偏移；仅 `EventKind::ImeComposition` 有意义）。
+  ///
+  /// 为何不用字节偏移：预编辑串来自 IME，里面可能是任意 Unicode；
+  /// 而码点偏移是 IME 原生口径（`GCS_CURSORPOS` 给的也是 UTF-16 码元数，
+  /// 转成码点数才是“用户看到光标在第几个字后面”）。
+  int preedit_cursor{0};
   bool ctrl{false};
   bool shift{false};
   bool alt{false};
@@ -542,7 +566,6 @@ class Element {
     return extras_ != nullptr ? extras_->cursor : MouseCursor::Arrow;
   }
   /// 指针在 `point`（**本元素坐标系**里的绝对点）处该显示什么形态。
-  ///
   /// 默认返回 `set_cursor` 声明的那个。**按位置细分**是留给需要分区的控件覆写的：
   /// `CodeEditor` 正文给 Text、行号栏给 Arrow；`SplitView` 在分隔线上给 Resize。
   ///
@@ -553,6 +576,20 @@ class Element {
     (void)point;
     return cursor();
   }
+
+  // —— 输入法插入点 ——
+  /// 本元素**文本插入点**在屏幕上的矩形（逻辑像素）。
+  ///
+  /// 用途：输入法的候选窗/组合窗要贴着当前打字位置弹出——那是“用户在看哪里”的
+  /// 唯一可信坐标。由组件自己回答，因为只有它知道行高、滚动偏移、字宽口径
+  ///（宿主自己拼 `bounds_.x + gutter + …` 必然与绘制分叉）。
+  ///
+  /// 默认返回空矩形 = “我这里没有文本插入点”（按钮、面板…）；
+  /// `UiRoot` 据它决定要不要向宿主后端上报。
+  ///
+  /// 为何用**缓存几何**而不是收 `RenderContext`：它会在事件派发里被调
+  ///（那时拿不到绘制上下文，与 `CodeEditor::caret_screen_rect` 同一条理由）。
+  [[nodiscard]] virtual auto caret_rect() const -> math::Rect { return math::Rect{}; }
 
   // —— 交互状态 ——
   /// 悬浮"特效"的声明式开关（组件自己决定怎么用）。

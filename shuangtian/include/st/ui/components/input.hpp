@@ -118,6 +118,10 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   std::string placeholder_{};
   std::string icon_prefix_{};
   std::size_t cursor_{0};
+  /// 输入法预编辑串（显示态；**不进 `text_`**）。
+  std::string preedit_{};
+  /// 上一帧绘制的插入点矩形（`caret_rect()` 用；它拿不到 `RenderContext`）。
+  mutable math::Rect last_caret_rect_{};
   bool password_{false};
   /// 上一次绘制时光标的**闪烁可见相位**；只在真翻转的那帧才上报损坏区
   ///（每帧报会与帧间损坏判据互相触发成每帧续帧循环，见 Terminal 同名成员）。
@@ -191,6 +195,8 @@ class TextArea : public Element {
   [[nodiscard]] auto placeholder() const noexcept -> const std::string& { return placeholder_; }
   [[nodiscard]] auto cursor_index() const noexcept -> std::size_t { return cursor_; }
   [[nodiscard]] auto scroll_offset() const noexcept -> float { return scroll_; }
+  /// 输入法插入点（`Element` 契约；由上一帧绘制时缓存）。
+  [[nodiscard]] auto caret_rect() const -> math::Rect override { return last_caret_rect_; }
 
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
@@ -251,6 +257,10 @@ class TextArea : public Element {
   std::string placeholder_{};
   std::size_t cursor_{0};
   float scroll_{0.0f};
+  /// 输入法预编辑串（显示态；**不进 `text_`**）。
+  std::string preedit_{};
+  /// 上一帧绘制的插入点矩形（`caret_rect()` 用）。
+  mutable math::Rect last_caret_rect_{};
   /// 上一次绘制时光标的**闪烁可见相位**；只在真翻转的那帧才上报损坏区
   ///（见 Input 同名成员的说明）。
   mutable int last_blink_visible_{-1};

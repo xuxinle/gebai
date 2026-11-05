@@ -1435,9 +1435,14 @@ auto Application::start() -> Status {
     // 为何在这里接而不是让 UiRoot 直接持有后端：依赖方向是 shell → ui，
     // UI 层不该知道 shell 的存在。回调让这条依赖保持单向。
     // 后端为空（理论上不会，但别让空指针炸在这里）时静默跳过。
-    root_.cursor_sink = [this](ui::MouseCursor cursor) {
-      if (impl_->backend != nullptr) impl_->backend->set_cursor(cursor);
-    };
+      root_.cursor_sink = [this](ui::MouseCursor cursor) {
+    if (impl_->backend != nullptr) impl_->backend->set_cursor(cursor);
+  };
+  // 输入法插入点：界面只知道“光标在哪”，候选窗开在哪里是后端的事。
+  // 与 `cursor_sink` 同一条单向依赖。
+  root_.ime_caret_sink = [this](math::Rect caret) {
+    if (impl_->backend != nullptr) impl_->backend->set_ime_caret(caret);
+  };
     // 逐 face 记录**路径 / 序号 / 名称**。
     // 只记数量在排查"字变了"这类问题时毫无用处：字形由哪个 face 提供，
     // 决定了该怀疑哪份字体数据（TTC 的多 face、CID-keyed CFF 的 FDSelect 都在这一层）。

@@ -202,6 +202,100 @@ void append_utf8(std::string& out, char32_t code_point) {
   }
 }
 
+/// UTF-16 串 → UTF-8，**正确合成代理对**。
+///
+/// 为何单独写：`WM_CHAR` 一次只给一个码元，而非 BMP 字符（emoji、部分 CJK 扩展）
+/// 需要用**两个码元**拼成一个码点。旧实现把单个码元当码点编码，于是 emoji 会变成
+/// 三个字节的乱码（而它看起来只是“某个字坏了”，很难追到输入路径上）。
+/// IME 提交的串里这类字符很常见（候选词里带 emoji）。
+void append_utf16_as_utf8(std::string& out, std::wstring_view text) {
+  for (std::size_t index = 0; index < text.size(); ++index) {
+    const auto unit = static_cast<std::uint32_t>(text[index]);
+    if (unit >= 0xD800U && unit <= 0xDBFFU && index + 1 < text.size()) {
+      const auto low = static_cast<std::uint32_t>(text[index + 1]);
+      if (low >= 0xDC00U && low <= 0xDFFFU) {
+        const char32_t combined =
+            0x10000U + ((unit - 0xD800U) << 10U) + (low - 0xDC00U);
+        append_utf8(out, combined);
+        ++index;
+        continue;
+      }
+    }
+    append_utf8(out, static_cast<char32_t>(unit));
+  }
+}
+
+// ── 输入法（imm32，**运行时动态加载**）──────────────────────────────────────
+//
+// 为何不用链接期导入：霜天的窗口后端一直坚持“能零编译期依赖就零依赖”
+//（X11/Wayland 也是 `dlopen`），而 imm32 只在 Windows 上存在、且只为输入法候选窗
+// 定位这一件事服务。动态加载把它降级成**可选能力**：拿不到就像以前一样工作
+//（候选窗位置由系统决定，其余一切正常），而不是整个产物多一条链接依赖。
+struct CompositionForm {
+  DWORD style{0};
+  POINT current_pos{};
+  RECT area{};
+};
+
+struct CandidateForm {
+  DWORD index{0};
+  DWORD style{0};
+  POINT current_pos{};
+  RECT area{};
+  RECT exclude{};
+};
+
+constexpr DWORD kCfsPoint{0x0002};
+constexpr DWORD kCfsCandidatePos{0x0040};
+constexpr DWORD kCfsExclude{0x0080};
+constexpr DWORD kGcsCompStr{0x0008};
+constexpr DWORD kGcsCursorPos{0x0080};
+constexpr DWORD kGcsResultStr{0x0800};
+/// `WM_IME_SETCONTEXT` 的 lParam 位：让系统自己画组合窗。
+constexpr LPARAM kIscShowUiCompositionWindow{0x80000000L};
+
+/// imm32 的函数指针集合（懒加载一次；`ok` 为假时全部为 null）。
+struct ImmApi {
+  using GetContext = void*(*)(HWND);
+  using ReleaseContext = int (*)(HWND, void*);
+  using SetCompositionWindow = int (*)(void*, const CompositionForm*);
+  using SetCandidateWindow = int (*)(void*, const CandidateForm*);
+  using GetCompositionStringW = long (*)(void*, DWORD, void*, DWORD);
+
+  GetContext get_context{nullptr};
+  ReleaseContext release_context{nullptr};
+  SetCompositionWindow set_composition_window{nullptr};
+  SetCandidateWindow set_candidate_window{nullptr};
+  GetCompositionStringW get_composition_string{nullptr};
+
+  [[nodiscard]] auto ok() const noexcept -> bool {
+    return get_context != nullptr && set_candidate_window != nullptr &&
+           set_composition_window != nullptr;
+  }
+};
+
+/// 进程级单例（`LoadLibraryW` 只需要一次；失败也记着，不重试）。
+auto imm_api() -> const ImmApi& {
+  static const ImmApi api = [] {
+    ImmApi loaded;
+    HMODULE module = ::LoadLibraryW(L"imm32.dll");
+    if (module == nullptr) return loaded;
+    loaded.get_context = reinterpret_cast<ImmApi::GetContext>(
+        reinterpret_cast<void*>(::GetProcAddress(module, "ImmGetContext")));
+    loaded.release_context = reinterpret_cast<ImmApi::ReleaseContext>(
+        reinterpret_cast<void*>(::GetProcAddress(module, "ImmReleaseContext")));
+    loaded.set_composition_window = reinterpret_cast<ImmApi::SetCompositionWindow>(
+        reinterpret_cast<void*>(::GetProcAddress(module, "ImmSetCompositionWindow")));
+    loaded.set_candidate_window = reinterpret_cast<ImmApi::SetCandidateWindow>(
+        reinterpret_cast<void*>(::GetProcAddress(module, "ImmSetCandidateWindow")));
+    loaded.get_composition_string = reinterpret_cast<ImmApi::GetCompositionStringW>(
+        reinterpret_cast<void*>(::GetProcAddress(module, "ImmGetCompositionStringW")));
+    return loaded;
+  }();
+  return api;
+}
+
+
 class Win32Backend final : public Backend {
  public:
   Win32Backend() = default;
@@ -720,6 +814,16 @@ class Win32Backend final : public Backend {
     apply_cursor();
   }
 
+  /// 文本插入点上报（输入法候选窗贴哪里）。
+  ///
+  /// 只存不立即定位：真正的 `ImmSet*Window` 在 `apply_ime_forms()` 里，
+  /// 由**组合开始/更新**时调用——光标每走一步就调一次跨进程 IME API 是浪费，
+  /// 而 IME 只在组合期间才需要这个坐标。
+  void set_ime_caret(math::Rect logical_rect) override {
+    last_ime_caret_ = logical_rect;
+    if (composing_) apply_ime_forms();
+  }
+
   [[nodiscard]] auto supports_window_icon() const noexcept -> bool override {
     return window_ != nullptr;
   }
@@ -1228,8 +1332,12 @@ class Win32Backend final : public Backend {
       case ui::MouseCursor::ResizeNWSE: return 32642; // IDC_SIZENWSE
       case ui::MouseCursor::ResizeNESW: return 32643; // IDC_SIZENESW
       case ui::MouseCursor::Move: return 32646;       // IDC_SIZEALL
-      case ui::MouseCursor::Crosshair: return 32515;  // IDC_CROSS
-      case ui::MouseCursor::NotAllowed: return 32648; // IDC_NO
+          case ui::MouseCursor::Crosshair: return 32515;  // IDC_CROSS
+    case ui::MouseCursor::NotAllowed: return 32648; // IDC_NO
+    // 滚动条：用**系统默认箭头**（与 VSCode 的滚动条一致，不是 I-beam、也不是双向箭头）。
+    // 语义枚举不能省：`Arrow` 在 `cursor_at` 里兼着“交给上层”的含义，
+    // 若把 `Scroll` 也映射成 Arrow，那一层就分不清“我要箭头”与“我没意见”。
+    case ui::MouseCursor::Scroll: return 32512;     // IDC_ARROW
     }
     return 32512;
   }
@@ -1686,6 +1794,15 @@ class Win32Backend final : public Backend {
         close_requested_ = true;
         continue;
       }
+      // **输入法组合中的按键不能当普通键送**：IME 把物理键吞成 `VK_PROCESSKEY(0xE5)`，
+      // `key_name` 对它返回空串——会把一条空键事件送到 UI，而它若碰巧被当成
+      // “无修饰的某个键”就会触发快捷键（实测风险：输入中文时意外触发单键快捷键）。
+      // `TranslateMessage` 仍要给：它才是 `WM_CHAR`/`WM_IME_*` 的来源。
+      if (message.message == WM_KEYDOWN && message.wParam == VK_PROCESSKEY) {
+        ::TranslateMessage(&message);
+        ::DispatchMessageW(&message);
+        continue;
+      }
       ::TranslateMessage(&message);
       ::DispatchMessageW(&message);
     }
@@ -1727,6 +1844,77 @@ class Win32Backend final : public Backend {
     event.shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
     event.alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
     events_.push_back(std::move(event));
+  }
+
+  // —— 输入法辅助 ——
+
+  /// 取 IME 组合串（`GCS_RESULTSTR` = 已选定 / `GCS_COMPSTR` = 未选定）。
+  /// 拿不到上下文或 imm32 不可用时返回空——**调用方按“没有组合”处理**，
+  /// 而不是报错：没装输入法/没启用的环境下这就是常态。
+  [[nodiscard]] auto composition_string(DWORD flag) const -> std::wstring {
+    const ImmApi& api = imm_api();
+    if (window_ == nullptr || !api.ok() || api.get_composition_string == nullptr) {
+      return {};
+    }
+    void* context = api.get_context(window_);
+    if (context == nullptr) return {};
+    std::wstring out;
+    const long bytes = api.get_composition_string(context, flag, nullptr, 0);
+    if (bytes > 0) {
+      out.resize(static_cast<std::size_t>(bytes) / sizeof(wchar_t));
+      const long written =
+          api.get_composition_string(context, flag, out.data(), static_cast<DWORD>(bytes));
+      if (written > 0) {
+        out.resize(static_cast<std::size_t>(written) / sizeof(wchar_t));
+      } else {
+        out.clear();
+      }
+    }
+    if (api.release_context != nullptr) (void)api.release_context(window_, context);
+    return out;
+  }
+
+  /// 组合串内的光标位置（**UTF-16 码元**偏移；IME 原生口径）。
+  [[nodiscard]] auto composition_cursor_units() const -> int {
+    const ImmApi& api = imm_api();
+    if (window_ == nullptr || !api.ok() || api.get_composition_string == nullptr) return 0;
+    void* context = api.get_context(window_);
+    if (context == nullptr) return 0;
+    const long position = api.get_composition_string(context, kGcsCursorPos, nullptr, 0);
+    if (api.release_context != nullptr) (void)api.release_context(window_, context);
+    return position > 0 ? static_cast<int>(position) : 0;
+  }
+
+  /// 把插入点告诉 IME：组合窗与候选窗都贴在光标所在行。
+  ///
+  /// 坐标转换两步：逻辑像素 `× scale_` 得物理/客户区像素，再 `ClientToScreen`
+  /// 得屏幕坐标——IME 要的是**屏幕**坐标，而 UI 层给的是客户区**逻辑**坐标。
+  /// 少了任何一步候选窗都会偏（典型现象：高 DPI 下候选窗偏到左上方）。
+  void apply_ime_forms() {
+    const ImmApi& api = imm_api();
+    if (window_ == nullptr || !api.ok()) return;
+    if (!last_ime_caret_.has_value()) return;
+    const math::Rect caret = *last_ime_caret_;
+    const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
+    POINT origin{static_cast<LONG>(caret.x * safe_scale), static_cast<LONG>(caret.y * safe_scale)};
+    if (::ClientToScreen(window_, &origin) == 0) return;
+    void* context = api.get_context(window_);
+    if (context == nullptr) return;
+    CompositionForm composition{};
+    composition.style = kCfsPoint;
+    composition.current_pos = origin;
+    (void)api.set_composition_window(context, &composition);
+    CandidateForm candidate{};
+    candidate.style = kCfsCandidatePos | kCfsExclude;
+    candidate.current_pos = origin;
+    // 排除区=当前光标行：让候选窗**避开**正在看的那一行，而不是盖住它。
+    // （`CFS_EXCLUDE` 不生效时系统会退回 `current_pos` 定位，两种都不差。）
+    const long line_height = static_cast<LONG>(
+        std::max(1.0f, caret.height > 0.0f ? caret.height : 20.0f) * safe_scale);
+    candidate.exclude = RECT{origin.x, origin.y, origin.x + static_cast<LONG>(static_cast<float>(line_height) * 0.6f),
+                             origin.y + line_height};
+    (void)api.set_candidate_window(context, &candidate);
+    if (api.release_context != nullptr) (void)api.release_context(window_, context);
   }
 
   static auto CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -2165,11 +2353,98 @@ class Win32Backend final : public Backend {
         event.kind = ui::EventKind::TextInput;
         // 控制字符（\r \t \b 等）不是"文本输入"，由键事件表达
         if (wparam >= 32 && wparam != 127) {
-          append_utf8(event.text, static_cast<char32_t>(wparam));
+          // 代理对：高半先挂起，低半到达才拼成一个码点。
+          const auto unit = static_cast<std::uint32_t>(wparam);
+          if (unit >= 0xD800U && unit <= 0xDBFFU) {
+            pending_high_surrogate_ = unit;
+            return 0;
+          }
+          char32_t code = static_cast<char32_t>(unit);
+          if (unit >= 0xDC00U && unit <= 0xDFFFU) {
+            if (pending_high_surrogate_ != 0U) {
+              code = static_cast<char32_t>(0x10000U +
+                                           ((pending_high_surrogate_ - 0xD800U) << 10U) +
+                                           (unit - 0xDC00U));
+            }
+            pending_high_surrogate_ = 0U;
+          }
+          append_utf8(event.text, code);
           events_.push_back(std::move(event));
         }
         return 0;
       }
+
+      // —— 输入法（IME）——
+      //
+      // 这四条消息是“中文输入能在窗口里用”的全部。旧实现一条都不处理，
+      // 于是：组合串不显示、候选窗飘在系统默认位置（屏幕左上角），
+      // 用户看到的是“打字没反应、突然蹦出一串字在某处”。
+      case WM_IME_SETCONTEXT:
+        // 让系统自己画组合窗（我们只负责把位置告诉它）；
+        // 不清 `ISC_SHOWUICOMPOSITIONWINDOW` 的话组合串不显示。
+        // 同时告知后端“有人要编辑了”让默认 IME 窗口（DefWindowProc 不做）。
+        return ::DefWindowProcW(window, message, wparam,
+                                lparam | kIscShowUiCompositionWindow);
+
+      case WM_IME_STARTCOMPOSITION:
+        composing_ = true;
+        preedit_.clear();
+        // 组合一开始就把候选窗定位到光标的当前行：这是“首次弹出就对”的关键，
+        // 否则第一次组合会用系统默认位置（要等 100ms 后的第一次 COMPOSITION 才纠正）。
+        apply_ime_forms();
+        return 0;
+
+      case WM_IME_COMPOSITION: {
+        // 结果串（用户选定）→ 作为一条正常的 `TextInput` 送出（走既有编辑路径，
+        // 进撤销栈的是**一次完整的插入**，而不是每个组合步一条）。
+        if ((lparam & kGcsResultStr) != 0) {
+          const std::wstring result = composition_string(kGcsResultStr);
+          ui::Event event;
+          event.kind = ui::EventKind::TextInput;
+          append_utf16_as_utf8(event.text, result);
+          if (!event.text.empty()) events_.push_back(std::move(event));
+          preedit_.clear();
+          composing_ = false;
+          apply_ime_forms();
+          // ⚠ **不在这里再补一条 `WM_CHAR`**：`GCS_RESULTSTR` 已经给出了完整串，
+          // 而 `WM_CHAR` 也会由系统在本条消息之后自己发（与 `CONVENTIONS.md`
+          // “一次物理按键 = KEYDOWN + 一条 CHAR，不要再补”同一条纪律）。
+          return 0;
+        }
+        // 组合串（尚未选定）→ 预编辑事件（**不进文本**，只是显示态）。
+        if ((lparam & kGcsCompStr) != 0) {
+          const std::wstring text = composition_string(kGcsCompStr);
+          std::string utf8;
+          append_utf16_as_utf8(utf8, text);
+          // 预编辑串内的光标（UTF-16 码元偏移 → 码点数）：IME 给的是码元口径，
+          // UI 层要的是“第几个字后面”，否则 CJK 之外的字符会漂位。
+          const int units = composition_cursor_units();
+          int code_points = 0;
+          for (int index = 0; index < units && static_cast<std::size_t>(index) < text.size();
+               ++index) {
+            const auto unit = static_cast<std::uint32_t>(text[static_cast<std::size_t>(index)]);
+            // 代理对的低半不单独计数（它不构成一个码点）。
+            if (unit >= 0xDC00U && unit <= 0xDFFFU) continue;
+            ++code_points;
+          }
+          ui::Event event;
+          event.kind = ui::EventKind::ImeComposition;
+          event.text = std::move(utf8);
+          event.preedit_cursor = code_points;
+          events_.push_back(std::move(event));
+          preedit_ = text;
+          composing_ = !text.empty();
+          apply_ime_forms();
+        }
+        return 0;
+      }
+
+      case WM_IME_ENDCOMPOSITION:
+        composing_ = false;
+        preedit_.clear();
+        // 组合结束（无论选定还是取消）：发一条**空预编辑**，让编辑器擦掉临时串。
+        events_.push_back(ui::Event{.kind = ui::EventKind::ImeComposition});
+        return 0;
 
       case WM_KILLFOCUS:
         events_.push_back(ui::Event{.kind = ui::EventKind::FocusOut});
@@ -2240,6 +2515,14 @@ class Win32Backend final : public Backend {
   int dib_width_{0};
   int dib_height_{0};
   WPARAM pending_key_{0};
+  /// `WM_CHAR` 的高位代理挂起位（非 BMP 字符成对合成用）。
+  std::uint32_t pending_high_surrogate_{0};
+  /// 输入法组合中（`WM_IME_STARTCOMPOSITION` 置、`ENDCOMPOSITION` 清）。
+  bool composing_{false};
+  /// 最近一条预编辑串（UTF-16；仅用于调试/重置，不参与事件内容）。
+  std::wstring preedit_{};
+  /// 最近一次从 UI 上报的**文本插入点**（逻辑像素，客户区坐标）。
+  std::optional<math::Rect> last_ime_caret_{};
   /// 绘制面：软件或 GPU（由 `--renderer` / `auto` 决定）。
   /// 之前这里是具体 `Canvas` 且完全忽略 `options.renderer`——真实窗口下**永远走软件**，
   /// `--renderer gpu` 静默失效（实测绘制耗时 22.95ms vs 无头 GPU 的 1.31ms 才发现）。

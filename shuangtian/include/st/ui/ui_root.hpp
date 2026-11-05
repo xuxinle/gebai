@@ -412,6 +412,11 @@ class UiRoot : public Element::HostFocus {
   /// 与 `refresh_cursor` 的分工：那边“按位置解析”，这边“给定目标值”——
   /// 清理路径（WindowLeave/失活）没有位置可解析，只需要复位 Arrow。
   void apply_cursor(MouseCursor cursor);
+  /// 把焦点元素的文本插入点上报给宿主（只在几何变化时）。
+  ///
+  /// 调用时机：焦点元素处理完键/文本/组合事件之后，以及焦点切换后——
+  /// 这三处是“光标可能跑到别处”的全部来源。
+  void publish_ime_caret();
   /// 当前生效的指针形态（控制通道只读属性 / 测试断言 / 拖拽锁定判断）。
   [[nodiscard]] auto cursor() const noexcept -> MouseCursor { return cursor_; }
   /// 指针变化时的出口（宿主注入为 `Backend::set_cursor` 的转发）。
@@ -422,6 +427,14 @@ class UiRoot : public Element::HostFocus {
   ///
   /// 不注入时（单测/无头）什么也不发生——与 `text_port_` 同一姿态。
   std::function<void(MouseCursor)> cursor_sink{};
+  /// 文本插入点变化的出口（宿主注入为 `Backend::set_ime_caret` 的转发）。
+  ///
+  /// 与 `cursor_sink` 同一姿态：`ui` 层不知道后端存在，只负责“焦点元素的光标
+  /// 位置变了，说一声”——输入法的候选窗贴在哪里是后端的事。
+  ///
+  /// 只在**几何真的变了**才调（同 `apply_cursor` 的纪律）：鼠标在编辑器里移动时
+  /// 每帧都会走这条路径，无条件上报等于每帧做一次 `ImmSetCandidateWindow`。
+  std::function<void(math::Rect)> ime_caret_sink{};
  private:
   void assign_ids(Element& element, const std::string& prefix);
   /// 回收"派发或绘制期间摘除的叠加层"（延迟析构的墓场）。
@@ -576,6 +589,8 @@ class UiRoot : public Element::HostFocus {
   Element* pressed_{nullptr};
   /// 当前生效的指针形态（上次下发给后端的值）。
   MouseCursor cursor_{MouseCursor::Arrow};
+  /// 最近一次上报给宿主的输入法插入点（变化才下发，同 `cursor_`）。
+  math::Rect ime_caret_{};
   /// 最近一次 MouseMove 的位置与它是否仍有效。
   ///
   /// 为何要记：悬浮/光标平时只随鼠标事件重算，但有三类时刻**指针不动而命中

@@ -114,6 +114,14 @@ class Backend {
   /// 默认**空实现**：无头后端与不关心的后端不必覆写，也不会因此编译失败。
   /// 这与 `set_present_region` 同一姿态（可选能力，缺省无害）。
   virtual void set_cursor(ui::MouseCursor cursor) { (void)cursor; }
+  /// 告知后端**文本插入点在哪**（逻辑像素，客户区坐标）——输入法的候选窗/组合窗贴它。
+  ///
+  /// 默认空实现：无头后端与不处理输入法的平台不必覆写。
+  ///
+  /// 为何由**宿主**上报而不是让后端读 UI 焦点树：后端不依赖 `ui` 层
+  ///（依赖方向是 shell → ui，但反查会把后端的生命周期绑到 UI 树上）。
+  /// 只要界面知道“现在光标在哪”，把它当一条**状态**告诉后端就够了。
+  virtual void set_ime_caret(math::Rect logical_rect) { (void)logical_rect; }
   /// 提交一帧（headless 时写入离屏缓冲）。
   virtual void present() = 0;
   /// 取回输入事件（无则空）。headless 恒为空——输入由控制通道直接投递。

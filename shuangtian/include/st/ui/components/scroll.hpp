@@ -52,6 +52,14 @@ class ScrollBar : public Element {
   void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
+  /// 整个滚动条都是“可拖拽滚动”的（轨道与滑块同一意图）。
+  ///
+  /// 为何必须显式声明：不声明时落到父元素，在 `ScrollView` 里就是箭头（无害），
+  /// 但在**代码编辑器自绘**的场景下实打实是 I-beam（见 `MouseCursor::Scroll` 的说明）。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override {
+    (void)point;
+    return MouseCursor::Scroll;
+  }
   [[nodiscard]] auto hit_test(math::Point point) const noexcept -> bool override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
 
@@ -164,6 +172,8 @@ class ScrollView : public Element {
   void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_impl(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
+  /// 滚动条占位区是“可拖拽滚动”，内容区交回给子节点（回 `Arrow` = 没意见）。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;
 

@@ -476,7 +476,19 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
     const float height = std::min(line, box.height);
     const math::Rect caret{cursor_x(context), box.y + (box.height - height) * 0.5f, k_cursor_width,
                           height};
-    canvas.fill_rect(caret, raster::Paint::solid(colors.primary), k_cursor_radius);
+    // 缓存给 `caret_rect()`（输入法候选窗用它对齐插入点）。
+    last_caret_rect_ = caret;
+    // 预编辑串（输入法组合中）：画在光标处，带一条下划线标“尚未确定”。
+    //
+    // 不依赖闪烁相位：组合中的串必须**始终可见**（否则用户会在打字时看到
+    // 自己刚敲的拼音忽隐忽现）。
+    if (!preedit_.empty()) {
+      port.draw(canvas, preedit_, math::Point{caret.x, box.y + (box.height - line) * 0.5f}, size,
+                colors.primary);
+    }
+    if (visible_now) {
+      canvas.fill_rect(caret, raster::Paint::solid(colors.primary), k_cursor_radius);
+    }
     }
   }
   canvas.pop_clip();
@@ -640,7 +652,14 @@ auto Input::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::KeyDown: return handle_key(event);
     case EventKind::TextInput:
       if (event.text.empty()) return false;
+      preedit_.clear();   // 提交后预编辑串的使命结束
       insert_text(event.text);   // 走 `replace_selection_with`：有选区就替换
+      return true;
+    case EventKind::ImeComposition:
+      // 预编辑串：只显示、不进 `text_`（理由见 `EventKind::ImeComposition`）。
+      if (preedit_ == event.text) return true;
+      preedit_ = event.text;
+      mark_dirty();
       return true;
     default: return false;
   }
@@ -1055,12 +1074,18 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
       record_damage();
       last_blink_visible_ = visible_now ? 1 : 0;
     }
+    const std::size_t row = row_of(lines, cursor_);
+    const Line& entry = lines[row];
+    const float caret_x = box.x + port.measure_width(
+        whole.substr(entry.begin, cursor_ - entry.begin), size);
+    const float caret_y = box.y + static_cast<float>(row) * line - scroll_;
+    // 缓存给 `caret_rect()`（输入法候选窗）。
+    last_caret_rect_ = math::Rect{caret_x, caret_y, k_cursor_width, line};
+    // 预编辑串：与光标同一行（组合串不折行——它是瞬态，折行会让后续行错位）。
+    if (!preedit_.empty()) {
+      port.draw(canvas, preedit_, math::Point{caret_x, caret_y}, size, colors.primary);
+    }
     if (visible_now) {
-      const std::size_t row = row_of(lines, cursor_);
-      const Line& entry = lines[row];
-      const float caret_x = box.x + port.measure_width(
-          whole.substr(entry.begin, cursor_ - entry.begin), size);
-      const float caret_y = box.y + static_cast<float>(row) * line - scroll_;
       canvas.fill_rect(math::Rect{caret_x, caret_y, k_cursor_width, line},
                        raster::Paint::solid(colors.primary), k_cursor_radius);
     }
@@ -1233,7 +1258,14 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
       // 只读：**不进字**（但落到底部的 KeyDown 导航分支仍放行——
       // 只读展示仍要能按方向键/Home/End 看内容，这正是它区别于 disabled 的地方）
       if (read_only_) return true;
+      preedit_.clear();
       insert_text(event.text);
+      return true;
+    case EventKind::ImeComposition:
+      if (read_only_) return true;
+      if (preedit_ == event.text) return true;
+      preedit_ = event.text;
+      mark_dirty();
       return true;
     case EventKind::KeyDown: {
       const std::string& key = event.key;

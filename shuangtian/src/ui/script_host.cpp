@@ -44,6 +44,9 @@ namespace {
     case EventKind::KeyDown: return "keydown";
     case EventKind::KeyUp: return "keyup";
     case EventKind::TextInput: return "input";
+    // 输入法预编辑：脚本侧叫 `composition`（与浏览器 `compositionupdate` 同源直觉）。
+    // 同样属于“预编辑显示态”，不是最终的输入值。
+    case EventKind::ImeComposition: return "composition";
     case EventKind::FocusIn: return "focus";
     case EventKind::FocusOut: return "blur";
     case EventKind::HoverIn: return "hover";
