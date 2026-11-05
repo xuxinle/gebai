@@ -267,6 +267,31 @@ struct ThreeRuntime::Impl {
     ready = false;
   }
 
+  /// 宿主函数：`console.*` 的落地。
+  ///
+  /// ## 为何日志要真的打出来（而不是丢掉）
+  ///
+  /// 沙箱里给一个“能调但不输出”的 `console` 能消除报错，但会造出新的困惑源：
+  /// 用户打了 `console.log(geo)` 查到的东西是空的，而**没有任何解释**。
+  /// 而这类场景（写三维脚本）里，看属性结构是最主要的调试手段。
+  ///
+  /// 输出走 `st::log`（与框架其他部分同一出口，会被 `--log` 收进日志）。
+  static auto console_log(JSContext* ctx, JSValueConst /*this_val*/, int argc,
+                          JSValueConst* argv) -> JSValue {
+    std::string line;
+    for (int i = 0; i < argc; ++i) {
+      if (i > 0) line += ' ';
+      // 用 toString 而不是 JSON：三维对象里大量循环引用，stringify 会抛。
+      const char* text = JS_ToCString(ctx, argv[i]);
+      if (text != nullptr) {
+        line += text;
+        JS_FreeCString(ctx, text);
+      }
+    }
+    ST_LOG_INFO("[three-script] {}", line);
+    return JS_UNDEFINED;
+  }
+
   void boot() {
     const auto source = three_source();
     if (source.empty()) {
@@ -297,7 +322,17 @@ struct ThreeRuntime::Impl {
     // 同时给几个**必需的桩**（都是纯 JS，不涉及系统能力）：
     // - `self`/`window`：three 在若干地方探"是不是浏览器"；
     // - `performance.now`：动画/时钟用（给了之后 `Clock` 可用）；
-    // - `TextEncoder`：`BufferGeometry.toJSON`、字体/文本相关路径会摸它。
+    // - `TextEncoder`：`BufferGeometry.toJSON`、字体/文本相关路径会摸它；
+    // - `console`：场景脚本最普通的排查手段（缺它会让整份脚本报错中断）；
+    // - `ATOB`：three 的 `Loader`/`toArray` 相关路径会用它解码 base64。
+    //
+    // 最后一个 `__st_console_log` 是**宿主函数**（下面注册），把日志送到 `st::log`。
+    {
+      JSValue global = JS_GetGlobalObject(context);
+      JS_SetPropertyStr(context, global, "__st_console_log",
+                        JS_NewCFunction(context, &Impl::console_log, "__st_console_log", 2));
+      JS_FreeValue(context, global);
+    }
     static constexpr std::string_view kShim = R"JS(
 var self = globalThis;
 var window = globalThis;
@@ -323,6 +358,23 @@ if (typeof TextEncoder === 'undefined') {
       }
       return new Uint8Array(bytes);
     };
+  };
+}
+// ## `console`：不能只修“报错”，还要让日志真的看得到
+//
+// 场景脚本里写 `console.log(...)` 排查问题是最普通的手法，而沙箱里原本没有它
+// → 一句 `console is not defined` 就把整个脚本打断（连场景都出不来）。
+// three 自己也在若干路径上打 warning（例如未知属性）。
+//
+// 输出口径：走宿主日志（`st::log`）而不是丢弃——丢弃会让“我打了日志但什么都看不到”
+// 变成新的困惑源。
+if (typeof console === 'undefined') {
+  console = {
+    log: function () { __st_console_log('log', arguments); },
+    info: function () { __st_console_log('info', arguments); },
+    warn: function () { __st_console_log('warn', arguments); },
+    error: function () { __st_console_log('error', arguments); },
+    debug: function () { __st_console_log('debug', arguments); },
   };
 }
 )JS";
@@ -524,57 +576,217 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
 
   // 自动给最后一条“表达式语句”加 `return`。
   //
-  // 只处理**最后一条非空且非注释行**，且该行：
-  // - 不是 `return …`（已经写了）
-  // - 不是以 `}` 结尾的块结构（if/for/function 的闭括号，加 return 会语法错）
-  // - 不以 `const`/`let`/`var`/`function`/`class`/`import` 开头（声明无值）
-  //
-  // 这样两种常见写法都对：
-  //   `...; scene;`                      ← 改成 `...; return scene;`
-  //   `...; scene.add(mesh);`            ← 改成 `return scene.add(mesh);`（值是 mesh，
-  //                                        不过下面还会去找全局名兜底）
-  const auto as_iife = [](const std::string& source) -> std::string {
-    // 找最后一个非空行
-    std::size_t end = source.size();
-    while (end > 0 && (source[end - 1] == '\n' || source[end - 1] == '\r' ||
-                       source[end - 1] == ' ' || source[end - 1] == '\t')) {
-      --end;
-    }
-    std::size_t line_start = source.rfind('\n', end == 0 ? 0 : end - 1);
-    line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
-    std::string last_line = source.substr(line_start, end - line_start);
-    // 去掉行尾分号（后面要重加）
-    while (!last_line.empty() &&
-           (last_line.back() == ';' || last_line.back() == ' ' || last_line.back() == '\t')) {
-      last_line.pop_back();
-    }
-    // 首部去空白，用于关键字判定
-    std::size_t first = last_line.find_first_not_of(" \t");
-    const std::string head = first == std::string::npos ? "" : last_line.substr(first);
-
-    bool needs_return = !head.empty();
-    if (needs_return) {
-      for (const char* keyword : {"return", "const ", "let ", "var ", "function", "class ",
-                                 "import", "export", "if ", "for ", "while ", "switch",
-                                 "try", "do ", "throw"}) {
-        if (head.rfind(keyword, 0) == 0) {
-          needs_return = false;
-          break;
+  // 详细约定见下面 lambda 顶部那段：要点是**按语句边界**识别（不是按行），
+  // 因为跨行表达式与一行多语句都是合法写法。
+    // ══════════════════════════════════════════════════════════════════
+    // 取「最后一条顶层语句」并给它加 `return`
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // ## 为何不能“只看最后一行”（旧实现的真缺陷）
+    //
+    // 旧代码只取最后一行、去掉行尾 `;`、然后在行首插 `return`。三种常见写法全坏：
+    //
+    // | 写法 | 旧实现的结果 | 现象 |
+    // |---|---|---|
+    // | 表达式**跨行**（`new THREE.Mesh(\n  geo, mat)`） | `return new THREE.Mesh(` + 换行 | `unexpected token in expression` |
+    // | 一行里多个语句（`s.add(l);s.add(x);s;`） | `return s.add(l);s.add(x);s;` | 只返回第一个结果 |
+    // | 末行是块结尾（`}` 后面的换行） | 识别为空行 → 不加 return | 场景丢 |
+    //
+    // 实测：一组 20 条能力脚本里有 9 条因此报“语法错”，而它们写的都是合法 JS。
+    // 最坑的是错误信息指向用户完全无辜的最后一行。
+    //
+    // ## 现在怎做
+    //
+    // 逐字符扫描（跳过字符串/模板/正则/注释），按**顶层 `;`与顶层平衡的 `}`**
+    // 切出语句边界，取最后一段非空语句。然后分三种情形：
+    //
+    // 1. 以 `;` 结尾 → 它就是一条语句，直接加 `return `；
+    // 2. 以 `}` 结尾（块结构，如 `for(...){...}`）→ **不加** return：
+    //    块无值，而且 `return {...}` 会把一个块当对象字面量解析（语义完全不同）；
+    // 3. 其余（末尾无分号）→ 也加 `return `（ASI 风格的最后一行表达式）。
+    //
+    // 已有 `return`/声明/控制流关键字的，一律不加。
+    const auto as_iife = [](const std::string& source) -> std::string {
+      // ── 扫描器：找到“最后一个顶层语句”的起始位置 ──
+          std::size_t statement_start = 0;
+      // 块语句的起点（`for (...) { ... }` 的 `for` 位置）。
+      //
+      // ## 为何需要单独一个游标（实测代价）
+      //
+      // 顶层 `}` 也意味着“一条语句结束”，但它结束的那条语句 **从块的头部开始**，
+      // 不是从 `}` 之后。旧写法直接 `statement_start = i + 1`，于是遇到
+      // “末行是 `}` 后面的换行”时就把最后一条顶层语句当成了空串——
+      // 场景因此丢掉（而错误里什么都没有，最难查）。
+      //
+      // 现在两个游标分工：
+      // · `statement_start`：最近一条**已结束**语句之后的游标（给下一句用）；
+      // · `block_statement_start`：最近一个**顶层块语句的开始位置**。
+      std::size_t block_statement_start = 0;
+      std::size_t last_completed_statement = 0;   // 最后一条**非空**语句的起点
+      int depth_paren_last = 0;
+      (void)depth_paren_last;
+    int depth_paren = 0;   // ( )
+      int depth_brace = 0;   // { }
+      int depth_bracket = 0; // [ ]
+      bool in_string = false;
+      bool in_template = false;
+      bool in_line_comment = false;
+      bool in_block_comment = false;
+      char quote = '\0';
+      for (std::size_t i = 0; i < source.size(); ++i) {
+        const char ch = source[i];
+        const char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        if (in_line_comment) {
+          if (ch == '\n') in_line_comment = false;
+          continue;
+        }
+        if (in_block_comment) {
+          if (ch == '*' && next == '/') {
+            in_block_comment = false;
+            ++i;
+          }
+          continue;
+        }
+        if (in_string || in_template) {
+          if (ch == '\\') {
+            ++i;   // 跳过转义的下一个字符
+            continue;
+          }
+          if (ch == quote) {
+            in_string = false;
+            in_template = false;
+            quote = '\0';
+          }
+          continue;
+        }
+        if (ch == '/' && next == '/') {
+          in_line_comment = true;
+          ++i;
+          continue;
+        }
+        if (ch == '/' && next == '*') {
+          in_block_comment = true;
+          ++i;
+          continue;
+        }
+        if (ch == '\'' || ch == '"' || ch == '`') {
+          in_string = true;
+          in_template = (ch == '`');
+          quote = ch;
+          continue;
+        }
+        switch (ch) {
+          case '(': ++depth_paren; break;
+          case ')': --depth_paren; break;
+          case '[': ++depth_bracket; break;
+          case ']': --depth_bracket; break;
+          case '{':
+            // 顶层 `{` **第一次**出现的位置就是 block 语句的开头（`for (...) {`）。
+            if (depth_paren == 0 && depth_brace == 0 && depth_bracket == 0) {
+              block_statement_start = statement_start;
+            }
+            ++depth_brace;
+            break;
+          case '}': --depth_brace; break;
+          case ';':
+            // **只在全部深度归零时**才是一条顶层语句的边界。
+            // 少了这个判定，`new THREE.Mesh(a, b);` 里的分号（若在括号内）
+            // 会把一条语句劈成两半。
+            if (depth_paren == 0 && depth_brace == 0 && depth_bracket == 0) {
+              last_completed_statement = statement_start;
+              statement_start = i + 1;
+            }
+            break;
+          default: break;
+        }
+        // 顶层 `}` 收尾一个块（`for { ... }` / `function { ... }`）：块本身就是一条语句。
+        // 它结束的语句**从块头开始**（不是从 `}` 之后）——这是上面两个游标存在的原因。
+        if (ch == '}' && depth_paren == 0 && depth_brace == 0 && depth_bracket == 0) {
+          last_completed_statement = block_statement_start;
+          statement_start = i + 1;
+        }
+        if (depth_paren < 0 || depth_brace < 0 || depth_bracket < 0) {
+          // 不平衡（用户写错了）：放弃改造，让真编译器报原错（错误信息才准）。
+          return "(function(){ 'use strict';\n" + source + "\n})()";
         }
       }
-      // 以 `}` 或 `{` 结尾的：块结构，不碰
-      if (needs_return && (head.back() == '}' || head.back() == '{')) needs_return = false;
-    }
+      // ── 最后一段（末尾无分号的尾巴）与“最后一条已结束语句”取更靠后的那个 ──
+      //
+      // 三种尾巴都要对：
+      // · `scene;`      → 尾巴是空白，用 `last_completed_statement`（即 `scene`）
+      // · `scene`       → 尾巴就是 `scene`
+      // · `for(){...}` → `}` 已把 `last_completed_statement` 设为块头
+      const std::size_t trailing_start = statement_start;
+      const std::size_t last_statement_start =
+          source.find_first_not_of(" \t\r\n", trailing_start) == std::string::npos
+              ? last_completed_statement
+              : trailing_start;
+    // ⚠ **`return ` 后面紧跟 `{` 会把块变成对象字面量**——所以这里的目标是“最后一条
+    // 顶层语句”，而块结构（以 `{` 开头、`}` 结尾）本身就不该加 return。
+    // 旧实现里那条 “以 `}` 或 `{` 结尾就不碰” 的判定保留下来，但现在它作用在
+    // **整条语句**上（而不是一行），于是多行块也能正确识别。
+      std::size_t begin = last_statement_start;
+      while (begin < source.size() &&
+             (source[begin] == ' ' || source[begin] == '\t' || source[begin] == '\n' ||
+              source[begin] == '\r')) {
+        ++begin;
+      }
+      // 末尾向前跳过空白
+      std::size_t end = source.size();
+      while (end > begin && (source[end - 1] == '\n' || source[end - 1] == '\r' ||
+                             source[end - 1] == ' ' || source[end - 1] == '\t')) {
+        --end;
+      }
+      std::string_view tail(source.data() + begin, end > begin ? end - begin : 0);
 
-    std::string body = source.substr(0, line_start);
-    if (needs_return) {
-      body += "return " + head + ";\n";
-    } else {
-      body += source.substr(line_start, end - line_start);
-      body += '\n';
-    }
-    return "(function(){ 'use strict';\n" + body + "})()";
-  };
+      // 尾部去掉行尾注释（`scene; // 注释`），否则关键字判定会被注释干扰。
+      if (const std::size_t comment = tail.rfind("//"); comment != std::string_view::npos &&
+          tail.find('\n', comment) == std::string_view::npos) {
+        tail = tail.substr(0, comment);
+        while (!tail.empty() && (tail.back() == ' ' || tail.back() == '\t')) {
+          tail.remove_suffix(1);
+        }
+      }
+      if (tail.empty()) {
+        return "(function(){ 'use strict';\n" + source + "\n})()";
+      }
+
+      const std::string text(tail);
+      std::string head = text;
+      while (!head.empty() && (head.back() == ';' || head.back() == ' ' || head.back() == '\t')) {
+        head.pop_back();
+      }
+      std::size_t first = head.find_first_not_of(" \t");
+      const std::string head_trimmed = first == std::string::npos ? "" : head.substr(first);
+
+      bool needs_return = !head_trimmed.empty();
+      if (needs_return) {
+        for (const char* keyword : {"return", "const ", "let ", "var ", "function", "class ",
+                                    "import", "export", "if ", "if(", "for ", "for(", "while ",
+                                    "while(", "switch", "try", "do ", "do{", "throw", "else",
+                                    "case ", "default:", "async "}) {
+          if (head_trimmed.rfind(keyword, 0) == 0) {
+            needs_return = false;
+            break;
+          }
+        }
+        // 以 `}` 结尾：块结构无值。**必须不加**——`return { … }` 会被解析成
+        // 对象字面量，而块里的语句全部失效（语义静默地变了）。
+        if (needs_return && (head_trimmed.back() == '}' || head_trimmed.back() == '{')) {
+          needs_return = false;
+        }
+      }
+
+      std::string body = source.substr(0, begin);
+      if (needs_return) {
+        // 保留原缩进与换行（`text` 里可能有换行）：只在前面插 `return `。
+        body += "return " + text + ";\n";
+      } else {
+        body += source.substr(begin, end - begin);
+        body += '\n';
+      }
+      return "(function(){ 'use strict';\n" + body + "})()";
+    };
 
   impl_->begin_timing();
   JSValue result = impl_->eval_value(as_iife(original), script_name);

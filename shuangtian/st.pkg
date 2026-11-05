@@ -830,6 +830,22 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "对齐基准出图：给任何场景（.js/.py）出一张 1100x800 的 PNG，好与真 three.js / 真 Blender 的图并排看。中性的出图工具，不绑定特定判据"
     },
+    "scene3d_capability_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_capability_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "三条表达层的能力对照：每个能力用自己的脚本真跑一遍，看是否被识别且真的产出可画场景。清单是数据（加一条加一行）——防“grep 到了但另一条路径没接”那类缺口"
+    },
+    "render_gap_probe": {
+      "kind": "executable",
+      "sources": ["tools/render_gap_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "渲染差距的量化基线：两条腿一致性（同一脚本不能两副长相）+ 暗部存在性。给任何 .js/.py 场景出可复算的数字，不靠肉眼"
+    },
     "mixed_scene_probe": {
       "kind": "executable",
       "sources": ["tools/mixed_scene_probe.cpp", "src/python/mp_bridge.c",
