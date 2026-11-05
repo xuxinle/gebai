@@ -942,6 +942,60 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
     if (ambient_from_light > 0.0f) scene.lighting.ambient = ambient_from_light;
   }
 
+  // ── 世界背景 → 环境反射 ──
+  //
+  // ## 这一块是 bpy 路早就有的，three 路漏了（2026-11-05 补）
+  //
+  // 环境反射是**金属出色的唯一来源**。而 `Lighting::env_sky` 的默认值是
+  // `(0.52, 0.58, 0.68)` —— 一个明亮的天空。
+  //
+  // bpy 路已经改成“从脚本的世界背景推导”（`bpy_runtime.cpp`），而
+  // three 路一直没做——后果就是同一个场景、同一个渲染器：
+  //
+  // | 脚本 | 主体均值 |
+  // |---|---|
+  // | bpy (`bpy_watch.py`) | **69.5** |
+  // | three (`watch_gears.js`) | **149.5** |
+  //
+  // 差 80 级。而调 `DirectionalLight.intensity`（0.8125 → 0.12）只降
+  // 5 级——证明亮度不来自主光，来自那个不存在的亮天空。
+  //
+  // `scene.background` 在 three 里可能是 `Color` 对象，也可能是贴图/
+  // 立方体贴图。只有 `Color` 能推导环境反射；其余保持默认。
+  {
+    // ⚠ 用 `scene_root`（脚本返回的 Scene 对象）而不是全局 `scene`
+    // ——`three_script` 里 `scene` 是脚本内 `const`，不进全局。
+    //
+    // 第一次改的时候用了 `JS_GetGlobalObject` 取 `scene`，结果永远是
+    // undefined，改了等于没改（数值一位不动）。
+    JsRef background{impl_->context,
+                     JS_GetPropertyStr(impl_->context, scene_root.get(), "background")};
+    if (!JS_IsUndefined(background.get()) && !JS_IsNull(background.get())) {
+      // `Color` 有 `isColor === true`（three 的惯例）
+      JsRef is_color{impl_->context,
+                     JS_GetPropertyStr(impl_->context, background.get(), "isColor")};
+      const bool looks_like_color = JS_ToBool(impl_->context, is_color.get()) == 1;
+      if (looks_like_color) {
+        // `Color.toArray()` → [r, g, b]（已是线性工作空间值）
+        JsRef to_array{impl_->context,
+                       JS_GetPropertyStr(impl_->context, background.get(), "toArray")};
+        if (JS_IsFunction(impl_->context, to_array.get())) {
+          JsRef array{impl_->context,
+                      JS_Call(impl_->context, to_array.get(), background.get(), 0, nullptr)};
+          if (!JS_IsException(array.get()) && !JS_IsUndefined(array.get())) {
+            const math::Vec3 linear = read_color(impl_->context, array.get());
+            scene.lighting.env_sky = linear;
+            // 地面反射取 50%（与 bpy 路同一取舍：保留“上亮下暗”的型制）
+            scene.lighting.env_ground =
+                math::Vec3{linear.x * 0.5f, linear.y * 0.5f, linear.z * 0.5f};
+            // 环境强度：与 bpy 路同值（0.45，分位数标定得出）
+            if (scene.lighting.env_strength <= 0.0f) scene.lighting.env_strength = 0.45f;
+          }
+        }
+      }
+    }
+  }
+
   // ── 物体 ──
   {
     JsRef objects{impl_->context,

@@ -103,7 +103,47 @@ class Camera:
 
     @property
     def angle_y(self):
-        """竖直视野角（弧度）。bpy 的 `camera.data.angle_y` 同一口径。"""
+        """竖直视野角（弧度）。
+
+        ## 这里试过“按宽高比修正”，但实测是**错的**（2026-11-05）
+
+        第一版：`2·atan(sensor_width/2 / lens)`——直接拿 sensor_width
+        算，得到的是**水平** fov，却当 `angle_y` 用。
+
+        第二版（已回退）：按 `sensor_fit='AUTO'` 的真 bpy 口径加了
+        宽高比修正 `angle_y = 2·atan(tan(angle_x/2)/aspect)`，得到
+        26.78°（vs 45° 默认值）。
+
+        **实测证明第二版更差**：
+
+        | 配置 | 主体占比 | 主体均值 |
+        |---|---|---|
+        | 真 Blender | **19.6%** | 78.0 |
+        | 本框架 + 默认 45° | **19.4%** | **79.6** |
+        | 本框架 + 26.78° | 28.3% | 70.3 |
+
+        45° 反而与参照**几乎完全一致**。说明本框架的相机 `fov_y_degrees`
+        在 45° 时的取景，恰好等价于 `bpy_watch.py` 那个 `lens=55`
+        在 Blender 里的取景。
+
+        ## 所以现在怎么办
+
+        保持“水平 fov”这个算法（也就是回退到第一版），**不**加宽高比
+        修正。理由：
+
+        1. 它让 `bpy_watch.py` 与真 Blender 的构成完全对齐（实测）
+        2. 加修正后反而偏离
+
+        这是**经验标定**而不是几何推导——真相是“兼容层的 `lens` 与
+        本框架 `fov_y` 之间的口径关系没被严格定义过”，而实测给出了
+        一个能对上的值。完整标定需要逐 lens 扫一遍（未做，记为待办）。
+        """
+        import math
+        return 2.0 * math.atan(self.sensor_width * 0.5 / self.lens)
+
+    @property
+    def angle(self):
+        """水平视野角（弧度）。与 `angle_y` 同值（见上：口径未分离）。"""
         import math
         return 2.0 * math.atan(self.sensor_width * 0.5 / self.lens)
 
