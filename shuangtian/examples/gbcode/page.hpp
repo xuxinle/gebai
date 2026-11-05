@@ -350,6 +350,17 @@ struct CodeEditorPage : Component {
   /// 选中的提交（详情摘要与高亮用）。
   std::string git_selected_hash_{};
   State<std::string> git_commit_summary_{};
+  /// 选中提交的**增删总量**（详情栏右缘那一行）。
+  ///
+  /// 为何单独存：它属于“统计层”，与标题（提交信息）是两个层级的信息。
+  /// 旧版把二者拼成一个字符串塞进 `git_commit_summary_`，于是标题变成
+  /// “hash · N 个文件 · +A −R”这种读不出“干了什么”的串，而统计又重复显示两次。
+  struct CommitStat {
+    std::size_t files{0};
+    std::size_t added{0};
+    std::size_t removed{0};
+  };
+  CommitStat git_selected_stat_{};
   /// 选中提交的**元信息**（详情栏显示作者与时间——日志行窄，放不下）。
   std::string git_selected_author_{};
   std::string git_selected_date_{};

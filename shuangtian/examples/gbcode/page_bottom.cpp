@@ -11,6 +11,7 @@
 
 #include "page.hpp"
 #include "st/core/string.hpp"
+#include "st/ui/components/table.hpp"
 
 namespace gbcode_ui {
 
@@ -499,28 +500,64 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
                          git_.branch.empty() ? std::string{} : "· " + git_.branch);
     }, "log-refresh");
     build_log_filters(c);
-    (void)custom_container<ScrollView>(
-        c,
-        [&] {
-          const auto entries = filtered_log();
-          if (entries.empty()) {
-            (void)text(c, [] { return std::string("（没有提交，或读取失败）"); });
-            return;
+    // —— 多列表格（IDEA 同款）——
+    //
+    // 旧形态是“一行一个 Button + 空格拼起来的字符串”，问题是：
+    // 提交信息/作者/日期挤成一串，**列不对齐**（不同长度就错位）——而日志表
+    // 恰恰是靠列对齐来扫的（“谁改的 / 什么时候” 是两列独立信息）。
+    //
+    // 泳道列由图型圆点 + 竖线表示（`Table::set_row_lanes`），不走文本列：
+    // 用字符画分支线（`●`/`○`）在有向无环图上根本表达不出合并关系。
+    (void)custom<Table>(c, [this](Table& table) {
+      table.set_id("git-log-table");
+      const auto entries = filtered_log();
+      table.clear_rows();   // 每次重组重建：日志量与过滤条件都会变
+      table.set_columns({
+          {.name = "提交信息", .width = 0.0f},
+          {.name = "作者", .width = 110.0f},
+          {.name = "日期", .width = 130.0f},
+          {.name = "哈希", .width = 76.0f},
+      });
+      // 列色调：提交信息主色（用户在看的东西）、其余弱化（背景信息）。
+      // 不这样做就只能全表一个颜色，靠列位置猜重点。
+      table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
+                              Table::CellTone::Muted, Table::CellTone::Muted});
+      table.set_row_height(24.0f);
+      std::vector<int> lanes;
+      lanes.reserve(entries.size());
+      for (const auto& entry : entries) {
+        // refs（分支/标签胶囊）拼在提交信息尾部：它是**这条提交的身份装饰**，
+        // 单独开一列会在窄视图里把真正的内容挤没。
+        std::string subject = entry.subject;
+        if (!entry.refs.empty()) {
+          std::string refs;
+          for (const auto& ref : entry.refs) refs += " [" + ref + "]";
+          subject += refs;
+        }
+        table.add_row({subject, entry.author, entry.date, entry.short_hash});
+        lanes.push_back(static_cast<int>(entry.lane));
+      }
+      table.set_row_lanes(std::move(lanes));
+      // 选中行与左栏的“当前提交”同源（同一条高亮，不是两个独立状态）。
+      if (!git_selected_hash_.empty()) {
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+          if (entries[index].short_hash == git_selected_hash_) {
+            table.set_selected_row(index);
+            break;
           }
-          for (const auto& entry : entries) {
-            (void)custom<Button>(c, [this, entry](Button& b) {
-              b.set_id("git-log-" + entry.short_hash);
-              b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
-b.set_label(log_line_label(entry));
-              b.set_variant(entry.short_hash == git_selected_hash_ ? Button::Variant::Soft
-                                                                  : Button::Variant::Ghost);
-              b.set_size(Button::Size::Small);
-              b.on_click = [this, entry] { show_commit(entry); };
-            }, {.height = 26.0f, .key = "log:" + entry.short_hash});
-          }
-        },
-        [](ScrollView& scroll) { scroll.set_id("git-log-scroll"); },
-        {.grow = true, .id = "git-log-host"});
+        }
+      }
+      // 点行 = 看这条提交的详情（与旧版同一动线）。
+      table.set_on_row_click([this, entries](std::size_t row) {
+        if (row < entries.size()) show_commit(entries[row]);
+      });
+    }, {.grow = true, .id = "git-log-host"});
+    // 给 e2e 用的断言面：当前可见行区间（“表格真的在显示数据”而非空壳）。
+    (void)text(c, [this] {
+      const std::size_t total = filtered_log().size();
+      return total == 0U ? std::string("（没有提交，或读取失败）")
+                         : std::string{};
+    }, {.id = "git-log-empty"});
   }
 
 
@@ -607,33 +644,67 @@ b.set_label(log_line_label(entry));
                  {.color = Tone::Muted, .id = "git-detail-empty"});
       return;
     }
-    (void)text(c, [this] { return git_commit_summary_.value(); },
-               {.color = Tone::Muted, .id = "git-commit-summary"});
-    // 元信息（作者 + 时间）——日志行窄，放不下这两项；详情栏宽一些，正好补上。
-    (void)text(c, [this] {
-      return std::format("{} · {}", git_selected_author_, git_selected_date_);
-    }, {.color = Tone::Muted, .id = "git-commit-meta"});
+    // —— 元信息分级（IDEA 同款）——
+    //
+    // 三级层次，靠字号/字重/色调三个正交手段区分（不是只靠颜色）：
+    //   ① **提交标题**：最大、最重、主色——它回答“这笔提交干了什么”；
+    //   ② **作者 · 日期**：小、中灰——背景信息；
+    //   ③ **增删统计**：右缘、+/− 分色——回答“改动多大”。
+    //
+    // 旧版三条都是 `Tone::Muted` 的小字，扫一眼分不出主次（“标题”与“作者”同在），
+    // 而这一栏的存在意义正是“选中一笔提交后快速看清它”——主次必须成立。
+    (void)custom<Text>(c, [this](Text& t) {
+      t.set_id("git-commit-summary");
+      t.set_content(git_commit_summary_.value());
+      t.set_weight(FontWeight::SemiBold);
+      t.set_font_size(14.0f);
+    }, {.grow = true});
+    (void)row(c, {.gap = 8.0f, .height = 20.0f}, [&] {
+      (void)custom<Text>(c, [this](Text& t) {
+        t.set_id("git-commit-meta");
+        // 作者与日期放在同一行（它们回答同一个问题：“谁、什么时候”）。
+        t.set_content(std::format("{} · {}", git_selected_author_, git_selected_date_));
+        t.set_tone(Tone::Muted);
+        t.set_font_size(12.0f);
+      }, {.grow = true});
+      // 增删统计：从**存下来的**统计层读（不在渲染期重算：那是“同一量两处推导”的温床）。
+      (void)custom<Text>(c, [this](Text& t) {
+        t.set_id("git-commit-stat");
+        t.set_content(std::format("{} 个文件  +{} −{}", git_selected_stat_.files,
+                                  git_selected_stat_.added, git_selected_stat_.removed));
+        t.set_tone(Tone::Muted);
+        t.set_font_size(12.0f);
+      }, {.id = "git-commit-stat"});
+    });
     if (git_commit_files_.empty()) {
       (void)text(c, [] { return std::string("（这笔提交没有改动文件）"); },
                  {.id = "git-detail-no-files"});
       return;
     }
-    (void)custom_container<ScrollView>(
-        c,
-        [&] {
-          for (const auto& [path, plus, minus] : git_commit_files_) {
-            (void)custom<Button>(c, [this, path, plus, minus](Button& b) {
-              b.set_id("commit-file-" + path);
-              b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
-b.set_label(std::format("{}  +{} −{}", path, plus, minus));
-              b.set_variant(Button::Variant::Ghost);
-              b.set_size(Button::Size::Small);
-              b.on_click = [this, path] { open_commit_file(git_selected_hash_, path); };
-            }, {.height = 24.0f, .key = "cfile:" + path});
-          }
-        },
-        [](ScrollView& scroll) { scroll.set_id("git-commit-files-scroll"); },
-        {.grow = true, .id = "git-commit-files"});
+    // —— 文件清单：**表格**（路径 / 增 / 删）——
+    //
+    // 旧版是一行一个 Button，文本拼成 `path  +N −M`：路径长短不一时
+    // 增删数字**参差不齐**，而“哪些文件动得多”恰恰要靠这两列对齐才扫得出来。
+    (void)custom<Table>(c, [this](Table& table) {
+      table.set_id("git-commit-files-table");
+      table.clear_rows();
+      table.set_columns({
+          {.name = "文件", .width = 0.0f},
+          {.name = "+", .width = 52.0f},
+          {.name = "−", .width = 52.0f},
+      });
+      table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
+                              Table::CellTone::Muted});
+      table.set_row_height(24.0f);
+      for (const auto& [path, plus, minus] : git_commit_files_) {
+        table.add_row({path, std::format("+{}", plus), std::format("−{}", minus)});
+      }
+      // 点文件 → 看该文件在这笔提交里的差异（与旧版同一动线）。
+      const auto files = git_commit_files_;
+      table.set_on_row_click([this, files](std::size_t row) {
+        if (row < files.size()) open_commit_file(git_selected_hash_, std::get<0>(files[row]));
+      });
+    }, {.grow = true, .id = "git-commit-files"});
   }
 
 
@@ -793,8 +864,15 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
       added += plus;
       removed += minus;
     }
-    git_commit_summary_.set(std::format("{} · {} 个文件 · +{} −{}", entry.short_hash,
-                                        copy.files.size(), added, removed));
+    // 增删总量另行保存：它属于**统计层**，不属于标题（见上面的说明）。
+    git_selected_stat_ = {.files = copy.files.size(), .added = added, .removed = removed};
+    // 标题 = **提交信息原文**（它回答“这笔提交干了什么”）。
+    //
+    // 为什么不能拼上 hash/统计：那些是**另一类信息**（身份与体量），
+    // 把它们塞进标题会让标题变成一串难读的元数据——而详情栏的分级排版
+    // 正是为了让“标题 / 元信息 / 统计”各占一层（见 `build_commit_detail`）。
+    // 旧版在这里拼过“hash · N 个文件 · +A −R”，导致标题与统计重复两次。
+    git_commit_summary_.set(entry.subject);
     git_selected_author_ = entry.author;
     git_selected_date_ = entry.date;
     // 文件清单存下来（渲染期只消费）：它是“看具体改动”的入口。

@@ -1077,6 +1077,9 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
             view.set_show_hunk_separators(false);
             // 摘要带也关掉：工具条上已经写了“第 i / N 处 + 增删”，再一条就重复了。
             view.set_show_header(false);
+            // 右缘变更缩略条（IDEA 同款）：几千行的文件里一眼看出改动分布与当前位置。
+            // 它不挤窄编辑器（覆盖层），所以总是开着不会有代价。
+            view.set_show_overview(true);
             // 内联/并列：与工具条那个开关同源（用户要求“两样都能看”）。
             view.set_layout(diff_unified_.value() ? DiffLayout::Unified : DiffLayout::SideBySide);
             // —— 内容：**整文件模式**（不是只给 `@@` 附近的几行）——
