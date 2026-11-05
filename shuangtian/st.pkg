@@ -804,6 +804,14 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "按顶层块二分执行大脚本，定位 MicroPython 报 NameError 的具体位置（MINIMUM 档不说名字，只能二分）"
     },
+    "concave_triangulate_probe": {
+      "kind": "executable",
+      "sources": ["tools/concave_triangulate_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "凹多边形三角化：用已知面积的 L 形/星形证明扇形算法会填平凹角（静默错），再验耳切修好。面积是可断言的量，比“看着像”可靠"
+    },
     "bpy_watch_probe": {
       "kind": "executable",
       "sources": ["tools/bpy_watch_probe.cpp", "src/python/mp_bridge.c",

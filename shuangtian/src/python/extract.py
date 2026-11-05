@@ -91,16 +91,191 @@ def _flatten_matrix(m):
     return out
 
 
-def _triangulate(polygon_vertices):
-    """把多边形三角化（扇形）。返回顶点索引三元组列表。
+def _triangulate(polygon_vertices, positions):
+    """把多边形三角化。返回顶点索引三元组列表。
 
-    `polygon_vertices` 是一个索引列表（长度 >= 3）。
+    ## 算法：耳切（ear clipping）
+
+    对**凸多边形**用扇形更快，但它对**凹多边形**会生成跨出边界的三角形
+    ——那些三角形填平凹角。而这是**静默错**：画面看起来“有个多边形”，
+    但形状是错的（凹口被填平）。比崩溃危险——崩溃会被人发现，画错会被
+    当成“设计成这样”。
+
+    实测（`tools/concave_triangulate_probe`）：五角星（外 1.0 / 内 0.4）
+    真实面积 1.176，扇形得到 2.137（填平了 5 个凹角）。
+
+    更阴的是 L 形（浅凹）**扇形也对了**——所以“跑几个例子没看出问题”
+    不能证明算法对。凹得浅就侥幸，凹得深就错。
+
+    ## 耳切怎么做
+
+    反复找一个“耳”：顶点 `i` 与它的两个邻居构成三角形，且
+    ① 它是**凸角**（叉积 > 0，与多边形绕向一致），
+    ② 三角形内**不含**其他任何顶点。
+
+    切掉这个耳（从工作列表移除 `i`），直到只剩 3 个点。
+    复杂度 O(n²)，而 bpy 的面通常只有 3~20 个点——完全够用。
+
+    ## 退化处理
+
+    找不到耳时会**回退到扇形**（保证不返回空、不死循环）。
+    情形：自相交多边形、共线点过多的退化输入。那类输入本身就不合法，
+    给一个“尽量正确”的结果比报错更实用（CAD 导出的数据经常带共线点）。
+
+    参数 `positions` 是**全局顶点坐标表**（`[(x,y,z), ...]`），
+    `polygon_vertices` 是它的下标。需要坐标才能判凸凹与内含。
     """
     n = len(polygon_vertices)
     if n < 3:
         return []
     if n == 3:
         return [(polygon_vertices[0], polygon_vertices[1], polygon_vertices[2])]
+
+    # ── ① 绕向：用标准 shoelace（**相邻点**，不是 i,i+1,i+2）──
+    #
+    #     A2 = Σ (x_i * y_{i+1} - x_{i+1} * y_i)
+    #
+    # A2 > 0 ⇒ 逆时针（CCW）；< 0 ⇒ 顺时针（CW）。
+    #
+    # ## 踩过的坑（两轮）
+    #
+    # 第一版用的是三相邻点的叉积和 `(bx-ax)*(cy-ay)-(by-ay)*(cx-ax)`，
+    # 对星形算出 **负数**，而标准 shoelace 算出 **正数**——两者符号相反。
+    # 于是 `_is_convex` 拿到了错的绕向，所有凸角被判成凹，耳切一下子
+    # 都找不到 → 回退到扇形 → 面积 2.137（应 1.176）。
+    #
+    # 而**三角形数仍是 n-2**（扇形也给 n-2 个），所以只看三角形数的判据
+    # 会误过。必须用面积才能看出来。
+    #
+    # 教训：绕向就用 shoelace，它是有定义的那个量；别自创叉积和。
+    signed = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        x1 = positions[polygon_vertices[i]][0]
+        y1 = positions[polygon_vertices[i]][1]
+        x2 = positions[polygon_vertices[j]][0]
+        y2 = positions[polygon_vertices[j]][1]
+        signed += x1 * y2 - x2 * y1
+    if signed == 0.0:
+        # 全共线：退化成扇形（什么算法都得不到有效三角形）
+        return _fan_triangulate(polygon_vertices)
+
+    # ── ② 耳切主循环 ──
+    remaining = list(range(n))
+    tris = []
+    guard = 0
+    while len(remaining) > 3:
+        guard += 1
+        if guard > n * n + 8:
+            # 找不到耳（自相交/退化）→ 回退扇形，保证有输出
+            return _fan_triangulate(polygon_vertices)
+
+        found = False
+        count = len(remaining)
+        for slot in range(count):
+            prev_slot = (slot - 1) % count
+            next_slot = (slot + 1) % count
+            ia = polygon_vertices[remaining[prev_slot]]
+            ib = polygon_vertices[remaining[slot]]
+            ic = polygon_vertices[remaining[next_slot]]
+            if not _is_convex(positions, ia, ib, ic, signed > 0.0):
+                continue
+            if _contains_any(positions, ia, ib, ic, polygon_vertices, remaining,
+                             prev_slot, slot, next_slot):
+                continue
+            # 这是一个耳：切掉
+            tris.append((ia, ib, ic))
+            del remaining[slot]
+            found = True
+            break
+        if not found:
+            return _fan_triangulate(polygon_vertices)
+
+    tris.append((polygon_vertices[remaining[0]],
+                 polygon_vertices[remaining[1]],
+                 polygon_vertices[remaining[2]]))
+    return tris
+
+
+def _is_convex(positions, ia, ib, ic, counter_clockwise):
+    """顶点 `ib` 处是不是凸角。
+
+    ## 关键：凸角与绕向的对应关系
+
+    `cross = (bx-ax)×(cy-ay)` 是**从 a→b 到 a→c 的转向**。
+
+    - 多边形**逆时针**（CCW，signed > 0）：凸角的 cross **> 0**
+    - 多边形**顺时针**（CW，signed < 0）：凸角的 cross **< 0**
+
+    第一版把 `counter_clockwise` 传错了（`signed > 0.0` 是对的，但判定式用了
+    `cross >= 0 if ccw else cross <= 0`，而实际星形是 CW 却把凸角判成了凹）：
+    根源是**绕向和凸角的内外关系我记反了**——CCW 多边形的凸角在“行进方向
+    的左侧”，叉积为正。
+
+    共线（cross == 0）当凸角处理：切掉它不会错，且能推进（否则死循环）。
+    """
+    ax = positions[ia][0]
+    ay = positions[ia][1]
+    bx = positions[ib][0]
+    by = positions[ib][1]
+    cx = positions[ic][0]
+    cy = positions[ic][1]
+    cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if counter_clockwise:
+        return cross >= 0.0
+    return cross <= 0.0
+
+
+def _contains_any(positions, ia, ib, ic, polygon_vertices, remaining,
+                  skip_a, skip_b, skip_c):
+    """三角形 (ia,ib,ic) 内部是否含有**其他**多边形顶点。"""
+    ax = positions[ia][0]
+    ay = positions[ia][1]
+    bx = positions[ib][0]
+    by = positions[ib][1]
+    cx = positions[ic][0]
+    cy = positions[ic][1]
+    count = len(remaining)
+    for slot in range(count):
+        if slot in (skip_a, skip_b, skip_c):
+            continue
+        index = polygon_vertices[remaining[slot]]
+        px = positions[index][0]
+        py = positions[index][1]
+        if _point_in_triangle(px, py, ax, ay, bx, by, cx, cy):
+            return True
+    return False
+
+
+def _point_in_triangle(px, py, ax, ay, bx, by, cx, cy):
+    """点是否在三角形**内部**（严格内部，不含边界）。
+
+    ## 为何必须排除边界（这是星形失败的真因）
+
+    第一版用“三个叉积同号（含 0）”判，于是**落在三角形边上的点也算内含**。
+    而耳切里那个“边”往往正好穿过另一个多边形顶点（凸角两侧的邻居）——
+    于是一个耳都找不到，回退到扇形，星形面积就变成了 2.137（应 1.176）。
+
+    症状特别隐：三角形数还是 n-2（回退的扇形也给 n-2 个），所以
+    “数三角形”这个判据会误过。必须用**面积**才能看出来。
+    """
+    d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by)
+    d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy)
+    d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay)
+    # 严格内部：三个叉积**同号且非零**
+    has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+    has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+    if has_neg and has_pos:
+        return False
+    # 全零或有零 = 在边界/顶点上 → 不算“内含”
+    if (d1 == 0) or (d2 == 0) or (d3 == 0):
+        return False
+    return True
+
+
+def _fan_triangulate(polygon_vertices):
+    """扇形三角化（凸多边形的快速路径，也是耳切失败时的兜底）。"""
+    n = len(polygon_vertices)
     tris = []
     first = polygon_vertices[0]
     for i in range(1, n - 1):
@@ -173,7 +348,7 @@ def _extract_mesh_object(obj):
     vertices = []       # 交错：[x, y, z, nx, ny, nz, r, g, b]
     indices = []
     for poly in mesh.polygons:
-        for tri in _triangulate(poly.vertices):
+        for tri in _triangulate(poly.vertices, positions):
             i0, i1, i2 = tri
             p0 = positions[i0]
             p1 = positions[i1]
