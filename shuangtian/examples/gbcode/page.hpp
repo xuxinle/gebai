@@ -908,7 +908,16 @@ auto open_recent(const std::string& path) -> void;
 
 
   /// 小图标钮（侧栏各视图共用；`on_click` 为空 = 纯展示）。
-   void scm_icon_button(Composer& c, const std::string& id, const char* icon_name, const char* tip, std::function<void()> on_click);
+  void scm_icon_button(Composer& c, const std::string& id, const char* icon_name,
+                       const char* tip, std::function<void()> on_click);
+
+  /// 同上，但可控制**可见位**（宽度恒定占位）。
+  ///
+  /// 用于“悬停才显示”的行内动作：必须只翻可见位、不增删元素——
+  /// 悬停时增删元素会改变行内容宽度⇒按钮被挤出指针命中区⇒HoverOut⇒
+  /// 按钮消失⇒指针又落回行上⇒HoverIn，用户看到的就是**按钮在闪**。
+  void scm_icon_button_visible(Composer& c, const std::string& id, const char* icon_name,
+                               const char* tip, bool visible, std::function<void()> on_click);
 
 
   // —— 视图 2：变更（面板：分组 + 行内动作 + 底部提交框）——

@@ -597,10 +597,12 @@ void Element::place_absolute(const RenderContext& context, Element& child, math:
   // 右/下缘锚定：优先于 left/top（两者同给时以**具体边**为准，与 CSS 的
   // “left+right 同时给则由宽度反解”不同——这里选择更可预测的那个：
   // 贴右缘是常见需求，而“又贴左又贴右”等于让别人替你算宽，不如用 width）。
-  if (child_style.right >= 0.0f) x = content.x + content.width - child_style.right - size.width;
-  if (child_style.bottom >= 0.0f) {
-    y = content.y + content.height - child_style.bottom - size.height;
-  }
+  //
+  // ⚠ 右缘基准用的是**本元素的 bounds_ 右缘**，不是 `content` 的：
+  // `content` 已扣过 padding，贴右缘若按它算会往左缩一个 padding。
+  // 而“贴右缘”的直觉是“贴容器的右边缘”（与 CSS 一致）。
+  if (child_style.right >= 0.0f) x = bounds_.right() - child_style.right - size.width;
+  if (child_style.bottom >= 0.0f) y = bounds_.bottom() - child_style.bottom - size.height;
   child.arrange(context, math::Rect{x, y, size.width, size.height});
 }
 

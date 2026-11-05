@@ -635,6 +635,42 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
     }, {.width = 26.0f, .height = 22.0f, .key = id});
   }
 
+  /// 同上，但可控制**可见位**（宽度**恒定占位**）。
+  ///
+  /// 为何不用“悬停时才声明”：那是**布局反馈环**——按钮出现→行内容变宽
+  /// →按钮被挤出指针命中区→HoverOut→按钮消失→指针又落回行上→HoverIn→…
+  /// 实测（探头逐步扫过行右半）：动作数在 2 / 1 之间反复翻转，就是“按钮在闪”。
+  /// 只翻可见位时占位恒定（按钮数与激活位无关，只看该变更的语义），命中区不再变。
+  void CodeEditorPage::scm_icon_button_visible(Composer& c, const std::string& id,
+                                               const char* icon_name, const char* tip,
+                                               bool visible, std::function<void()> on_click) {
+    (void)custom<Button>(c, [id = id, icon_name = std::string(icon_name), tip = std::string(tip),
+                             visible, on_click = std::move(on_click)](Button& b) mutable {
+      b.set_id(id);
+      b.set_icon(icon_name);
+      b.set_variant(Button::Variant::Ghost);
+      b.set_size(Button::Size::Small);
+      b.set_hint(tip);
+      // 设计：**用固定宽度的外层容器占位，内层按钮只被隐藏**。
+      //
+      // 为何不用绝对定位（试过，不行）：贴右缘的基准是父容器右缘，而文件行
+      // 所在的 `row` 宽度由内容决定——按钮被摆到内容外面，然后被父级的
+      // 裁剪剔除掉（实测：属性面 visible=true、坐标也在，但画面上什么都没有）。
+      //
+      // 为何不能直接 `set_visible(false)` 就完事：它会**退出布局**（宽度变 0），
+      // 于是悬停时行内容宽度变化 → 按钮被挤动 → HoverOut → 按钮消失 → …
+      // 就是那个闪烁环。
+      //
+      // 所以靠外层容器保住宽度：容器恒 26px，里面的按钮显/隐都不影响行布局。
+      b.set_visible(visible);
+      b.set_variant(Button::Variant::Ghost);
+      b.set_size(Button::Size::Small);
+      b.style().width = 24.0f;
+      b.style().height = 22.0f;
+      if (on_click) b.on_click = [on_click]() { on_click(); };
+    }, {.width = 24.0f, .height = 22.0f, .key = id});
+  }
+
 
   // —— 视图 2：变更（面板：分组 + 行内动作 + 底部提交框）——
   //
@@ -823,25 +859,40 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
                   });
                   b.on_click = [this, change] { open_git_diff(change); };
                 }, {.height = 24.0f, .grow = true, .key = "row"});
-                // 行内动作：**只在该行悬停时存在**。
+                // 行内动作：**悬停时可见，宽度恒占位**。
                 //
-                // 用 `set_visible(false)` 会留下占位（行宽仍是“按钮也在”的那份），
-                // 于是文件名被白挤窄一截——所以这里干脆不声明。
-                // （外层是 `row(...)` 的 lambda，`continue` 在那里不合法，故用 if 包住。）
-                if (row_hovered) {
-                  if (change.has_unstaged_side() && !change.is_conflicted()) {
-                    scm_icon_button(c, "stage-" + change.path, "plus", "暂存更改",
-                                    [this, path = change.path] { git_stage(path, true); });
+                // ⚠ 不能“悬停时才声明”（原来的写法）：那是**布局反馈环**——
+                //   按钮出现 → 行内容变宽 → 按钮被挤到指针右侧/挤出命中区
+                //   → HoverOut → 按钮消失 → 指针又落回行上 → HoverIn → …
+                // 实测（探头逐步扫过行右半）：动作数在 2 / 1 之间反复翻转，
+                // 用户看到的就是“按钮在闪”。
+                //
+                // 也**不能靠 `set_visible` 保占位**：它会退出布局（宽度变 0），环照样在。
+                // 真正管用的结构：**外层固定宽度容器 + 内层按钮显隐**。
+                // 容器恒 76×22（三个按钮位）、始终存在 ⇒ 行宽与悬停无关 ⇒ 环断开。
+                //
+                // 为何预留三个位而不是一个：IDEA 的行内动作是“暂存 + 放弃”
+                // （已暂存的则是“取消暂存 + 放弃”）。只留一位就只能二选一，
+                // 而“暂存”与“放弃”是两个不同的意图，不该互相顶掉。
+                constexpr float kActionSlot = 26.0f;
+                constexpr float kActionCount = 3.0f;
+                (void)row(c, {.gap = 0.0f, .width = kActionSlot * kActionCount, .height = 22.0f,
+                              .key = "actions"}, [&] {
+                  if (!change.is_conflicted() && row_hovered) {
+                    // 未暂存：可以暂存；已暂存：可以取消暂存；两种情况都可以放弃。
+                    if (change.has_unstaged_side()) {
+                      scm_icon_button_visible(c, "stage-" + change.path, "plus", "暂存更改",
+                                              true,
+                                              [this, path = change.path] { git_stage(path, true); });
+                    } else if (change.has_staged_side()) {
+                      scm_icon_button_visible(c, "unstage-" + change.path, "minus", "取消暂存",
+                                              true,
+                                              [this, path = change.path] { git_stage(path, false); });
+                    }
+                    scm_icon_button_visible(c, "discard-" + change.path, "undo", "放弃更改",
+                                            true, [this, change] { git_discard(change); });
                   }
-                  if (change.has_staged_side()) {
-                    scm_icon_button(c, "unstage-" + change.path, "minus", "取消暂存",
-                                    [this, path = change.path] { git_stage(path, false); });
-                  }
-                  if (!change.has_staged_side() || change.has_unstaged_side()) {
-                    scm_icon_button(c, "discard-" + change.path, "undo", "放弃更改",
-                                    [this, change] { git_discard(change); });
-                  }
-                }
+                });
               });
             }
           }
