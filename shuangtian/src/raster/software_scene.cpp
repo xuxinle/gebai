@@ -331,10 +331,9 @@ auto ggx_specular(math::Vec3 normal, math::Vec3 view_dir, math::Vec3 light_dir,
 
 math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 view_dir,
                          const Lighting& lighting, float metallic, float roughness,
-                         float specular, float emission,                          math::Vec3 specular_tint,
-                         math::Vec3 world_position = math::Vec3{0.0f, 0.0f, 0.0f},
-                         math::Vec3 emissive_color = math::Vec3{1.0f, 1.0f, 1.0f},
-                         bool emission_unlit = false) {
+                         float specular, float emission, math::Vec3 specular_tint,
+                         math::Vec3 world_position, math::Vec3 emissive_color,
+                         bool emission_unlit) {
   const math::Vec3 n = normal.normalized();
   const math::Vec3 l = lighting.light_from.normalized();
 
@@ -450,12 +449,45 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
     }
   }
 
-  if (specular > 0.0f) {
+  // ## 主光高光：开关不能只看 `specular`（2026-11-05 修）
+  //
+  // 原实现在 `specular <= 0` 时**完全不算**平行光高光。而 `specular` 的默认
+  // 值是 0——于是**默认材质没有任何方向性高光**。
+  //
+  // 实测（`tools/ggx_highlight_probe`，黄铜 metallic=0.95 rough=0.22）：
+  //
+  // | specular | 高光峰值 |
+  // |---|---|
+  // | **0（默认）** | **0.13**（只是漫反射残留，没有高光） |
+  // | 1.0 | 1.00 |
+  //
+  // 而三路对照显示本框架「最亮 203 vs 真渲染器 255」——高光不够，这就是根源。
+  //
+  // ## 为何金属必须无计算
+  //
+  // 镜面反射的存在性由**菲涅耳 F0** 决定：
+  //
+  // | 材质 | F0 |
+  // |---|---|
+  // | 绝缘体（塑料/陶瓷） | 0.04（固定） |
+  // | 金属 | **= 固有色**（黄铜 ≈ 0.72/0.55/0.24） |
+  //
+  // 金属的 F0 远大于 0.04，所以它的反射不该被一个“额外的开关”关掉。
+  // `specular` 在语义上是**非金属反射的缩放**（Blender 的 `Specular IOR Level`
+  // 就是这种含义），它不该控制金属。
+  //
+  // 修法：`specular > 0` **或** `metallic > 0` 都算高光；非金属时按 `specular`
+  // 缩放，金属时按 F0 全量（不再乘 `specular`——否则还是要靠用户手动把它
+  // 调非零，问题没解决）。
+  const bool has_metal_reflection = metallic > 0.0f;
+  if (specular > 0.0f || has_metal_reflection) {
     const math::Vec3 spike =
         ggx_specular(n, view_dir, l, roughness, metallic, base_color, specular_tint);
-    result.x += spike.x * specular;
-    result.y += spike.y * specular;
-    result.z += spike.z * specular;
+    // 非金属按 `specular` 缩放（旧行为）；金属全量（F0 已是固有色）
+    const float scale = has_metal_reflection ? std::max(specular, 1.0f) : specular;
+    result.x += spike.x * scale;
+    result.y += spike.y * scale;
+    result.z += spike.z * scale;
   }
 
   // 自发光：加在**色调映射之前**（线性 HDR 域），这样才能被色调映射滚降。

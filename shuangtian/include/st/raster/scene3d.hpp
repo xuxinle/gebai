@@ -445,10 +445,24 @@ struct Lighting {
 /// 与 `shade_terms` 的关系：后者是**只含漫反射**的旧版（保留给老路径与
 /// 两腿一致性测试）；本函数是完整版，`specular == 0 && emission == 0` 时
 /// 退化为与 `shade_terms` **逐像素相同**的结果（渐进采用）。
+///
+/// ## 为何后三个参数带默认值（2026-11-05 修）
+///
+/// 实现在 `software_scene.cpp` 里一直有 12 个参数（后三个 `world_position` /
+/// `emissive_color` / `emission_unlit` 带默认值），而**头文件只声明了 9 个**。
+///
+/// 后果：外部调用方（测试、探针、GPU 腿之外的代码）只能拿到 9 参版本，
+/// 而链接器找的是 12 参符号——直接 `undefined symbol`。
+/// 实测就是这样：写一个探针调 `shade_surface` 编译不过。
+///
+/// 修复：头文件补上后三个默认参数，与实现声明一致。
 [[nodiscard]] auto shade_surface(math::Vec3 normal, math::Vec3 base_color,
                                  math::Vec3 view_dir, const Lighting& lighting,
                                  float metallic, float roughness, float specular,
-                                 float emission, math::Vec3 specular_tint) -> math::Vec3;
+                                 float emission, math::Vec3 specular_tint,
+                                 math::Vec3 world_position = math::Vec3{0.0f, 0.0f, 0.0f},
+                                 math::Vec3 emissive_color = math::Vec3{1.0f, 1.0f, 1.0f},
+                                 bool emission_unlit = false) -> math::Vec3;
 
 /// 三维场景交出的**原生纹理句柄**（供同后端的上层零拷贝合成）。
 ///

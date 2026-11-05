@@ -820,6 +820,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "诊断：把抽出来的灯光/材质/分组数值打出来。全黑时分不清是光反了、强度 0、还是基色没设"
     },
+    "metal_specular_probe": {
+      "kind": "executable",
+      "sources": ["tools/metal_specular_probe.cpp", "src/raster/software_scene.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "金属高光判据（防回归）：默认 specular 下金属必须有方向性高光、F0 要起作用、粗糙度要收敛。修前默认材质的金属完全没有高光"
+    },
+    "ggx_highlight_probe": {
+      "kind": "executable",
+      "sources": ["tools/ggx_highlight_probe.cpp", "src/raster/software_scene.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "量主光 GGX 高光的峰值：法线扫 0~90 度看最高值。若默认材质峰值为 0，说明平行光高光完全没算（specular 默认 0 是唯一开关）"
+    },
     "brightness_source_probe": {
       "kind": "executable",
       "sources": ["tools/brightness_source_probe.cpp", "src/python/mp_bridge.c",

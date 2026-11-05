@@ -3616,7 +3616,18 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   // 为何用 GGX 而不是 Blinn-Phong：后者的高光形状不随角度变化，掠射角下会崩
   // 成一束硬边；GGX 是微表面模型，粗糙度直接决定高光宽度与拖尾形状。
   float3 lit = base * scale;
-  if (specular_w > 0.0) {
+  // ## 开关不能只看 specular_w（与 C++ 侧 2026-11-05 的修同步）
+  //
+  // 镜面反射的存在性由**菲涅耳 F0** 决定：绝缘体 0.04、金属 = 固有色。
+  // 金属的 F0 远大于 0.04，不该被一个“额外开关”关掉——而 `specular`
+  // 默认值是 0，于是默认材质（包括金属）完全没有方向性高光。
+  //
+  // 实测（`tools/ggx_highlight_probe`）：黄铜默认 `specular=0` 时高光峰值
+  // 只有 0.13（全是漫反射残留），而三路对照显示本框架最亮 203 vs 真渲染器 255。
+  //
+  // 修法：`specular_w > 0` **或** `metallic > 0` 都算；非金属按 specular
+  // 缩放（旧行为），金属全量（F0 已是固有色）。
+  if (specular_w > 0.0 || metallic > 0.0) {
     float3 view_dir = normalize(g_eye.xyz - input.world);
     float3 h = normalize(view_dir + light);
     float n_dot_v = max(dot(n, view_dir), 0.0);
@@ -3635,7 +3646,8 @@ float4 ps_scene3d(VsOut input) : SV_Target {
       float fres = pow(1.0 - v_dot_h, 5.0);
       float3 F = f0 + (1.0 - f0) * fres;
       float denom = 4.0 * n_dot_v * n_dot_l;
-      lit += D * G * F / denom * n_dot_l * specular_w;
+      float scale_spec = (metallic > 0.0) ? max(specular_w, 1.0) : specular_w;
+      lit += D * G * F / denom * n_dot_l * scale_spec;
     }
   }
 
