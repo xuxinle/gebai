@@ -198,6 +198,64 @@ function makeGear(name, teeth, module, rimWidth, depth, bore, spokes, hubScale) 
     curveSegments: 12,
   });
   geometry.translate(0, 0, -depth * 0.5);
+
+  // ## 平滑法线（2026-11-05 补）
+  //
+  // `ExtrudeGeometry` 给出的是**非索引几何**：每个三角形有自己独立的三个
+  // 顶点，`computeVertexNormals()` 只会算回平面法线（没有共享顶点可平均）。
+  //
+  // 而 bpy 版通过 `poly.use_smooth = True` 得到的是**平滑**法线，
+  // 真 Blender 参照也一样。两边几何法线不同 → 高光完全不同。
+  //
+  // 实测：
+  //
+  // | | 主体均值 | 暗部 | 亮部 |
+  // |---|---|---|---|
+  // | bpy 脚本（平面，修前） | 69.5 | 78.2% | **0.0%** |
+  // | bpy 脚本（平滑，修后） | 79.6 | 42.0% | 1.1% |
+  // | 真 Blender（平滑） | 78.0 | 34.5% | 2.9% |
+  //
+  // ## 做法：手工按位置合并顶点后重算法线
+  //
+  // three 有 `BufferGeometryUtils.mergeVertices()`，但它是**附加模块**
+  // （`three/addons/...`），而本框架内嵌的是 core。所以这里手工做：
+  // 用位置的量化字符串作键，把同位置的顶点归一化到同一个索引。
+  //
+  // 量化到 1e-4：齿形坐标在这个精度下唯一，而浮点误差不会把两个不同
+  // 顶点误并（实测齿顶/齿根间距 >= 1e-2）。
+  {
+    const pos = geometry.attributes.position;
+    const map = new Map();
+    const newIndex = [];
+    const unique = [];
+    for (let i = 0; i < pos.count; ++i) {
+      const kx = Math.round(pos.getX(i) * 10000);
+      const ky = Math.round(pos.getY(i) * 10000);
+      const kz = Math.round(pos.getZ(i) * 10000);
+      const k = kx + ',' + ky + ',' + kz;
+      let idx = map.get(k);
+      if (idx === undefined) {
+        idx = unique.length;
+        map.set(k, idx);
+        unique.push([pos.getX(i), pos.getY(i), pos.getZ(i)]);
+      }
+      newIndex.push(idx);
+    }
+    // 只有在真合并到东西时才重建（否则原样返回）
+    if (unique.length < pos.count) {
+      const merged = new THREE.BufferGeometry();
+      const arr = new Float32Array(unique.length * 3);
+      for (let i = 0; i < unique.length; ++i) {
+        arr[i * 3] = unique[i][0];
+        arr[i * 3 + 1] = unique[i][1];
+        arr[i * 3 + 2] = unique[i][2];
+      }
+      merged.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+      merged.setIndex(newIndex);
+      merged.computeVertexNormals();
+      return { geometry: merged, pitchRadius: pitchRadius };
+    }
+  }
   geometry.computeVertexNormals();
   return { geometry: geometry, pitchRadius: pitchRadius };
 }

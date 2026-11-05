@@ -247,6 +247,28 @@ def make_gear(name, teeth, module, rim_width, depth,
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
+    # ## 平滑着色（2026-11-05 补）
+    #
+    # 真 Blender 参照（`tools/blender_reference.py:242`）对同一齿轮设了
+    # `poly.use_smooth = True`，而本脚本**没有**。
+    #
+    # 后果（实测，四格里唯一“绝对错”的一格）：
+    #
+    # | | 主体均值 | 暗部 | **亮部** |
+    # |---|---|---|---|
+    # | 本脚本（平面法线） | 69.5 | 78.2% | **0.0%** |
+    # | 真 Blender（平滑） | 78.0 | 34.5% | **2.9%** |
+    #
+    # **亮部 0.0%** ——整个画面一个高光像素都没有。而均值 69.5 看上去
+    # “接近”78.0，实际是因为暗部占 78.2%、整片均匀发暗把均值拉到了
+    # 看似合理的区间。这正是「判据选错缺陷会藏起来」的典型：只看均值时
+    # 它是四格里最“准”的（差 8.5），看亮部才发现它是最坏的。
+    #
+    # 根因：齿轮的平面法线让每个面只有一个朝向，而 GGX 高光只在
+    # `n·h` 接近 1 的极少数面上出现。加上齿侧、轮辐、盘面全是不同平面，
+    # 高光被稀释到统计意义上为零。
+    for poly in mesh.polygons:
+        poly.use_smooth = True
     obj = bpy.data.objects.new(name, mesh)
     return obj, pitch_radius
 
