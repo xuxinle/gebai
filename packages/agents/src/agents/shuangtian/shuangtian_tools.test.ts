@@ -885,6 +885,47 @@ describe("框架与提示词装配", () => {
     expect(prompt).toContain("回退")
   })
 
+  test("系统提示词含五类高危动作与逆向验证纪律", async () => {
+    const mod = await import("./shuangtian")
+    const prompt = mod.def.systemPrompt
+    // 五类“一写成就会错”的缺陷（同一根因反复变形的五次实录）——
+    // 它们全在“文本/属性面正常、只有用户能发现”那一类，是最贵的返工来源。
+    // 这五条的标题词必须都在（改成同义词可以，但不能整节被删）。
+    expect(prompt).toContain("禁用判据读了本帧尚未赋值的指针")
+    expect(prompt).toContain("构建期读实例的当前值")
+    expect(prompt).toContain("set_text")
+    expect(prompt).toContain("显示行号当内容身份")
+    expect(prompt).toContain("滚动/定位在排布前算")
+    // 逆向验证：“测试通过不等于测试有效”——没做这一步等于没测
+    expect(prompt).toContain("逆向验证")
+    expect(prompt).toContain("不等于测试有效")
+    // 属性面 vs 像素两类缺陷的分工（形态错只能靠截图）
+    expect(prompt).toContain("属性面")
+    expect(prompt).toContain("形态错")
+    // DSL 踩坑：custom_container 与 BoxProps 的两条高频错（后者带具体报错文案，好记）
+    expect(prompt).toContain("custom_container")
+    expect(prompt).toContain("BoxProps")
+    expect(prompt).toContain("has no member named")   // 典型报错，定位时靠它
+  })
+
+  test("系统提示词写明：框架缺能力要补齐，不在应用层绕路", async () => {
+    const mod = await import("./shuangtian")
+    const prompt = mod.def.systemPrompt
+    // 这是“框架会随使用变好”还是“越来越坑”的分水岭，必须显式写在提示词里。
+    expect(prompt).toContain("框架缺能力")
+    expect(prompt).toContain("当场补齐")
+    // 反面：绕路的三张脸（改信息结构 / 位置碰运气 / 换三种写法）
+    expect(prompt).toContain("改变信息结构")
+    expect(prompt).toContain("换三种写法")
+    // “能力有但没暴露给 DSL” 也算同一个坑（否则会以“框架有啊”为由继续绕）
+    expect(prompt).toContain("没暴露")
+    // 补齐流程不能只写“改框架”：必须有用例 + 逆向验证 + 回去改绕路代码
+    expect(prompt).toContain("默认值不变")
+    expect(prompt).toContain("绕路代码")
+    // 唯一的例外（用户明确说不要动框架）也要写清，否则会变成不补的借词
+    expect(prompt).toContain("先不要动框架")
+  })
+
   test("README/客户端导出面可用（协议常量与错误类型）", async () => {
     const client = await import("./shuangtian_client")
     expect(typeof client.resolve_target).toBe("function")
