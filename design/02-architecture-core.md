@@ -69,7 +69,7 @@
 | `GEBAI_PUBLIC_URL` | 对外可访问地址（如 `http://localhost:3000` 或公网域名）：飞书用户授权（user_access_token）自动回调默认取 `{GEBAI_PUBLIC_URL}/api/v1/oauth/feishu/callback`（缺省回落 `http://localhost:{GEBAI_PORT|3000}`），需在开发者后台「安全设置 → 重定向 URL」登记 | 空（回落 localhost） |
 | `GEBAI_SELF_MODIFY` | 是否允许 `self_optimize` 修改服务端源码（`true`/`false`） | `false` |
 | `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：风险能力**降级而非禁用**——`sh` 只读命令白名单 + 重定向限用户目录、`py`/`js` 只读运行时（写/进程/网络屏蔽，仅保留文件读取）、`write`/`edit`/`file` 限定用户目录内、`task_*` 调度类硬阻断、子Agent 工具按 `Tool.safeMode` 自主声明过滤注册（详见「安全模型 → 安全模式」） | `false` |
-| `GEBAI_LLM_MODELS` | **模型配置清单**（JSON 对象数组，**首选**）：每项一份完整自洽的接入信息——`name`（配置名，缺省用模型名，清单内唯一）/ `model`（必填）/ `url`（别名 `api_base`）/ `api_key`（别名 `key`）/ `api_kind` / `max_context` / `max_output_tokens` / `multimodal` / `extra_params`，以及可选的独立视觉模型 `vision_model` + `vision_api_base`/`vision_api_key`/`vision_api_kind`/`vision_max_context`/`vision_extra_params`。启动基准取第一条（列表默认），前端标题栏右侧的模型下拉**按会话切换**（会话选中项持久化在 chat.json 的 `modelConfig`）；配置本项后旧的 `GEBAI_LLM_*`/`OPENAI_*`/`GEBAI_VISION_*` 散项**进程级整体让位**（既不混读，也不会上又写成第三种配置），任务级/子会话显式注入的同名散项仍生效（优先级高于条目） | 空（回退下面的单配置写法） |
+| `GEBAI_LLM_MODELS` | **模型配置清单**（JSON 对象数组，**首选**）：每项一份完整自洽的接入信息——`name`（配置名，缺省用模型名，清单内唯一）/ `model`（必填）/ `url`（别名 `api_base`）/ `api_key`（别名 `key`）/ `api_kind` / `max_context` / `max_output_tokens` / `multimodal` / `extra_params`，以及可选的独立视觉模型 `vision_model` + `vision_api_base`/`vision_api_key`/`vision_api_kind`/`vision_max_context`/`vision_extra_params`。启动基准取第一条（列表默认），前端标题栏右侧的模型入口**按会话切换**（无边框的一行配置名：桌面悬停即展开配置清单、点条目直接切换，触屏无悬停改为点击展开；会话选中项持久化在 chat.json 的 `modelConfig`）；配置本项后旧的 `GEBAI_LLM_*`/`OPENAI_*`/`GEBAI_VISION_*` 散项**进程级整体让位**（既不混读，也不会上又写成第三种配置），任务级/子会话显式注入的同名散项仍生效（优先级高于条目） | 空（回退下面的单配置写法） |
 | `GEBAI_LLM_CONFIG` | 指名使用清单中的哪一条（条目 `name`）：由会话选择自动写入任务 env（`EnvManager.resolve` 按会话 `modelConfig` 注入，优先级低于显式环境变量）；名字未命中/未配置清单时回落默认配置（不会变成「无模型」） | 空（= 清单第一条） |
 | `GEBAI_LLM_MODEL` / `OPENAI_*` | LLM Provider 与模型配置（**未配置 `GEBAI_LLM_MODELS` 时生效**） | - |
 | `GEBAI_LLM_API_BASE` / `GEBAI_LLM_API_KEY` | LLM 服务地址与密钥（等价 `OPENAI_*`；未配置 `GEBAI_LLM_MODELS` 时生效） | - |
@@ -882,7 +882,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **读取优先级二选一，不混读**：配置了清单就以清单为准（启动基准 = 第一条，即列表默认），旧的 `GEBAI_LLM_*`/`OPENAI_*`/`GEBAI_VISION_*` 散项在进程级**整体让位**（启动时从环境里摘除）——混读会拼出谁也没写过的一份（如旧接口地址贴到新模型上）；未配置清单时行为与之前完全一致
 - **选择存在会话里**：`SessionData.modelConfig`（chat.json 持久化）记住该会话选的是哪一条；`EnvManager.resolve` 把它以 `GEBAI_LLM_CONFIG` 注入任务 env，任务启动按它重建主/视觉 Provider——**对话/定时任务/飞书桥接/子会话继承都走同一口**。优先级：会话选择 < 显式环境变量（会话 env / 浏览器本地 / 子会话自定义），于是子会话仍可单独指向另一个模型
 - **失效与回落**：名字在清单里已不存在（清单改过、会话从别处导入）时回落默认配置（不报错、不变成「无模型」）；切换/清除模型配置不刷新 `updatedAt`（不动列表排序基线）
-- **对外面**：`GET /api/v1/models` 返回清单摘要（名称/模型/接口地址/窗口/多模态/视觉模型，**密钥永不出站**）、WS `session.model_config.set` 写回会话；前端标题栏右侧最左的模型下拉按会话切换（未配置清单或草稿态时隐藏），上下文圆环分母按当前配置的 `max_context` 算
+- **对外面**：`GET /api/v1/models` 返回清单摘要（名称/模型/接口地址/窗口/多模态/视觉模型，**密钥永不出站**）、WS `session.model_config.set` 写回会话；前端标题栏右侧最左的模型入口按会话切换（未配置清单或草稿态时隐藏）——入口只有一行无边框的配置名，悬停/点击展开的清单**就是**选择面（每条给出配置名 + 模型、多模态、接口主机，宽度随最宽条目，当前项高亮），点条目直接切换并收起；上下文圆环分母按当前配置的 `max_context` 算
 
 #### 前端环境变量（浏览器本地，不保存到服务端）
 

@@ -87,6 +87,7 @@
         <span id="header-title" class="header-title"></span>
         <div class="header-right">
           <!-- 模型配置切换器（标题栏右侧最左）：按当前会话选择 GEBAI_LLM_MODELS 中的哪一条；
+               入口只是一行配置名（无边框/无下拉箭头），悬停或点击展开配置清单（见 model-picker.ts）；
                未配置清单（只有一份启动配置）时整组隐藏，由 model-picker.ts 的 syncModelPicker 决定 -->
           <div id="model-picker" class="model-picker" hidden></div>
           <!-- 单轮计时器：运行中实时走，结束定格保留，下次运行重启；按时长分级变色，hover 显示累计总运行时（外观 tab 可关） -->

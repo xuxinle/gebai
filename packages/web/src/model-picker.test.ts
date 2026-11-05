@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { configCtxWindow, configTipLines, resolveConfigName } from "./model-picker-core"
+import { configCtxWindow, configMenuDetail, resolveConfigName } from "./model-picker-core"
 
 const LIST = [
   { name: "deepseek", model: "deepseek-flash", apiKind: "openai", apiBase: "https://api.deepseek.com", maxContextTokens: 512000, multimodal: true },
@@ -28,14 +28,15 @@ describe("模型配置选择器（纯逻辑）", () => {
     expect(configCtxWindow(LIST, "missing")).toBe(0)
   })
 
-  test("悬浮提示含模型/接口/多模态/视觉模型，一眼确认选的是哪一份", () => {
-    expect(configTipLines(LIST[1])).toEqual([
-      "模型配置：glm",
-      "模型 glm-5.3（openai）",
-      "接口 https://open.bigmodel.cn/api/paas/v4",
-      "多模态：仅文本",
-      "视觉模型 glm-5.3-flash",
-    ])
-    expect(configTipLines({ ...LIST[0], apiBase: "" })).toEqual(["模型配置：deepseek", "模型 deepseek-flash（openai）", "多模态：支持图片输入"])
+  test("清单副标题给出模型标识、多模态能力与接口主机：不必切过去就能判断能干什么", () => {
+    expect(configMenuDetail(LIST[0])).toBe("deepseek-flash · 支持图片 · api.deepseek.com")
+    expect(configMenuDetail(LIST[1])).toBe("glm-5.3 · 仅文本 · open.bigmodel.cn")
+    // 独立视觉模型：主模型标仅文本也能看图（副标题给出视觉模型这一事实）
+    expect(configMenuDetail({ ...LIST[1], multimodal: true })).toBe("glm-5.3 · 图片+视觉模型 · open.bigmodel.cn")
+    // 未声明接口地址：不补空段（不留多余的「 · 」）
+    expect(configMenuDetail({ ...LIST[0], apiBase: "" })).toBe("deepseek-flash · 支持图片")
+    // 非法/相对地址：去协议头后原样给出
+    expect(configMenuDetail({ ...LIST[0], apiBase: "http://localhost:8000/v1" })).toBe("deepseek-flash · 支持图片 · localhost:8000")
+    expect(configMenuDetail({ ...LIST[0], apiBase: "not a url" })).toBe("deepseek-flash · 支持图片 · not a url")
   })
 })

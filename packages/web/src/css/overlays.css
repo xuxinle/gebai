@@ -252,21 +252,66 @@
 }
 /* 自绘下拉选择 */
 .sel { display: inline-block; }
-/* 标题栏模型配置切换器（右侧最左）：紧凑化，不抢标题行的高度与宽度；
-   名字长时省略号截断（悬浮 data-tip 给出完整模型/接口信息） */
+/* 标题栏模型配置切换器（右侧最左）：只有一行配置名——无边框、无下拉箭头、无内边距，
+   悬停即展开配置清单（见下），名字过长时省略号截断 */
 .model-picker { display: flex; align-items: center; flex: none; }
 .model-picker[hidden] { display: none; }
-.model-picker .sel-btn {
-  padding: 3px 8px;
-  gap: 6px;
+.model-trigger {
+  padding: 0;
+  border: none;
+  background: none;
   font-size: 12px;
-  border-radius: 999px;
-  background: transparent;
+  line-height: 1.5;
   color: var(--text-muted);
+  cursor: pointer;
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--transition);
 }
-.model-picker .sel-btn:hover { color: var(--text); }
-.model-picker .sel-val { min-width: 0; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-picker .sel-arrow { border-top-color: currentColor; }
+.model-trigger:hover,
+.model-trigger[aria-expanded="true"] { color: var(--text); }
+.model-trigger:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+/* 配置清单（悬停/点击展开的浮层）：宽度由最宽的配置名撑开，不留固定空白 */
+.model-menu {
+  position: fixed;
+  z-index: 400;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.model-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 5px 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition);
+}
+.model-opt:hover { background: var(--bg-hover); }
+.model-opt.active { background: var(--accent-soft); color: var(--accent); }
+.model-opt .mo-sub { font-size: 11px; color: var(--text-faint); }
+.model-opt.active .mo-sub { color: inherit; opacity: 0.8; }
 .sel-btn {
   display: inline-flex;
   align-items: center;
@@ -335,6 +380,8 @@
 @media (max-width: 860px) {
   #sidebar-toggle { display: grid; }
   .msg.user { max-width: 84%; }
+  /* 触屏无悬停：入口靠点击展开，给足触摸目标（桌面仍是紧致的一行文字） */
+  .model-trigger { display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; font-size: 12.5px; }
 }
 
 /* ---------- 登录层（服务模式） ---------- */
