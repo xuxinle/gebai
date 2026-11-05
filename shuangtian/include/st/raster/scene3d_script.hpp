@@ -403,6 +403,43 @@ struct SceneSpec {
   /// 模型/人才能一眼定位到源文件的那一行。
   std::string three_script_name{};
 
+  // ────────────────────────────────────────────────────────────────
+  // bpy 源码场景（2026-11-05）
+  // ────────────────────────────────────────────────────────────────
+  //
+  // ## 为什么要第三条表达层
+  //
+  // `objects`（JSON）语料稀薄，`three_script` 在“一般三维场景”上很好，
+  // 但**精确建模**（齿轮齿形、涡轮叶片、程序化几何）上不如 bpy：
+  // 模型的语料里 Blender 那套（`bmesh` / `bpy.ops.primitive_*` /
+  // `mathutils`）在机械件与资产级建模上远厚。
+  //
+  // ## 与另两条的关系：**三选一，按优先级**
+  //
+  // | 字段 | 优先级 | 说明 |
+  // |---|---|---|
+  // | `bpy_script` | 1 | 非空时最高优先 |
+  // | `three_script` | 2 | 非空时次之 |
+  // | `objects` | 3 | 两者都空时的声明式路径 |
+  //
+  // 为何不允许“两个脚本同时给”：那会让“到底以哪个为准”变成隐规则，
+  // 而写出两个的人一定是想叠加，叠加的语义（同一个场景里两份几何共存？
+  // 各自独立的相机/灯光谁生效？）没有一个自然答案。当前定死为前两条互斥。
+  //
+  // ## 下游完全一致
+  //
+  // bpy 路径抽出来的也是 `ThreeScene`（见 `bpy_runtime.hpp`），所以
+  // 相机覆盖/整体姿态/材质覆盖三扇窗对它**同样生效**——那是刻意设计的，
+  // 否则裁云要写两套镜头编排逻辑。
+  /// bpy 源码（非空时忽略 `three_script` 与 `objects`）。
+  ///
+  /// 契约：脚本里把要导出的东西赋给 `result`（可选）；不写就导出场景里
+  /// 全部带 mesh 的对象。
+  std::string bpy_script{};
+
+  /// bpy 源码在报错里的**文件名**（默认 `<inline-bpy>`）。
+  std::string bpy_script_name{};
+
   // ── 叠加层（只对 `three_script` 生效）──
   //
   // ## 为何需要“叠加”而不是“覆盖”
@@ -464,6 +501,31 @@ struct SceneSpec {
 /// `Timeout`（超过执行时限）、`Invalid`（脚本未产出场景）。
 [[nodiscard]] auto scene_spec_from_three(std::string_view script,
                                          std::string_view script_name = "<inline-three>")
+    -> Result<SceneSpec>;
+
+/// 把 **bpy 源码**抽成 `SceneSpec`（Blender 的 Python 建模 API）。
+///
+/// ## 与 `scene_spec_from_three` 的关系
+///
+/// 两者**同构**：都是“跑脚本 → 抽 `ThreeScene` → 填 `SceneSpec` 的相机/光照”，
+/// 区别只在于用哪个运行时。所以下游（`render_scene*`）对它们一视同仁。
+///
+/// ## 能力与边界
+///
+/// 子集覆盖 `mathutils` / `bpy.data` / `bpy.ops.mesh.primitive_*` / `bmesh`。
+/// 已知硬限制：
+///
+/// · **`@` 运算符不可用**（MicroPython 编译器不支持 PEP 465），用
+///   `.matmul()` / `.dot()` 代替
+/// · 面三角化用**扇形**：凸多边形正确，凹多边形会出错
+/// · 多材质对象只取第 0 个槽
+///
+/// 详见 `docs/python.md`。
+///
+/// 错误：`Unsupported`（MicroPython 不可用）、`Invalid`（Python 语法/运行时错，
+/// 带异常类型与消息）、`Parse`（抽取结果不合法）。
+[[nodiscard]] auto scene_spec_from_bpy(std::string_view script,
+                                       std::string_view script_name = "<inline-bpy>")
     -> Result<SceneSpec>;
 
 /// 把 JSON 解析成 `SceneSpec`。

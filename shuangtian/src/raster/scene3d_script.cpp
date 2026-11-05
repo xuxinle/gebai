@@ -1,6 +1,7 @@
 #include "st/raster/scene3d_script.hpp"
 
 #include "st/raster/three_runtime.hpp"
+#include "st/raster/bpy_runtime.hpp"   // bpy 路径的同一段落（产出同一个 ThreeScene）
 
 #include "st/raster/gltf.hpp"
 #include "st/codec/png.hpp"
@@ -1299,29 +1300,47 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
     return st::unexpected(ErrorCode::Parse, "snap：步长必须 >= 0（0 = 关闭）");
   }
 
-  // ── three.js 源码场景（与 `objects` 互斥，非空时优先） ──
+  // ── 脚本场景（与 `objects` 互斥，非空时优先）──
   //
-  // 先读它，因为它决定 `objects` 是否必填：写 three 脚本时 `objects` 可以省。
+  // 先读它们，因为它们决定 `objects` 是否必填：写脚本时 `objects` 可以省。
+  //
+  // ## 优先级：bpy > three > objects
+  //
+  // 两者同时写一定是误操作（想叠加，但叠加语义不明：两个场景各带相机/灯光，
+  // 谁生效？）。这里给**一个确定的顺序**而不是报错——报错会让一份“其实
+  // 能跑”的配置失败，而模型从两个例子各拿一段是常见情形。
+  //
+  // 选 bpy 优先是因为它在“精确建模”上能力更强：真写了 bpy，那才是想要的。
+  // 被忽略的那条会记一条 warn，不静默。
+  spec.bpy_script = json_get_string(json, "bpy_script", "");
+  spec.bpy_script_name = json_get_string(json, "bpy_script_name", "");
   spec.three_script = json_get_string(json, "three_script", "");
   spec.three_script_name = json_get_string(json, "three_script_name", "");
 
+  if (!spec.bpy_script.empty() && !spec.three_script.empty()) {
+    ST_LOG_WARN("场景同时写了 bpy_script 与 three_script：以 bpy_script 为准，three_script 被忽略");
+    spec.three_script.clear();
+    spec.three_script_name.clear();
+  }
+  // 脚本模式 = 任一脚本非空（后续建树/约束逻辑对它们天然空转）
+  const bool script_mode = !spec.bpy_script.empty() || !spec.three_script.empty();
+
   const Json* objects = json_find(json, "objects");
-  if (objects == nullptr && spec.three_script.empty()) {
-    // `objects` 是必填的（哪怕是空数组）——除非写了 three 脚本
+  if (objects == nullptr && !script_mode) {
+    // `objects` 是必填的（哪怕是空数组）——除非写了脚本
     return st::unexpected(ErrorCode::Parse,
-                          "objects：缺少（哪怕是空数组也要写；或改用 three_script）");
+                          "objects：缺少（哪怕是空数组也要写；或改用 three_script / bpy_script）");
   }
   if (objects != nullptr && !objects->is_array()) {
     return st::unexpected(ErrorCode::Parse, "objects：需要数组");
   }
-  // 写了 three 脚本时 `objects` 被忽略（文档里已声明）：**不建树、不跑约束**——
+  // 写了脚本时 `objects` 被忽略（文档里已声明）：**不建树、不跑约束**——
   // 那些结果会被渲染路径丢掉，白花时间且掩盖真正的错。
   //
-  // 实现方式是“把处理范围限定在非 three 模式”：用一个空数组代替 objects，
+  // 实现方式是“把处理范围限定在非脚本模式”：用一个空数组代替 objects，
   // 后面的建树/重名/约束逻辑因而天然空转（它们对空列表都是无操作）。
-  const bool three_mode = !spec.three_script.empty();
   const Json kEmptyObjects = Json::array();
-  const Json& objects_value = three_mode ? kEmptyObjects : *objects;
+  const Json& objects_value = script_mode ? kEmptyObjects : *objects;
   {
     const auto& arr = objects_value.get_ref<const Json::array_t&>();
     spec.objects.reserve(arr.size());
@@ -1446,8 +1465,40 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
   return spec;
 }
 
+namespace {
+
+/// 文本看起来是不是 bpy 脚本？
+///
+/// 判据：含 `import bpy` / `import bmesh` / `from mathutils`。
+/// 理由见 `parse_scene_spec_text` 的说明——一个三维脚本不可能不 import 它的库。
+auto looks_like_bpy(std::string_view text) -> bool {
+  // 只在**行首**（允许前导空白）找 import，避开字符串里出现的同名文本。
+  // 不是完整词法分析，但足够稳：bpy 脚本的 import 必在行首（Python 语法要求）。
+  constexpr std::string_view kNeedles[] = {"import bpy", "import bmesh", "from mathutils",
+                                          "import mathutils"};
+  std::size_t line_start = 0;
+  while (line_start <= text.size()) {
+    const std::size_t line_end = text.find('\n', line_start);
+    const std::string_view line =
+        text.substr(line_start, (line_end == std::string_view::npos ? text.size() : line_end) -
+                                    line_start);
+    // 跳过前导空白
+    std::size_t at = 0;
+    while (at < line.size() && (line[at] == ' ' || line[at] == '\t')) ++at;
+    const std::string_view stripped = line.substr(at);
+    for (const auto needle : kNeedles) {
+      if (stripped.substr(0, needle.size()) == needle) return true;
+    }
+    if (line_end == std::string_view::npos) break;
+    line_start = line_end + 1;
+  }
+  return false;
+}
+
+}  // namespace
+
 auto parse_scene_spec_text(std::string_view text) -> Result<SceneSpec> {
-  // ## 自动识别两种形态：JSON 声明式 / three.js 源码
+  // ## 自动识别三种形态：JSON 声明式 / three.js 源码 / bpy 源码
   //
   // 这个函数是裁云 `model_script`、三维预览、自检三条路的**共同入口**。
   // 让它在文本层面分流，比在每个调用方各写一遍判断好：
@@ -1455,16 +1506,50 @@ auto parse_scene_spec_text(std::string_view text) -> Result<SceneSpec> {
   // · 一处判断，三条路自动同时支持（少一处漏改的机会）
   // · 同一种输入在任何入口得到同一个结果
   //
-  // 判据不用“看起来像不像 JS”——而是**先试 JSON 解析**：
-  // 合法 JSON 只有当它真的是对象时才算声明式场景；其余一律当 three.js 源码。
-  // 这样 `{` 开头的 three 脚本（极少）也能走到正确分支。
+  // ## 判据
+  //
+  // ① **先试 JSON**：合法 JSON 且是对象 ⇒ 声明式场景
+  //    （里面可以带 `three_script` / `bpy_script` 字段，那是声明式包着脚本）
+  // ② 不是 JSON 时，再看**是不是 Python**：
+  //    · 含 `import bpy` / `import bmesh` / `from mathutils` ⇒ bpy
+  //    · 否则 ⇒ three.js
+  //
+  // ## 为何靠 import 语句而不是语法分析
+  //
+  // 真要做“这是 Python 还是 JS”的判断得写两个词法器。而**一个三维脚本
+  // 不可能不 import 它的库**：bpy 脚本必`import bpy`（否则什么也做不了），
+  // three 脚本必有 `THREE.`。两个特征都稳。
+  //
+  // 探测顺序（先 bpy）与实际执行顺序一致；两者都不命中时归 three——
+  // 那条路的报错已经足够具体（会把语法错指到行）。
   const auto json = json_parse(text);
   if (json.has_value() && json->is_object()) {
-    // 显式写了 `three_script` 字段的 JSON：那是声明式包着脚本，走 JSON 路径
     return parse_scene_spec(*json);
   }
-  // 非 JSON → 当 three.js 源码处理（空文本会在这里得到明确报错）
+  // 非 JSON：区分 Python（bpy）与 JS（three）
+  if (looks_like_bpy(text)) {
+    return scene_spec_from_bpy(text, "<inline-bpy>");
+  }
   return scene_spec_from_three(text, "<inline>");
+}
+
+
+auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
+    -> Result<SceneSpec> {
+  if (script.empty()) {
+    return st::unexpected(ErrorCode::Invalid, "bpy 脚本为空");
+  }
+  auto extracted = BpySceneExtractor::extract(script);
+  if (!extracted.has_value()) return st::forward_error(extracted.error());
+
+  // 与 `scene_spec_from_three` 同构：相机/光照就位，`bpy_script` 留在 spec 里
+  // （调用方序列化出去、以后再渲染仍能重放）。
+  SceneSpec spec{};
+  spec.camera = extracted->camera;
+  spec.lighting = extracted->lighting;
+  spec.bpy_script = std::string(script);
+  spec.bpy_script_name = std::string(script_name);
+  return spec;
 }
 
 auto scene_spec_from_three(std::string_view script, std::string_view script_name)
@@ -1823,22 +1908,34 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
                  Surface& canvas, math::Color background) -> Result<void> {
   canvas.clear(background);
 
-  // ## three.js 源码场景：**另一条完整的渲染路径**
+  // ────────────────────────────────────────────────────────────────
+  // 脚本场景（three.js 或 bpy）：**同一条完整渲染路径**
+  // ────────────────────────────────────────────────────────────────
   //
-  // 为什么不把抽出来的几何塞进 `spec.objects` 复用下面的遍历：
+  // ## 为何不把抽出来的几何塞进 `spec.objects` 复用下面的遍历
   //
-  // | 项 | `SceneObjectSpec` 路径 | three 抽出来的东西 |
+  // | 项 | `SceneObjectSpec` 路径 | 脚本抽出来的东西 |
   // |---|---|---|
   // | 几何 | **按参数现场生成**（shape + size） | **已给定的顶点表**（没有参数可重生成） |
   // | 材质 | 对象级字段 | 已翻译成 `Material` 结构 |
-  // | 层级 | `SceneObjectSpec` 树 + 约束解算 | 已经是 three 的世界矩阵 |
+  // | 层级 | `SceneObjectSpec` 树 + 约束解算 | 已经是世界矩阵 |
   //
   // 硬塞进去就要给 `SceneObjectSpec` 加一个“外部几何”字段并绕过约束/布尔/阵列
   // 全部逻辑——那些路径对它都是无意义的，而每个绕过点都是一个“以为生效实际没走”的坑。
-  // 分开写虽然多几十行，但两边都保持单一直线。
-  if (!spec.three_script.empty()) {
-    auto three_scene = ThreeRuntime::instance().evaluate(spec.three_script, spec.three_script_name);
-    if (!three_scene.has_value()) return st::forward_error(three_scene.error());
+  //
+  // ## 为何 bpy 与 three 共用这一段（而不是各写一份）
+  //
+  // 两者的产物都是 `ThreeScene`（见 `bpy_runtime.hpp` 的设计）。共用的好处：
+  // 相机覆盖/整体姿态/材质覆盖三扇窗**自动对 bpy 生效**——否则裁云要写
+  // 两套镜头编排逻辑，而那正是“改一处漏一处”的源头。
+  //
+  // 差异只在前三行（取哪份 `ThreeScene`）；后面的渲染流程逐行相同。
+  if (!spec.bpy_script.empty() || !spec.three_script.empty()) {
+    const bool bpy_mode = !spec.bpy_script.empty();
+    auto script_scene = bpy_mode
+        ? BpySceneExtractor::extract(spec.bpy_script)
+        : ThreeRuntime::instance().evaluate(spec.three_script, spec.three_script_name);
+    if (!script_scene.has_value()) return st::forward_error(script_scene.error());
 
     // ## 相机：场景自带 vs 图层覆盖
     //
@@ -1846,13 +1943,13 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     // `camera_override` 有值时换掉它——裁云用这个做镜头推拉/机位切换，
     // 而不必让每个场景文件重写一遍。
     const Camera camera = spec.camera_override.has_value() ? *spec.camera_override
-                                                           : three_scene->camera;
+                                                           : script_scene->camera;
 
     scene.begin_frame(background);
     scene.set_camera(camera);
-    scene.set_lighting(three_scene->lighting);
-    for (const auto& warning : three_scene->warnings) {
-      ST_LOG_WARN("three 场景：{}", warning);
+    scene.set_lighting(script_scene->lighting);
+    for (const auto& warning : script_scene->warnings) {
+      ST_LOG_WARN("{} 场景：{}", bpy_mode ? "bpy" : "three", warning);
     }
     // ## 整体姿态：乘在世界矩阵**后面**
     //
@@ -1861,7 +1958,7 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     //
     // 反过来乘（`object.world * pose`）会让每个物体**各自绕自身原点**转，
     // 一个由多个零件组成的模型会当场散开——那是两种完全不同的效果。
-    for (const auto& object : three_scene->objects) {
+    for (const auto& object : script_scene->objects) {
       if (!object.visible) continue;
       scene.set_cull_mode(object.cull);
       // 材质：默认用物体自己的（模型的一部分）；`material_override` 有值时统一换掉

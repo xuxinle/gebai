@@ -1,78 +1,73 @@
-feat(bpy): 场景抽取 —— bpy 脚本 → ThreeScene
+feat(bpy): 接入 scene3d_script —— bpy_script 三路并存
 
-打通 bpy 脚本到渲染器的最后一段：抽取器把 `bpy.data` 里的场景转成
-`ThreeScene`，与 three.js 那条路的下游完全一致。
+bpy 脚本现在能像 three.js 一样直接写进场景 JSON，端到端出像素。
 
-判据 10/10 全过（`tools/bpy_scene_probe`）。
+## 三条表达路径（按优先级）
 
-## 为什么抽取写在 Python 里
-
-C++ 侧读 bpy 对象要逐层调 MicroPython API：三层深度的对象
-（`obj.data.vertices[0].co.x`）就是四五次查表 + 类型检查，每个调用点
-都要写错误处理——代码量极大且易错。
-
-而 Python 侧写是自然表达：
-
-    for v in obj.data.vertices:
-        out.append(v.co.x)
-
-所以分工是：**Python 理解 bpy，C++ 搬数据**（后者只做 dict → struct）。
-
-```
-bpy.data.reset()          ① 重置场景
-      ↓
-跑脚本                    ② 建出 bpy 场景
-      ↓
-_st_extract.extract_json()  ③ Python 抽取 → 扁平 JSON
-      ↓
-parse_extracted_json()    ④ C++ 搬进 ThreeScene
-```
-
-## 实现要点
-
-| 文件 | 职责 |
-|---|---|
-| `src/python/extract.py` | 遍历场景、三角化、算世界矩阵、材质/相机/灯光 → JSON |
-| `src/raster/bpy_runtime.cpp` | JSON → `ThreeScene`（纯数据搬运，无 bpy 知识） |
-| `include/st/raster/bpy_runtime.hpp` | 对外契约 + 用法 |
-| `parse_extracted_json` | 单独暴露给测试（不必每次跑 Python） |
-
-## 抽取里三个容易错的地方（都钉进判据）
-
-| 项 | 错法 | 症状 |
+| 字段 | 优先级 | 说明 |
 |---|---|---|
-| 矩阵布局 | bpy 行主序 vs `Mat4` 列主序 | 位置对但旋转/缩放错位 |
-| `fov_y` 单位 | bpy 弧度 vs `Camera.fov_y_degrees` 角度 | 视野极窄、只看到一角 |
-| 灯光方向 | `Light.direction` 是**指向光源**（与相机 -Z 视线相反） | 物体被从背面照亮 |
+| `bpy_script` | 1 | bpy 源码（Blender Python API） |
+| `three_script` | 2 | three.js 源码 |
+| `objects` | 3 | 声明式 JSON（原有路径） |
 
-这三条都不是"会崩"而是"画面有点不对没人报错"——所以探针用可断言的量
-（顶点数、包围盒、材质值、fov 角度）把抽取钉住。
+### 自动识别（文本入口）
+
+`parse_scene_spec_text()` 是裁云 `model_script` / 三维预览 / 自检三条路的
+共同入口，按顺序分流：
+
+1. 先试 JSON（合法且是对象 ⇒ 声明式）
+2. 行首含 `import bpy` / `import bmesh` / `from mathutils` ⇒ bpy
+3. 否则 ⇒ three.js
+
+靠 import 语句而不是语法分析：真要做"Python 还是 JS"得写两个词法器，
+而一个三维脚本不可能不 import 它的库。两个特征都稳。
+
+### 渲染路径统一
+
+两条脚本路**共用同一段**渲染代码（只在前三行决定取哪份 `ThreeScene`）：
+
+    auto script_scene = bpy_mode ? BpySceneExtractor::extract(spec.bpy_script)
+                                : ThreeRuntime::instance().evaluate(...);
+    // 以下逐行相同：camera_override / extra_transform / material_override / end_frame
+
+好处：裁云的镜头编排（推拉/机位/整体姿态/统一材质）**自动对 bpy 生效**
+——否则要写两套，而那正是"改一处漏一处"的源头。
+
+### 同时写两个脚本
+
+不报错，**bpy 胜**，记一条 warn。理由：两者同时写一定是误操作，而模型从
+两个例子各拿一段是常见情形；报错会让一份"其实能跑"的配置失败，给确定顺序
+加警告更有用。
 
 ## 这轮修掉的问题
 
-1. **输出缓冲 8 KB 太小** —— 场景 JSON 有数 MB，截断后报
-   `JSON 解析失败（第 8192 字节）… unexpected end of input`，
-   看起来像"序列化器写错了"，实际是**读回来时被截断了**。改 4 MB
-2. **`MICROPY_PY_JSON` 在 MINIMUM 档没有** —— `import json` 报 ModuleNotFound。
-   而抽取结果全是自己构造的简单类型，所以手写 60 行序列化器（无依赖、好查）
-3. **`bpy.data` 跨 run 存活导致数据累积** —— 第二个脚本报
-   `ValueError: 已存在同名数据块：'Cube'`，看起来像"脚本重名了"，
-   实际是上一个脚本的残留。加 `bpy.data.reset()`，抽取器每次跑脚本前调
-4. **`_Module.bind(...)` 误当方法** —— `bind` 是 `extract.py` 的全局函数，
-   写成 `_st_extract.bind(...)` 报 `AttributeError: no such attribute`
-   （而 `_Module` 是普通对象，那个报错不说是哪个属性）
-
-## 已知边界（写进 docs/python.md）
-
-- 面三角化用**扇形**：凸多边形正确，凹多边形会错（`primitive_*` 与 bmesh
-  建的面绝大多数是凸的）
-- 多材质只取第 0 个槽（本框架 `Mesh` 是单一材质）
-- 父子关系不抽（`matrix_world` 已是绝对变换）
-- 顶点留局部空间（变换由 `ThreeObject::world` 承担，两处都变换就是两遍）
+1. **`src/python/*.c` 从来没进过库目标** —— 探针各自显式列了它们，
+   所以探针能跑；而 `st test` 的测试目标链不到 `st_mp_init` /
+   `st_mp_deinit` / `st_mp_run`，报 `undefined symbol`。
+   根因：`sources` 的通配 `src/python/*.cpp` 不含 `.c`（框架里 `.c`
+   从不自动纳入源集合）。改成显式列出两个 `.c`
+2. **相机/灯光被当 mesh 抽取** —— `obj.data` 是 `Camera` 对象，
+   读 `.vertices` 抛 AttributeError，被外层 try 捕获成一条**假警告**。
+   假警告会淹没真警告，所以加 `isinstance(mesh, Mesh)` 判型
+3. **探针覆盖率判据恒 100%** —— 原判据拿传入的 `background` 比，
+   但渲染背景经色调映射后会变，差值恒 > 阈值。改成拿**画布角落像素**
+   作参照（背景是均匀的，角落就是背景色）
 
 ## 验证
 
-- `bpy_scene_probe`：**10/10**（立方体顶点/索引数、世界矩阵平移、
-  材质 PBR 参数、bmesh 三角面、相机 fov 单位转换、错误路径）
-- `python_embed_probe`：18/18 仍全过
-- 全量 16 分片 0 失败
+`bpy_script_probe`：**7/7**
+
+1. 纯 Python 文本自动走 bpy 分支（three_script 未被误填）
+2. 出像素（非背景 18%）
+3. 相机覆盖对 bpy 生效（18% → 52%）
+4. 材质覆盖对 bpy 生效（亮红 17.9%）
+5. 优先级 bpy > three
+6. 错误路径可读
+
+为何第 2 条必须用像素判据：`draw_mesh` 只提交到内部缓冲，合成到画布发生在
+`end_frame`。漏了它，`draw_calls` 会涨、内部缓冲也有内容，但画布上一个
+像素都没有（本仓实测过一次：抽取出 3 个方块、位置全对，像素计数为 0）。
+
+- 另有：`bpy_scene_probe` 10/10、`python_embed_probe` 18/18
+- 全量 17 分片 0 失败
+- 文档：`docs/python.md` 第九～十一节（三路并存 / 验证 / 下一步）

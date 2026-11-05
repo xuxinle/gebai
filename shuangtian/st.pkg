@@ -26,7 +26,9 @@
     "src/edit/*.cpp",
     "src/lsp/*.cpp",
     "src/perf/*.cpp",
-    "src/python/*.cpp"
+    "src/python/*.cpp",
+    "src/python/mp_bridge.c",
+    "src/python/bpy_bridge.c"
   ],
   "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs",
             "src/python/prelude.py", "src/python/bpy_data.py", "src/python/bpy_ops.py",
@@ -788,6 +790,14 @@
                   "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "内嵌 MicroPython 的端到端判据：语言基础 + mathutils + bpy.data/ops + bmesh。它是整条 bpy 链路的地基。`.c` 源必须显式列出：不会被自动源集合纳入"
+    },
+    "bpy_script_probe": {
+      "kind": "executable",
+      "sources": ["tools/bpy_script_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "bpy_script 端到端：纯 Python 文本自动识别 → SceneSpec → 渲染 → 像素判据（含 camera/material 覆盖与优先级）。必须像素收口：漏 end_frame 时 draw_calls 会涨而画布全空"
     },
     "bpy_scene_probe": {
       "kind": "executable",

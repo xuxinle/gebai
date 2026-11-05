@@ -123,7 +123,7 @@ _st_extract = _Module('_st_extract')
 # 注入宿主（`bind` 是 `extract.py` 里的全局函数，不是模块方法——
 # 写成 `_st_extract.bind(...)` 会报 `AttributeError: no such attribute`，
 # 而 `_Module` 是个普通对象，那个报错不会告诉你是哪个属性）
-bind(_data, _context, Camera, Light)
+bind(_data, _context, Mesh, Camera, Light)
 _st_extract.extract = extract
 _st_extract.extract_json = extract_json
 

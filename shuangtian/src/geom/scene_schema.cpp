@@ -34,7 +34,7 @@ auto build_tables() -> std::vector<FieldTable> {
               {"cull", "string", false, R"j("none"/"back"/"front")j", "背面剔除模式", R"j("back")j",
                {"拼成 culling 会被拒"}},
               {"objects", "array", false, "",
-               "物体数组（写 `three_script` 时可省；两者都不写 = 空场景）",
+               "物体数组（写 `three_script` / `bpy_script` 时可省；三者都不写 = 空场景）",
                R"j([{"shape":"cube"}])j", {"拼成 objectsList 会被拒"}},
               {"three_script", "string", false, "",
                "three.js 源码（非空时**覆盖 objects**）：直接写 new THREE.Mesh(...)，"
@@ -45,6 +45,13 @@ auto build_tables() -> std::vector<FieldTable> {
               {"three_script_name", "string", false, "",
                "three 脚本在报错里的文件名（从文件加载时填真实路径，报错才能指到行）",
                R"j("hero.js")j", {}},
+              {"bpy_script", "string", false, "",
+               "bpy 源码（Blender 的 Python 建模 API；非空时**优先级高于 three_script 与 objects**）："
+               "bpy.ops.mesh.primitive_* / bmesh / mathutils 均可用，把要导出的赋给 result",
+               R"j("import bpy\nbpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=1, depth=2)\nresult = bpy.context.active_object")j",
+               {"优先级最高：与 three_script 同时写时 bpy 胜",
+                "`@` 运算符不可用（MicroPython 编译器限制），用 .matmul() / .dot()",
+                "面三角化用扇形：凹多边形会出错"}},
               {"animation", "object", false, "", "关键帧动画（traks/name/duration）",
                R"j({"tracks":[...]})j", {"拼成 animations 会被拒"}},
               {"skeleton", "object", false, "", "骨架（joints/inverse_bind）",

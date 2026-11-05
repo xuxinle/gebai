@@ -53,7 +53,7 @@ Python 侧写就是自然表达：
 _host = {}
 
 
-def bind(data, context, camera_type, light_type):
+def bind(data, context, mesh_type, camera_type, light_type):
     """注入宿主。
 
     ## 为什么用注入而不是直接 import bpy
@@ -68,6 +68,7 @@ def bind(data, context, camera_type, light_type):
     global Camera, Light
     _host['data'] = data
     _host['context'] = context
+    _host['mesh_type'] = mesh_type
     Camera = camera_type
     Light = light_type
 
@@ -127,10 +128,22 @@ def _compute_normal(p0, p1, p2):
 def _extract_mesh_object(obj):
     """一个带 mesh 的 bpy Object → 扁平 dict（顶点表 + 索引 + 材质 + 世界矩阵）。
 
-    返回 None 表示"不可导出"（没有 data、没有顶点、不可见）。
+    返回 None 表示"不可导出"（不是 mesh 对象、没有顶点、不可见）。
+
+    ## 为何要显式判“是不是 Mesh”而不是只看 `.data`
+
+    `bpy.data.objects` 里**什么都能放**：mesh 对象、相机、灯光、空物体。
+    而后三者没有 `.vertices`。只判 `data is None` 不够——相机有 data
+    （`Camera` 对象），但读 `.vertices` 不是 `None` 而是 `AttributeError`。
+
+    症状：相机被当 mes​h 抽取时抛异常，被外层 try 捕获成一条 warn
+    （“对象 'cam' 抽取失败：no such attribute”）——功能上没错（相机本来就
+    不该当几何），但**日志里多一条假警告**，而假警告会淹没真警告。
     """
     mesh = obj.data
-    if mesh is None or len(mesh.vertices) == 0:
+    if not isinstance(mesh, _host['mesh_type']):
+        return None
+    if len(mesh.vertices) == 0:
         return None
     if not obj.visible:
         return None

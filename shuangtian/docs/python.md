@@ -268,9 +268,75 @@ st build bpy_scene_probe && ./build/dev/bin/bpy_scene_probe
 10 条判据：立方体顶点/索引数、世界矩阵平移、材质 PBR 参数、bmesh 三角面、
 相机 fov 单位转换、错误路径可读性。
 
-## 九、下一步
+## 九、接入 `scene3d_script`（三路并存）
 
-1. **接进 `scene3d_script`**：加 `bpy_script` 字段，与 `three_script` / JSON
-   三路并存（抽取器已就绪，只差入口派发）
-2. **端到端出图**：用 bpy 写一个真实资产（齿轮箱/涡轮盘），与 three.js
-   版本对照像素
+`SceneSpec` 现在有**三条**表达路径，按优先级派发：
+
+| 字段 | 优先级 | 说明 |
+|---|---|---|
+| `bpy_script` | 1 | bpy 源码（Blender Python API） |
+| `three_script` | 2 | three.js 源码 |
+| `objects` | 3 | 声明式 JSON（原有路径） |
+
+### 自动识别（文本入口）
+
+`parse_scene_spec_text()` 是裁云 `model_script` / 三维预览 / 自检三条路的
+共同入口，它按下面顺序分流：
+
+1. **先试 JSON** —— 合法 JSON 且是对象 ⇒ 声明式（里面可带脚本字段）
+2. **看是不是 Python** —— 行首含 `import bpy` / `import bmesh` /
+   `from mathutils` ⇒ bpy
+3. 否则 ⇒ three.js
+
+为何靠 import 语句而不是语法分析：真要做“Python 还是 JS”得写两个词法器，
+而**一个三维脚本不可能不 import 它的库**（bpy 脚本必 `import bpy`，
+three 脚本必有 `THREE.`）。两个特征都稳。
+
+### 渲染路径统一
+
+`render_scene` 里两条脚本路**共用同一段**（只在前三行决定取哪份
+`ThreeScene`）：
+
+```cpp
+auto script_scene = bpy_mode ? BpySceneExtractor::extract(spec.bpy_script)
+                            : ThreeRuntime::instance().evaluate(...);
+// 以下逐行相同：camera_override / extra_transform / material_override / end_frame
+```
+
+好处：裁云的镜头编排（推拉/机位/整体姿态/统一材质）**自动对 bpy 生效**
+——否则要写两套，而那正是“改一处漏一处”的源头。
+
+### 同时写两个脚本时
+
+不报错，**bpy 胜**，并记一条 warn。理由：两者同时写一定是误操作，而模型
+从两个例子各拿一段是常见情形——报错会让一份“其实能跑”的配置失败，
+而给一个确定顺序再加警告更有用。
+
+## 十、验证
+
+```sh
+st build python_embed_probe && ./build/dev/bin/python_embed_probe    # 18/18
+st build python_features_probe && ./build/dev/bin/python_features_probe
+st build bpy_scene_probe && ./build/dev/bin/bpy_scene_probe          # 10/10
+st build bpy_script_probe && ./build/dev/bin/bpy_script_probe        # 7/7
+```
+
+`bpy_script_probe` 的 7 条判据：
+
+1. 纯 Python 文本自动走 bpy 分支（three_script 未被误填）
+2. **出像素**（非背景 18%——漏 `end_frame` 会是 0%）
+3. 相机覆盖对 bpy 生效（18% → 52%）
+4. 材质覆盖对 bpy 生效（亮红 17.9%）
+5. 优先级 bpy > three
+6. 错误路径可读
+
+> 为何第 2 条必须用**像素判据**：`draw_mesh` 只是提交到内部缓冲，
+> 合成到画布发生在 `end_frame`。漏了它，`draw_calls` 会涨、内部缓冲也有内容，
+> 但画布上一个像素都没有（本仓实测过一次：抽取出 3 个方块、位置全对，
+> 而像素计数为 0）。
+
+## 十一、下一步
+
+1. **真实资产端到端**：用 bpy 写齿轮箱/涡轮盘，与 three.js 版本对照像素
+2. 凹多边形三角化（现在是扇形）
+3. 多材质槽（现在是第 0 个）
