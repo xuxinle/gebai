@@ -344,24 +344,55 @@ def _extract_mesh_object(obj):
     # 变换矩阵，渲染器会用它。把顶点也变换一次就是变换两遍。
     # 见 docs/python.md 的"为什么顶点留局部空间"。
 
-    # ## 三角化 + 逐三角形法线
+    # ## 三角化 + 逐三角形法线 + 按材质分组
+    #
+    # ## 为何要按材质排序索引
+    #
+    # 渲染时是“换材质 → 画一批”：同材质的三角形**必须连在一起**，
+    # 否则每画一个三角形就换一次材质（状态抖动，实测在软件腿上代价明显）。
+    #
+    # 而 bpy 的面顺序是按几何逻辑排的，不同 material_index 会交错。
+    # 所以这里先按材质桶收集三角形，再拼成连续的 `indices`。
     vertices = []       # 交错：[x, y, z, nx, ny, nz, r, g, b]
-    indices = []
+    buckets = {}        # material_index -> [三角形顶点下标三元组, ...]
+    bucket_order = []   # 保持首次出现的顺序（结果可复现，便于对照）
     for poly in mesh.polygons:
+        mat_index = poly.material_index if hasattr(poly, 'material_index') else 0
+        if mat_index not in buckets:
+            buckets[mat_index] = []
+            bucket_order.append(mat_index)
         for tri in _triangulate(poly.vertices, positions):
             i0, i1, i2 = tri
             p0 = positions[i0]
             p1 = positions[i1]
             p2 = positions[i2]
             n = _compute_normal(p0, p1, p2)
-            for idx, p in ((i0, p0), (i1, p1), (i2, p2)):
-                indices.append(len(vertices))
+            base = len(vertices)
+            for p in (p0, p1, p2):
                 vertices.append((p[0], p[1], p[2], n[0], n[1], n[2]))
+            buckets[mat_index].append((base, base + 1, base + 2))
 
-    if not indices:
+    if not vertices:
         return None
 
-    material = _extract_material(obj)
+    # ## 拼索引 + 分组表
+    #
+    # `material_groups` 是三元组序列 `[index_start, index_count, material_index]`
+    # ——与 `Mesh::material_groups` 的契约一致（`index_count` 是**索引个数**）。
+    indices = []
+    groups = []
+    for mat_index in bucket_order:
+        tris = buckets[mat_index]
+        if not tris:
+            continue
+        start = len(indices)
+        for tri in tris:
+            indices.append(tri[0])
+            indices.append(tri[1])
+            indices.append(tri[2])
+        groups.append([start, len(indices) - start, mat_index])
+
+    materials = _extract_materials(obj)
 
     return {
         'name': obj.name,
@@ -369,40 +400,84 @@ def _extract_mesh_object(obj):
         'vertices': vertices,
         'indices': indices,
         'world': world,
-        'material': material,
+        # 向后兼容：`material` 仍是第 0 个（旧下游读它）
+        'material': materials[0] if materials else _default_material(),
+        # 全量槽位 + 分组表（多材质对象用）
+        'materials': materials,
+        'material_groups': groups,
         'visible': True,
     }
 
 
-def _extract_material(obj):
-    """材质 → dict（PBR 子集：基色 / 金属度 / 粗糙度 / 自发光）。
+def _default_material():
+    """没材质的对象用什么（与 Blender 新建物体的默认灰一致）。"""
+    return {
+        'base_color': [0.8, 0.8, 0.8],
+        'metallic': 0.0,
+        'roughness': 0.5,
+        'emission': 0.0,
+        'opacity': 1.0,
+    }
 
-    ## 只取第 0 个槽
 
-    bpy 支持一个对象多个材质槽（按面分配）。本框架的 `Mesh` 是单一材质
-    （见 `docs/three3d.md` 的说明），所以只取第 0 个。
+def _material_to_dict(mat):
+    """一个 bpy Material → dict（PBR 子集）。
 
-    这是**已知边界**：多材质对象会被统一成第一个材质。写在
-    `docs/python.md` 里，不静默。
+    ## 为何用 `diffuse_color` 而不是节点树
+    ##
+    ## 真 bpy 的 Principled BSDF 在 `mat.node_tree` 里（`inputs['Base Color']`
+    ## 等），而 `diffuse_color` 只是**视口显示色**。两者可能不同。
+    ##
+    ## 我们的兼容层没有节点树（实现成本远高于收益），所以用 `diffuse_color`
+    ## 叠加 `metallic` / `roughness` 两个直接字段——它们是 bpy 的 `Material`
+    ## 属性，在真实 Blender 里与节点值**默认同步**（Blender 的 Material
+    ## 面板把两者写进节点）。
+    ##
+    ## 残余差异：若脚本显式设了节点而不改 `diffuse_color`，抽取会拿到未同步的
+    ## 值。这条写在 docs/python.md 的“残余差异”里。
     """
-    mat = obj.active_material
     if mat is None:
-        return {
-            'base_color': [0.8, 0.8, 0.8],
-            'metallic': 0.0,
-            'roughness': 0.5,
-            'emission': 0.0,
-            'opacity': 1.0,
-        }
+        return _default_material()
     color = mat.diffuse_color
     return {
-        # diffuse_color 是 RGBA，本框架要 RGB
+        # diffuse_color 是 RGBA，本框架要 RGB（都是线性空间）
         'base_color': [float(color[0]), float(color[1]), float(color[2])],
         'metallic': float(mat.metallic),
         'roughness': float(mat.roughness),
         'emission': float(mat.emission_strength),
         'opacity': float(color[3]),
     }
+
+
+def _extract_materials(obj):
+    """对象的所有材质槽 → dict 列表。
+
+    ## 为何返回列表而不是单个
+
+    bpy 的一个网格可以按面分多个材质（`polygon.material_index` 指向这个
+    槽位表）。只取第 0 个会让其余材质的面被迫用第一个材质渲染——
+    现象是“物体颜色单一”，而**不会报错**。
+
+    空槽（`None`）用默认材质填充而不是跳过：因为 `material_index` 是
+    槽位下标，跳过会让下标错位。
+    """
+    slots = getattr(obj, 'material_slots', None)
+    if not slots:
+        return [_default_material()]
+    out = []
+    for slot in slots:
+        # ## 两种形态都要认
+        #
+        # 真 bpy：`material_slots[i].material` 是材质（槽对象带 link/offset 等）。
+        # 本兼容层：`material_slots[i]` 直接就是材质（简化，见 bpy_data.py）。
+        #
+        # 判据用 `getattr` 而不是类型判断：`Material` 没有 `.material` 属性，
+        # 而槽对象有——一条 `getattr` 就分开了，不必引入类型名依赖。
+        mat = getattr(slot, 'material', slot)
+        out.append(_material_to_dict(mat))
+    if not out:
+        out.append(_default_material())
+    return out
 
 
 def _extract_camera(context):

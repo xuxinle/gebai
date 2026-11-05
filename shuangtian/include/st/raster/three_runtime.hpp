@@ -88,7 +88,16 @@ struct ThreeObject {
   /// 几何：**已展开成非索引/索引两种都可**的顶点表（`Mesh` 的交错布局）。
   Mesh mesh{};
   /// 材质（PBR 子集）。
+  ///
+  /// 与 `materials` 的关系：**单材质对象用本字段**（two.js 路径、大多数 bpy
+  /// 对象）；多材质对象（`mesh.has_material_groups()` 为真）用
+  /// `materials` + `mesh.material_groups`。
+  ///
+  /// 两者并存而不是合并：合并会让“没有槽位的对象”也要建一个单元素 vector，
+  /// 而那恰好是最常见的情形（每帧每物体一次堆分配）。
   Material material{};
+  /// 多材质对象的槽位表（空 = 用 `material` 字段）。
+  std::vector<Material> materials{};
   /// 面的朝向剔除（由 three 的 `material.side` 映射：Front→Back 剔除，Back→Front，Double→不剔）。
   CullMode cull{CullMode::Back};
   /// 世界矩阵（three 的 `matrixWorld`，**列主序**，与本框架 `Mat4` 布局一致，无需转置）。

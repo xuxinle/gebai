@@ -28,15 +28,25 @@ class MeshVertex:
 
 
 class MeshPolygon:
-    """网格面（顶点索引列表。三角/四边/多边都支持，抽取时扇形三角化）。"""
+    """网格面（顶点索引列表 + 材质槽下标）。
 
-    __slots__ = ('vertices',)
+    ## `material_index`（2026-11-05）
 
-    def __init__(self, indices):
+    与真 bpy 一致：它指向所在对象的 `material_slots` 下标，默认 0。
+
+    有它才能表达“同一网格不同面不同材质”（塑料壳 + 金属触点那类）。
+    面本身不知道材质——材质在 **Object 的槽位表**里，面只存下标。
+    这个分离与 Blender 一致，也意味着抽取时必须把两者放在一起看。
+    """
+
+    __slots__ = ('vertices', 'material_index')
+
+    def __init__(self, indices, material_index=0):
         self.vertices = list(indices)
+        self.material_index = material_index
 
     def __repr__(self):
-        return 'MeshPolygon(%r)' % (self.vertices,)
+        return 'MeshPolygon(%r, mat=%d)' % (self.vertices, self.material_index)
 
 
 class Mesh:

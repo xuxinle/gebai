@@ -1961,12 +1961,35 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     for (const auto& object : script_scene->objects) {
       if (!object.visible) continue;
       scene.set_cull_mode(object.cull);
-      // 材质：默认用物体自己的（模型的一部分）；`material_override` 有值时统一换掉
-      scene.set_material(spec.material_override.has_value() ? *spec.material_override
-                                                           : object.material);
       const math::Mat4 world = spec.extra_transform.has_value()
                                    ? *spec.extra_transform * object.world
                                    : object.world;
+
+      // ## 多材质：逐组换材质 + 只画该段的索引
+      //
+      // 顺序很重要：`draw_mesh_range` 内部会临时换 `material_` 再画，
+      // 画完恢复。因此不能在循环外一次性 `set_material`——那就变成
+      // “整块一个颜色”。
+      //
+      // `material_override` 仍然优先：它表达的是“这个镜头里统一成一个质感”，
+      // 与对象自带几个槽无关。
+      if (object.mesh.has_material_groups() && !object.materials.empty() &&
+          !spec.material_override.has_value()) {
+        const std::size_t groups = object.mesh.material_group_count();
+        for (std::size_t g = 0; g < groups; ++g) {
+          const auto [start, count, slot] = object.mesh.material_group_at(g);
+          // 槽位越界时退回第 0 个（不报错：bpy 脚本里 material_index 写脏
+          // 是常见的，而“用一个能做到的材质画出来”比整块不画有用）
+          const Material& material =
+              slot < object.materials.size() ? object.materials[slot] : object.materials[0];
+          scene.draw_mesh_range(object.mesh, world, material, start, count);
+        }
+        continue;
+      }
+
+      // 单材质路径（与以前逐位相同）
+      scene.set_material(spec.material_override.has_value() ? *spec.material_override
+                                                           : object.material);
       scene.draw_mesh(object.mesh, world);
     }
     // ## `end_frame` 不能漏（漏了看起来就是“什么都没画”）

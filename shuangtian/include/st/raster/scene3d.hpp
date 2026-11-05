@@ -571,6 +571,28 @@ class Scene3D {
                                        const Material& /*material*/) {
     draw_mesh(mesh, model);
   }
+
+  /// 画网格的**一个索引区间**，带 PBR 材质。
+  ///
+  /// ## 为何需要索引区间（多材质的关键）
+  ///
+  /// 一个网格的三角形按材质分成了连续区间（`Mesh::material_groups`）。
+  /// 要正确渲染多材质对象，必须“换材质 → 只画该组那几个索引”。
+  ///
+  /// 没有区间参数就只能整网格重画 —— 效果是每组的三角形都会被其他组的
+  /// 材质重画一遍，最后看到的永远是最后那个材质（**静默错**：不报错，
+  /// 物体整块都是一个颜色）。
+  ///
+  /// `index_start` / `index_count` 单位是**索引个数**（不是三角形数）。
+  /// `index_start = 0` 且 `index_count = 0` 时语义为“全画”（与旧行为一致）。
+  ///
+  /// 默认实现忽略区间并转调旧接口：已有子类不会因新增虚函数而编不过；
+  /// 代价是那些后端上多材质退化成“整块用第一个材质画 N 遍”（仍比崩溃好）。
+  virtual void draw_mesh_range(const Mesh& mesh, const math::Mat4& model,
+                               const Material& /*material*/,
+                               std::size_t /*index_start*/, std::size_t /*index_count*/) {
+    draw_mesh_with_material(mesh, model, Material{});
+  }
   /// 结束一帧并把结果**合成**到 `target` 的目的矩形（逻辑坐标）。
   ///
   /// **降级链在这里**：`target` 是本进程的 GPU 画布且本场景也是 GPU 腿时，

@@ -84,9 +84,11 @@ auto read_mesh(const Json& item) -> Mesh {
 }
 
 /// 读材质（PBR 子集）。
-auto read_material(const Json& item) -> Material {
+///
+/// 接受两种输入：一个**材质对象**（如 `item["material"]`），或一个单独的材质
+/// 节点（如 `item["materials"][k]`）——两者字段完全相同，所以共用一个函数。
+auto read_material_node(const Json& value) -> Material {
   Material material{};
-  const Json& value = json_at(item, "material");
   if (!value.is_object()) return material;
 
   const auto color = read_doubles(json_at(value, "base_color"), 3);
@@ -100,6 +102,11 @@ auto read_material(const Json& item) -> Material {
   material.opacity = static_cast<float>(json_get_double(value, "opacity", 1.0));
   material.depth_write = material.opacity >= 1.0f;
   return material;
+}
+
+/// 读材质（兼容单材质旧格式：`item["material"]`）。
+auto read_material(const Json& item) -> Material {
+  return read_material_node(json_at(item, "material"));
 }
 
 /// 读相机。缺失时用一份保守默认（并已在 warnings 里报过）。
@@ -217,6 +224,31 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
       object.mesh = read_mesh(item);
       if (object.mesh.vertices.empty()) continue;   // 空几何不占位
       object.material = read_material(item);
+      // 多材质槽位表：非空时渲染按 `mesh.material_groups` 逐组换材质
+      const Json& slots = json_at(item, "materials");
+      if (slots.is_array()) {
+        object.materials.reserve(slots.size());
+        for (const auto& slot : slots) {
+          object.materials.push_back(read_material_node(slot));
+        }
+      }
+      // 分组表：三元组 `[index_start, index_count, material_index]`
+      const Json& groups = json_at(item, "material_groups");
+      if (groups.is_array()) {
+        object.mesh.material_groups.reserve(groups.size() * 3U);
+        for (const auto& group : groups) {
+          if (!group.is_array() || group.size() < 3) continue;
+          for (std::size_t k = 0; k < 3; ++k) {
+            const auto value = group[k].is_number() ? group[k].get<long long>() : 0LL;
+            object.mesh.material_groups.push_back(
+                static_cast<std::uint32_t>(value < 0 ? 0 : value));
+          }
+        }
+        // 分组退化（不足一组）就清空，回到单材质路径——防“搬了一半”的异常维数
+        if (object.mesh.material_groups.size() % 3U != 0U) {
+          object.mesh.material_groups.clear();
+        }
+      }
       object.world = read_matrix(json_at(item, "world"));
       object.visible = json_get_bool(item, "visible", true);
       scene.objects.push_back(std::move(object));

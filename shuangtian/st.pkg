@@ -804,6 +804,30 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "按顶层块二分执行大脚本，定位 MicroPython 报 NameError 的具体位置（MINIMUM 档不说名字，只能二分）"
     },
+    "bpy_normal_probe": {
+      "kind": "executable",
+      "sources": ["tools/bpy_normal_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "诊断：立方体面法线朝内还是朝外（朝内则 N·L<0，光照贡献为 0，全黑）"
+    },
+    "bpy_lighting_probe": {
+      "kind": "executable",
+      "sources": ["tools/bpy_lighting_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "诊断：把抽出来的灯光/材质/分组数值打出来。全黑时分不清是光反了、强度 0、还是基色没设"
+    },
+    "material_groups_probe": {
+      "kind": "executable",
+      "sources": ["tools/material_groups_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "多材质槽：一个网格按面分两材质，验两组颜色都出现且面积相当。三个错法（只画最后一组/整网格重画/槽位越界）都不报错，只能用像素判据"
+    },
     "concave_triangulate_probe": {
       "kind": "executable",
       "sources": ["tools/concave_triangulate_probe.cpp", "src/python/mp_bridge.c",

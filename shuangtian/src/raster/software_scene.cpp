@@ -938,6 +938,45 @@ class SoftwareScene final : public Scene3D {
     material_ = saved;
   }
 
+  /// 索引区间 + 材质的绘制（见 `Scene3D::draw_mesh_range`）。
+  ///
+  /// ## 为何不能直接调 `draw_mesh_with_material`
+  ///
+  /// 那个入口画**整网格**。多材质对象如果每组都整画一遍，最后一组的材质
+  /// 会覆盖前面所有组——现象是“物体整块都是一个颜色”，且**不报错**。
+  ///
+  /// 同理不能把“区间”塞进 mesh 再让它拷贝：阴影路径上会
+  /// `make_shared<const Mesh>(mesh)` 整份拷贝，多组就多份（一个 2000
+  /// 三角形的齿轮 × 5 组 = 10 倍内存）。这里只拷**区间内的索引**，
+  /// 顶点表共用。
+  void draw_mesh_range(const Mesh& mesh, const math::Mat4& model, const Material& material,
+                       std::size_t index_start, std::size_t index_count) override {
+    if (mesh.is_empty() || !mvp_ready_) return;
+    const Material saved = material_;
+    material_ = material;
+    if (shadow_map_.strength > 0.0f) {
+      Mesh slice = mesh;
+      slice.material_groups.clear();   // 切片不再是多材质对象
+      const std::size_t begin = index_start < mesh.indices.size() ? index_start
+                                                                  : mesh.indices.size();
+      const std::size_t end = index_count == 0
+                                  ? mesh.indices.size()
+                                  : (begin + index_count < mesh.indices.size()
+                                         ? begin + index_count
+                                         : mesh.indices.size());
+      slice.indices.assign(mesh.indices.begin() + static_cast<std::ptrdiff_t>(begin),
+                           mesh.indices.begin() + static_cast<std::ptrdiff_t>(end));
+      deferred_.push_back(
+          DeferredMesh{std::make_shared<const Mesh>(std::move(slice)), model, material_});
+      ++draw_calls_;
+      material_ = saved;
+      return;
+    }
+    draw_mesh_now(mesh, model, index_start, index_count);
+    ++draw_calls_;
+    material_ = saved;
+  }
+
   /// 旧的即时入口（保留以兼容 `draw_mesh` 的语义）。
   void draw_mesh_legacy(const Mesh& mesh, const math::Mat4& model) {
     if (mesh.is_empty() || !mvp_ready_) return;
@@ -959,12 +998,21 @@ class SoftwareScene final : public Scene3D {
   }
 
   /// 即时绘制（原有路径，行为不变）。
-  void draw_mesh_now(const Mesh& mesh, const math::Mat4& model) {
+  void draw_mesh_now(const Mesh& mesh, const math::Mat4& model,
+                     std::size_t index_start = 0, std::size_t index_count = 0) {
     const math::Mat4 mvp = projection_ * view_ * model;
     // 本网格是否有可用 UV；有且已设纹理时才采样
     const bool mesh_has_uv = mesh.has_uvs();
     use_texture_ = mesh_has_uv && !texture_.empty() && texture_width_ > 0;
-    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+    // 索引区间：`index_count == 0` 意为“全画”（与旧行为一致）
+    const std::size_t begin = index_start < mesh.indices.size() ? index_start
+                                                                : mesh.indices.size();
+    const std::size_t end = index_count == 0
+                                ? mesh.indices.size()
+                                : (begin + index_count < mesh.indices.size()
+                                       ? begin + index_count
+                                       : mesh.indices.size());
+    for (std::size_t i = begin; i + 2 < end; i += 3) {
       Vertex tri[3];
       bool ok = true;
       for (int k = 0; k < 3; ++k) {

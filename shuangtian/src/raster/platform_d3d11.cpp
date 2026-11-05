@@ -4190,6 +4190,13 @@ class GpuScene3d final : public st::raster::Scene3D {
 
   /// 当前材质（每帧在 `begin_frame` 重置为默认）。
   st::raster::Material material_{};
+  /// 本次绘制的索引区间（`range_count_ == 0` = 全画）。
+  ///
+  /// 为何是成员而不是 `draw_mesh_impl` 的参数：那个函数的签名被多处调用
+  /// （旧 `draw_mesh` / 阴影延迟重排），加参数要改全部调用点且大部分
+  /// 传 0。成员赋值 + 恢复是两行，且与 `material_` 的暂存模式一致。
+  UINT range_start_{0};
+  UINT range_count_{0};
 
   /// 透明队列（整网格级）。
   struct TransparentMesh {
@@ -4209,6 +4216,23 @@ class GpuScene3d final : public st::raster::Scene3D {
 
   void draw_mesh(const st::raster::Mesh& mesh, const math::Mat4& model) override {
     draw_mesh_with_material(mesh, model, material_);
+  }
+
+  /// 索引区间 + 材质的绘制（与软件腿同语义，见 `Scene3D::draw_mesh_range`）。
+  ///
+  /// GPU 腿上比软件腿简单：`DrawIndexed` 本身就接受起始索引，不需要切缓冲。
+  void draw_mesh_range(const st::raster::Mesh& mesh, const math::Mat4& model,
+                       const Material& material, std::size_t index_start,
+                       std::size_t index_count) override {
+    if (!ok_ || !mvp_ready_ || mesh.is_empty()) return;
+    const Material saved = material_;
+    material_ = material;
+    range_start_ = static_cast<UINT>(index_start);
+    range_count_ = static_cast<UINT>(index_count);
+    draw_mesh_impl(mesh, model);
+    range_start_ = 0;
+    range_count_ = 0;
+    material_ = saved;
   }
 
   /// 显式指定材质的绘制（与软件腿同语义，见 `Scene3D::draw_mesh_with_material`）。
@@ -4377,7 +4401,19 @@ class GpuScene3d final : public st::raster::Scene3D {
     ID3D11Buffer* constants[1] = {pipes.constants};
     context_->VSSetConstantBuffers(0, 1, constants);
     context_->PSSetConstantBuffers(0, 1, constants);
-    context_->DrawIndexed(buffers->index_count, 0, 0);
+    // ## 索引区间（多材质）
+    //
+    // `DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation)` 第二个
+    // 参数正好就是“从哪个索引开始”——多材质分组不需要重传缓冲。
+    //
+    // `range_count_ == 0` 意为“全画”（与旧行为一致）。
+    {
+      const UINT total = buffers->index_count;
+      const UINT start = range_start_ < total ? range_start_ : total;
+      UINT count = (range_count_ == 0) ? (total - start) : range_count_;
+      if (start + count > total) count = total - start;
+      context_->DrawIndexed(count, start, 0);
+    }
     ++draw_calls_;
   }
 

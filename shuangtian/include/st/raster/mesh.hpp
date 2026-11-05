@@ -12,6 +12,7 @@
 /// 顶点的内存布局在 `kVertexFloats` 处定义一次，所有后端共用：
 /// 布局是"后端上传缓冲"与"生成器产出"之间的契约，写两遍必然漂移。
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -46,6 +47,50 @@ struct Mesh {
   std::vector<std::uint32_t> indices{};
   /// 每顶点 `(u, v)`（`u*N = v*N = uvs.size()/2`）；空 = 无 UV（不贴图）。
   std::vector<float> uvs{};
+
+  // ── 多材质分组（2026-11-05，对齐 Blender 的 material_index）──
+  //
+  // ## 为什么需要
+  //
+  // Blender 的一个网格可以按面分多个材质（`polygon.material_index`）——
+  // 典型场景：塑料壳 + 金属触点、齿轮本体 + 齿面镀层。而本框架的
+  // `Mesh` 是单材质，于是抽 bpy 场景时**只能取第 0 个槽**，其余材质的
+  // 面会被迫用第一个材质渲染。
+  //
+  // ## 为何是「索引区间 + 平行表」而不是每三角形一个材质号
+  //
+  // 与 `uvs` / `skins` 同一取舍：**空 = 无此能力**，零破坏
+  // （老代码一字不改、不分配、不传 GPU）。
+  //
+  // 而用「区间」而不是「逐三角形材质号」是因为渲染时**按材质分批**：
+  // 同一材质的三角形连在一起才能一次 `set_material` 后连续绘制。
+  // 逐三角形存材质号会让每画一个三角形就换一次材质（状态抖动）。
+  //
+  // ## 布局
+  //
+  // `material_groups` 是三元组序列：`[index_start, index_count, material_index, ...]`。
+  // `index_start` / `index_count` 是 `indices` 数组上的范围（**索引个数**，
+  // 不是三角形数）；`material_index` 由调用方解释（bpy 路径是
+  // `object.material_slots` 的下标）。
+  //
+  // 空 = 单材质（走 `set_material` 设的那一个），行为与以前完全一致。
+  std::vector<std::uint32_t> material_groups{};
+
+  /// 是否有可用材质分组（边长是 3 的倍数且非空）。
+  [[nodiscard]] auto has_material_groups() const noexcept -> bool {
+    return !material_groups.empty() && material_groups.size() % 3U == 0U;
+  }
+  /// 分组数。
+  [[nodiscard]] auto material_group_count() const noexcept -> std::size_t {
+    return has_material_groups() ? material_groups.size() / 3U : 0U;
+  }
+  /// 第 `group` 组的 `(index_start, index_count, material_index)`；越界返回全零。
+  [[nodiscard]] auto material_group_at(std::size_t group) const noexcept
+      -> std::array<std::uint32_t, 3> {
+    if (group >= material_group_count()) return {0U, 0U, 0U};
+    const std::size_t at = group * 3U;
+    return {material_groups[at], material_groups[at + 1U], material_groups[at + 2U]};
+  }
 
   // ── 蒙皮（2026-10-30）──
   //
