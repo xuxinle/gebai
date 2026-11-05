@@ -5,7 +5,7 @@ import { requiresApproval as toolApprovals, tools as toolSet } from "./shuangtia
 
 export const name = "shuangtian"
 export const description =
-  "构建、运行与操控霜天（Shuangtian）原生桌面应用：无头模式开发闭环（构建/启动/停止/测试/禁令扫描）、组件树与选择器查询（tree/find）、属性读写与动作触发（get/set/invoke）、真实鼠标键盘注入（click/type/key）、截图 PNG（无头唯一视觉通道）、视觉树、条件等待、运行指标（后端/无头/DPI/帧耗时）。坐标一律逻辑像素；无任意代码执行入口。适用于用智能体开发与验证原生界面；真实宿主桌面操作用 desktop 子Agent。"
+  "构建、运行与操控霜天（Shuangtian）原生桌面应用：无头模式开发闭环（构建/启动/停止/测试/禁令扫描）、组件树与选择器查询（tree/find）、属性读写与动作触发（get/set/invoke）、真实鼠标键盘注入（click/type/key）、截图 PNG（无头唯一视觉通道）、视觉树、条件等待、运行指标（后端/无头/DPI/帧耗时）。坐标一律逻辑像素；无任意代码执行入口。适用于用智能体开发与验证原生界面；真实宿主桌面操作用 desktop 子Agent。内含 code 子代理（`code_*`）负责源码探索与定点修改。"
 export const systemPrompt = systemPromptBase
 
 export const tools = toolSet
@@ -29,4 +29,21 @@ export const envVars = [
   },
 ]
 
-export const def: SubAgentDef = { name, description, systemPrompt, tools, requiresApproval, preload, envVars }
+export const def: SubAgentDef = {
+  name,
+  description,
+  systemPrompt,
+  tools,
+  requiresApproval,
+  preload,
+  envVars,
+  // 依赖连带装载：`code` 的工具以 `code_*` 命名空间并入。
+  //
+  // 为何必须依赖它（而不是“需要改代码时用户再装载 code”）：
+  // 用霜天写应用时，“改源码”不是可选项而是**主循环的一部分**——
+  // 一个典型回合是“读现有实现 → 改框架/应用代码 → 构建 → 截图核验”
+  // （§2 工作循环与 §6.5「框架缺能力就补齐」都要求动手改源码）。
+  // 没有读/改文件的能力，这个循环走不下去：只能看到症状、改不了原因。
+  // 依赖表就是把这个**必然会被要求的能力**提前备好，不靠调用方每次记得。
+  dependencies: ["code"],
+}

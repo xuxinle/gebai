@@ -926,6 +926,17 @@ describe("框架与提示词装配", () => {
     expect(prompt).toContain("先不要动框架")
   })
 
+  test("依赖 code 子代理：装霜天就自动带上“读/改源码”的能力", async () => {
+    const mod = await import("./shuangtian")
+    // 为何这是硬约束而不是“顺手带上”：
+    // 用霜天写应用的**主循环**就是“读现有实现 → 改代码 → 构建 → 截图核验”
+    //（§2 工作循环与 §6.5「框架缺能力就补齐」都要求动手改源码）。
+    // 没有 code 的读/改文件能力，这个循环走不下去：只能看见症状、改不了原因。
+    expect(mod.def.dependencies).toContain("code")
+    // 描述里要写明，否则调用方看不到这个能力已在内（会重复装载或绕路）
+    expect(mod.def.description).toContain("code_")
+  })
+
   test("README/客户端导出面可用（协议常量与错误类型）", async () => {
     const client = await import("./shuangtian_client")
     expect(typeof client.resolve_target).toBe("function")
