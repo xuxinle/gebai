@@ -461,6 +461,12 @@ class UiRoot : public Element::HostFocus {
   void take_root_damage() noexcept;
   [[nodiscard]] auto hit_test_subtree(Element& element, math::Point point) -> Element*;
   [[nodiscard]] auto dispatch_to(Element& element, Event& event) -> bool;
+  /// `node` 是否仍在本 root 的内容树/浮层里（悬垂安全阀）。
+  ///
+  /// 存在的理由：事件回调里改 State 会触发声明式重组，**旧元素被销毁重建**，
+  /// 而事件观察者与冒泡链拿的都是裸引用——直接传就是 use-after-free
+  ///（实测：点变更项的“暂存”钮后程序崩溃）。
+  [[nodiscard]] auto is_alive(const Element& node) const -> bool;
   /// 清掉已不在树上的 `focused_` / `hovered_` / `pressed_`。
   ///
   /// 存在的理由：它们是裸指针，而元素能被移除并销毁（列表按数据刷新、页面替换）。
@@ -491,7 +497,33 @@ class UiRoot : public Element::HostFocus {
   /// 立即释放就是 use-after-free（实测 SIGSEGV）。用 `dispatching_` 标记 +
   /// 分发末尾 `reap_overlays()` 统一回收。
   std::vector<std::unique_ptr<Element>> graveyard_{};
+  /// 事件派发期间被**重组移除的内容树子树**（延迟析构）。
+  ///
+  /// 为何与 `graveyard_` 分开：那个是“叠加层摘除”，这个是“声明式重组的裁剪”——
+  /// 两者的释放时机相同（派发结束）但回收路径不同（这里由 Composer 交进来）。
+  /// 为何不能立即释放（实测 SIGSEGV，2026-11-05）：
+  /// 点击回调里改 `State` → 标脏 → 同一轮派发内重组 → 旧元素 `remove_child`
+  /// 返回后立即析构，而 `dispatch_to` 的冒泡链/事件观察者还拿着它的裸引用。
+  /// 症状：点变更项的“暂存”钮后程序崩溃。
+  std::vector<std::unique_ptr<Element>> decl_graveyard_{};
   bool dispatching_{false};
+
+ public:
+  /// 把一个被重组裁掉的子树交给 root 延后到派发结束再释放（派发期内部用）。
+  ///
+  /// 不在派发期时**立即析构**（不积压）：无人在栈上持它的引用，早点释放更好。
+  void retire_subtree(std::unique_ptr<Element> subtree) {
+    if (subtree == nullptr) return;
+    if (dispatching_) {
+      decl_graveyard_.push_back(std::move(subtree));
+      return;
+    }
+    subtree.reset();
+  }
+  /// 回收重组墓场（派发结束/下一帧帧首调；幂等）。
+  void reap_decl_graveyard() { decl_graveyard_.clear(); }
+
+ private:
   /// 是否正在绘制叠加层（`paint_overlays` 置位）。
   /// 与 `dispatching_` 并列：摘除发生在**绘制**里时同样要延后释放，
   /// 否则当前对象的 `paint` 栈帧还在用 `this`（use-after-free，ASan 有现场）。

@@ -738,9 +738,8 @@ auto Composer::reconcile() -> ReconcileStats {
                                        ? impl_->child_cursor[impl_->anchor]
                                        : 0;
       while (impl_->anchor->content_child_count() > declared) {
-        auto removed = impl_->anchor->remove_child(impl_->anchor->child_at(
-            impl_->anchor->content_child_count() - 1));
-        (void)removed;
+        impl_->root.retire_subtree(impl_->anchor->remove_child(impl_->anchor->child_at(
+            impl_->anchor->content_child_count() - 1)));
         ++impl_->last_stats.elements_removed;
       }
     }
@@ -1088,8 +1087,11 @@ void Composer::pop_parent() {
       const std::size_t declared = impl_->child_cursor[parent];
       // 只裁到「内容子元素」边界：载体内部件（ScrollView 的滚动条等）永远保留
       while (parent->content_child_count() > declared) {
-        auto removed = parent->remove_child(parent->child_at(parent->content_child_count() - 1));
-        (void)removed;
+        // 交给 root 延后到派发结束再释放：事件回调里改 State 会**当场**触发重组，
+        // 而派发栈（冒泡链、事件观察者）还拿着这棵子树的裸引用——
+        // 立即析构就是 use-after-free（实测：点「暂存」钮后程序崩溃）。
+        impl_->root.retire_subtree(
+            parent->remove_child(parent->child_at(parent->content_child_count() - 1)));
         ++impl_->last_stats.elements_removed;
       }
     }
@@ -1274,8 +1276,10 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
     const bool occupant_is_stale =
         occupant != nullptr && impl_->keyed_region.count(occupant->key()) == 0;
     if (occupant_is_stale) {
-      auto removed = parent->remove_child(occupant);
-      (void)removed;   // 释放旧元素（它的 key 不在本次列表里 = 已被数据移除）
+      // 交给 root **延后到派发结束**再释放：事件回调里改 State 会当场触发重组，
+      // 而派发栈（冒泡链、事件观察者）还拿着这棵子树的裸引用——
+      // 立即析构就是 use-after-free（实测：点「暂存」钮后崩溃）。
+      impl_->root.retire_subtree(parent->remove_child(occupant));
       ++impl_->last_stats.elements_removed;
     }
     parent->insert_child(std::min(cursor, parent->content_child_count()), std::move(created));

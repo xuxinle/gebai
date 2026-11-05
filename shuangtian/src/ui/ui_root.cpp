@@ -475,8 +475,22 @@ auto UiRoot::shortcuts() const -> std::vector<ShortcutInfo> {
 auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
   const RenderContext context = render_context();
   bool handled = false;
-  for (Element* current = &element; current != nullptr; current = current->parent()) {
-    if (current->on_event(context, event)) {
+  // ⚠ **冒泡的下一跳必须在回调之前取好**。
+  //
+  // 为何（实测代价，2026-11-05）：点击回调里改 `State` 会标脏重组，
+  // 而声明式重组**销毁重建**元素。原先写成
+  //   `for (…; current = current->parent())`
+  // 即“递增表达式在 `on_event` 之后求值”——那时 `current` 可能已经被销毁，
+  // `current->parent()` 就是 use-after-free。
+  // 症状：点变更项的“暂存”钮后程序**崩溃**（headless 下有时期幸不崩，
+  // 真实鼠标路径下稳崩）；不崩时表现为“点了一下但什么也没发生”——
+  // 因为崩在生产环境之前已经把冒泡链走坏了。
+  Element* current = &element;
+  while (current != nullptr) {
+    // 下一跳先算：哪怕回调销毁本元素，这个指针也已经拿到手。
+    Element* next = current->parent();
+    const bool self_handled = current->on_event(context, event);
+    if (self_handled) {
       handled = true;
       break;
     }
@@ -487,14 +501,46 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
       handled = true;
       break;
     }
+    current = next;
   }
-  // 脚本桥：在**元素自身处理之后**通知观察者（各分支都经此函数，命中元素即 `element`）。
+  // 脚本桥：在**元素自身处理之后**通知观察者（各分支都经此函数）。
   //
   // 顺序很关键：若在 C++ 处理**之前**通知，脚本写入会被随后的 C++ 处理器覆盖，
   // 表现为"用 JS 改了界面却没生效"（实测踩过：语言标签点击后状态栏仍是 C++ 写的文案）。
   // 放在之后 = 脚本看到的是处理后的状态，且它的写入是最终态。
-  if (event_observer_) event_observer_(event, element);
+  //
+  // ⚠ **回调可能把 `element` 自己销毁掉**（改 State → 标脏 → 声明式重组）。
+  // 所以先确认它还在树上；不在就**跳过观察者**——
+  // “已触发重组”本身就是脚本能观察到的事件，比 use-after-free 好得多。
+  if (event_observer_ && is_alive(element)) event_observer_(event, element);
   return handled;
+}
+
+/// `node` 是否仍在本 root 的内容树/浮层里（悬垂安全阀）。
+///
+/// 为何需要：事件回调里改 State 会触发声明式重组，**旧元素被销毁重建**，
+/// 而观察者拿的是 `Element&`——直接传就是 use-after-free。
+auto UiRoot::is_alive(const Element& node) const -> bool {
+  // 递归下降找指针相等。用显式函数对象而不是 `auto` lambda：
+  // 递归 lambda 对自身调用时，`auto` 返回值还没推导完（编译报
+  // "use of 'walk' before deduction of 'auto'"）。
+  struct Finder {
+    const Element* needle;
+    auto operator()(const Element* current) const -> bool {
+      if (current == nullptr) return false;
+      if (current == needle) return true;
+      for (const auto& child : current->children()) {
+        if ((*this)(child.get())) return true;
+      }
+      return false;
+    }
+  };
+  const Finder find{&node};
+  if (find(content_.get())) return true;
+  for (const auto& overlay : overlays_) {
+    if (find(overlay.get())) return true;
+  }
+  return false;
 }
 
   void UiRoot::clear_hover() {
@@ -1042,9 +1088,16 @@ auto UiRoot::dispatch(Event& event) -> bool {
   // 立即释放就是 use-after-free。这里标记 + 分发结束后统一回收。
   dispatching_ = true;
   struct DispatchGuard {
-    bool& flag;
-    ~DispatchGuard() { flag = false; }
-  } guard{dispatching_};
+    UiRoot& root;
+    ~DispatchGuard() {
+      root.dispatching_ = false;
+      // 派发结束：重组裁掉的子树到这里才真正释放。
+      // 放在 guard 里而不是函数末尾：派发函数有多条 `return` 路径
+      //（分早期返回），写在末尾必漏——而漏的那条就是“墓场只进不出”（内存滞）
+      // 或“不回收就一直挂着”。
+      root.reap_decl_graveyard();
+    }
+  } guard{*this};
   layout();
   // 任何**非悬停类**输入都先把提示收起来：点击/按键/滚轮之后还挂着上次的提示，
   // 是“黏在屏幕上”的感觉。
