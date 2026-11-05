@@ -300,3 +300,108 @@ scene;
   // 排除了大背景板 → 距离应显著更近
   ST_CHECK(flagged->camera_state().distance < plain->camera_state().distance * 0.6f);
 }
+
+ST_TEST(three_view_user_data_inherits_from_group) {
+  // ## `userData` 必须从组继承到子网格
+  //
+  // three 的习惯写法是把"这一组一起转"标在**组**上：
+  //
+  //     const rotor = new THREE.Group();
+  //     rotor.userData.spin = { axis: [1,0,0], speed: 0.5 };
+  //     rotor.add(fanBlade); rotor.add(compressorBlade); ...
+  //
+  // 那是符合直觉的（同一级叶片是刚体，转的是转子）。但抽取器只遍历 Mesh——
+  // 不向上看，标记就**静默丢掉**：场景照常渲染、物体数正确、
+  // `three_anim_probe` 报"自转 0 个"，而画面就是不动。
+  // 实测踩过（涡轮发动机双转子）。
+  constexpr const char* kGrouped = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+camera.position.set(0, 0, 8);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+// 组上打标记，子网格自身不带任何 userData
+const rotor = new THREE.Group();
+rotor.name = 'rotor';
+rotor.userData.spin = { axis: [1, 0, 0], speed: 0.75 };
+for (let i = 0; i < 4; i++) {
+  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2, 0.6),
+    new THREE.MeshStandardMaterial({ color: 0xaaaaaa }));
+  blade.name = 'blade_' + i;
+  blade.rotation.x = (i / 4) * Math.PI * 2;
+  blade.position.set(0, Math.cos((i / 4) * Math.PI * 2) * 1.2,
+                     Math.sin((i / 4) * Math.PI * 2) * 1.2);
+  rotor.add(blade);
+}
+scene.add(rotor);
+
+// 另一组不带标记：它不该被继承到任何东西
+const staticGroup = new THREE.Group();
+const lone = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshStandardMaterial({ color: 0x999999 }));
+lone.name = 'lone';
+lone.position.x = 3;
+staticGroup.add(lone);
+scene.add(staticGroup);
+
+scene;
+)js";
+  auto view = make_view(kGrouped, "grouped.js");
+  ST_REQUIRE(view->object_count() == 5U);
+
+  int spinning = 0;
+  int still = 0;
+  for (const auto& object : view->scene().objects) {
+    if (object.spin_speed != 0.0f) {
+      ++spinning;
+      // 继承来的转速必须与组上写的一致
+      ST_CHECK_NEAR(object.spin_speed, 0.75f, 1e-4f);
+      // 轴也要继承正确（绕 X）
+      ST_CHECK_NEAR(std::abs(object.spin_axis.x), 1.0f, 1e-3f);
+    } else {
+      ++still;
+    }
+  }
+  ST_CHECK(spinning == 4);   // 组内四片叶子
+  ST_CHECK(still == 1);      // 独立方块不转
+}
+
+ST_TEST(three_view_frame_scene_fits_long_model) {
+  // ## 取景要按**横纵跨度**适配，不能只用包围球半径
+  //
+  // 包围球对长条模型很浪费：涡轮发动机轴向跨 21、径向 20，
+  // 球半径取对角线 ≈ 15，而实际该适配的是"横向 21 / 纵向 20"。
+  // 用球半径算出的距离偏大约 40%，画面四周大片空白（实测）。
+  //
+  // 判据：同一份"长条 + 方形"两个模型的取景距离，
+  // 长条模型不该因为"对角线更长"而被推得过远。
+  constexpr const char* kLong = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, 16 / 9, 0.5, 500);
+camera.position.set(0, 0, 50);
+camera.lookAt(0, 0, 0);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+// 轴向 20、径向 6：明显细长
+const body = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 20, 24),
+  new THREE.MeshStandardMaterial({ color: 0x88aaff }));
+body.name = 'long';
+body.rotation.z = Math.PI / 2;
+scene.add(body);
+scene;
+)js";
+  auto view = make_view(kLong, "long.js");
+  ST_REQUIRE(view->object_count() == 1U);
+  view->frame_scene();
+
+  const auto state = view->camera_state();
+  // 包围盒对角线一半 = sqrt(20² + 12² + 12²)/2 ≈ 12.2
+  const float sphere_radius = std::sqrt(20.0f * 20.0f + 12.0f * 12.0f + 12.0f * 12.0f) * 0.5f;
+  // 按球半径 + 垂直 fov 的旧算法会得到 ~ sphere_radius / sin(17.5°) ≈ 40
+  // 新算法应按"纵向跨度 12"适配 → 距离明显更近
+  const float old_style = sphere_radius / std::sin(35.0f * 0.5f * 3.14159265f / 180.0f);
+  ST_CHECK(state.distance < old_style * 0.85f);
+  // 但仍要装得下：距离必须大于最长半跨度
+  ST_CHECK(state.distance > 10.0f);
+}

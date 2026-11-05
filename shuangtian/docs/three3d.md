@@ -327,6 +327,34 @@ if (!report.ok()) {
 算进包围盒会让取景距离白白拉远（实测：表径 40，一块半径 22.4 的背景盘
 把距离从 86 拉到 120，主体在画面里只剩一半大）。
 
+### 6.5 三个 `userData` 都会**从组继承**
+
+```js
+const rotor = new THREE.Group();
+rotor.userData.spin = { axis: [1, 0, 0], speed: 0.5 };
+rotor.add(fanBlade); rotor.add(compressorBlade);   // 都不带 userData
+```
+
+这是 three 的习惯写法（同一级叶片是刚体，转的是转子），抽取器会**向上找**
+最近一个带标记的祖先。
+
+> ⚠ 这条是踩出来的：最初只查网格自身，于是组上的标记**静默丢掉**——
+> 场景照常渲染、物体数 1253 正确、`three_anim_probe` 报“自转 0 个”，
+> 而画面就是不动。写双转子/轮系这类“一族零件一起转”的东西必定踩到。
+
+### 6.6 剖切视图：`thetaStart` 到底画哪半圈
+
+`CylinderGeometry(..., thetaStart, thetaLength)` 转到 X 轴后：
+
+| 参数 | 覆盖 |
+|---|---|
+| `0, PI` | **上半圈**（y 全为正） |
+| `PI, PI` | **下半圈**（y 全为负） |
+
+实测得出（`tools/cylinder_theta_probe`），不是推导——`Cylinder` 的 θ 起点在 +Z、
+绕 Y 逆时针，再叠 `rotation.z = PI/2`，推错一次就是“敞开的变成盖住的”，
+而画面**不会报错**、只是里面什么都看不见。
+
 ## 七、相关文件
 
 | 文件 | 作用 |

@@ -215,21 +215,44 @@ void ThreeView::frame_scene(float margin) {
   }
   orbit_.target = box.center();
   const math::Vec3 size = box.size();
-  // 包围球半径 = 对角线一半（比逐轴取最大更保守，斜放的长条也能框住）
-  const float radius = 0.5f * std::sqrt(size.x * size.x + size.y * size.y + size.z * size.z);
-  const float safe_radius = std::max(radius, 0.05f);
+  // ## 距离：按**相机坐标系下的横纵跨度**分别适配
+  //
+  // 不用包围球半径 —— 它对长条模型很浪费：涡轮发动机轴向跨 21、径向只 20，
+  // 球半径取对角线 ≈ 15，而实际该适配的是“横向 21 / 纵向 20”。
+  // 用球半径算出来的距离偏大约 40%，画面四周大片空白（实测）。
+  //
+  // 做法：把包围盒的尺寸投影到相机的右/上两个轴上，得到“画面里的宽与高”，
+  // 再分别按水平/垂直 fov 反解距离，取**更严**的那个。
+  //
+  // 投影用世界轴近似即可（不真算相机基向量）：沿 yaw 的水平方向就是
+  // 横轴，竖直方向就是纵轴。对轨道相机来说这已经足够准确，
+  // 且避免在 frame_scene 里再做一次三角函数推导（那是出错的高发地）。
+  const float cos_yaw = std::abs(std::cos(orbit_.yaw));
+  const float sin_yaw = std::abs(std::sin(orbit_.yaw));
+  // 水平跨度：包围盒在“与视线垂直的水平方向”上的投影
+  const float span_h = size.x * cos_yaw + size.z * sin_yaw;
+  // 垂直跨度：高度 + 由俯仰带来的深度投影
+  const float sin_pitch = std::abs(std::sin(orbit_.pitch));
+  const float span_v = size.y + (size.x * sin_yaw + size.z * cos_yaw) * sin_pitch;
+  const float half_span_h = std::max(span_h * 0.5f, 0.05f);
+  const float half_span_v = std::max(span_v * 0.5f, 0.05f);
   // ## 距离要同时满足**垂直**与**水平**两个方向
   //
-  // fov 是垂直视角，宽屏的物理宽高比大——但圆形物体在**竖直方向**受限，
-  // 所以真正的约束是垂直方向的 `half_fov`。
+  // ## 两个方向都要满足（宽高比陷阱）
   //
-  // 这里是 1:1 的半径模型（包围球），两个方向对称，所以仍用垂直 fov 即可；
-  // 但**不要**因为视口很宽就把距离拉大（那会让物体变小且无意义）。
+  // 所以横纵分别反解，取**更严**的那个（距离取大值）：
   //
-  // 另一层：`OrbitCameraState` 默认 fov=42，而场景可能写 30（更“长焦”）。
-  // 用场景 fov 时距离会算小（更近），这是对的——长焦本来就该靠得更近。
-  const float half_fov = std::max(orbit_.fov_y_degrees, 1.0f) * 0.5f * kPi / 180.0f;
-  orbit_.distance = safe_radius * std::max(margin, 1.0f) / std::max(std::sin(half_fov), 0.05f);
+  //   垂直方向：d_v = half_span_v / tan(half_fov_v)
+  //   水平方向：d_h = half_span_h / tan(half_fov_h)
+  //
+  // 圆形物体两个约束接近，行为与旧版一致；长条形（发动机）才明显受益。
+  const float aspect = bounds_.height > 0.5f ? bounds_.width / bounds_.height : 1.0f;
+  const float half_fov_v = std::max(orbit_.fov_y_degrees, 1.0f) * 0.5f * kPi / 180.0f;
+  const float half_fov_h = std::atan(std::tan(half_fov_v) * std::max(aspect, 0.05f));
+  const float m = std::max(margin, 1.0f);
+  const float d_v = half_span_v * m / std::max(std::tan(half_fov_v), 0.05f);
+  const float d_h = half_span_h * m / std::max(std::tan(half_fov_h), 0.05f);
+  orbit_.distance = std::max(std::max(d_v, d_h), 0.1f);
   orbit_.clamp();
   mark_dirty();
 }

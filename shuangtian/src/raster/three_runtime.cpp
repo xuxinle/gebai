@@ -759,10 +759,40 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       // 轮系/摆轮这类“只在转”的动画不该每帧重求值整个场景。
       // 这里只把意图（轴/速度/振幅/频率）带出去，实际旋转由渲染侧逐帧算。
       // 字段缺省时给 null，C++ 侧按 0 处理。
-      spin: (o.userData && o.userData.spin) || null,
-      oscillate: (o.userData && o.userData.oscillate) || null,
-      // 取景时不算它（背景板/地面板这类氛围件）
-      noFrame: !!(o.userData && o.userData.noFrame)
+      //
+      // ### 向上继承：查自身 + 所有祖先
+      //
+      // three 的习惯写法是把“这一组一起转”标在**组**上：
+      //
+      //     const rotor = new THREE.Group();
+      //     rotor.userData.spin = { axis: [1,0,0], speed: 0.5 };
+      //     rotor.add(fanBlade); rotor.add(compressorBlade); ...
+      //
+      // 那是**符合直觉的**：同一级的叶片是刚体，转的是转子而不是叶片。
+      // 但抽取器只遍历 Mesh —— 不向上看，标记就**静默丢掉**：
+      // 场景照常渲染、物体数正确、`three_anim_probe` 报“自转 0 个”，
+      // 而画面就是不动。本仓实测就是这样（涡轮发动机双转子）。
+      //
+      // 所以这里向上找最近一个带标记的祖先。自己身上的优先。
+      spin: (function () {
+        for (var node = o; node; node = node.parent) {
+          if (node.userData && node.userData.spin) return node.userData.spin;
+        }
+        return null;
+      })(),
+      oscillate: (function () {
+        for (var node = o; node; node = node.parent) {
+          if (node.userData && node.userData.oscillate) return node.userData.oscillate;
+        }
+        return null;
+      })(),
+      // 取景排除标记（同样向上继承：一块背景板可能是个组）
+      noFrame: (function () {
+        for (var node = o; node; node = node.parent) {
+          if (node.userData && node.userData.noFrame) return true;
+        }
+        return false;
+      })()
     });
   });
 

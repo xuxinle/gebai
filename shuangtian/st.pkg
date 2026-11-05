@@ -771,6 +771,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "验证 three 场景的三扇叠加窗（extra_transform / camera_override / material_override）。存在的理由：任一扇没生效时**画面根本不变也不报错**，只能靠对比渲染结果发现"
     },
+    "geometry_coverage_probe": {
+      "kind": "executable",
+      "sources": ["tools/geometry_coverage_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "逐个确认 three 几何在抽取后**真的有面**（顶点数/三角形数）。存在的理由：“物体存在但画不出来”完全不会报错，而多零件模型里少一层叶片很难从截图看出来"
+    },
+    "cylinder_theta_probe": {
+      "kind": "executable",
+      "sources": ["tools/cylinder_theta_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "实测 CylinderGeometry 的 thetaStart/Length 转到 X 轴后覆盖哪个方位（读世界包围盒的 y 范围）。存在的理由：剖切视图全靠它，画错半圈就是“敞开的变成盖住的”，而画面不会报错、只是什么都看不见"
+    },
     "scene3d_shadow_probe": {      "kind": "executable",
       "sources": ["tools/scene3d_shadow_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
