@@ -21,9 +21,10 @@
 ///
 /// - sRGB 分段公式与 `gpu_shader_colorspace.bsl.hh` 的
 ///   `scene_linear_to_rec709_srgb` 同一组常数（0.04045 / 12.92 / 1.055 / 2.4）。
-/// - 色调映射**不照搬 AgX**：Blender 的 AgX 是 OpenColorIO 外部配置里的
-///   LUT/样条，不在 C++ 源码中，且为影视分级设计（要配合 Log 空间）。
-///   实时渲染用**解析式**更合适，也能被单元测试逐点钉住。
+/// - 色调映射：**AgX 有实现**（`ToneMap::Agx`，Troy Sobotka 拟合版，与 Blender
+///   早期实现同源）。它与 Blender 的完整 AgX（OpenColorIO LUT）差别在于：
+///   只做基变换、不做色域映射、对比度固定。够用于“观感一致”，不追逐像素相同。
+///   量化差异见 `tools/tone_map_measure`。
 ///
 /// ## 三条纪律
 ///

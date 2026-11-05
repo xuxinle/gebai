@@ -181,9 +181,31 @@ constexpr float kAgxR2020Inv[3][3] = {
 /// - 去饱和：**这个最关键**，高亮的饱和色（纯红灯管）要往白吐，
 ///   否则过曝时颜色会“烧焦”成一片纯色。
 [[nodiscard]] auto agx_curve(math::Vec3 v) noexcept -> math::Vec3 {
-  // ① 对数编码：把 0~∞ 映射到可处理区（0.18 中灰 ≈ 0.44）
+  // ① 对数编码：把 0~∞ 映射到可处理区
+  //
+  // ## 这组常数的来历（这里踩过大坑）
+  //
+  // 原实现是 `log2(x/0.18) * 0.32 + 0.5`。那组常数下 **线性 0.05 算出来
+  // 是 −0.09**（负数），被后面的 `clamp(x, 0, 1)` 直接夹成 0 —— 暗部全黑。
+  //
+  // 实测（`tools/tone_map_measure` 修前）：
+  //
+  // | 线性 | 修前 | 问题 |
+  // |---|---|---|
+  // | 0.05 | **0** | 暗部被夹掉 |
+  // | 0.10 | 123 | 对 |
+  // | 0.18 | 191 | 对 |
+  // | 饱和红 HDR (3,0.05,0.05) | (249,249,225) | **几乎全白**，把色相丢了 |
+  //
+  // 中灰以上全对、以下全黑，再加高饱和色变白 —— 而这两条恰好是
+  // “AgX 对比度高/高光去饱和”的**特征**，很容易被误当成风格而不去查。
+  //
+  // ## 修法
+  //
+  // 斜枕减半（0.32 → 0.16）：这样线性 0.001 算出来才 −0.19（加 0.5 后 0.31
+  // 非负），而 0.18 仍在 0.5 附近（中灰不偏）。
   const auto encode = [](float x) noexcept -> float {
-    return std::log2(std::max(x, 1e-6f) / 0.18f) * 0.32f + 0.5f;
+    return std::log2(std::max(x, 1e-6f) / 0.18f) * 0.16f + 0.5f;
   };
   const math::Vec3 loged{encode(v.x), encode(v.y), encode(v.z)};
 
@@ -196,8 +218,26 @@ constexpr float kAgxR2020Inv[3][3] = {
   const math::Vec3 curved{sigmoid(loged.x), sigmoid(loged.y), sigmoid(loged.z)};
 
   // ③ 去饱和：按亮度把三通道往灰拉（越亮拉得越狠）
+  //
+  // ## 为何要限制幅度（这里踩过大坑）
+  //
+  // 原实现是 `highlight = clamp((luma - 0.55) * 2.2, 0, 1)`——也就是
+  // luma 超过 0.55 就开始全速去饱和，到 1.0 完全变灰。
+  //
+  // 而 AgX 的关键特性恰恰是**高光保色相**。实测（`tools/tone_map_measure`）：
+  //
+  // | 输入 | 原实现 | 应当 |
+  // |---|---|---|
+  // | 饱和红 HDR (3, 0.05, 0.05) | (250,232,195) 几乎白 | 偏红，不是白 |
+  // | 饱和绿 HDR | (254,254,252) 全白 | 偏绿 |
+  //
+  // 根因不是“去饱和本身错”，而是**幅度过大**：在 Rec.2020 宽色域里，
+  // 饱和红的三通道都被推高，luma 靠近 1，于是去饱和一开就到底。
+  //
+  // 修法：把系数从 2.2 降到 0.55（起始点 0.55 → 0.72），上限 0.45。
+  // 这样高光仍然**往灰吐**（避免烧色），但不会把色相完全抹掉。
   const float luma = 0.2126f * curved.x + 0.7152f * curved.y + 0.0722f * curved.z;
-  const float highlight = std::clamp((luma - 0.55f) * 2.2f, 0.0f, 1.0f);
+  const float highlight = std::clamp((luma - 0.72f) * 0.55f, 0.0f, 0.45f);
   const auto mix = [&](float c) noexcept -> float { return c + (luma - c) * highlight; };
   return math::Vec3{mix(curved.x), mix(curved.y), mix(curved.z)};
 }

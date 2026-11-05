@@ -1547,6 +1547,24 @@ auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
   SceneSpec spec{};
   spec.camera = extracted->camera;
   spec.lighting = extracted->lighting;
+  // ## 色调映射：bpy 场景跟 Blender 的默认（AgX）
+  //
+  // 对齐口径（量化表见 `tools/tone_map_measure`）：
+  //
+  // | 来源 | 色调映射 | 理由 |
+  // |---|---|---|
+  // | `three_script` | None | three.js 的 `renderer.toneMapping` 默认是 None |
+  // | `bpy_script` | **AgX** | Blender 4.x 的 view transform 默认是 AgX |
+  // | `objects`（JSON）| ACES | 本框架原有默认，不改 |
+  //
+  // ## 为何这里改、而 three 那边不改
+  //
+  // 本函数是**新增的**（bpy 路径本身也是新增的），所以把默认设成 AgX 不会
+  // 改变任何一个已存在的场景。而 `scene_spec_from_three` 已有多处调用方
+  //（`threelab` 示例、多个探针、e2e），改它的默认会影响那些已出片的画面。
+  //
+  // 想要 three 场景也不做映射时，在 JSON 里写 `lighting.tone_map: "none"`。
+  spec.lighting.tone_map = ToneMap::Agx;
   spec.bpy_script = std::string(script);
   spec.bpy_script_name = std::string(script_name);
   return spec;
@@ -1565,6 +1583,16 @@ auto scene_spec_from_three(std::string_view script, std::string_view script_name
   SceneSpec spec{};
   spec.camera = three_scene->camera;
   spec.lighting = three_scene->lighting;
+  // ## 色调映射：保持本框架原默认（ACES）
+  //
+  // 虽然 three.js 的 `renderer.toneMapping` 默认是 None，但本函数已有
+  // 多处调用方（`threelab` 示例、多个探针、e2e），改默认会改变它们
+  // 已出片的画面。
+  //
+  // 需要与浏览器完全一致时，在 JSON 里写 `lighting.tone_map: "none"`
+  // ——那是显式的、不会让存量场景静默改变。
+  //
+  // 这条取舍与项目一贯的「新能力默认不改变既有外观」一致。
   spec.three_script = std::string(script);
   spec.three_script_name = std::string(script_name);
   return spec;

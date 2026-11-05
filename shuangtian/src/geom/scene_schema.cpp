@@ -230,6 +230,13 @@ auto build_tables() -> std::vector<FieldTable> {
               {"env_ground", "color", false, "", "环境反射的地面色", R"j("#1a1a21")j", {}},
               {"env_strength", "number", false, ">= 0", "环境反射强度（0=关闭）", "0", {}},
               {"env_rough_falloff", "number", false, "0..1", "粗糙度向均值弥散", "0.6", {}},
+              {"tone_map", "string", false,
+               R"j("none"/"reinhard"/"aces"/"filmic"/"agx")j",
+               "色调映射算子。用于与外部工具对齐：three.js 默认 none、Blender 4.x 默认 agx。"
+               "不写时按来源择默认（bpy 场景 → agx；其余 → aces）",
+               R"j("aces")j",
+               {"三条曲线的差异到了肉眼可辨（中灰相差 50/255）：见 tools/tone_map_measure",
+                "想让 three_script 产物与浏览器一致，显式写 \"none\""}},
           },
       .open = false,
   });
