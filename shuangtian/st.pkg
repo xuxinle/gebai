@@ -820,6 +820,22 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "诊断：把抽出来的灯光/材质/分组数值打出来。全黑时分不清是光反了、强度 0、还是基色没设"
     },
+    "brightness_source_probe": {
+      "kind": "executable",
+      "sources": ["tools/brightness_source_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "确认画面亮度由哪一项主导：逐项归零看均值掉多少。标定 diffuse 时发现它扫 5 倍只改 2.7/255，说明主导项在别处"
+    },
+    "diffuse_calibrate": {
+      "kind": "executable",
+      "sources": ["tools/diffuse_calibrate.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "标定 bpy energy → Lighting.diffuse 的换算系数。两者单位无物理对应（W/m² vs 相对权重），只能拿真 Blender 参照图实测标定"
+    },
     "lighting_lower_bound_probe": {
       "kind": "executable",
       "sources": ["tools/lighting_lower_bound_probe.cpp", "src/python/mp_bridge.c",

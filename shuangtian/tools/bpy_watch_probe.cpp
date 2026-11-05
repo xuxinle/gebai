@@ -159,7 +159,8 @@ int main(int argc, char** argv) {
 
   // ── ⑤ 渲染 + 出像素 ─────────────────────────────────────────────────
   {
-    const st::math::Color background = st::math::Color::rgba(18, 20, 24, 255);
+    const st::math::Color background =
+      st::math::Color::rgba(16, 17, 21, 255);
     Canvas canvas{kW, kH, 1.0f};
     const auto status = render_scene(*spec, canvas, background);
     if (!status) {

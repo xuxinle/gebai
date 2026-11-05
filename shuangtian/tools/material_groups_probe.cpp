@@ -189,7 +189,8 @@ int main() {
       std::printf("  [FAIL] 转 SceneSpec：%s\n", spec.error().message.c_str());
       return 1;
     }
-    const st::math::Color background = st::math::Color::rgba(18, 20, 24, 255);
+    const st::math::Color background =
+      st::math::Color::rgba(16, 17, 21, 255);
     Canvas canvas{kW, kH, 1.0f};
     const auto status = render_scene(*spec, canvas, background);
     if (!status) {
