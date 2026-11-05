@@ -814,16 +814,23 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
             // 行高翻倍、可用行数减半，而列表的主任务是“快速扫一堆文件名”——
             // 单行能一眼看更多条。
             for (const auto& change : items) {
-              (void)row(c, {.gap = 4.0f, .key = "git:" + change.path}, [&] {
+              // 悬停判定挂在 **整行容器** 上，而不是行内那个文件名按钮。
+              //
+              // 为何必须如此（实测故障）：`UiRoot` 的 hover 链是**逐元素直达**
+              // （DOM 的 mouseenter 语义，不冒泡）。指针从文件名移到行内动作钮时，
+              // 文件名按钮收到 HoverOut → 按它算的 `row_hovered` 变假 → 动作钮
+              // 被收掉 → 指针又落回文件名上 → 又 HoverIn → **按钮自己赶走了自己**。
+              // （用户：“移到按钮时按钮隐藏掉了”。）
+              //
+              // 容器的命中覆盖整行（含动作钮那一格）⇒ 在行内怎么移都不会离开。
+              const std::string hover_path = change.path;
+              (void)custom_container<Panel>(
+                  c,
+                  [&] {
                 const auto full_path = change.path;
                 const std::string name = change.file_name();
                 const std::string dir = change.dir_path();
                 const std::string code(1, change.display_code());
-                // 悬停才显示行内动作（用户要求；IDEA/VSCode 同行为）。
-                //
-                // 为何用**一条共享的路径 State** 而不是每行一个 bool：
-                // 同一时刻只可能悬停一行，而“哪一行在悬停”就是一个值。
-                // 每行一个 bool 会让 N 个 State 在悬停时全部重算。
                 const bool row_hovered = scm_hovered_path_.value() == change.path;
                 // 版式：`状态 文件名  目录`——**文件名在前、目录在后**。
                 //
@@ -844,19 +851,7 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
                   b.set_size(Button::Size::Small);
                   // 去掉默认内边距：列表行要贴左缘，与组标题、上方工具条同一条基线。
                   b.style().padding = st::math::Insets{0.0f, 0.0f, 0.0f, 0.0f};
-                  // 悬停 → 记下“这一行在悬停”；离开 → 只有当它还是当前行时才清空。
-                  //
-                  // ⚠ 必须比一下再清：鼠标从 A 快速滑到 B 时，A 的 HoverOut 可能
-                  // **晚于** B 的 HoverIn 到达；不比就把 B 刚写进去的值清掉，
-                  // 表现为“悬停在 B 上却没有按钮”。
                   const std::string path = change.path;
-                  b.set_on_hover([this, path](bool entered) {
-                    if (entered) {
-                      scm_hovered_path_.set(path);
-                    } else if (scm_hovered_path_.value() == path) {
-                      scm_hovered_path_.set(std::string{});
-                    }
-                  });
                   b.on_click = [this, change] { open_git_diff(change); };
                 }, {.height = 24.0f, .grow = true, .key = "row"});
                 // 行内动作：**悬停时可见，宽度恒占位**。
@@ -893,7 +888,27 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
                                             true, [this, change] { git_discard(change); });
                   }
                 });
-              });
+                  },
+                  [this, hover_path](Panel& holder) {
+                    holder.style().grow = true;
+                    holder.style().height = 28.0f;
+                    holder.style().gap = 4.0f;
+                    // **横向**：文件名与动作钮并排（Panel 默认是 Column）。
+                    holder.style().direction = FlexDirection::Row;
+                    // 悬浮取**容器**的（它覆盖整行、包括动作钮那一格）。
+                    //
+                    // ⚠ 离开时要比一下再清：鼠标从 A 快速滑到 B 时，A 的 HoverOut
+                    // 可能**晚于** B 的 HoverIn 到达；不比就把 B 刚写进去的值清掉，
+                    // 表现为“悬停在 B 上却没有按钮”。
+                    holder.set_on_hover([this, hover_path](bool entered) {
+                      if (entered) {
+                        scm_hovered_path_.set(hover_path);
+                      } else if (scm_hovered_path_.value() == hover_path) {
+                        scm_hovered_path_.set(std::string{});
+                      }
+                    });
+                  },
+                  {.height = 28.0f, .grow = true, .key = "gitrow:" + change.path});
             }
           }
         },

@@ -896,6 +896,12 @@ describe("框架与提示词装配", () => {
     expect(prompt).toContain("set_text")
     expect(prompt).toContain("显示行号当内容身份")
     expect(prompt).toContain("滚动/定位在排布前算")
+    // 交互层的两条（事件回调里改 State / 悬停改变命中区）——
+    // 它们是“属性面全对、只有用户能发现”那一类里最贵的：崩溃与闪烁。
+    expect(prompt).toContain("事件回调里改 State")
+    expect(prompt).toContain("retire_subtree")
+    expect(prompt).toContain("悬停才显示")
+    expect(prompt).toContain("不冒泡")
     // 逆向验证：“测试通过不等于测试有效”——没做这一步等于没测
     expect(prompt).toContain("逆向验证")
     expect(prompt).toContain("不等于测试有效")
