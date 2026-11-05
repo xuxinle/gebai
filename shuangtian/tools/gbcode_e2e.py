@@ -973,8 +973,72 @@ def main():
         check(wait_until(lambda: client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false"),
               "收起后再点应重新展开")
 
-        # —— 29. 崩溃栈可符号化（诊断基建回归）——
+        # —— 28b. 空白差异对比：用户自己粘两段文本 ——
         #
+        # 这个需求的要点是“**不需要文件、不需要 git** 也能看结构化差异”，
+        # 所以判据看三件：
+        #   ① 开得出来（菜单/命令面板入口 → 标签 + 两个输入区 + 对比视图）；
+        #   ② 粘进去的文本真的被比了（摘要的行数与手算一致）；
+        #   ③ 交换/清空是两个不同动作（交换后增删行数互换，清空后无改动）。
+        # 入口走**命令面板**（真实用户路径：Ctrl+Shift+P → 搜“文本” → 回车）。
+        # 不用 `invoke #view.compare-blank`：没这元素——命令面板的条目不是一个
+        # 常驻元素 id，而是面板内部的行。
+        client.ok("input.key", {"key": "p", "ctrl": True, "shift": True})
+        time.sleep(0.6)
+        check(client.count("#command-palette") == 1, "命令面板未打开（无法走真实入口）")
+        client.ok("input.text", {"text": "两段文本"})
+        time.sleep(0.6)
+        # 判据用**命中数**而不是“当前选中项”：`CommandPalette` 的属性面只有
+        # `query` / `active` / `match_count`（没有命令名字段）。
+        palette = client.ok("get", {"id": "command-palette"})["props"]
+        check(palette.get("query") == "两段文本", f"过滤词未进面板（{palette.get('query')!r}）")
+        check(int(palette.get("match_count") or 0) >= 1,
+              f"搜“两段文本”没有命中任何命令（match_count={palette.get('match_count')}）")
+        client.ok("input.key", {"key": "Enter"})
+        time.sleep(0.7)
+        for want in ("compare-column", "compare-left", "compare-right",
+                     "compare-view", "compare-summary", "compare-swap"):
+            check(client.count("#" + want) == 1, f"文本对比缺少 #{want}")
+        # 两侧是**可编辑**编辑器（用户要能在里面直接粘/打）。
+        left_props = client.ok("get", {"id": "compare-left"})["props"]
+        check(left_props.get("read_only") == "false",
+              f"左侧文本不可编辑（{left_props.get('read_only')}）")
+        left_text = "alpha\nbeta\ngamma"
+        right_text = "alpha\nBETA\ngamma\ndelta"
+        client.ok("set", {"id": "compare-left", "props": {"text": left_text}})
+        client.ok("set", {"id": "compare-right", "props": {"text": right_text}})
+        time.sleep(0.3)
+        client.ok("invoke", {"id": "compare-run", "action": "click"})
+        time.sleep(0.6)
+        summary = client.text("compare-summary")
+        # 期望值手算依据：left={alpha,beta,gamma} / right={alpha,BETA,gamma,delta}
+        # → 改 1 行（beta→BETA）+ 新增 1 行（delta）= 1 处改动、+2 −1。
+        check("处改动" in summary and "+2" in summary and "\u22121" in summary,
+              f"对比摘要不对（期望 1 处改动 +2 \u22121，实际 {summary!r}）")
+        hunks = client.ok("get", {"id": "compare-view"})["props"].get("hunks")
+        check(hunks is not None and int(hunks) >= 1, f"对比视图没有差异段（hunks={hunks}）")
+        print(f"[28b] 空白文本对比：粘两段文本 → {summary}")
+
+        # 交换两侧：增删互换（左/右身份真的换了，不是只改标签）
+        client.ok("invoke", {"id": "compare-swap", "action": "click"})
+        time.sleep(0.6)
+        swapped = client.text("compare-summary")
+        # 交换后新增/删除应当互换：+2 −1  →  +1 −2。
+        check("+1" in swapped and "\u22122" in swapped,
+              f"交换后增删没有互换（{summary!r} → {swapped!r}）")
+        # 清空：两侧都空 → 无改动
+        client.ok("invoke", {"id": "compare-clear", "action": "click"})
+        time.sleep(0.6)
+        check(client.text("compare-summary") == "两侧相同",
+              f"清空后应无改动（{client.text('compare-summary')!r}）")
+        # 关掉：标签与面板都退场。
+        # 走 Ctrl+W（与真实用户一致：`close_active` 优先关特殊标签）。
+        client.ok("input.key", {"key": "W", "ctrl": True})
+        time.sleep(0.6)
+        check(client.count("#compare-column") == 0, "关闭后文本对比面板仍在")
+        print("[28b] 交换/清空/关闭 全部生效")
+
+        # —— 29. 崩溃栈可符号化（诊断基建回归）——        #
         # 崩溃时能否显示**函数名**取决于链接期 `-rdynamic`：丢了它栈里只有裸地址，
         # AI 排查得手工包 gdb 再来一遍（实测过一次这样的往返）。用 crash_probe
         # 真崩一次、断言 stderr 含调用链上的函数名。

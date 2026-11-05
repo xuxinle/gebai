@@ -357,6 +357,10 @@ struct CodeEditorPage : Component {
   std::string diff_pending_path_{};
   /// 差异视图实例（当前帧有效）——`hunk` 导航靠它。
   DiffView* diff_view_ptr{nullptr};
+  /// 空白差异对比：左侧文本实例（当前帧有效；带惯编辑完成后置回 null）。
+  CodeEditor* compare_left_ptr{nullptr};
+  /// 空白差异对比：右侧文本实例（同上）。
+  CodeEditor* compare_right_ptr{nullptr};
   /// 逐行暂存模式（差异视图上方多一条工具条）。
   ///
   /// 为何是模式而不是"永远显示勾选列"：勾选列会占掉左侧栏宽度（本来就窄），
@@ -368,7 +372,21 @@ struct CodeEditorPage : Component {
 /// 而`enabled` 是**构建期写入**的。勾选发生在 `DiffView` 内部（自绘命中），
 /// 不经过声明式状态——不把计数变成响应式的话，勾了一行按钮仍然 disabled，
 /// 用户点不动（看上去像“勾选没生效”）。
-State<std::size_t> diff_selected_count_{0};
+  State<std::size_t> diff_selected_count_{0};
+
+  // —— 空白差异对比（用户自己粘两段文本比）——
+  //
+  // 与“文件差异”（`diff_key_`）的关系：那是**从 git 读两端**的差异；这一种
+  // 两端都是用户粘的，没有文件、没有仓库——把两者分开成两个 key，而不是给
+  // 文件差异加一个“无文件”分支：后者的每一处都假设路径能读、能暂存。
+  //
+  // ⚠ 两侧文本**不用 `State`**：编辑器自己的文本是运行时状态，而这两个值只在
+  // “交换两侧 / 清空 / 重建对比视图”这三个动作时被写。放进 `State` 会让声明式
+  // 每帧把它们回写到编辑器里（用户正在打字的那个字就被重置了）。
+  State<std::string> compare_key_{};         ///< 空 = 不是空白对比标签
+  State<bool> compare_split_{true};          ///< true = 左右并列，false = 行内
+  std::string compare_left_text_{};
+  std::string compare_right_text_{};
 
   // —— 三方合并视图（冲突处置）——
   ///
@@ -1429,6 +1447,31 @@ auto shutdown() -> void;
    void open_diff(std::string title, const gbcode::CompareOptions& options, std::string path);
 
 
+  /// 打开一个**空白差异对比**标签：两侧都是空文本，用户自己粘。
+  ///
+  /// 为何需要（与 `open_diff` 的区别）：`open_diff` 的两端都得先从 git 读
+  /// （一个路径 + 两个端点）。而“比这两段文本”是个常见需求，且
+  /// **很多内容根本不在仓库里**（日志片段、粘贴的配置、模型给的代码）。
+  /// 所以这里不要求工作区、不碰 git：两个可编辑的文本框 + 一个结构化对比视图。
+   void open_compare_blank();
+
+
+  /// 构建空白差异对比的面板（两栏输入 + 结构化结果）；只在 `compare_key_` 非空时调。
+  void build_compare_blank(Composer& c);
+
+
+  /// 交换空白对比的左右两侧（“谁是新版”粘反了时用）。
+  void swap_compare_sides();
+
+
+  /// 清空空白对比的两侧（保留标签，接着粘另一对）。
+  void clear_compare_sides();
+
+
+  /// 把两侧文本实例的当前内容拍回成员（见 `compare_left_text_` 的注释）。
+  void pull_compare_texts();
+
+
   /// 打开一个**三方合并**标签（`base/ours/theirs` 三栏 + 逐段取舍）。
   ///
   /// 与差异视图并列、同样住在编辑区（见 `build` 里的互斥顺序）。
@@ -1869,7 +1912,9 @@ auto shutdown() -> void;
             {.separator = true},
             {.id = "toggle-sidebar", .label = "切换侧栏可见性（Ctrl+B）"},
             {.id = "find", .label = "查找（Ctrl+F）"},
-            {.id = "toggle-terminal", .label = "切换底部面板（Ctrl+J）"}}},
+            {.id = "toggle-terminal", .label = "切换底部面板（Ctrl+J）"},
+            {.separator = true},
+            {.id = "compare-blank", .label = "比较两段文本…"}}},
           {"run", "运行",
            {{.id = "run-task", .label = "运行任务：构建 gallery"},
             {.id = "run-test", .label = "运行任务：st test"},

@@ -233,6 +233,8 @@ namespace gbcode_ui {
     // 编辑器实例可能在本次重组中新建/换绑：先置空，由 `build_editor_area` 重新取得
     editor = nullptr;
     diff_view_ptr = nullptr;   // 同上：差异视图实例每帧重建
+    compare_left_ptr = nullptr;    // 空白对比的两个编辑器也是每帧重建
+    compare_right_ptr = nullptr;
     // **浮层里的输入框**：它们在上一次重组里被销毁，本帧还没重建。
     //
     // 不置空就会踩到已释放的 Input——实测（无头 E2E，转到行浮层）：
@@ -340,6 +342,8 @@ namespace gbcode_ui {
       sidebar_visible_.set(!sidebar_visible_.value());
     } else if (menu == "view" && item == "find") {
       open_find();
+    } else if (menu == "view" && item == "compare-blank") {
+      open_compare_blank();
     } else if (menu == "view" && (item == "zoom-in" || item == "zoom-out" || item == "zoom-reset")) {
       zoom_page(item == "zoom-in" ? 1 : (item == "zoom-out" ? -1 : 0));
     } else if (menu == "run" && (item == "run-task" || item == "run-test" || item == "run-lint")) {
@@ -736,6 +740,13 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
       }
       const bool diff_open = !diff_key_.value().empty();
       const bool merge_open = !merge_key_.value().empty();
+      const bool compare_open = !compare_key_.value().empty();
+      if (compare_open) {
+        // 空白对比与合并/差异同为特殊标签，三者在内容区互斥（见下方首行判断）。
+        tabs.push_back(TabData{.key = compare_key_.value(),
+                               .label = std::string("↔ 文本对比"),
+                               .modified = false, .closable = true});
+      }
       if (merge_open) {
         // 合并标签排在差异前面（与内容区互斥顺序一致：合并优先级最高）。
         tabs.push_back(TabData{.key = merge_key_.value(),
@@ -751,7 +762,9 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
       }
       // 活动索引：差异/合并任一打开 → 它就是当前内容（文件标签仍保留、可点回）。
       std::size_t active_index = active;
-      if (merge_open) {
+      if (compare_open) {
+        active_index = buffers.size() + (merge_open ? 1 : 0) + (diff_open ? 1 : 0);
+      } else if (merge_open) {
         active_index = buffers.size();
       } else if (diff_open) {
         active_index = buffers.size() + (merge_open ? 1 : 0);
@@ -897,6 +910,10 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
       }
       merge_view_ptr = nullptr;
       md_view_ptr = nullptr;
+      if (!compare_key_.value().empty()) {
+        build_compare_blank(c);
+        return;
+      }
       if (!diff_key_.value().empty()) {
         // 差异视图外面包一层列：上面是逐行暂存工具条（仅在需要时出现），下面才是视图。
         //
@@ -1118,6 +1135,94 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         };
         editor = &ed;
       }, {.grow = true, .id = "editor-host"});
+    });
+  }
+
+
+  /// 空白差异对比：上面两个可编辑文本框（左/右），下面结构化对比视图。
+  ///
+  /// ## 为何两侧是**可编辑编辑器**而不是只读展示
+  ///
+  /// 需求就是“用户自己粘内容对比”。黏贴进只读视图做不到，而重新开对话框
+  /// 再载入又回到了“必须有文件”。这边就是两块可直接编辑/粘贴的文本。
+  ///
+  /// ## 为何差异结果**不每帧重算**
+  ///
+  /// `diff_hunks` 是 O(ND)：大文本（几万行日志）下会卡帧。所以只在
+  /// “交换 / 清空 / 用户明确要求重算”时拍一次全文；编辑中不重算。
+  /// 每次重组本函数都会跑，所以差异本身仍从成员文本现算（纯函数、只读）。
+  void CodeEditorPage::build_compare_blank(Composer& c) {
+    (void)column(c, {.grow = true, .id = "compare-column"}, [&] {
+      // —— 工具条 ——
+      (void)row(c, {.gap = 6.0f, .height = 32.0f,
+                    .surface = Element::Surface::Content, .id = "compare-toolbar"}, [&] {
+        // 工具条按钮统一走 `custom<Button>`：`dsl::button` 的 props 只有布局，
+        // 而这里要 `size` / `variant`（与其他工具条的写法一致）。
+        const auto tool = [&](const char* id, std::string label, Button::Variant variant,
+                              std::function<void()> on_click) {
+          (void)custom<Button>(c, [id, label = std::move(label), variant,
+                                   on_click = std::move(on_click)](Button& b) {
+            b.set_id(id);
+            b.set_label(label);
+            b.set_size(Button::Size::Small);
+            b.set_variant(variant);
+            b.on_click = on_click;
+          }, {.height = 26.0f, .key = id});
+        };
+        tool("compare-swap", "交换两侧", Button::Variant::Ghost, [this] { swap_compare_sides(); });
+        tool("compare-clear", "清空", Button::Variant::Ghost, [this] { clear_compare_sides(); });
+        tool("compare-layout", compare_split_.value() ? "行内对比" : "左右对比",
+             Button::Variant::Ghost, [this] { compare_split_.set(!compare_split_.value()); });
+        // 重算：编辑过程中不重算（见函数注释），用户粘完点这一下。
+        tool("compare-run", "比对", Button::Variant::Primary, [this] {
+          pull_compare_texts();
+          status_.set("已重新对比");
+        });
+        (void)spacer(c);
+        // 差异摘要：一眼看出“到底差多少行”，免得只看到滚不完的视图。
+        (void)text(c, [this] {
+          const auto file = st::text::make_file_diff(compare_left_text_, compare_right_text_);
+          const auto [added, removed] = st::text::count_changes(file.hunks);
+          if (file.hunks.empty()) return std::string("两侧相同");
+          return std::format("{} 处改动 · +{} −{}", file.hunks.size(), added, removed);
+        }, {.id = "compare-summary"});
+      });
+      (void)divider(c);
+      // —— 两栏输入 ——
+      (void)row(c, {.gap = 0.0f, .height = 200.0f, .id = "compare-inputs"}, [&] {
+        const auto side = [this, &c](const char* id, const char* host_id, std::string& seed,
+                                     CodeEditor** slot) {
+          (void)custom<CodeEditor>(c, [this, id, seed_copy = seed, slot](CodeEditor& ed) {
+            ed.set_id(id);
+            ed.set_language("text");
+            ed.set_font_size(0.0f);
+            // ⚠ `grow` 必须写在**组件自己的 style** 上：`BoxProps.grow` 对
+            // `custom<T>` 不生效（实测：两栏宽度都是 0，面板上只剩一条空白）。
+            ed.style().grow = true;
+            // 只在“内容还没进过编辑器”时灌种子文本。
+            // ⚠ 条件必须存在：声明式每帧重建这个回调，无条件 `set_text`
+            // 会把用户正在输的内容逐帧抹回种子（实测同款坑：read_only/font 被回写）。
+            if (ed.text().empty() && !seed_copy.empty()) ed.set_text(seed_copy);
+            // 编辑后不自动重算（大文本会卡），但要让摘要与实际内容一致：
+            // 编辑时不进 `on_change` 重算，用户按「比对」或交换时算。
+            *slot = &ed;
+          }, {.grow = true, .id = host_id});
+        };
+        side("compare-left", "compare-left-host", compare_left_text_, &compare_left_ptr);
+        side("compare-right", "compare-right-host", compare_right_text_, &compare_right_ptr);
+      });
+      (void)divider(c);
+      // —— 结构化对比结果 ——
+      //
+      // 用与文件差异**同一个组件**：用户已经在“看差异”时熟悉它的配色、行号与
+      // 逐差异跳转（F7/F8），再另做一个对比视图只会多一套要学的东西。
+      (void)custom<DiffView>(c, [this](DiffView& view) {
+        view.set_id("compare-view");
+        view.set_read_only(true);
+        view.set_font_size(0.0f);
+        view.set_layout(compare_split_.value() ? DiffLayout::SideBySide : DiffLayout::Unified);
+        view.set_diff(st::text::make_file_diff(compare_left_text_, compare_right_text_));
+      }, {.grow = true, .id = "compare-view-host"});
     });
   }
 

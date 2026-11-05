@@ -210,9 +210,15 @@ namespace gbcode_ui {
   /// 只有标签的 × 天然走 `request_close`——其余三处若直接调 `close()`，
   /// 就会出现“同一个动作，换个入口就静默丢修改”的不一致（实测踩到）。
   auto CodeEditorPage::close_active() -> void {
-    // 特殊标签（差异/合并）当前正在看时优先关它（与内容区互斥顺序一致：
+    // 特殊标签（差异/合并/空白对比）当前正在看时优先关它（与内容区互斥顺序一致：
     // 看的是什么就关什么）——不先判会让 Ctrl+W 在差异视图下静默关掉背后的文件标签。
-    if (!merge_key_.value().empty()) {
+    if (!compare_key_.value().empty()) {
+      compare_key_.set({});
+      compare_left_ptr = nullptr;
+      compare_right_ptr = nullptr;
+      status_.set("已关闭文本对比");
+      return;
+    }    if (!merge_key_.value().empty()) {
       merge_key_.set({});
       merge_view_ptr = nullptr;
       status_.set("已关闭合并标签");
@@ -556,7 +562,10 @@ void CodeEditorPage::load_active_text() {
     // `build_editor_area` 的组装顺序：文件标签在前，差异/合并在后）。
     if (index >= list.size()) {
       // 落在尾部但差异/合并都没开 = 索引越界（如刚关闭时短暂不一致），忽略。
-      if (diff_key_.value().empty() && merge_key_.value().empty()) return;
+      if (diff_key_.value().empty() && merge_key_.value().empty() &&
+          compare_key_.value().empty()) {
+        return;
+      }
       // 点的就是已打开的差异/合并标签本身：无需改状态（它已是当前内容）。
       status_.set("当前已是差异/合并标签");
       return;
@@ -588,6 +597,13 @@ void CodeEditorPage::load_active_text() {
       merge_key_.set({});
       merge_view_ptr = nullptr;
       status_.set("已关闭合并标签");
+      return;
+    }
+    if (!compare_key_.value().empty() && key == compare_key_.value()) {
+      compare_key_.set({});
+      compare_left_ptr = nullptr;
+      compare_right_ptr = nullptr;
+      status_.set("已关闭文本对比");
       return;
     }
     if (!diff_key_.value().empty() && key == diff_key_.value()) {
@@ -1517,6 +1533,60 @@ void CodeEditorPage::load_active_text() {
     merge_key_.set("merge:" + merge_pending_path_);
     merge_loaded_ = false;
     merge_wanted_ = true;
+  }
+
+
+  /// 打开一个**空白差异对比**标签：两侧都是空文本，用户自己粘。
+  ///
+  /// 与 `open_diff` 的关键区别：**不读磁盘、不碰 git**。
+  /// 于是它不依赖工作区、也不可能因“文件已删除/二进制”而失败——
+  /// 这正是“用户手里有两段文本、只想看看差在哪”时该走的那条路。
+  void CodeEditorPage::open_compare_blank() {
+    // 特殊标签（差异/合并/空白对比）互斥：同一时刻最多一个。
+    if (!merge_key_.value().empty()) {
+      merge_key_.set({});
+      merge_view_ptr = nullptr;
+    }
+    if (!diff_key_.value().empty()) {
+      diff_key_.set({});
+      diff_title_.set({});
+      diff_file_.set(st::text::FileDiff{});
+    }
+    compare_left_text_.clear();
+    compare_right_text_.clear();
+    compare_key_.set("compare:blank");
+    status_.set("已打开空白差异对比：两侧各粘一段文本（或直接在该面板里输入）");
+  }
+
+
+  /// 交换空白对比的左右两侧。
+  ///
+  /// 为何需要：“哪边旧、哪边新”几乎总是粘完才看出来，而重粘一遍容易粘错。
+  /// 交换后**光标位置无法保留**（文本换了）——这是预期行为，不再额外提示。
+  void CodeEditorPage::swap_compare_sides() {
+    pull_compare_texts();
+    std::swap(compare_left_text_, compare_right_text_);
+    status_.set("已交换两侧文本");
+  }
+
+
+  /// 清空空白对比的两侧（保留标签位，接着粘另一对）。
+  void CodeEditorPage::clear_compare_sides() {
+    compare_left_text_.clear();
+    compare_right_text_.clear();
+    status_.set("已清空两侧文本");
+  }
+
+
+  /// 把两侧文本实例的当前内容拍回成员。
+  ///
+  /// 为何要有“拍回”这一步：编辑器里的文本是**运行时状态**（用户打的字在
+  /// `CodeEditor` 内部），而重建对比结果要的是全文。
+  /// ⚠ 不在 `on_change` 里直接写成员：那会让每敲一个字都重算全量差异
+  ///（`diff_hunks` 是 O(ND)，大文本下会卡）。改为只在“重建/交换/清空”时拍。
+  void CodeEditorPage::pull_compare_texts() {
+    if (compare_left_ptr != nullptr) compare_left_text_ = compare_left_ptr->text();
+    if (compare_right_ptr != nullptr) compare_right_text_ = compare_right_ptr->text();
   }
 
 
@@ -2859,6 +2929,8 @@ void CodeEditorPage::load_active_text() {
       zoom_page(0);
     } else if (id == "view.toggle-sidebar") {
       sidebar_visible_.set(!sidebar_visible_.value());
+    } else if (id == "view.compare-blank") {
+      open_compare_blank();
     } else if (id == "view.toggle-indent-guides") {
       if (editor != nullptr) {
         editor->set_indent_guides(!editor->indent_guides());
@@ -2909,6 +2981,7 @@ void CodeEditorPage::load_active_text() {
     add("view.zoom-out", "查看: 缩小页面", "页面缩放 −（Ctrl+-）");
     add("view.zoom-reset", "查看: 重置页面缩放", "回到 100%（Ctrl+0）");
     add("view.toggle-sidebar", "查看: 切换侧栏可见性", "显示/隐藏侧栏（活动栏常驻，Ctrl+B）");
+    add("view.compare-blank", "查看: 比较两段文本…", "自己粘两侧内容做结构化差异（不读磁盘）");
     add("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换");
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");
     // blame 行尾注解：开关 + 当前视口取数（B5）。
