@@ -178,12 +178,32 @@ class _Collection:
         self._factory = factory
 
     def new(self, name, *args, **kwargs):
-        # bpy 允许重名（会自动加 .001），但那样按名查就有歧义。
-        # 这里**拒绝重名**：建模脚本里重名几乎总是笔误，
-        # 而静默加后缀会让"按名取不到预期对象"变成难查的问题。
-        if any(item.name == name for item in self._items):
-            raise ValueError('已存在同名数据块：%r' % (name,))
-        item = self._factory(name, *args, **kwargs)
+        # ## 重名时自动加 `.001` 后缀（2026-11-05 改）
+        #
+        # 原实现**拒绝重名**，理由是“建模脚本里重名几乎总是笔误”。
+        # 而那个取舍错得很具体：
+        #
+        # `bpy.ops.mesh.primitive_*_add()` 在 `bpy_ops_ns.py` 里用的是
+        # **硬编码名字**（`'Sphere'`、`'Cube'`…），所以同一脚本里
+        # **建两个球就必崩**：
+        #
+        #     ValueError: 已存在同名数据块：'Sphere'
+        #
+        # 而真实 bpy 是自动加后缀（`Sphere`、`Sphere.001`、…）。
+        # 对齐验证场景正是“一排四个球”——写成拒绝重名就直接跑不了。
+        #
+        # 改成与真实 bpy 一致：重名时找第一个未被占用的 `.NNN` 后缀。
+        # 而“按名取不到预期对象”的担心由**调用方**负责——
+        # `primitive_*_add` 返回的是对象本身，不靠名字取。
+        unique = name
+        if any(item.name == unique for item in self._items):
+            suffix = 1
+            while any(item.name == '%s.%03d' % (name, suffix) for item in self._items):
+                suffix += 1
+                if suffix > 999:
+                    raise ValueError('同名数据块过多：%r' % (name,))
+            unique = '%s.%03d' % (name, suffix)
+        item = self._factory(unique, *args, **kwargs)
         self._items.append(item)
         return item
 
