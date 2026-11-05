@@ -593,6 +593,49 @@ def _extract_camera(context):
     }
 
 
+def _extract_world():
+    """场景的世界背景色 → `[r, g, b]` 线性值（取不到时返回 None）。
+
+    ## 为何必须抽它（2026-11-05 加）
+
+    环境反射是**金属出色的唯一来源**：纯 Cook-Torrance 只处理直接光，
+    金属其余像素 = 固有色 × 0（无漫反射）= 黑。
+
+    而本框架的 `Lighting::env_sky` 默认是 `(0.52, 0.58, 0.68)`——一个
+    **明亮的天空**。而典型 bpy 脚本的世界背景是 `(0.006, 0.007, 0.009)`
+    （sRGB 18/20/24 转线性）——**亮了 87 倍**。
+
+    实测后果（`tools/subject_stats`，只统计主体）：
+
+    | | 主体均值 | 暗部 |
+    |---|---|---|
+    | 本框架 | **139.6** | **0.0%** |
+    | 真 Blender | 78.1 | 34.6% |
+    | 真 three.js | 74.0 | 50.2% |
+
+    亮近一倍，完全没有暗部——因为金属被一个**不存在的亮天空**照亮。
+
+    ## 为何回退到 None 而不是报错
+
+    bpy 脚本可以不设世界（用默认灰色）。那时用本框架原默认即可——
+    不把“没配世界”当成错误。
+    """
+    scene = _host.get('context')
+    if scene is None:
+        return None
+    scene = getattr(scene, 'scene', None)
+    if scene is None:
+        return None
+    world = getattr(scene, 'world', None)
+    if world is None:
+        return None
+    # 真实 bpy：色在节点树的 Background 节点里
+    background = getattr(world, 'background_color', None)
+    if background is not None:
+        return [float(background[0]), float(background[1]), float(background[2])]
+    return None
+
+
 def _extract_lights():
     """灯光 → list（类型 / 位置 / 朝向 / 颜色 / 强度）。"""
     out = []
@@ -659,6 +702,8 @@ def extract():
         'objects': objects,
         'camera': camera,
         'lights': lights,
+        # 世界背景色（环境反射用）。None = 脚本没配世界，C++ 侧用默认
+        'world': _extract_world(),
         'warnings': warnings,
     }
 

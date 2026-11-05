@@ -259,6 +259,39 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
   scene.camera = read_camera(json_at(root, "camera"));
   scene.lighting = read_lighting(json_at(root, "lights"));
 
+  // ## 世界背景 → 环境反射色（2026-11-05 加）
+  //
+  // 环境反射是**金属出色的唯一来源**（纯 Cook-Torrance 下金属其余像素全黑）。
+  //
+  // 而 `Lighting::env_sky` 默认是 `(0.52, 0.58, 0.68)`——一个**明亮的天空**。
+  // 典型 bpy 脚本的世界背景只相当于线性 `0.006`，**差 87 倍**。
+  //
+  // 实测（`tools/subject_stats`，只统计主体）：
+  //
+  // | | 主体均值 | 暗部 |
+  // |---|---|---|
+  // | 本框架（用亮天空） | **139.6** | **0.0%** |
+  // | 真 Blender | 78.1 | 34.6% |
+  // | 真 three.js | 74.0 | 50.2% |
+  //
+  // 亮近一倍、完全没有暗部——因为金属被一个不存在的亮天空照亮。
+  //
+  // 修法：从脚本的世界背景推导。天空 = 背景色（上半环境），地面 = 更暗的
+  // 同色（下半）——这与 Blender 的“世界色均匀发光”近似（真实是均匀，
+  // 但本框架的环境只有双色渐变，用“天空 = 背景、地面 = 50% 背景”保留
+  // 上下有别的型制）。
+  {
+    const Json& world = json_at(root, "world");
+    if (world.is_array() && world.size() >= 3) {
+      const auto rgb = read_doubles(world, 3);
+      const math::Vec3 background{static_cast<float>(rgb[0]), static_cast<float>(rgb[1]),
+                                  static_cast<float>(rgb[2])};
+      scene.lighting.env_sky = background;
+      scene.lighting.env_ground =
+          math::Vec3{background.x * 0.5f, background.y * 0.5f, background.z * 0.5f};
+    }
+  }
+
   const Json& warnings = json_at(root, "warnings");
   if (warnings.is_array()) {
     for (const auto& item : warnings) {

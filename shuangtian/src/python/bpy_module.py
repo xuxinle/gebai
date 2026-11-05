@@ -91,6 +91,40 @@ _context.scene = _Module('Scene')
 _context.scene.name = 'Scene'
 
 
+# ---- 世界背景（环境反射的来源）----
+#
+# ## 为何需要它（2026-11-05）
+#
+# 环境反射是**金属出色的唯一来源**。而本框架 `env_sky` 默认是
+# `(0.52, 0.58, 0.68)`（一个明亮的天空），而典型 bpy 脚本的世界背景
+# 只相当于线性 `0.006`——差 87 倍。
+#
+# 后果：金属被一个**不存在的亮天空**照亮，主体均值 139.6 vs 真渲染器 78。
+#
+# ## 为何用 `background_color` 而不是节点树
+#
+# 真实 bpy 的颜色在 `world.node_tree.nodes['Background'].inputs['Color']`。
+# 我们的兼容层没有节点树（与材质同样的取舍，见 `docs/python.md`）。
+# 所以提供一个**直接字段**：脚本能用、抽取器能读、与“节点值默认同步”的
+# 真实行为意图一致。
+
+
+class _World:
+    """世界背景（只实现环境反射需要的最小面）。"""
+
+    def __init__(self, name='World'):
+        self.name = name
+        # 与 Blender 默认世界灰一致（0.05 中性灰）
+        self.background_color = (0.05, 0.05, 0.05)
+        self.use_nodes = False
+
+    def __repr__(self):
+        return 'World(%r)' % (self.name,)
+
+
+_context.scene.world = _World()
+
+
 # ---- bpy 模块 ----
 _bpy = _Module('bpy')
 _bpy.data = _data
