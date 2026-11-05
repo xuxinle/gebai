@@ -3184,8 +3184,12 @@ RL 的观测距离特征也改成按角色招式算（否则技能型角色被�
   棋盘格锚在内容坐标系。
 - [x] **B10 `st::ui::ColorPicker`**：HSV 面板 + 十六进制 + 吸管（8 例 127 断言）。
   灰阶时保住色相（否则"我刚选的红"会悄悄变基）；解析失败如实拒绝（不静默变黑）。
-- [x] **B11 逐行暂存**：数据层 `build_partial_patch` + gbcode 的 `StagePatch`/`UnstagePatch`。
+- [x] ~~**B11 逐行暂存**~~：数据层 `build_partial_patch` + gbcode 的 `StagePatch`/`UnstagePatch`。
   真 git e2e 验证「暂存区只有选中的改动」。踩到 `core.autocrlf` 的坑（LF 上下文 vs CRLF 工作区）。
+  **已于 2026-11-05 下线**（用户要求去掉）：整套链（数据层/写操作/`DiffView::staging_mode`/
+  `LineDecoration::Check` 勾选列/单测/e2e）全部删除。原因：差异视图改为“整文件编辑器与
+  对比一体”后，逐行暂存那套“基于片段的选择模型”与它共存时无法自洽——
+  “勾一行到底改了什么”说不清。暂存/提交回到**整文件**粒度（变更面板）。
 - [x] **B12 三方合并数据层**：`merge_three_way`/`merge_apply`（9 例 55 断言）。
   五态区段（`BothSame` 不算冲突——把"两边加同一行"当冲突是纯噪音）。
   修出两个真缺陷：尾部纯插入丢失、相邻不重叠被误判成冲突。

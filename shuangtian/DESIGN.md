@@ -1053,6 +1053,27 @@ class DiffView : public Element {
 | 底部 Git → 选中提交 | 列出该提交改动的文件，点文件开“父提交 ↔ 本提交”的并列差异（**根提交归一到空树**） |
 | ~~活动栏「比较」~~ | **已下线**（2026-10-14，1014 提交：用户要求删除比较侧栏）。任意两端比较的数据能力（`read_compare`/`read_diff_text`）保留在 `git_service`，无 UI 入口；恢复时接回 `ensure_compare` 即可 |
 | F7 / Shift+F7 | 下一个 / 上一个差异块（差异视图在场时生效） |
+| 命令面板「比较两段文本」 | **空白文本对比**：与文件差异**同一个一体视图**（两侧都是可编辑的 `DiffView` 栏），没有单独的输入区、没有“比对”按钮（编辑即对比）。见下条 |
+
+**空白文本对比的形态（2026-11-05 统一）**：早期是“上面两块输入框 + 下面只读差异”，
+与文件差异长得不一样（而用户对“对比”只有一个心智模型）。现在两侧共用 `DiffView`：
+`set_both_sides_editable(true)`（左右都可写） + `set_full_texts(左, 右, {}, keep_numbers=true)`。
+
+三个必须一起成立的技术点（缺一个就会出现“看着能用、数值全错”）：
+
+1. **编辑后要有重绘信号**。两侧文本是普通成员（不能用 `State<>`，否则声明式每帧回写会
+   抹掉正在打的字）；但普通成员变了声明式看不见——所以用 `compare_revision_`（`State`）
+   当**信号**：编辑回调递增它，重组时把新文本交给 `set_full_texts`。
+   实测踩过：回调只记时间戳，没有任何 `State` 变化 ⇒ 没有下一帧 ⇒ 防抖判据永远没人检查，
+   两边都输了字、差异块仍是 0。
+2. **`logical_text` 不能用重建时的行下标筛当前文本**。`real` 表（标记哪些显示行是填充行）
+   属于**快照**；用户一按回车或程序整体重设文本，行数一变就从那行起全错位
+   （实测：右栏只剩最后一行，摘要变成 `+1 −4`）。改动后：快照与当前文本相同则按下标筛；
+   不同则走**行级差异**把当前行映射回快照行（Context 沿用快照的 `real` 位，Added 一律算真实内容，
+   Removed 与当前行无关）。
+3. **`real` 与行号解耦**。空白对比要两侧都显示真实行号（`keep_numbers`），
+   但填充行**仍然不是内容**——所以 `begin_row` 多了一个显式 `real` 参数，
+   而不是用“行号非零”推断（旧写法一给填充行编号，它们就会被当成文件内容）。
 
 数据侧（`examples/gbcode/git_service.hpp` / `.cpp`）新增端点语义表 `diff_args`（**返回 `nullopt` 表示不支持**，
 而不是编一个命令）、`read_compare`（`--name-status` 与 `--numstat` **分成两条**命令再按下标合并）、
@@ -1706,7 +1727,6 @@ append/clear` 六个便利函数（**薄包装** `apply_properties`/`invoke_elem
 | **取色器** | `st::ui::ColorPicker` | HSV 面板 + 十六进制 + 吸管；灰阶时**保住色相**，解析失败**如实拒绝** |
 | **三方合并** | `st::text::merge_three_way` / `merge_apply` | 五态区段；`BothSame`（两侧同改）**不是冲突** |
 | **时间轴模型** | `st::ui::timeline::Model` | 多轨道 + 换算 + 命中优先级（播放头 → 修剪边缘 → 片体）+ 像素阈值吸附 |
-| **部分暂存** | `st::text::build_partial_patch` | 构造只含选中改动的补丁（未选中的删除行**降级为上下文**，不丢掉） |
 | **品牌区** | `TitleBar::set_brand` | 独立一格（不再复用 `leading` 槽）；宽度用**保守估宽**（不依赖量尺） |
 
 ### 4.2.24 C 轮新增的能力（2026-10-11）
@@ -1716,7 +1736,6 @@ append/clear` 六个便利函数（**薄包装** `apply_properties`/`invoke_elem
 | **三方合并** | `st::text::merge_three_way` / `merge_apply` | 五态区段（`BothSame` 不算冲突）、逐块取舍。与 git 无关（配置/翻译稿合并同形） |
 | **合并视图** | `st::ui::MergeView` | 三栏 + 每段"取我方/取他方" + 未决定冲突计数与 F7 跳转 |
 | **时间轴视图** | `st::ui::TimelineView` | 标尺/轨道/片段/播放头；拖体=移动（只改 `start`）、拖边缘=修剪（左缘同步 `source_in`）；头部栏可关（`set_show_track_headers`），片段可按内容着色（`Clip::tint`） |
-| **逐行暂存** | `CodeEditor::LineDecoration::Check` + `DiffView::staging_mode` | 勾选框是装饰的一部分（逐行对齐只有编辑器知道）。**选择单位是“改动区段”**：勾一行 = 整对改动（删旧+加新）；两栏都画勾选框（只画一侧时“新增行”无法逐行暂存，且会造成只删不加写坏文件）；属性面 `staging`/`selected_count`/`selected_lines` + 动作 `toggle_line "hunk,line"` 供自动化驱动 |
 | **帧内输入合并** | `st::ui::InputCoalescer` | 一帧内的多次指针移动并成一次派发；**保留首尾**（只给最新会丢整段路）；拖拽期间不合并 |
 | **视频解码** | `st::ext::VideoDecoder` | `ffmpeg` 子进程抽帧与元信息；探测不到如实 `Unsupported`。定位是素材查看，不是播放 |
 | **用例异常边界** | `test_runner.cpp` | 用例里未捕获的异常记 FAIL 并继续，不再 `terminate` 整个测试进程 |
