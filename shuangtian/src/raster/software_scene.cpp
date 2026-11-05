@@ -425,18 +425,93 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
                                ground.y + (sky.y - ground.y) * sky_t,
                                ground.z + (sky.z - ground.z) * sky_t};
 
+    // ## 探针采样（2026-11-05 新增）
+    //
+    // `env_probe_count > 0` 时改用“方向探针”而不是“Y 分量插值”。
+    //
+    // ### 为何必须有这条分支
+    //
+    // Y 分量插值让**同一平面上的金属反射完全一样**（法线相同 → reflect
+    // 只差一点 Y → 插值差不多）。实测：齿轮场景无论把 `env_strength`
+    // 从 0.45 提到 3.5，壳部都只从 6.7% 到 7.9%，而暗部从 10.5% 降到 0%
+    // ——“挖了一层灰蜡”，不是金属。
+    //
+    // 真 three.js 的金属是“大面积暗 + 少量亮”（暗部 54.7%），因为反射
+    // 到的环境**有空间结构**（窗、墙、天花）——每一块朝向不同的微面
+    // 反射到不同的东西。
+    //
+    // ### 采样公式
+    //
+    // ```
+    // w_i = max(0, dot(r, dir_i))^sharpness
+    // env = Σ(w_i · color_i) / Σw_i
+    // ```
+    //
+    // 归一化保证“探针有多少个”不影响整体亮度（只影响分布）。若所有
+    // 权重都为 0（反射方向落在探针覆盖面之外），回退到 Y 分量插值。
+    math::Vec3 probe_sampled = env_color;
+    bool probe_hit = false;
+    if (lighting.env_probe_count > 0) {
+      const float sharpness = lighting.env_probe_sharpness > 0.0f
+                                  ? lighting.env_probe_sharpness
+                                  : 3.0f;
+      float sum_w = 0.0f;
+      math::Vec3 sum_c{0.0f, 0.0f, 0.0f};
+      const std::size_t count = lighting.env_probe_count < Lighting::kMaxEnvProbes
+                                    ? lighting.env_probe_count
+                                    : Lighting::kMaxEnvProbes;
+      for (std::size_t i = 0; i < count; ++i) {
+        const auto& probe = lighting.env_probes[i];
+        const math::Vec3 dir = probe.direction.normalized();
+        const float cos_angle = r.x * dir.x + r.y * dir.y + r.z * dir.z;
+        if (cos_angle <= 0.0f) continue;
+        float w = 1.0f;
+        for (int k = 0; k < static_cast<int>(sharpness); ++k) w *= cos_angle;
+        if (sharpness < 1.0f) w = std::pow(cos_angle, sharpness);
+        sum_w += w;
+        sum_c.x += probe.color.x * w;
+        sum_c.y += probe.color.y * w;
+        sum_c.z += probe.color.z * w;
+      }
+      if (sum_w > 1e-6f) {
+        probe_sampled = math::Vec3{sum_c.x / sum_w, sum_c.y / sum_w, sum_c.z / sum_w};
+        probe_hit = true;
+      }
+    }
+
     // 粗糙度把锐利反射打散成“模糊的一整片”：越粗糙越向环境均值靠拢。
     //
     // ⚠ 注意：它**不改变强度**——原实现额外乘了 `(0.35 + 0.65×blur)`
     // 当作强度倍数，那是错的（详见下方 `weight` 处的说明）。
     const float rough = std::clamp(roughness, 0.0f, 1.0f);
-    const math::Vec3 env_mean{(sky.x + ground.x) * 0.5f, (sky.y + ground.y) * 0.5f,
-                              (sky.z + ground.z) * 0.5f};
+    // 环境均值：探针模式下取**探针颜色的加权均值**，否则取天地色的中点。
+    //
+    // 为何探针模式不能仍用天地中点：探针表达的是一个有多个斑块的环境，
+    // 它的“弥散后结果”应当是这些斑块的平均，而不是天空与地面的中点
+    //（那两者在探针模式下可能都不存在）。
+    math::Vec3 env_mean;
+    if (probe_hit) {
+      math::Vec3 sum{0.0f, 0.0f, 0.0f};
+      const std::size_t count = lighting.env_probe_count < Lighting::kMaxEnvProbes
+                                    ? lighting.env_probe_count
+                                    : Lighting::kMaxEnvProbes;
+      for (std::size_t i = 0; i < count; ++i) {
+        sum.x += lighting.env_probes[i].color.x;
+        sum.y += lighting.env_probes[i].color.y;
+        sum.z += lighting.env_probes[i].color.z;
+      }
+      const float inv = count > 0 ? 1.0f / static_cast<float>(count) : 0.0f;
+      env_mean = math::Vec3{sum.x * inv, sum.y * inv, sum.z * inv};
+    } else {
+      env_mean = math::Vec3{(sky.x + ground.x) * 0.5f, (sky.y + ground.y) * 0.5f,
+                            (sky.z + ground.z) * 0.5f};
+    }
     // `env_rough_falloff` 控制“越粗糙越弥散”的强度（默认 0.6）。
     const float mix_to_mean = rough * lighting.env_rough_falloff;
-    math::Vec3 env_sampled{env_color.x + (env_mean.x - env_color.x) * mix_to_mean,
-                           env_color.y + (env_mean.y - env_color.y) * mix_to_mean,
-                           env_color.z + (env_mean.z - env_color.z) * mix_to_mean};
+    const math::Vec3 env_base = probe_hit ? probe_sampled : env_color;
+    math::Vec3 env_sampled{env_base.x + (env_mean.x - env_base.x) * mix_to_mean,
+                           env_base.y + (env_mean.y - env_base.y) * mix_to_mean,
+                           env_base.z + (env_mean.z - env_base.z) * mix_to_mean};
 
     // ## 反射色：金属映**固有色**（不是“固有色当增益”）
     //

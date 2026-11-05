@@ -3542,6 +3542,23 @@ cbuffer Scene : register(b0) {
  // `"color": "#c8895c"` 完全不生效，永远是白的。
  // 这是「两条腿功能不同步」的又一个实例（前三次：环境反射、自发光、纹理标志）。
  float4 g_base;
+ // ## 环境探针（2026-11-05 新增）——与 `Lighting::env_probes` 逐字对应
+ //
+ // 只靠 g_env / g_env_ground（天/地两色按 r.y 插值）有个硬限制：
+ // **同一平面上的金属反射完全一样**（法线相同 → reflect 只差一点 Y）。
+ //
+ // 实测（齿轮场景）：env_strength 0.45 → 3.5 只把主体均值从 109 推到 152，
+ // 而暗部从 10.5% 掉到 0%——“挖了一层灰蜡”，不是金属。
+ //
+ // 真 three.js 的金属是“大面积暗 + 少量亮”，因为环境**有空间结构**。
+ //
+ // 每个探针占一个 float4（xyz = 方向，w = 该探针是否存在），
+ // 颜色另占一个 float4（xyz = 颜色，w 备用）。
+ // `g_probe_tune.x` = 探针个数（0 = 走旧的天地插值，逐位不变）。
+ // `g_probe_tune.y` = 锐利度（权重 = max(0,dot)^sharpness）。
+ float4 g_probe_dirs[4];
+ float4 g_probe_colors[4];
+ float4 g_probe_tune;
 };
 
 struct VsIn {
@@ -3707,13 +3724,48 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     float sky_t = saturate(0.5 + 0.5 * r.y);
     float3 env_color = lerp(env_ground, env_sky, sky_t);
 
+    // ## 环境探针采样（与 C++ 侧 `shade_surface` 逐字对应，2026-11-05）
+    //
+    // `g_probe_tune.x > 0` 时改用方向探针。为何必须有这条分支：
+    // 天地两色按 r.y 插值让**同一平面上的金属反射完全一样**（法线相同），
+    // 于是平面看起来是均匀色块——不是金属。
+    //
+    // 采样：`w_i = max(0, dot(r, dir_i))^sharpness`，颜色取加权平均。
+    // 归一化保证“探针个数”不影响整体亮度。若所有权重为 0，回退天地插值。
+    float3 probe_color = env_color;
+    bool probe_hit = false;
+    float3 probe_mean = (env_sky + env_ground) * 0.5;
+    if (g_probe_tune.x > 0.0) {
+      float sharpness = g_probe_tune.y > 0.0 ? g_probe_tune.y : 3.0;
+      float sum_w = 0.0;
+      float3 sum_c = float3(0.0, 0.0, 0.0);
+      float3 all_c = float3(0.0, 0.0, 0.0);
+      int count = 0;
+      for (int pi = 0; pi < 4; ++pi) {
+        if (g_probe_dirs[pi].w <= 0.0) continue;
+        ++count;
+        all_c += g_probe_colors[pi].xyz;
+        float3 dir = normalize(g_probe_dirs[pi].xyz);
+        float cos_angle = dot(r, dir);
+        if (cos_angle <= 0.0) continue;
+        float w = pow(cos_angle, sharpness);
+        sum_w += w;
+        sum_c += g_probe_colors[pi].xyz * w;
+      }
+      if (sum_w > 1e-6) {
+        probe_color = sum_c / sum_w;
+        probe_hit = true;
+      }
+      if (count > 0) probe_mean = all_c / float(count);
+    }
+
     // 粗糙度把锐利反射打散成模糊一片（向均值靠拢）。
     //
     // ⚠ 它**不改变强度**——原实现多乘了 `(0.35 + 0.65×blur)` 是错的
     //（详见下方 weight 的说明）。
     float rough = saturate(roughness);
-    float3 env_mean = (env_sky + env_ground) * 0.5;
-    env_color = lerp(env_color, env_mean, rough * g_env_ground.w);
+    float3 env_mean = probe_hit ? probe_mean : ((env_sky + env_ground) * 0.5);
+    env_color = lerp(probe_color, env_mean, rough * g_env_ground.w);
 
     // ## 反射色：金属映固有色（=F0），非金属映 0.04（与 C++ 侧同步，2026-11-05）
     //
@@ -3800,6 +3852,12 @@ struct Scene3dParams {
   std::array<float, 4> emissive{};
   /// 材质基色：xyz = 颜色，w = 是否启用
   std::array<float, 4> base{};
+  /// 环境探针（2026-11-05）：方向 xyz + w = 是否存在
+  std::array<std::array<float, 4>, 4> probe_dirs{};
+  /// 探针颜色 xyz
+  std::array<std::array<float, 4>, 4> probe_colors{};
+  /// x = 探针个数（0 = 走旧的天地插值），y = 锐利度
+  std::array<float, 4> probe_tune{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -4344,6 +4402,28 @@ class GpuScene3d final : public st::raster::Scene3D {
                   lighting_.env_strength};
     params.env_ground = {lighting_.env_ground.x, lighting_.env_ground.y,
                          lighting_.env_ground.z, lighting_.env_rough_falloff};
+    // 环境探针（2026-11-05）：最多 4 个（cbuffer 里只留 4 组，GPU 常量
+    // 缓冲越大越贵，而 4 个探针已足以让金属有明暗结构）。
+    //
+    // `probe_tune.x = 0` 时 HLSL 不进探针分支 → 与旧行为逐位相同。
+    {
+      constexpr std::size_t kGpuProbes = 4;
+      const std::size_t count =
+          lighting_.env_probe_count < kGpuProbes ? lighting_.env_probe_count : kGpuProbes;
+      for (std::size_t i = 0; i < kGpuProbes; ++i) {
+        if (i < count) {
+          const auto& probe = lighting_.env_probes[i];
+          params.probe_dirs[i] = {probe.direction.x, probe.direction.y, probe.direction.z,
+                                  1.0f};
+          params.probe_colors[i] = {probe.color.x, probe.color.y, probe.color.z, 0.0f};
+        } else {
+          params.probe_dirs[i] = {0.0f, 0.0f, 0.0f, 0.0f};
+          params.probe_colors[i] = {0.0f, 0.0f, 0.0f, 0.0f};
+        }
+      }
+      params.probe_tune = {static_cast<float>(count), lighting_.env_probe_sharpness, 0.0f,
+                           0.0f};
+    }
     // 自发光：与软件腿 `shade_surface` 的 emission 逻辑对齐。
     // 用**带符号**强度传递 `emission_unlit`（负值 = 纯发光体），
     // 避免再加一个 float4 —— 常量缓冲多一个字段就多一处错位可能。

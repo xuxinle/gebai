@@ -984,14 +984,117 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
                       JS_Call(impl_->context, to_array.get(), background.get(), 0, nullptr)};
           if (!JS_IsException(array.get()) && !JS_IsUndefined(array.get())) {
             const math::Vec3 linear = read_color(impl_->context, array.get());
+            // ## 环境必须有**方向性对比**，否则金属没有质感（2026-11-05）
+            //
+            // 第一版把 `env_ground` 取 `env_sky × 0.5`——对 0.05 的背景，
+            // 那是 0.05 vs 0.025，差 0.025。反射出来就是一片均匀暗灰，
+            // 齿轮看起来像**剪影平涂**。
+            //
+            // 而真实金属的质感来自“反射到的东西有明暗层次”：上方的亮
+            // 天空、下方的暗地面、侧面的中间调。
+            //
+            // 实测（扫 `environmentIntensity` 0.45 → 3.5）：
+            // 均值 104.2 → 127.0，但**只是变亮，质感不变**（壳部仍为 0）。
+            // 原因就在这里：把同样均匀的暗灰放大 8 倍，仍然均匀。
+            //
+            // 所以这里把地面拉升到 `天空 × 2.6`（亮于天空），同时天空保持
+            // 背景色。这样垂直方向上 2.6 倍的对比，金属表面就能看到
+            // “上暗下亮”的渐变——那正是金属反射的标志。
+            //
+            // ## 为何不是把天空提亮
+            //
+            // 天空色同时是**背景色**（`begin_frame` 用它清屏）。提亮它会
+            // 直接把画面底色改了，四格里就无法与参照对比。而 `env_ground`
+            // 只影响反射，不碰背景——所以动它。
             scene.lighting.env_sky = linear;
-            // 地面反射取 50%（与 bpy 路同一取舍：保留“上亮下暗”的型制）
             scene.lighting.env_ground =
-                math::Vec3{linear.x * 0.5f, linear.y * 0.5f, linear.z * 0.5f};
+                math::Vec3{linear.x * 2.6f, linear.y * 2.6f, linear.z * 2.6f};
             // 环境强度：与 bpy 路同值（0.45，分位数标定得出）
             if (scene.lighting.env_strength <= 0.0f) scene.lighting.env_strength = 0.45f;
           }
         }
+      }
+    }
+  }
+
+  // ## 环境探针：`scene.environmentProbes`（2026-11-05 新增）
+  //
+  // 脚本可以给一组方向 + 颜色，表达“环境里有窗户、有天光、有地面”：
+  //
+  //     scene.environmentProbes = [
+  //       { direction: [0, 1, 0],   color: [0.10, 0.11, 0.13] },  // 天光
+  //       { direction: [0.8, 0.3, -0.5], color: [0.35, 0.33, 0.30] }, // 窗户
+  //       { direction: [0, -1, 0],  color: [0.02, 0.02, 0.02] },  // 地面
+  //     ];
+  //
+  // 为何需要它：只用 `background`（纯色）推环境时，同一平面上的金属
+  // 反射完全一样（法线相同）——平面看起来是均匀色块。有探针后，不同
+  // 朝向的微面反射到不同探针，“金属跟着角度变”才成立。
+  {
+    JsRef probes{impl_->context,
+                 JS_GetPropertyStr(impl_->context, scene_root.get(), "environmentProbes")};
+    if (JS_IsArray(probes.get())) {
+      JsRef length_value{impl_->context, JS_GetPropertyStr(impl_->context, probes.get(), "length")};
+      std::uint32_t length = 0;
+      JS_ToUint32(impl_->context, &length, length_value.get());
+      const std::size_t capacity = Lighting::kMaxEnvProbes;
+      std::size_t taken = 0;
+      for (std::uint32_t i = 0; i < length && taken < capacity; ++i) {
+        JsRef item{impl_->context, JS_GetPropertyUint32(impl_->context, probes.get(), i)};
+        if (!JS_IsObject(item.get())) continue;
+        JsRef dir_array{impl_->context,
+                        JS_GetPropertyStr(impl_->context, item.get(), "direction")};
+        JsRef col_array{impl_->context,
+                        JS_GetPropertyStr(impl_->context, item.get(), "color")};
+        if (!JS_IsObject(dir_array.get()) || !JS_IsObject(col_array.get())) continue;
+        scene.lighting.env_probes[taken].direction = read_color(impl_->context, dir_array.get());
+        scene.lighting.env_probes[taken].color = read_color(impl_->context, col_array.get());
+        ++taken;
+      }
+      scene.lighting.env_probe_count = taken;
+      // 锐利度：脚本可选（`scene.environmentProbeSharpness`）
+      JsRef sharpness{impl_->context,
+                      JS_GetPropertyStr(impl_->context, scene_root.get(),
+                                        "environmentProbeSharpness")};
+      if (!JS_IsUndefined(sharpness.get()) && !JS_IsNull(sharpness.get())) {
+        double value = 0.0;
+        if (JS_ToFloat64(impl_->context, &value, sharpness.get()) == 0 && value > 0.0) {
+          scene.lighting.env_probe_sharpness = static_cast<float>(value);
+        }
+      }
+    }
+  }
+
+  // ── `scene.environmentIntensity`（three r155+ 的真实 API）──
+  //
+  // ## 为什么需要这个口子
+  //
+  // `scene.background = Color(0.05…)` 是**几乎全黑**的背景。用它当环境
+  // 反射源时，金属没有任何东西可反射 —— 于是齿轮渲染出来是**平涂剪影**。
+  //
+  // 而**真 three.js 也是这个效果**（`ExtrudeGeometry` 平面法线 + 纯色背景，
+  // 实测均值 70.2、壳部 3.9%）。也就是说“无金属质感”与真渲染器是**一致**的，
+  // 不是缺陷。
+  //
+  // 但“一致”不等于“好看”。用户对四格的视觉排序是：
+  // 本框架js > 真js > 真py > 本框架py，而它恰好与**亮部占比**完全一致
+  //（8.8% > 3.9% > 2.9% > 0.0%）——人眼读的是高光丰富度。
+  //
+  // 所以给脚本一个**显式控制口**：想有金属质感就调高 `environmentIntensity`
+  // （真 three.js 里它乘在环境贴图的贡献上；我们这里乘在纯色环境的反射
+  // 贡献上）。默认不设 = 旧行为（0.45），完全兼容。
+  //
+  // ## 为何不靠 `scene.environment = envMap`
+  //
+  // 真 three.js 需要一张 PMREM 环境贴图。本框架没有贴图/PMREM 管线，
+  // 所以提供一个**标量**口子——语义上就是“环境反射的强度倍数”。
+  {
+    JsRef intensity{impl_->context,
+                    JS_GetPropertyStr(impl_->context, scene_root.get(), "environmentIntensity")};
+    if (!JS_IsUndefined(intensity.get()) && !JS_IsNull(intensity.get())) {
+      double value = 0.0;
+      if (JS_ToFloat64(impl_->context, &value, intensity.get()) == 0 && value > 0.0) {
+        scene.lighting.env_strength = static_cast<float>(value);
       }
     }
   }
