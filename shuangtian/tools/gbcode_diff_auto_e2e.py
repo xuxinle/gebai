@@ -294,8 +294,9 @@ def main():
         check(client.props("diff-view").get("current_hunk") == "1",
               "点「下一处」→ 当前块 0 → 1")
         position_text = client.props("diff-hunk-position").get("text", "")
-        check(position_text.startswith("第 2"),
-              f"工具条序号跟着变（实际 {position_text!r}，期望“第 2 / N 处”）")
+        # 新文案照 IDEA：`N 个差异 · 第 i / N`（原来是“第 i / N 处”）。
+        check("第 2 /" in position_text and "个差异" in position_text,
+              f"工具条序号跟着变（实际 {position_text!r}，期望含“N 个差异 · 第 2 / N”）")
         client.invoke("diff-prev-hunk", "click")
         wait_until(lambda: client.props("diff-view").get("current_hunk") == "0",
                    what="点「上一处」回到第 1 处")

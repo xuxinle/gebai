@@ -766,20 +766,69 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
               }
             });
             if (collapsed) continue;
-            // 组内条目：行 = 状态字母 + 路径 + 行内动作钮。
+            // 组内条目：**两段式行**（IDEA 同款）——上行文件名（主色），
+            // 下行目录 + 状态字母（弱化），右侧悬停才出现的行内动作。
             //
-            // 路径显示：IDEA 同款“目录灰、文件名亮”——这里用 `dir/` 前缀 + 文件名两段文本
-            //（Button 只有一个 label，所以拼成 `状态 目录/ 名字`，目录部分已截断）。
+            // 为何不是一行 `M 目录/文件名`：目录会把文件名挤到中间，
+            // 扫列表时反而找不到“我改的是哪个文件”。IDEA 把“文件”当主语放首行，
+            // 目录作为副信息——眼睛只需扫一列文件名就能定位。
             for (const auto& change : items) {
               (void)row(c, {.gap = 4.0f, .key = "git:" + change.path}, [&] {
-                (void)custom<Button>(c, [this, change](Button& b) {
-                  b.set_id("git-file-" + change.path);
-                  b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
-b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
-                  b.set_variant(Button::Variant::Ghost);
-                  b.set_size(Button::Size::Small);
-                  b.on_click = [this, change] { open_git_diff(change); };
-                }, {.height = 26.0f, .grow = true});
+                const auto full_path = change.path;
+                const std::string name = change.file_name();
+                const std::string dir = change.dir_path();
+                const std::string code(1, change.display_code());
+                // 两段式行（IDEA 同款）：**整行可点 + 文字是叠在上面的透明层**。
+                //
+                // 结构（两个框架能力都必须有，都是这轮补的）：
+                //  ① 绝对定位（`.absolute`）：文字层不参与 flex 流，
+                //     所以能盖在按钮的矩形上，而不是被排到它旁边；
+                //  ② `set_intercepts_input(false)`：点文字会**穿透**到下层按钮。
+                // 缺任一条就退回“把两行塞进 Button 的单行 label”（排版崩）或
+                // “只有文件名可点”（路径行成了死区）。
+                (void)custom_container<Panel>(
+                    c,
+                    [&] {
+                      // 下层：整行命中区（先声明 = 在底下）。
+                      (void)custom<Button>(c, [this, change, full_path](Button& b) {
+                        b.set_id("git-file-" + full_path);
+                        b.set_label("");
+                        b.set_variant(Button::Variant::Ghost);
+                        b.set_size(Button::Size::Small);
+                        b.style().grow = true;
+                        b.style().padding = st::math::Insets{0.0f, 0.0f, 0.0f, 0.0f};
+                        b.on_click = [this, change] { open_git_diff(change); };
+                      }, {.height = 40.0f, .grow = true, .key = "hit"});
+                      // 上层：两行文字（绝对定位 + 不拦截输入）。
+                      (void)column(c,
+                                   {.gap = 0.0f, .height = 34.0f, .absolute = true, .left = 8.0f,
+                                    .top = 4.0f, .right = 0.0f, .intercepts = false,
+                                    .key = "label"},
+                                   [&] {
+                                     (void)custom<Text>(c, [name](Text& t) {
+                                       t.set_id("git-name-" + name);
+                                       t.set_content(name);
+                                       t.set_weight(FontWeight::Medium);
+                                     }, {.height = 18.0f, .grow = true, .key = "name"});
+                                     (void)custom<Text>(c, [dir, code](Text& t) {
+                                       t.set_id("git-dir-" + dir);
+                                       t.set_content(dir.empty()
+                                                         ? code
+                                                         : std::format("{}  {}", code, dir));
+                                       t.set_tone(Tone::Muted);
+                                       t.set_font_size(11.0f);
+                                     }, {.height = 14.0f, .grow = true, .key = "dir"});
+                                   });
+                      // 两个子层都不吃鼠标：文本层要穿透，而容器本身也不该拦。
+                      // （容器是行主体，它拦了也不影响——点击目标是上面那层——
+                      //   但关掉更稳：以后子层重排时不会突然变成“点不动”。）
+                      (void)custom<Panel>(c, [](Panel&) {}, {.width = 0.0f, .height = 0.0f});
+                    },
+                    [](Panel& holder) {
+                      holder.style().grow = true;
+                      holder.style().height = 40.0f;
+                    },
+                    {.height = 40.0f, .grow = true, .key = "holder"});
                 // 行内动作（悬停意图：VSCode 同款三键）。
                 if (change.has_unstaged_side() && !change.is_conflicted()) {
                   scm_icon_button(c, "stage-" + change.path, "plus", "暂存更改",

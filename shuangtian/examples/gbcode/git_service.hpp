@@ -66,6 +66,22 @@ struct GitChange {
   [[nodiscard]] auto has_unstaged_side() const noexcept -> bool {
     return work_status != ' ' && work_status != '?';
   }
+  /// 展示用的“文件名”（不含目录）——两段式列表的上行。
+  ///
+  /// 为何拆出文件名与目录两个：IDEA 的变更列表是**两行**——上行文件名（亮色）、
+  /// 下行目录 + 状态字母（灰）。拼成一行时目录会把文件名挤到中间，
+  /// 扫列表时反而找不到“我改的是哪个文件”。
+  [[nodiscard]] auto file_name() const -> std::string {
+    const std::size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+  }
+
+  /// 展示用的“目录部分”（末尾不带 `/`；根目录下的文件为空）——两段式列表的下行。
+  [[nodiscard]] auto dir_path() const -> std::string {
+    const std::size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? std::string{} : path.substr(0, slash);
+  }
+
   /// 展示用的路径（含目录段，便于用户区分同名文件）。
   /// 超长路径截断中段（保留尾部的文件名 + 前两级目录）——变更列表窄，
   /// 完整路径放不下，而“最尾部”才是用户在对账的部分。

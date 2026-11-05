@@ -111,6 +111,20 @@ class DiffView : public Element {
   void set_show_header(bool value) { show_header_ = value; mark_layout_dirty(); }
   [[nodiscard]] auto show_header() const noexcept -> bool { return show_header_; }
 
+  /// 右缘**变更缩略条**（IDEA 同款）：整篇高度按比例压缩，改动处画彩色短横，
+  /// 可见区是一个可拖的框——拖它 = 平移滚动。
+  ///
+  /// 为何需要它（不只是“好看”）：几千行的差异文件里，
+  /// “改动集中在哪里、我现在看的是整体哪一段”在逐行阅读时完全看不出来。
+  /// 缩略条把两个正交的量（**分布**与**位置**）压到一条竖条上。
+  ///
+  /// 默认开：它是差异视图的标配部件，不需要宿主每次记得打开。
+  void set_show_overview(bool value) { show_overview_ = value; mark_layout_dirty(); }
+  [[nodiscard]] auto show_overview() const noexcept -> bool { return show_overview_; }
+  /// 缩略条宽度（逻辑像素）。宿主缩得很窄时可以关掉它（见上）。
+  void set_overview_width(float value);
+  [[nodiscard]] auto overview_width() const noexcept -> float { return overview_width_; }
+
   /// 清空（无差异）。
   void clear();
 
@@ -295,6 +309,16 @@ class DiffView : public Element {
   bool show_separators_{true};
   /// 是否画顶部摘要带（见 `set_show_header`）。
   bool show_header_{true};
+  /// 是否画右缘变更缩略条（见 `set_show_overview`）。
+  bool show_overview_{true};
+  float overview_width_{12.0f};
+  /// 缩略条当前按下的状态（拖动中）：按下位置与当时的滚动值。
+  bool overview_dragging_{false};
+  float overview_grab_dy_{0.0f};
+  /// 缩略条的滚动框矩形（`arrange` 算，`paint` 画，`on_event` 命中）。
+  bool overview_box_valid_{false};
+  math::Rect overview_box_{};
+  math::Rect overview_track_{};
   DiffLayout layout_{DiffLayout::SideBySide};
   bool show_line_numbers_{true};
   bool read_only_{true};

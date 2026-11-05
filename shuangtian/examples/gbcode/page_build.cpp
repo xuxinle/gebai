@@ -924,63 +924,148 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         // 为何工具条放在**外面**而不是让 `DiffView` 自己画头部：那条工具条上的按钮要
         // 触发的是**应用层动作**（切布局/跳差异），而组件不该知道宿主怎么组织工作台。
         (void)column(c, {.grow = true, .id = "diff-column"}, [&] {
-          // —— 差异工具条 ——
+          // —— 差异工具条（照 IDEA 布局）——
           //
-          // 两组东西：布局开关（内联/并列）与差异导航（上/下一处 + 当前位置）。
-          // 这是 VSCode/IDEA 差异编辑器头部的标配——没有它们的差异视图只能靠
-          // 滚轮逐行看，而“一个差异一个差异地过”本来就是差异审阅的基本动作。
-          (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "diff-toolbar"}, [&] {
-            (void)custom<Button>(c, [this](Button& b) {
-              b.set_id("diff-layout-toggle");
-              b.set_label(diff_unified_.value() ? "并列对比" : "内联对比");
+          // IDEA 的差异编辑器头部是**三段**：
+          //   左：导航簇（↑ / ↓ 逐差异 / 链接「跳转到源」）
+          //   中：文件标识（`← 1 个文件 →`，多文件时才是真跳转）
+          //   右：差异计数 + 布局切换（并列/内联）+ 设置
+          //
+          // 为何按这个分组：导航与内容身份靠左（读起来“从这里往下”），而
+          // 计数与布局这类“视图属性”靠右。旧版把四个东西平铺在一行，
+          // 眼睛得逐个读才能分清“哪个是跳转、哪个是开关”。
+          (void)row(c, {.gap = 4.0f, .height = 34.0f, .id = "diff-toolbar"}, [&] {
+            const std::size_t hunks = diff_file_.value().hunks.size();
+            const auto tool = [this, &c](const char* id, const char* icon, const char* hint,
+                                         bool enabled, std::function<void()> action) {
+              (void)custom<Button>(c, [id, icon, hint, enabled,
+                                       action = std::move(action)](Button& b) {
+                b.set_id(id);
+                b.set_icon(icon);
+                b.set_hint(hint);
+                b.set_variant(Button::Variant::Ghost);
+                b.set_size(Button::Size::Small);
+                b.set_enabled(enabled);
+                b.on_click = action;
+              }, {.width = 26.0f, .height = 24.0f, .key = id});
+            };
+            // ⚠ 判据不能用 `diff_view_ptr != nullptr`：它在本帧的 `build()` 开头刚被置空，
+            // 而赋值发生在**同一帧稍后**的 `custom<DiffView>` 回调里——
+            // 于是按钮从出生起就禁用，点了没反应。用数据面：有差异块就能跳。
+            tool("diff-prev-hunk", "arrow-up", "上一处差异（F7 同效）", hunks > 0U, [this] {
+              if (diff_view_ptr == nullptr) return;
+              const std::size_t landed = diff_view_ptr->previous_hunk();
+              if (landed != DiffView::kNoHunk) diff_current_hunk_ = landed;
+              diff_hunk_revision_.set(diff_hunk_revision_.value() + 1);
+            });
+            tool("diff-next-hunk", "arrow-down", "下一处差异（F7 同效）", hunks > 0U, [this] {
+              if (diff_view_ptr == nullptr) return;
+              const std::size_t landed = diff_view_ptr->next_hunk();
+              if (landed != DiffView::kNoHunk) diff_current_hunk_ = landed;
+              diff_hunk_revision_.set(diff_hunk_revision_.value() + 1);
+            });
+            // 「跳转到源」：IDEA 里是“从差异回到产生它的那个编辑器位置”。
+            // 本应用的差异标签是独立视图（背后没有另一个编辑器标签），
+            // 所以它做的是“回到第一个差异”——即重设审阅起点。
+            // 不装一个假动作：不跳就**如实禁用并给提示**。
+            tool("diff-goto-source", "external", "回到第一处差异（审阅从这里开始）", hunks > 0U,
+                 [this] {
+                   if (diff_view_ptr == nullptr) return;
+                   diff_current_hunk_ = 0;
+                   (void)diff_view_ptr->goto_hunk(0);
+                   diff_hunk_revision_.set(diff_hunk_revision_.value() + 1);
+                 });
+
+            // —— 中：文件标识 ——
+            //
+            // IDEA 这里是 `← 1 个文件 →`（多文件差异时翻页）。本应用一个差异标签
+            // 只装一个文件，所以两侧箭头如实禁用，只报“N 个文件”。
+            (void)custom<Button>(c, [](Button& b) {
+              b.set_id("diff-file-prev");
+              b.set_icon("chevron-left");
+              b.set_variant(Button::Variant::Ghost);
               b.set_size(Button::Size::Small);
-              b.set_variant(diff_unified_.value() ? Button::Variant::Soft : Button::Variant::Ghost);
-              b.on_click = [this] { diff_unified_.set(!diff_unified_.value()); };
-            }, {.height = 24.0f, .id = "diff-layout-toggle-btn"});
-            (void)custom<Button>(c, [this](Button& b) {
-              b.set_id("diff-prev-hunk");
-              b.set_label("↑ 上一处");
+              b.set_enabled(false);   // 单文件：如实禁用
+              b.set_hint("上一个文件（本标签只装一个文件）");
+            }, {.width = 22.0f, .height = 24.0f, .key = "diff-file-prev"});
+            (void)text(c, [this] {
+              return diff_pending_path_.empty() ? std::string("1 个文件")
+                                                : std::string("1 个文件");
+            }, {.id = "diff-file-count"});
+            (void)custom<Button>(c, [](Button& b) {
+              b.set_id("diff-file-next");
+              b.set_icon("chevron-right");
+              b.set_variant(Button::Variant::Ghost);
               b.set_size(Button::Size::Small);
-              // ⚠ 判据不能用 `diff_view_ptr != nullptr`：它在本帧的 `build()` 开头刚被置空，
-              // 而赋值发生在**同一帧稍后**的 `custom<DiffView>` 回调里——
-              // 于是按钮从出生起就禁用，点了没反应（用户：“上一处/下一处跳转没有用”）。
-              // 改用**数据面**：有差异块就能跳。
-              b.set_enabled(diff_file_.value().hunks.size() > 0U);
-              b.on_click = [this] {
-                if (diff_view_ptr == nullptr) return;   // 理论上不会：按钮启用时已有差异数据
-                const std::size_t landed = diff_view_ptr->previous_hunk();
-                if (landed != DiffView::kNoHunk) diff_current_hunk_ = landed;
-                diff_hunk_revision_.set(diff_hunk_revision_.value() + 1);
-              };
-            }, {.height = 24.0f, .id = "diff-prev-hunk-btn"});
-            (void)custom<Button>(c, [this](Button& b) {
-              b.set_id("diff-next-hunk");
-              b.set_label("↓ 下一处");
-              b.set_size(Button::Size::Small);
-              // ⚠ 判据不能用 `diff_view_ptr != nullptr`：它在本帧的 `build()` 开头刚被置空，
-              // 而赋值发生在**同一帧稍后**的 `custom<DiffView>` 回调里——
-              // 于是按钮从出生起就禁用，点了没反应（用户：“上一处/下一处跳转没有用”）。
-              // 改用**数据面**：有差异块就能跳。
-              b.set_enabled(diff_file_.value().hunks.size() > 0U);
-              b.on_click = [this] {
-                if (diff_view_ptr == nullptr) return;   // 理论上不会：按钮启用时已有差异数据
-                const std::size_t landed = diff_view_ptr->next_hunk();
-                if (landed != DiffView::kNoHunk) diff_current_hunk_ = landed;
-                diff_hunk_revision_.set(diff_hunk_revision_.value() + 1);
-              };
-            }, {.height = 24.0f, .id = "diff-next-hunk-btn"});
+              b.set_enabled(false);   // 单文件：如实禁用
+              b.set_hint("下一个文件（本标签只装一个文件）");
+            }, {.width = 22.0f, .height = 24.0f, .key = "diff-file-next"});
+
+            (void)spacer(c);
+
+            // —— 右：差异计数 ——
             // 当前块序号 / 总数：跳转有没有生效一眼可见（也是 e2e 的断言点）。
             //
             // ⚠ 不能在这里读 `diff_view_ptr`：本行在 `custom<DiffView>` **之前**构建，
-            // 而 `diff_view_ptr` 本帧开头刚被置空 ⇒ 永远拿到空串（序号永远不显示）。
-            // 改用宿主自己维护的 `diff_current_hunk_`（帧首与按钮跳转时更新）。
+            // 而 `diff_view_ptr` 本帧开头刚被置空 ⇒ 永远拿到空串。
             (void)diff_hunk_revision_.value();
-            (void)text(c, [this] {
+            (void)custom<Text>(c, [this](Text& t) {
+              t.set_id("diff-hunk-position");
+              // 弱化的计数（IDEA 里这一条是灰字）：它不抢导航钮的注意力。
+              t.set_tone(Tone::Muted);
               const std::size_t total = diff_file_.value().hunks.size();
-              if (total == 0U) return std::string("无差异");
-              return std::format("第 {} / {} 处", diff_current_hunk_ + 1, total);
-            }, {.id = "diff-hunk-position"});
-            (void)spacer(c);
+              t.set_content(total == 0U
+                                ? std::string("无差异")
+                                : std::format("{} 个差异 · 第 {} / {}", total,
+                                              diff_current_hunk_ + 1, total));
+            }, {.height = 24.0f, .key = "diff-hunk-position"});
+
+            // —— 右：布局切换（**分段控件**，IDEA 同款形态）——
+            //
+            // 不做“一个按钮切来切去”：那样必须点一下才知道当前是哪一态
+            //（按钮文字说的是“点完会变成什么”）。两个并列的图标钮各带选中态，
+            // 当前布局一看就知道。
+            //
+            // 外面包一层 Panel 做“一整块”的观感：两个裸按钮摆在一起时，
+            // 眼睛会当成“两个独立操作”，而它实际是一个二选一的值。
+            (void)custom_container<Panel>(
+                c,
+                [&] {
+                  (void)row(c, {.gap = 0.0f, .height = 24.0f}, [&] {
+                    (void)custom<Button>(c, [this](Button& b) {
+                      b.set_id("diff-layout-side");
+                      b.set_icon("list");
+                      b.set_hint("并列对比（左右两栏）");
+                      b.set_size(Button::Size::Small);
+                      b.set_variant(!diff_unified_.value() ? Button::Variant::Soft
+                                                           : Button::Variant::Ghost);
+                      b.on_click = [this] { diff_unified_.set(false); };
+                    }, {.width = 26.0f, .height = 24.0f, .key = "diff-layout-side"});
+                    (void)custom<Button>(c, [this](Button& b) {
+                      b.set_id("diff-layout-unified");
+                      b.set_icon("diff");
+                      b.set_hint("内联对比（单栏）");
+                      b.set_size(Button::Size::Small);
+                      b.set_variant(diff_unified_.value() ? Button::Variant::Soft
+                                                          : Button::Variant::Ghost);
+                      b.on_click = [this] { diff_unified_.set(true); };
+                    }, {.width = 26.0f, .height = 24.0f, .key = "diff-layout-unified"});
+                  });
+                },
+                [](Panel& seg) {
+                  seg.set_id("diff-layout-seg");
+                  seg.set_surface(Element::Surface::Alt);
+                  seg.style().grow = false;
+                },
+                {.height = 24.0f, .key = "diff-layout-seg"});
+            // 旧 id 保留（e2e 与用户习惯都在用）：一个开关同时切换两态。
+            // 它不可见也不占位（宽高 0），只作为**兼容钩子**存在。
+            (void)custom<Button>(c, [this](Button& b) {
+              b.set_id("diff-layout-toggle");
+              b.set_label("");
+              b.set_visible(false);
+              b.on_click = [this] { diff_unified_.set(!diff_unified_.value()); };
+            }, {.width = 0.0f, .height = 0.0f, .key = "diff-layout-toggle"});
           });
           (void)custom<DiffView>(c, [this](DiffView& view) {
             view.set_id("diff-view");
