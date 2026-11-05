@@ -1600,6 +1600,16 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.align_self.has_value()) style.align_self = *props.align_self;
   if (props.text_align.has_value()) style.text_align = *props.text_align;
   if (props.radius >= 0.0f) style.radius = props.radius;
+  // 叠放（绝对定位）：四个量一起落，否则会出现“写了 absolute 但没给偏移”的诡异总在左上角。
+  if (props.absolute) {
+    style.absolute = true;
+    style.left = props.left;
+    style.top = props.top;
+    style.right = props.right;
+    style.bottom = props.bottom;
+  }
+  // 输入穿透（典型场景：叠在上层的文字层）
+  if (!props.intercepts) element.set_intercepts_input(false);
   if (!props.key.empty()) element.set_key(props.key);
   if (!props.id.empty()) element.set_id(props.id);
   // 排版三件套：**记成显式覆盖**（`apply_theme` 正常会从主题重算颜色/字号/字重，

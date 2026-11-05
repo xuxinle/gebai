@@ -581,18 +581,43 @@ void Element::measure(const RenderContext& context, const Constraints& constrain
   measured_ = math::Size{width, height};
 }
 
+void Element::place_absolute(const RenderContext& context, Element& child, math::Rect content) {
+  const Style& child_style = child.style();
+  math::Size size = child.measured_size();
+  if (child_style.width != kAuto) size.width = child_style.width;
+  if (child_style.height != kAuto) size.height = child_style.height;
+  float x = content.x + child_style.left;
+  float y = content.y + child_style.top;
+  // 右/下缘锚定：优先于 left/top（两者同给时以**具体边**为准，与 CSS 的
+  // “left+right 同时给则由宽度反解”不同——这里选择更可预测的那个：
+  // 贴右缘是常见需求，而“又贴左又贴右”等于让别人替你算宽，不如用 width）。
+  if (child_style.right >= 0.0f) x = content.x + content.width - child_style.right - size.width;
+  if (child_style.bottom >= 0.0f) {
+    y = content.y + content.height - child_style.bottom - size.height;
+  }
+  child.arrange(context, math::Rect{x, y, size.width, size.height});
+}
+
 void Element::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
   layout_children(context, content_box());
   layout_dirty_ = false;
 }
 
-void Element::layout_children(const RenderContext& context, math::Rect content) {
+  void Element::layout_children(const RenderContext& context, math::Rect content) {
   const bool row = style_.direction == FlexDirection::Row;
   std::vector<Element*> visible;
   visible.reserve(children_.size());
   for (auto& child : children_) {
-    if (child->visible_) visible.push_back(child.get());
+    if (!child->visible_) continue;
+    // 绝对定位的子元素**不进流**：它不占位、不影向兄弟与父的尺寸。
+    // 单独在函数末尾摆放（见 `place_absolute`）——两件事必须分开，
+    // 否则“叠在上层的东西”会把下面的兄弟挤走（那正是没有叠放能力的旧症状）。
+    if (child->style().absolute) {
+      place_absolute(context, *child, content);
+      continue;
+    }
+    visible.push_back(child.get());
   }
   if (visible.empty()) return;
 

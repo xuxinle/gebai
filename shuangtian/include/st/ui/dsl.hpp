@@ -568,6 +568,23 @@ struct BoxProps {
   ///
   /// 与 `color`/`hex_color` 的分工：那两个是**文字**色，这个是**背景**。
   Element::Surface surface{Element::Surface::None};
+  // —— 叠放（绝对定位）——
+  /// 本元素**脱离 flex 流**，按下面的偏移叠在父元素内容盒上（`Style::absolute`）。
+  ///
+  /// 典型用途：「文字层盖在整行可点区上」（文字不拦截输入）、
+  /// 「右缘缩略条」（覆盖层不该把主内容挤窄）。
+  bool absolute{false};
+  float left{0.0f};
+  float top{0.0f};
+  /// 贴右/底缘（<0 = 不用；见 `Style::right`）。
+  float right{-1.0f};
+  float bottom{-1.0f};
+  /// 本元素是否拦截输入（默认 `true`；`false` = 点击穿透到下层）。
+  ///
+  /// 为何要属性化：叠放层几乎总需要“上层穿透”，而 `column()`/`row()` 返回的是
+  /// `Element&`——拿它 `dynamic_cast<Panel*>` 也可以，但声明式里写不出中间变量，
+  /// 于是“一句声明定完”只能靠属性面。
+  bool intercepts{true};
   // —— 样式系统（`st/ui/styling.hpp`；一行声明 = CSS class 的声明式写法）——
   std::optional<Variant> variant{};        ///< 视觉语气（Primary/Ghost/Danger…）
   std::optional<Elevation> elevation{};    ///< 抬升档（阴影+表面+高光联动）

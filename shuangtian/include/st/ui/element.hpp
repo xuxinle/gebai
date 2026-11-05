@@ -939,7 +939,24 @@ class Element {
   /// 本元素（含子树）是否参与命中拦截：`hit_test` 与浮层键盘派发都先问它。
   /// 默认 `true`；「逻辑上在场但不应拦截输入」的形态（隐藏浮层、透明遮罩）覆写为
   /// `false` 或返回 `visible()`——不可见的浮层不再截住下层内容。
-  [[nodiscard]] virtual auto intercepts_input() const noexcept -> bool { return true; }
+  ///
+  /// 也可用 `set_intercepts_input(false)` 在实例上关掉（见那里）。
+  [[nodiscard]] virtual auto intercepts_input() const noexcept -> bool {
+    return intercepts_input_override_.value_or(true);
+  }
+  /// **实例级**关掉输入拦截（不用为“透明命中层”专门写一个子类）。
+  ///
+  /// 为何需要它（2026-11-05，实测绕路的代价）：
+  /// 想做一个“视觉在上、点击穿透到下层按钮”的叠加层（典型：两行列表行——
+  /// 文字盖在可点区域上）。以前只能子类化覆写 `intercepts_input()`，
+  /// 而 DSL 里没有子类可写，于是被迫把两行内容塞进 `Button` 的**单行** label，
+  /// 排版直接崩（状态字母跑到文件名左侧）。
+  void set_intercepts_input(bool value) noexcept {
+    intercepts_input_override_ = value;
+    mark_dirty();
+  }
+  /// 恢复默认（跟随虚函数实现）。
+  void clear_intercepts_input() noexcept { intercepts_input_override_.reset(); }
   /// **指针移动**时是否参与命中：默认与 `hit_test` 同义。
   ///
   /// 存在的理由：有些元素按整块矩形吃掉**点击**是**对的**（模态屏障——面板外点击
@@ -1123,6 +1140,8 @@ class Element {
                   math::Rect box) const -> void;
   /// 布局子节点（Flex 子集：方向/间距/增长/对齐）。
   void layout_children(const RenderContext& context, math::Rect content);
+  /// 摆放一个**绝对定位**的子元素（不参与 flex 流；见 `Style::absolute`）。
+  void place_absolute(const RenderContext& context, Element& child, math::Rect content);
   [[nodiscard]] auto content_box() const noexcept -> math::Rect;
 
   Style style_{};
@@ -1136,6 +1155,8 @@ class Element {
   std::vector<std::unique_ptr<Element>> children_{};
   bool visible_{true};
   bool enabled_{true};
+  /// 实例级的“不拦截输入”覆盖（见 `set_intercepts_input`）；空 = 跟随虚函数。
+  std::optional<bool> intercepts_input_override_{};
   bool focusable_{false};
   bool hovered_{false};
   /// 上一帧本元素**子树**的绘制耗时（纳秒；仅剖析时非零）。
