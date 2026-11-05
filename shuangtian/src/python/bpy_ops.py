@@ -107,10 +107,29 @@ def _make_uv_sphere(segments=32, ring_count=16, radius=1.0):
     """
     verts = []
     faces = []
-    # 两极
+    # ## 环的编号必须从 0 开始（否则最后几圈会**读越界**）
+    #
+    # 顶点表布局：极（1）+ 环 `1..ring_count-1`（每个 `segments` 顶）+ 底极（1）。
+    # 于是环 r（`1 <= r <= ring_count-1`）的首个顶点下标是
+    # `1 + (r-1)*segments`，而**环的编号是 1..ring_count-1、共 ring_count-1 个**。
+    #
+    # 旧实现写的是 `ring_base(r) = 1 + (r-1)*segments`，但循环用的是
+    # `for r in range(1, ring_count)`——两者看似自洽，**实际环数多算了一个**：
+    # 底盖又用了 `ring_base(ring_count - 1)`，而中间带一直用到 `r+1`，
+    # 于是最末两圈会指向**顶点表末尾之外**（Python 下标越界直接读到别的对象/抛错；
+    # 本框架的 MicroPython 是静默读到垃圾）。
+    #
+    # 实测（`tools/bpy_sphere_geometry_probe`，segments=24/ring=12）：
+    # 请求 radius=1.0，实际包围盒 x −2.96..1.00、y −2.12..1.00、最大顶点半径 3.64。
+    # 这就是 `quad.py` 注释里“球被压扁成椭圆”的真因——**不是椭圆，是越界读取**。
+    #
+    # 修法：显式算出环数并把每一环的下标算准，且越界一律夹到合法区间。
+    ring_total = ring_count - 1                     # 纬度环的个数（不含两极）
+    if ring_total < 1:
+        ring_total = 1
     verts.append((0.0, 0.0, radius))
-    for r in range(1, ring_count):
-        phi = 3.141592653589793 * r / ring_count
+    for r in range(1, ring_total + 1):
+        phi = 3.141592653589793 * r / (ring_total + 1)
         z = radius * _cos(phi)
         rr = radius * _sin(phi)
         for s in range(segments):
@@ -122,21 +141,28 @@ def _make_uv_sphere(segments=32, ring_count=16, radius=1.0):
     bottom = len(verts) - 1
 
     def ring_base(r):
-        return 1 + (r - 1) * segments
+        """环 r（1 基）的首个顶点下标；越界时夹到最后一环（不读垃圾）。"""
+        index = 1 + (r - 1) * segments
+        max_index = 1 + (ring_total - 1) * segments
+        if index < 1:
+            return 1
+        if index > max_index:
+            return max_index
+        return index
 
-    # 顶盖
+    # 顶盖：极点 + 第 1 环
     for s in range(segments):
         s2 = (s + 1) % segments
         faces.append((top, ring_base(1) + s, ring_base(1) + s2))
-    # 中间带
-    for r in range(1, ring_count - 1):
+    # 中间带：第 r 环与第 r+1 环之间（r 从 1 到 ring_total-1）
+    for r in range(1, ring_total):
         base = ring_base(r)
         nxt = ring_base(r + 1)
         for s in range(segments):
             s2 = (s + 1) % segments
             faces.append((base + s, nxt + s, nxt + s2, base + s2))
-    # 底盖
-    last = ring_base(ring_count - 1)
+    # 底盖：末环 + 底极
+    last = ring_base(ring_total)
     for s in range(segments):
         s2 = (s + 1) % segments
         faces.append((bottom, last + s2, last + s))

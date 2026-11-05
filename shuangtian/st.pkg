@@ -830,6 +830,14 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "对齐基准出图：给任何场景（.js/.py）出一张 1100x800 的 PNG，好与真 three.js / 真 Blender 的图并排看。中性的出图工具，不绑定特定判据"
     },
+    "bpy_sphere_geometry_probe": {
+      "kind": "executable",
+      "sources": ["tools/bpy_sphere_geometry_probe.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "bpy uv_sphere 的几何判据：三轴半径是否等于请求值。文档曾声称“顶点 x 超出半径两倍、球被压扁”，而示例场景据此刻意改用立方体——探针把“缺陷还在不在、多大”变成数字，防文档漂移导致的错误绕过"
+    },
     "scene3d_capability_probe": {
       "kind": "executable",
       "sources": ["tools/scene3d_capability_probe.cpp", "src/python/mp_bridge.c",

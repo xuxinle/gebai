@@ -93,6 +93,20 @@ Python 实现的取舍：
 
 ## 四、三条必须记住的边界
 
+### 4.0 几何正确性有**可执行判据**（2026-11-05 补）
+
+bpy 侧的几何错误**不报任何错**：脚本跑通、物体数对、面数对，只是**形状不对**。
+而形状不对又很像“渲染问题”——排查会从光照一路查到相机。
+
+所以几何正确性一律用 `tools/bpy_sphere_geometry_probe` + `tests/raster_bpy_geometry_test.cpp`
+量**包围盒**（不是“看一眼像不像”）：
+
+```bash
+st build bpy_sphere_geometry_probe && ./build/dev/bin/bpy_sphere_geometry_probe
+```
+
+实测基线（`segments=24 / ring_count=12 / radius=1.0`）：三轴半径 1.0018 / 1.0000 / 1.0000。
+
 ### 4.1 `@` 运算符不可用
 
 MicroPython 1.24 的**编译器不支持 PEP 465**：`py/lexer.c` 认 `@` 这个
@@ -177,6 +191,9 @@ cp build/mpgen/genhdr/* third_party/micropython/genhdr/
 
 | 坑 | 症状 | 原因 |
 |---|---|---|
+| **自实现的三角函数只对 \|a\| ≤ π 有效** | 球变成多瓣花形（顶点跑到半径 3.64 处），而**不报错** | `_sin`/`_cos` 的泰勒级数在 \|a\| > π 后**发散**（不是误差变大）。而 UV 球的经度从 0 扫到 2π。修法：先归约到 [-π, π] |
+| **耳切三角化用 x/y 平面判凸凹** | 三维曲面（球面环带）的多边形被切成跨曲面的三角形 | 球面相邻四边形的顶点在 x/y 平面大量重叠 → 耳切判“内含” → 回退扇形。修法：**四边形走固定对角线**（不依赖投影），耳切只给 ≥ 5 边 |
+| **UV 球的环数多算一个** | 木两环读越界顶点（静默读到垃圾） | 顶点表布局是 `1 + (ring_count-1)*segments + 1`，而循环用了 `range(1, ring_count)` 并配 `ring_base(ring_count-1)` |
 | **GC 根扫描手搬栈** | 大场景报 `Assertion failed: ATB_GET_KIND(area, block) == AT_HEAD, gc.c:914` | `gc_collect_root` 要求**精确的指针数组**，而栈里混着非指针数据 → GC 误标后链表被破坏。正解用上游的 `gc_helper_collect_regs_and_stack()`（同时扫寄存器 + 栈） |
 | `mp_hal_stdout_tx_strn_cooked` 返回 void 而 `_strn` 返回 `mp_uint_t` | `conflicting types`（只在 3 个文件报） | 上游两者签名不同，别"统一" |
 | `mp_hal_pin_obj_t` 是**宏**检查 | 找不到 `extmod/virtpin.h` | 写 `typedef` 不管用，必须 `#define` |
