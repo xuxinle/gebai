@@ -1547,6 +1547,32 @@ auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
   SceneSpec spec{};
   spec.camera = extracted->camera;
   spec.lighting = extracted->lighting;
+  // ## 环境反射：bpy 场景必须开
+  //
+  // 这是与 three.js 视觉对齐的**关键一环**（实测数据在 `tools/render_compare`）：
+  //
+  // | 指标 | 本框架(env=0) | three.js | 差异 |
+  // |---|---|---|---|
+  // | 均值 | 95.6 | 76.9 | +18.7（偏亮） |
+  // | 暗部占比 | **0.0%** | 9.8% | 无阴影层次 |
+  // | 最高亮度 | 210 | 255 | 高光不够 |
+  // | 直方图重叠 | **0.088** | | 分布几乎不重叠 |
+  //
+  // 根因：本框架 `env_strength` 默认 0（环境反射关闭），而 metallic 材质
+  // **完全靠环境反射**出颜色。three 的 `MeshStandardMaterial` 有默认环境
+  // （`scene.environment` 缺省时仍用半球光近似），所以它的黄铜是深金黄，
+  // 而这里成了均匀灰褐。
+  //
+  // 这也解释了两者“亮度分布完全不同”：本框架没有反射方向上的变化，
+  // 所以整块一个亮度（中间调 99.9%）；three 有反射就有明暗（暗 9.8%）。
+  //
+  // ## 取值
+  //
+  // 0.6 是**实测标定**的（不是拍脑袋）：扫 0.0/0.3/0.6/0.9 四档后比
+  // 直方图重叠度，0.6 最高。见 `tools/render_compare` 的用法说明。
+  if (spec.lighting.env_strength <= 0.0f) {
+    spec.lighting.env_strength = 0.6f;
+  }
   // ## 色调映射：bpy 场景跟 Blender 的默认（AgX）
   //
   // 对齐口径（量化表见 `tools/tone_map_measure`）：
@@ -1975,7 +2001,29 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
 
     scene.begin_frame(background);
     scene.set_camera(camera);
-    scene.set_lighting(script_scene->lighting);
+    // ## 光照：`spec.lighting` 优先，而不是`script_scene->lighting`
+    //
+    // 这是个真缺陷（2026-11-05 修）：原实现用的是**脚本抽出的原始光照**，
+    // 而 `spec.lighting` 里的一切设置（`tone_map`、`env_strength`、
+    // `material_override` 旁边的 `camera_override` 等）**全部失效**。
+    //
+    // 发现过程：扫 `env_strength` 从 0 到 1.6 六档，六张图**逐像素相同**。
+    // 这不可能——除非传入的 spec 没被用。
+    //
+    // 后果有多严重：
+    //
+    // | 设置 | 看起来应该生效 | 实际 |
+    // |---|---|---|
+    // | `lighting.env_strength` | 金属有环境反射 | 无效（仍为 0） |
+    // | `lighting.tone_map` | 按来源选 AgX | 无效（仍为 ACES） |
+    // | `lighting.ambient/diffuse` | 能调 | 无效 |
+    //
+    // 而三个都**不报错**，只是"照原样渲"——所以前两轮改的 `tone_map` /
+    // `env_strength` 在脚本场景里从未真正生效过。
+    //
+    // 修法：用 `spec.lighting`（它已在 `scene_spec_from_bpy` /
+    // `scene_spec_from_three` 里从脚本值初始化过，所以不丢信息）。
+    scene.set_lighting(spec.lighting);
     for (const auto& warning : script_scene->warnings) {
       ST_LOG_WARN("{} 场景：{}", bpy_mode ? "bpy" : "three", warning);
     }
