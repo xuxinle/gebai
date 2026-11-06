@@ -108,7 +108,7 @@ blender.exe --background --python tools/blender_reference.py
 所以把两条最硬的判据做成工具（给任何 `.js` / `.py` 场景都能跑）：
 
 ```bash
-st build render_gap_probe && ./build/dev/bin/render_gap_probe examples/jianmu/scenes/04-watch.js
+st build render_gap_probe && ./build/dev/bin/render_gap_probe apps/jianmu/scenes/04-watch.js
 ```
 
 它输出三样东西：

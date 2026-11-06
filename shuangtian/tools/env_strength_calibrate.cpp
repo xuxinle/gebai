@@ -104,7 +104,7 @@ auto read_file(const std::string& path) -> std::string {
 
 int main(int argc, char** argv) {
   const std::string script_path =
-      argc > 1 ? argv[1] : "examples/jianmu/scenes/bpy_watch.py";
+      argc > 1 ? argv[1] : "apps/jianmu/scenes/bpy_watch.py";
   const std::string reference_path = argc > 2 ? argv[2] : "reference_three_none.png";
 
   const auto script = read_file(script_path);

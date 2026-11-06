@@ -37,7 +37,7 @@ def run(args: list[str]) -> subprocess.CompletedProcess:
 
 def find_scripts() -> list[str]:
     out: list[str] = []
-    base = os.path.join(ROOT, "examples/caiyun")
+    base = os.path.join(ROOT, "apps/caiyun")
     for dirpath, dirnames, filenames in os.walk(base):
         # 跳过**包目录**：包里的 `scene.json` 也是“顶层有 scenes 的 JSON”，
         # 但它是**产物**不是源。把它当源会去 pack 一个已经拍平过的文件，

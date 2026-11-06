@@ -6,7 +6,7 @@
 // 本框架跑的 bpy 脚本不同，那么画面差异里既有渲染器差异也有参数差异，
 // 就分不清了。
 //
-// 所以本文件逐一对应 `examples/jianmu/scenes/bpy_watch.py`：
+// 所以本文件逐一对应 `apps/jianmu/scenes/bpy_watch.py`：
 //
 // | 项 | bpy 脚本里的值 | 这里 |
 // |---|---|---|

@@ -247,7 +247,7 @@ def main():
 
     process = None
     original_source = None
-    scene_path = os.path.join(ROOT, "examples", "jianmu", "scenes", "01-product.js")
+    scene_path = os.path.join(ROOT, "apps", "jianmu", "scenes", "01-product.js")
     try:
         process, client, log_path = start(binary)
         client.hello()
@@ -431,7 +431,7 @@ def main():
         # 这一节直接检验本应用新加的那半边：扩展名 `.py` → `BpySceneExtractor`。
         # 判据要点是“真装进去了并且看得见”——只断言“没报错”会被“默默没装”骗过
         #（版本兼容/兜底默认都能让它看起来正常）。
-        py_scene = os.path.join(ROOT, "examples", "jianmu", "scenes", "quad.py")
+        py_scene = os.path.join(ROOT, "apps", "jianmu", "scenes", "quad.py")
         py_original = open(py_scene, encoding="utf-8").read()
         try:
             # 切到 bpy 场景（下标由 `lab.scenes` 清单决定，不能写死：

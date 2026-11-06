@@ -8,7 +8,7 @@
 /// 编译（同 tools/README.md 口径；Windows 下无需 -ldl）：
 /// ```bash
 /// cd shuangtian && ./build/bin/st build st --profile dev
-/// OBJS=$(ls build/dev/obj/*.o | grep -v -E "(main\.cpp\.o|_test\.cpp\.o|test_runner\.cpp\.o|_vendor_|examples_)")
+/// OBJS=$(ls build/dev/obj/*.o | grep -v -E "(main\.cpp\.o|_test\.cpp\.o|test_runner\.cpp\.o|_vendor_|apps_)")
 /// g++ -std=c++23 -O1 -Iinclude -Ithird_party tools/lcd_ink_probe.cpp $OBJS -o /tmp/lcd_ink_probe -lpthread -lm
 /// ```
 #include <algorithm>

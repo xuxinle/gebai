@@ -13,8 +13,8 @@
 > 3. 条目写完在下面留一句「为什么值得做 / 已量到什么」，否则下个人得重查一遍。
 > 4. 自检：`python tools/check_docs.py` 会把「待做项落在优先级章之外」报成问题。
 
-> 📋 2026-10-09 **「镂月裁云」两个示例已实现**：`examples/louyue`（图像编辑器——像素/光栅
-> 创作面）与 `examples/caiyun`（视频剪辑器——时间/动效应用面）。权威现状见 `README.md`
+> 📋 2026-10-09 **「镂月裁云」两个应用已实现**：`apps/louyue`（图像编辑器——像素/光栅
+> 创作面）与 `apps/caiyun`（视频剪辑器——时间/动效应用面）。权威现状见 `README.md`
 > 「示例」节与 `DESIGN.md` §8.1；实现中反推出的框架缺口已进下方 P1/P2。
 
 > 📋 2026-10-08 终端能力修复轮（光标错位/输入回显/多会话串台等 15 项）已完成，
@@ -950,7 +950,7 @@ options.force = true;   // 自举重来：产物路径变了，增量缓存也�
 
 ### 构建：改了被 `#include` 的 `.cpp`，测试单元不重编（2026-10-23，**本轮返工六次的主因**）
 
-**现象**：本仓库大量用 `#include "examples/caiyun/xxx.cpp"` 让测试对着真实实现断言。
+**现象**：本仓库大量用 `#include "apps/caiyun/xxx.cpp"` 让测试对着真实实现断言。
 但改了 `fx.cpp` 之后跑 `st test`，**测试单元不重编**，跑的是旧二进制：
 
 - 注入回退（文件变短 11 字节）→ 仍命中缓存；
@@ -1111,7 +1111,7 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
 **现象**：同一脚本给 `model3d` 成员的 `dx` 从 0 改到 300，成片里物体**一动不动**
 （实测屏幕中心两档都是 `(783, 627)`）；而同一个 `dx` 给普通图层完全正常。
 
-**根因**：`paint_model3d_group`（`examples/caiyun/model3d.cpp`）对每个成员**重新**调
+**根因**：`paint_model3d_group`（`apps/caiyun/model3d.cpp`）对每个成员**重新**调
 `evaluate_layer`，而那条路只算基础值与关键帧，**不包含脚本编排层增量**（`dx/dy/dw/dh`
 由渲染器的 `states[]` 在 `apply_delta` 里加好）。组渲染器看不到那份 `states`。
 
@@ -1172,7 +1172,7 @@ diagnostics 警告（“该图层无法被脚本点亮”）；
 
 **现象**：场景边界后 0.12s 的一帧几乎全黑（均值亮度从 31 跌到 10）。
 
-**根因**（`examples/caiyun/project.cpp`）：旧实现先把**新一幕**不透明画进目标，
+**根因**（`apps/caiyun/project.cpp`）：旧实现先把**新一幕**不透明画进目标，
 再把**旧一幕**以 `opacity = 1 - eased` 叠上去。两侧同时半透明 → 中段整屏变暗。
 
 **已修**：改为「旧幕作底（不透明）+ 新幕以 `opacity = eased` 淡上来」，
@@ -1767,7 +1767,7 @@ gallery 的阶梯外字号从 49 处降到 0。两点值得继续看：
 
 | 方向 | 实测 | 结论 | 工具 |
 |---|---|---|---|
-| 未归因的 0.42 ms 绘制开销 | 6 次重测**恒为 0.00 ms** | **是测量假象**（最后一帧 vs 全部分位相减） | `examples/gallery` 的分解输出 |
+| 未归因的 0.42 ms 绘制开销 | 6 次重测**恒为 0.00 ms** | **是测量假象**（最后一帧 vs 全部分位相减） | `apps/gallery` 的分解输出 |
 | 整树遍历（`paint`/`layout`） | 1200 节点 42 µs | 远小于帧时间，非主因 | `partial_frame_overhead_probe` |
 | 帧末整树收尾（`collect_animation_requests` 等） | 300 节点 9.3 µs | 同上 | `frame_epilogue_cost_probe` |
 | 裁剪剔除是否生效 | 小脏区/全屏 = **2.41×**，屏外/全屏 = 4.56× | **生效**，无缺陷 | `cull_effectiveness_probe` |
@@ -2946,7 +2946,7 @@ A/B 的必要性：阈值只要还挂在「单点标定」上，无论标在哪�
 而单元测试跑在无头/CI 上；Windows 专用，Linux CI 只能 SKIP。
 
 **方向（待定）**：二选一——
-① 接进 `examples_e2e_all.py`（它已经在真实窗口上跑，平台天然对齐）；
+① 接进 `apps_e2e_all.py`（它已经在真实窗口上跑，平台天然对齐）；
 ② 给 `st::shell` 抽一个平台无关的「上屏字节回流」接口（无头也能验），
    代价是后端多一层接口。倾向①：不为了可测性改造产品接口。
 
@@ -3129,7 +3129,7 @@ RL 的观测距离特征也改成按角色招式算（否则技能型角色被�
 
 ## 已完成（2026-11-01：改了被 `#include` 的实现文件，测试二进制不重建）
 
-**症状**：`tests/gedou_rl_test.cpp` 用 `#include "examples/gedou/rl_env.cpp"` 把实现
+**症状**：`tests/gedou_rl_test.cpp` 用 `#include "apps/gedou/rl_env.cpp"` 把实现
 编进测试（本仓 `gedou_test` / `caiyun_carry_test` 同构）。改 `rl_env.cpp` 后
 `st build` 报“重编 0”，`st test` 跑旧二进制 —— 于是“回退实现 → 测试仍然绿”，
 完全静默。实测代价：`tools/gedou_rl_reverse_verify.py` 三个案例无法成立，
@@ -3187,7 +3187,7 @@ RL 的观测距离特征也改成按角色招式算（否则技能型角色被�
 > 登记名小写归一、注册序、不暴露 handler）——枚举面只读，写入仍只有
 > register/unregister 两口；实现见 `src/ui/ui_root.cpp`（快照而非引用：枚举面
 > 不得交出可变视图，且注册表随时可能变动，引用即悬垂窗口）。
-> 处置（应用面，gbcode）：新增单源表 `examples/gbcode/shortcut_help.hpp`
+> 处置（应用面，gbcode）：新增单源表 `apps/gbcode/shortcut_help.hpp`
 >（41 条 spec：键位/修饰键/守卫形态/文案/分组一体登记），main.cpp 注册块改
 > bind-by-id（键位零手抄，行为/顺序/守卫忠实移植），帮助卡正文改
 > `shortcuts_card_body(root.shortcuts())` 生成（手写体废除），启动时
@@ -4806,7 +4806,7 @@ mixed_bar = &row(c, {.id = "mixed"}, [...]);   // ← 第二个会 set_content()
 - 状态栏还报「主题 dark · 视觉令牌已切换」；
 - 而 `theme.mode` 实测全程 `dark` 不变，像素也不变（**画面一点没动**）。
 
-正确做法早就在同一仓库里：`examples/gallery` 从真值源
+正确做法早就在同一仓库里：`apps/gallery` 从真值源
 `app.root().theme().mode()` 读、调 `app.set_theme_mode()` 写。gbcode 改为同构：
 新增 `theme_mode`（读）/`theme_setter`（写）两个注入点，**删掉影子状态 `dark_`**。
 
@@ -4906,7 +4906,7 @@ gbcode + gallery E2E 全通过 / 截图核验已换体（暗色与亮色两侧�
   设完只读后一按 `select_all`——它写状态触发重组——立刻被改回 `false`）。改为只写“持久配置”，
   语言/只读态归“当前标签”与属性面所有。
 
-### 示例层（`examples/gbcode`）
+### 示例层（`apps/gbcode`）
 
 - [x] 菜单「编辑/选择」里的 `copy`/`paste`/`goto-line` 是**假的**（copy 只读不写剪贴板、
   paste 插死字符串「（剪贴板内容）」、goto-line 恒跳第 1 行）→ 接真实 API。
@@ -6360,9 +6360,9 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
     异步状态（引擎 `pump_jobs` 泵微任务）、`ForEach` 按 key 复用（`__d_move` 重排）。
   - [x] **`custom<T>` 逃生舱**：任意组件 + 一等接口的通用入口（`type_name<T>` 特化表，
     工厂补齐全部 32 类型）；`icon`/`overlay`/`dsl::tabs` 数据驱动。
-  - [x] **IDE 形态界面声明式重写**（2026-10-03 示例整合）：`examples/gbcode` 整份界面
+  - [x] **IDE 形态界面声明式重写**（2026-10-03 示例整合）：`apps/gbcode` 整份界面
     改为声明式组装（五层布局 + 多标签 + 真实文件工作区 + 查找替换 + 菜单栏下拉 +
-    命令面板 + 全局快捷键 + 终端 + 主题），与原本的 `examples/gbcode-dsl` 分身**合并为一份**
+    命令面板 + 全局快捷键 + 终端 + 主题），与原本的 `apps/gbcode-dsl` 分身**合并为一份**
     （两份合计 2758 行 → 1605 行，−42%）；端到端 `tools/gbcode_e2e.py` 九项。
     同一批整合把 `counter` / `counter-js` / `todo-js` 三个小示例删除（语义已由单测完整覆盖）、
     gallery 新增「声明式」页（`mount_into` 子树挂载）；示例收敛为 gallery + gbcode 两个。
@@ -6382,7 +6382,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
     输入指纹节流 + 代次计数丢旧结果。
   - [x] **构造期属性组件包装**：`dsl::select`/`dsl::table`/`dsl::tree`。
   - [x] **协议 `ui.create`/`ui.remove`**：在线建删元素（与声明式共用工厂）。
-  - [x] 旧版 `examples/gbcode` 编译修复（三处 `-Werror=shadow`）。
+  - [x] 旧版 `apps/gbcode` 编译修复（三处 `-Werror=shadow`）。
   - [x] **`SplitView` 分隔线偏移修正**（用户报修）：`paint_content` 里 `handle_rect()`
     返回的已是**绝对坐标**，旧代码又加了一次 `bounds_.x`——线整整偏出一个 `bounds_.x`，
     在 gbcode 里表现为“标签下方一条穿过代码行号栏的竖线”（分栏 x=44 时线落到
@@ -6551,7 +6551,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 
 ## P1（2026-10-06 gbcode 全面优化轮：框架层缺口）
 
-背景：把 `examples/gbcode` 做到“真正可用”（对标歌白文件工作台）时挖出的框架问题。
+背景：把 `apps/gbcode` 做到“真正可用”（对标歌白文件工作台）时挖出的框架问题。
 **已当场修的三项**（见各自段落），**仍未做的在下面**。
 
 ### ✅ 已修：`set_event_handler` 对覆写了 `on_event` 的组件静默失效
@@ -7103,7 +7103,7 @@ token/include 目录——**不含源内容与 mtime**；版本判定全在 `obj
 - [ ] **内联 `Deps{{…}}` 与内联 lambda 实参触 GCC 13 的 `-Wdangling-reference` 误报**：
   `memo`/`effect` 返回引用，GCC 会把“实参里的临时”（临时 `Deps`、或直接写在实参位的
   lambda 闭包对象）当成被引用对象而报警。现状是调用方用**具名局部变量**回避
-  （`examples/gallery/pages.cpp`）。更好的做法是从源头改：让 `memo` 返回**轻量句柄**
+  （`apps/gallery/pages.cpp`）。更好的做法是从源头改：让 `memo` 返回**轻量句柄**
   （而非裸引用）或收 `Deps` 为值参——但那会动 API 形态，需权衡。
 
 - [ ] **示例级组件回流决策：caiyun TimelineView / louyue ColorPicker+Viewport 双份维护**
@@ -7907,7 +7907,7 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
     + `ui::WindowFrame`（**组件化的窗口**：标题栏置顶 + 内容槽 + 八向缩放边缘条；
     它解决的是通用缺陷——无边框窗口**只能**靠界面提供拖动/缩放区域，只有 TitleBar 时
     窗口拖不动）+ `ui::WindowControl` 端口（依赖倒置，与 `TextPort` 同一手法）+ 应用装配
-    （`Application` 实现端口并转发后端）；**两个示例都已换壳**：gbcode 的 `#titlebar`
+    （`Application` 实现端口并转发后端）；**两个应用都已换壳**：gbcode 的 `#titlebar`
     换成窗框内置标题栏（旧三个装饰图标退役），gallery 的“60px 顶部栏 + 无标题栏外壳”
     换成 `WindowFrame`（品牌名挂前部槽、当前页名作标题、主题/DPI/截图挂尾部槽）；
     gallery 组件页保留「窗框」巡检卡；
@@ -7978,20 +7978,20 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
 - [x] **顺带修 `tests/core_fs_test.cpp` 缺 `<algorithm>`**（同根因）：用了 `std::ranges::is_sorted`
   却没包含 `<algorithm>`；测试组在无 PCH 口径下报 `'is_sorted' is not a member of 'std::ranges'`。
   它一直没暴露，是因为 `st test` 走 PCH 口径——**测试自己也该被这条门禁覆盖**。
-- [x] **修 `build gbcode` 编不过（Json 前向头漏补 `examples/`）**：
+- [x] **修 `build gbcode` 编不过（Json 前向头漏补 `apps/`）**：
   `88ba665`（Json 前向头解耦）把 `dsl.hpp` 的 `#include "st/core/json.hpp"` 换成前向声明，
-  给 `src/*`+`tests/*` 的 18 个 .cpp 补了 `json.hpp`——**却漏了整个 `examples/`**。
+  给 `src/*`+`tests/*` 的 18 个 .cpp 补了 `json.hpp`——**却漏了整个 `apps/`**。
   而 `dsl::custom<T>` 是**模板**，实例化时需要 `Json` 完整类型（模板体调
-  `create_element(…, empty_json_object(), …)`），于是 `examples/gbcode/main.cpp` 报
+  `create_element(…, empty_json_object(), …)`），于是 `apps/gbcode/main.cpp` 报
   「invalid use of incomplete type … basic_json」——报错落在标准库 `variant`/`type_traits`
   内部（300 行模板栈），完全看不出与 `dsl.hpp` 的关系。
 
   **为什么一路没被发现**：该提交自己的验证声明只跑 `st test` + `lint`，而 `st test` 只编
-  `tests/*_test.cpp`、**不编 `examples/`** 也不编 `tools/`——两个环节都覆盖不到 gbcode。
+  `tests/*_test.cpp`、**不编 `apps/`** 也不编 `tools/`——两个环节都覆盖不到 gbcode。
   它自己的提交信息写着「需要完整类型的 .cpp（**含测试/示例**）自行包含 json.hpp」：
-  **说明了但没做到**，且无任何机械检查会因“examples 编不过”而变红。
+  **说明了但没做到**，且无任何机械检查会因“apps 编不过”而变红。
 
-    修复（**最终形态**）：① `examples/gbcode/main.cpp` 补显式 `st/core/json.hpp`；
+    修复（**最终形态**）：① `apps/gbcode/main.cpp` 补显式 `st/core/json.hpp`；
   ② 把 `dsl.hpp` 那句**错误的**注释「`Json` 只出现在签名里」改成事实；
   ③ **根治：把 `empty_json_object()` 从「按值返回 `Json`」改为「返回 `const Json&`」**——
   这是需求本身的来源：`custom<T>` 只因要按值传 `empty_json_object()` 的返回值才需要完整类型，
@@ -8009,7 +8009,7 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
   返回引用才是消因。容器只有 GCC 13/14（无此警告），MinGW 16.2 才现形。
 
   教训一：**「改公共头 + 手动给 .cpp 补 include」这个模式必然漏**，尤其当目标目录不在
-  `st test` 的编译范围内（examples/tools）。这类改动要枚举**所有**包含该头的 TU
+  `st test` 的编译范围内（apps/tools）。这类改动要枚举**所有**包含该头的 TU
   （可用 `grep -rl` 列全），而不是只改眼前的 src/tests。
   教训二：**能用数据结构/签名消除的需求，不要用断言去探测**——守卫依赖编译器行为
   （SFINAE 上下文是否被记录），而返回引用把需求彻底去掉，不依赖任何编译器。
@@ -8021,7 +8021,7 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
 > 驱动方式：“实际测试 gbcode 的所有细节，要达到真正可用的水平”——用控制通道
 > 驱动真窗口/真 shell/真 git 仓逐项走查，**不读代码猜**。
 > 新增回归：`tools/gbcode_usability_e2e.py`（≈60 条断言，已入
-> `tools/examples_e2e_all.py` 与 `docs/EXAMPLES_E2E.md` 入口表）。
+> `tools/apps_e2e_all.py` 与 `docs/APPS_E2E.md` 入口表）。
 
 ### 缺陷（每一项都有“不修会怎样”的实测证据）
 

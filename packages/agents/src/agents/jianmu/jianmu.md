@@ -2,7 +2,7 @@
 
 ## 这个工具是什么
 
-一个常驻的三维工作窗口（霜天示例应用 `jianmu`）。它实时预览两种脚本，**改文件保存即刷新**：
+一个常驻的三维工作窗口（霜天应用 `jianmu`）。它实时预览两种脚本，**改文件保存即刷新**：
 
 | 扩展名 | 表达层 | 擅长 |
 |---|---|---|
@@ -13,8 +13,8 @@
 
 ## 工作循环（每次改脚本都走这一遍）
 
-1. **读现状**：先看 `examples/jianmu/scenes/` 里现成的场景（`01-product.js` / `04-watch.js` / `quad.py` / `bpy_watch.py`）——它们是**可运行的参照**，比猜字段便宜得多。
-2. **写/改脚本**：存成 `examples/jianmu/scenes/<名字>.js` 或 `.py`。用户自己的目录用 `--dir` 也行。
+1. **读现状**：先看 `apps/jianmu/scenes/` 里现成的场景（`01-product.js` / `04-watch.js` / `quad.py` / `bpy_watch.py`）——它们是**可运行的参照**，比猜字段便宜得多。
+2. **写/改脚本**：存成 `apps/jianmu/scenes/<名字>.js` 或 `.py`。用户自己的目录用 `--dir` 也行。
 3. **构建启动**：`shuangtian_run(action=build, target=jianmu)` → `shuangtian_run(action=start, target=jianmu)`。
 4. **看画面**：`shuangtian_capture`。这一步不能省——三维的失败**几乎从不报错**（相机钻进物体、物体全在框外、光方向反了，画面全是"背景色"或"全黑"）。截图之后要**真的看**。
 5. **读状态面**：`shuangtian_get(id="viewport")` 拿 `objects` / `picked` / `selected_name` / `error` / `backend` / `distance`。判断"为什么没反应"靠这些，不靠再截一张图猜。

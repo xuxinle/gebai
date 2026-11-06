@@ -16,7 +16,7 @@
 /// - 静止帧 = 帧差 < `static_threshold`（默认 1.2）。
 /// - 静止占比 = 静止帧对数 / 总帧对数（单帧段为 0——单帧无法判动静）。
 
-#include "examples/caiyun/frame_stats.cpp"
+#include "apps/caiyun/frame_stats.cpp"
 
 #include <cstdint>
 #include <vector>

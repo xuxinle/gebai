@@ -278,7 +278,7 @@ def icon_cefu(c):
 def icon_xiangqi(c):
     """相期：红/白/蓝三段竖条（与 `make_xiangqi_icon_png` 小尺寸档同源）。
 
-    ⚠ 这份图标必须与 `examples/xiangqi/main.cpp` 的 `make_xiangqi_icon_png()`
+    ⚠ 这份图标必须与 `apps/xiangqi/main.cpp` 的 `make_xiangqi_icon_png()`
     小尺寸档（≤24px 那一档）画**同一套图形**：那份是任务栏/窗口图标，
     这份经 `make_ico.py` 转成 exe 资源图标（资源管理器/快捷方式看到的）。
     之前两套各画各的（这里是卡片小人，那边是三竖条），
@@ -319,13 +319,13 @@ def icon_gbcode(c):
 
 APPS = {
     # name: (源图输出路径, 底色, 画法)
-    "gallery": ("examples/gallery/assets/gallery-icon.png", (0.36, 0.42, 0.86), icon_gallery),
-    "louyue":  ("examples/louyue/assets/louyue-icon.png",   (0.85, 0.42, 0.36), icon_louyue),
-    "caiyun":  ("examples/caiyun/assets/caiyun-icon.png",   (0.20, 0.62, 0.60), icon_caiyun),
-    "gedou":   ("examples/gedou/assets/gedou-icon.png",     (0.78, 0.26, 0.32), icon_gedou),
-    "cefu":    ("examples/cefu/assets/cefu-icon.png",       (0.42, 0.36, 0.68), icon_cefu),
-    "xiangqi": ("examples/xiangqi/assets/xiangqi-icon.png", (0x14 / 255.0, 0x11 / 255.0, 0x0E / 255.0), icon_xiangqi),
-    "gbcode":  ("examples/gbcode/assets/gbcode-icon.png",   (0.33, 0.42, 0.95), icon_gbcode),
+    "gallery": ("apps/gallery/assets/gallery-icon.png", (0.36, 0.42, 0.86), icon_gallery),
+    "louyue":  ("apps/louyue/assets/louyue-icon.png",   (0.85, 0.42, 0.36), icon_louyue),
+    "caiyun":  ("apps/caiyun/assets/caiyun-icon.png",   (0.20, 0.62, 0.60), icon_caiyun),
+    "gedou":   ("apps/gedou/assets/gedou-icon.png",     (0.78, 0.26, 0.32), icon_gedou),
+    "cefu":    ("apps/cefu/assets/cefu-icon.png",       (0.42, 0.36, 0.68), icon_cefu),
+    "xiangqi": ("apps/xiangqi/assets/xiangqi-icon.png", (0x14 / 255.0, 0x11 / 255.0, 0x0E / 255.0), icon_xiangqi),
+    "gbcode":  ("apps/gbcode/assets/gbcode-icon.png",   (0.33, 0.42, 0.95), icon_gbcode),
 }
 
 

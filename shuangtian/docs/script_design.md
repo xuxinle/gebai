@@ -220,7 +220,7 @@
 | **自绘与 carry 会双影** | carry 与自绘框同时可见时错开 3px，帧上看是两个套着的框。解法：`carry_out.fade_out` 0.35 + 自绘层在**同一窗口** alpha 0→1 淡入 |
 
 多镜承接的完整骨架（三幕结构 / 链的闭合 / layout 分文件）见资产库片段
-`multishot-carry-recipe`，七份已验收的实例在 `examples/caiyun/styles/*/film-multishot.json`
+`multishot-carry-recipe`，七份已验收的实例在 `apps/caiyun/styles/*/film-multishot.json`
 （承接分均为 1.00）。
 
 验收：`python scripts/carry_qa.py <输出目录>/trajectory.tsv --scenes <各幕时长>`。

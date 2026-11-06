@@ -12,7 +12,7 @@
 ///
 /// 所以这里钉的是**表与实现的一致性**，不是某个具体数值。
 
-#include "examples/caiyun/layer_schema.cpp"
+#include "apps/caiyun/layer_schema.cpp"
 
 #include "st/core/print.hpp"
 #include "st/core/json.hpp"

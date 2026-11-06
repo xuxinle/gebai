@@ -61,7 +61,7 @@
                 ──▶ {"type":"answer","id","kind",…}   用户答复
 ```
 
-这个方向由相期那边定（`shuangtian/examples/xiangqi` 用自研 WS 客户端连出去）。
+这个方向由相期那边定（`shuangtian/apps/xiangqi` 用自研 WS 客户端连出去）。
 
 **方案 B（2026-10-27）：窗口连主服务端口，不再独立开 7717。**
 
@@ -78,7 +78,7 @@
 |---|---|---|
 | `--agent` 端口 | `Bun.serve` 返回的 `server.port` | `GEBAI_PORT=0`（桌面形态）时真实端口由 OS 分配，用配置值会连错地方 |
 | `--home` | `xiangqiHomeFromEnv()`（与控制器内部**同一个函数**） | 两边各写一份公式时，WS 断后推卡写一处、答复读另一处，而 WS 通时毫无异常 |
-| `--ui` | 从仓库根取 `shuangtian/examples/xiangqi/ui` | 相期自身的资源探测是**相对 cwd** 的，而宿主 cwd 与 exe 所在树无关——不传就会「装载失败：读不到 main.xml」后立刻退出 |
+| `--ui` | 从仓库根取 `shuangtian/apps/xiangqi/ui` | 相期自身的资源探测是**相对 cwd** 的，而宿主 cwd 与 exe 所在树无关——不传就会「装载失败：读不到 main.xml」后立刻退出 |
 
 ### exe 路径探测（`resolveXiangqiBin`）
 
@@ -86,7 +86,7 @@
 
 1. `XIANGQI_BIN` ——**显式指定时不再探测别的**，指错就如实失败（不静默回落）；
 2. `{GEBAI_HOME}/shuangtian/build/{dev,quick,release,debug}/bin/xiangqi[.exe]` ——部署副本；
-3. 从**服务自身目录**逐级上溯找仓库标记 `shuangtian/examples/xiangqi/`，再取 `<仓库>/shuangtian/build/<档>/bin/`；
+3. 从**服务自身目录**逐级上溯找仓库标记 `shuangtian/apps/xiangqi/`，再取 `<仓库>/shuangtian/build/<档>/bin/`；
 4. 从 `{GEBAI_HOME}` 同样上溯（`.gebai-local` 这类子目录也能收敛到仓库根）。
 
 第 3、4 步刻意**不数相对级数**：数过一次、少算一级，就落到仓库外的同名路径上，
@@ -101,7 +101,7 @@
 | `相期窗口已断开（重开后卡片会重推）` | 窗口关了/崩了；控制器已清 peer |
 | `相期窗口未找到（…）` + 候选清单 | 一个候选都不存在 |
 | `相期窗口启动后 Nms 就退出了` | 起来了又立刻退（多半是 UI 资源缺失，看下一条 warn） |
-| `相期 UI 资源目录未找到（…）` | exe 所在树里没有 `examples/xiangqi/ui`，它会自己退出 |
+| `相期 UI 资源目录未找到（…）` | exe 所在树里没有 `apps/xiangqi/ui`，它会自己退出 |
 
 `XIANGQI_AUTO=off` 关闭自动拉起；找不到 exe / 拉起失败**只记日志不阻断服务**
 （相期是附加提醒面，没有它时授权卡仍走 REST 链接降级）；服务模式（`auth=server`）不拉起。

@@ -101,9 +101,9 @@ def main():
     #
     # 默认只测 sample-basic（快）；`--full` 才测 scene-script-demo（每帧 4 秒，
     # 一次基线要 12 分钟，日常对比不必跑）。
-    scripts = [os.path.join(ROOT, "examples/caiyun/assets/sample-basic.json")]
+    scripts = [os.path.join(ROOT, "apps/caiyun/assets/sample-basic.json")]
     if "--full" in sys.argv:
-        scripts.append(os.path.join(ROOT, "examples/caiyun/assets/scene-script-demo.json"))
+        scripts.append(os.path.join(ROOT, "apps/caiyun/assets/scene-script-demo.json"))
     for script in scripts:
         if os.path.exists(script):
             ms = run_render(script, "1920x1080", frames=20)

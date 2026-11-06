@@ -87,7 +87,7 @@ function frameworkRoot(ctx: ToolContext): string {
 }
 
 async function loadLibrary(ctx: ToolContext): Promise<Library | null> {
-  const p = join(frameworkRoot(ctx), "examples", "caiyun", "assets", "library.json")
+  const p = join(frameworkRoot(ctx), "apps", "caiyun", "assets", "library.json")
   if (!existsSync(p)) return null
   try {
     return JSON.parse(await readFile(p, "utf8")) as Library
@@ -155,9 +155,9 @@ export const assetsTool: Tool = {
     if (!lib) {
       return {
         output:
-          "资产库尚未建立（缺 `examples/caiyun/assets/library.json`）。\n"
-          + "可以直接看目录：`shuangtian/examples/caiyun/assets/`（示例脚本与 media/ 素材）、\n"
-          + "`shuangtian/examples/caiyun/styles/`（七个风格模板的一镜示例）。",
+          "资产库尚未建立（缺 `apps/caiyun/assets/library.json`）。\n"
+          + "可以直接看目录：`shuangtian/apps/caiyun/assets/`（示例脚本与 media/ 素材）、\n"
+          + "`shuangtian/apps/caiyun/styles/`（七个风格模板的一镜示例）。",
       }
     }
 

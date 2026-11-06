@@ -9,7 +9,7 @@
 
 ## 一、当前性能（1920×1080）
 
-### 真实片子（`examples/caiyun/assets/sample-basic.json`，300 帧）
+### 真实片子（`apps/caiyun/assets/sample-basic.json`，300 帧）
 
 | worker | 每帧 | 说明 |
 |---|---|---|

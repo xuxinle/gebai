@@ -10,7 +10,7 @@
 ///
 /// 所以这里钉的是**判据在真实配色上的结论**，不是某个阈值数字。
 
-#include "examples/caiyun/fx.hpp"
+#include "apps/caiyun/fx.hpp"
 
 #include "st/test/test.hpp"
 

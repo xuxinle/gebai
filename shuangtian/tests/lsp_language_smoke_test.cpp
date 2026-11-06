@@ -238,7 +238,7 @@ ST_TEST(lsp_recipe_table_matches_available_programs) {
   // 实测踩到：`--no-log-buffer`（正确是 `--no-log-buffering`）让 rust-analyzer
   // 拒绝启动，症状是"进程已退出"，与参数名毫无字面关联。
   //
-  // 这里断言四个程序名本身（配方表在 `examples/gbcode/lsp_bridge.cpp`，
+  // 这里断言四个程序名本身（配方表在 `apps/gbcode/lsp_bridge.cpp`，
   // 不参与单测链接——所以清单在这个测试里重复一次，**改了配方就要同步这里**）。
   const std::vector<std::pair<std::string, std::string>> expected = {
       {"cpp", "clangd"},

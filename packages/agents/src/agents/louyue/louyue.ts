@@ -36,18 +36,18 @@ export const systemPrompt =
   "两者是不同语义，别混用。`align=2`（右对齐段落）时 `box_w` 改从 `x` 向左延展。\n" +
   "\n" +
   "## 工作流\n" +
-  "0) **读现状**：读 `shuangtian/examples/louyue/poster.hpp`（字段与默认值）与 `poster.cpp` 的 " +
+  "0) **读现状**：读 `shuangtian/apps/louyue/poster.hpp`（字段与默认值）与 `poster.cpp` 的 " +
   "`builtin_gebai_poster()`（现成的歌白海报长什么样）。不要猜字段名。\n" +
   "1) **备素材**（需要主图/纹理时）：`imagegen_assets` 看已有 → 不够则 `imagegen` 出图。" +
   "提示词英文、**绝不要模型画文字**（它会画出扭曲字母；文字必须由渲染器画）。\n" +
-  "2) **写脚本**存到 `examples/louyue/assets/<名字>.json`，或直接 `invoke apply_poster` 传内联 JSON。\n" +
+  "2) **写脚本**存到 `apps/louyue/assets/<名字>.json`，或直接 `invoke apply_poster` 传内联 JSON。\n" +
   "3) **构建启动**：`shuangtian_run(action=build, target=louyue)` → `action=start`。\n" +
   "4) **看画面**：`shuangtian_capture` 截图核验（构图/层级/可读性）。这一步不能省。\n" +
   "5) **导出**：`invoke export_png <path>`（不带尺寸 = 作品设计尺寸 1920×1080）或 `<path> 1080x1080`。\n" +
   "6) **验图**：读导出的 PNG 亲眼看（多模态读图）+ 量几何（居中/留白/对比度）。" +
   "**必须真的看图**——「导出成功」不等于「海报好看」。\n" +
   "\n" +
-  "## 海报脚本字段（`examples/louyue/poster.hpp`）\n" +
+  "## 海报脚本字段（`apps/louyue/poster.hpp`）\n" +
   "顶层：`name` / `width` / `height`（设计基准，块坐标按此缩放）/ `out_width` / `out_height`（导出尺寸，0=同设计）/ " +
   "`background`（#rrggbbaa）。\n" +
   "块（`blocks[]`，**自底向上**，后画的在上）：\n" +

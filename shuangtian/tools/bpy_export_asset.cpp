@@ -20,7 +20,7 @@
 // ```json
 // {
 //   "format": "st-asset/1",
-//   "source": "examples/.../gears_asset.py",
+//   "source": "apps/.../gears_asset.py",
 //   "assets": {
 //     "gear_42t": {
 //       "positions": [...], "normals": [...], "indices": [...],

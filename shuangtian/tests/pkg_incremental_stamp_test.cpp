@@ -124,10 +124,10 @@ ST_TEST(test_binary_staleness_round_trip) {
   // ⑥ **被 include 的实现文件**改了 → 也必须过期
   //
   // 这条是回归测试的主体：`.d` 是编译器实际写出的依赖清单，测试单元通过
-  // `#include "examples/x/impl.cpp"` 把实现编进来时，它就在里面。
+  // `#include "apps/x/impl.cpp"` 把实现编进来时，它就在里面。
   tree.write("tests/a_test.cpp", "// b\n");   // 回到与快照一致的内容
-  tree.write("examples/x/impl.cpp", "int f() { return 1; }\n");
-  const std::string impl = st::fs::join(tree.dir, "examples/x/impl.cpp");
+  tree.write("apps/x/impl.cpp", "int f() { return 1; }\n");
+  const std::string impl = st::fs::join(tree.dir, "apps/x/impl.cpp");
   // 手工写一份 `.d`（真实构建里是编译器产出）。文件名只需含源文件主名：
   // `included_impl_files` 就是按主名去匹配 `.d` 的（真实文件名是路径转义后的形式，
   // 这里不必复刻那套转义——被测的是“读 `.d` 并把它入 stamp”这段逻辑）。
@@ -137,6 +137,6 @@ ST_TEST(test_binary_staleness_round_trip) {
                            st::pkg::test_source_stamp(sources, object_dir));
   ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary, object_dir));
   // 只改实现文件的内容 → 过期
-  tree.write("examples/x/impl.cpp", "int f() { return 2; }\n");
+  tree.write("apps/x/impl.cpp", "int f() { return 2; }\n");
   ST_CHECK(st::pkg::test_binary_is_stale(sources, binary, object_dir));
 }

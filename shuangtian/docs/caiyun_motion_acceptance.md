@@ -375,7 +375,7 @@ function layout(t, duration, canvas, layers) {
 **逐幕必看**，且判据要比全片更严（单幕 >70% 就是那一幕的问题）：
 
 ```bash
-py examples/caiyun/gbfilm/measure.py film.mp4 --scenes 4.6,5.2,5.8,5.4,6.0,5.4,6.0
+py apps/caiyun/gbfilm/measure.py film.mp4 --scenes 4.6,5.2,5.8,5.4,6.0,5.4,6.0
 ```
 
 该脚本与验收器同口径（结果可与渲染日志的「画面质量」行对账），

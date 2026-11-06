@@ -1,4 +1,4 @@
-"""把 examples/caiyun/assets 下的示例脚本逐个渲一遍并量画面质量，产出资产清单的原始数据。
+"""把 apps/caiyun/assets 下的示例脚本逐个渲一遍并量画面质量，产出资产清单的原始数据。
 
 ## 为什么要这一步
 
@@ -22,8 +22,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "build", "dev", "bin",
                    "caiyun.exe" if os.name == "nt" else "caiyun")
-ASSETS = os.path.join(ROOT, "examples", "caiyun", "assets")
-STYLES = os.path.join(ROOT, "examples", "caiyun", "styles")
+ASSETS = os.path.join(ROOT, "apps", "caiyun", "assets")
+STYLES = os.path.join(ROOT, "apps", "caiyun", "styles")
 
 
 def run_one(script: str, outdir: str, frames: int = 0) -> dict:

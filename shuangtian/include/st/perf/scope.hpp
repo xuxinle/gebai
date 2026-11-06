@@ -166,7 +166,7 @@ class Scope {
 ///
 /// 为什么必须缩短：MinGW 上 `__FILE__` 是**绝对路径**，直接进报告会把整条构建路径
 /// 泄漏出去，且同一文件的几十个调用点前缀完全相同、真正有信息量的只有尾巴。
-/// 规则：去掉到 `src/`、`include/`、`tests/`、`tools/`、`examples/` 之一为止的前缀；
+/// 规则：去掉到 `src/`、`include/`、`tests/`、`tools/`、`apps/` 之一为止的前缀；
 /// 找不到这些锚点时只保留最后两段。
 [[nodiscard]] auto shorten_site(std::string_view site) -> std::string;
 

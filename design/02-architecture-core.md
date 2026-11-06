@@ -1390,7 +1390,7 @@ refs 有 threadId 时必传 root。调度器队列本就按 sessionId 分桶，�
 - **`--ui` 显式传绝对路径**：相期自身的资源探测是相对 cwd 的，而宿主 cwd 与 exe 所在树无关。
 
 exe 探测不数相对级数（数错一次就静默失败）：`XIANGQI_BIN` → `{GEBAI_HOME}/shuangtian/build/<档>/bin/`
-→ 从服务自身目录与 `GEBAI_HOME` 逐级上溯找仓库标记 `shuangtian/examples/xiangqi/`
+→ 从服务自身目录与 `GEBAI_HOME` 逐级上溯找仓库标记 `shuangtian/apps/xiangqi/`
 → `{GEBAI_HOME}/xiangqi(.exe)` 直查 → `PATH`（Bun.which）。
 失败只记日志（列出全部试过的路径）不阻断服务；`XIANGQI_AUTO=off` 显式关闭。
 成功时两条 info 日志可核对：`相期窗口已拉起：pid=N` 与 **`相期窗口已连上（/xiangqi）`**——

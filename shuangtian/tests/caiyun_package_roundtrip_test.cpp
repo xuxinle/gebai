@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/director.hpp"
+#include "apps/caiyun/director.hpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"
 #include "st/test/test.hpp"

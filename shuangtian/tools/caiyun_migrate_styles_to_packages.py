@@ -38,7 +38,7 @@ import sys
 
 ROOT = "D:/code/gebai-pro/shuangtian"
 EXE = os.path.join(ROOT, "build/dev/bin/caiyun.exe")
-STYLES = os.path.join(ROOT, "examples/caiyun/styles")
+STYLES = os.path.join(ROOT, "apps/caiyun/styles")
 
 
 def run(args: list[str]) -> subprocess.CompletedProcess:

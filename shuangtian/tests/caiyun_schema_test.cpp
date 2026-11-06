@@ -14,8 +14,8 @@
 /// 4. **序列化不能丢字段**（往返不变量）——智能体会 `get script` 读回、改一处、
 ///    `apply_script` 写回；任何"能读不能写"的字段都会在那次往返里静默消失。
 
-#include "examples/caiyun/director.cpp"
-#include "examples/caiyun/schema.cpp"
+#include "apps/caiyun/director.cpp"
+#include "apps/caiyun/schema.cpp"
 
 #include "st/test/test.hpp"
 // `st::print`：lint L7 禁 printf，统一走它（带编码/镜像/缓冲顺序保障）

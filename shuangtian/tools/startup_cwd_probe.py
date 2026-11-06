@@ -90,7 +90,7 @@ def main() -> int:
 
     scenarios = [
         (str(ROOT), "仓库根"),
-        (str(ROOT / "examples" / "gbcode"), "小项目目录"),
+        (str(ROOT / "apps" / "gbcode"), "小项目目录"),
         (str(ROOT / "build" / "dev" / "bin"), "bin 目录（485MB，对账用）"),
     ]
     print(f"{'工作目录':<24}{'控制通道中位':>14}{'首帧中位':>12}")

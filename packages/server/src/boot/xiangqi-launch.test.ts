@@ -39,10 +39,10 @@ function makeRepo(tag: string, opts: { profile?: string; ui?: boolean } = {}): s
   const repo = tmpRoot(tag)
   const profile = opts.profile ?? "dev"
   mkdirSync(join(repo, "packages", "server", "src", "boot"), { recursive: true })
-  mkdirSync(join(repo, "shuangtian", "examples", "xiangqi", "ui"), { recursive: true })
+  mkdirSync(join(repo, "shuangtian", "apps", "xiangqi", "ui"), { recursive: true })
   mkdirSync(join(repo, "shuangtian", "build", profile, "bin"), { recursive: true })
   writeFileSync(join(repo, "shuangtian", "build", profile, "bin", XINGQI_EXE_NAME), "fake")
-  if (opts.ui !== false) writeFileSync(join(repo, "shuangtian", "examples", "xiangqi", "ui", "main.xml"), "<ui/>")
+  if (opts.ui !== false) writeFileSync(join(repo, "shuangtian", "apps", "xiangqi", "ui", "main.xml"), "<ui/>")
   return repo
 }
 
@@ -142,9 +142,9 @@ describe("exe 路径探测：三种部署形态", () => {
 })
 
 describe("UI 资源目录", () => {
-  test("仓库根下取 shuangtian/examples/xiangqi/ui（main.xml 存在才算）", () => {
+  test("仓库根下取 shuangtian/apps/xiangqi/ui（main.xml 存在才算）", () => {
     const repo = makeRepo("ui")
-    expect(resolveXiangqiUiDir(repo)).toBe(join(repo, "shuangtian", "examples", "xiangqi", "ui"))
+    expect(resolveXiangqiUiDir(repo)).toBe(join(repo, "shuangtian", "apps", "xiangqi", "ui"))
   })
 
   test("缺 main.xml 时视为没有（exe 会以「装载失败」退出，不能假装有）", () => {
@@ -184,8 +184,8 @@ describe("拉起决策 planXiangqiLaunch", () => {
     if (plan.action !== "launch") return
     const i = plan.args.indexOf("--ui")
     expect(i).toBeGreaterThanOrEqual(0)
-    expect(plan.args[i + 1]).toBe(join(repo, "shuangtian", "examples", "xiangqi", "ui"))
-    expect(plan.uiDir).toBe(join(repo, "shuangtian", "examples", "xiangqi", "ui"))
+    expect(plan.args[i + 1]).toBe(join(repo, "shuangtian", "apps", "xiangqi", "ui"))
+    expect(plan.uiDir).toBe(join(repo, "shuangtian", "apps", "xiangqi", "ui"))
   })
 
   test("XIANGQI_AUTO=off：不拉起（大小写与空格都认）", () => {

@@ -5,7 +5,7 @@
 /// gallery 自称「控件全集」，但展示卡是**手搭**的：新组件进了 `ST_COMPONENT_LIST`
 /// （dsl.cpp 注册表，组件全集的唯一权威清单）却没人补卡时——画廊不说、编译器不说、
 /// 任何机制都不说。v0.1.5 专项「补齐 28 组件」之后新增组件零跟进，缺口静默长大才被
-/// 反推发现（TimelineView/ColorPicker/Viewport/Tree/Tooltip 甚至全库 examples 零展示位）。
+/// 反推发现（TimelineView/ColorPicker/Viewport/Tree/Tooltip 甚至全库 apps 零展示位）。
 /// 缺的不是卡，是**让复发当场红**的对账机制——本文件就是那道闸。
 ///
 /// ## 对账形态（BACKLOG 原文：「ST_COMPONENT_LIST − 已知豁免清单 == gallery 展示集」）
@@ -22,7 +22,7 @@
 ///
 /// ## 展示集名单的来源（本单摸底实得，供复核）
 ///
-/// 遍历 examples/gallery/{pages,main}.cpp 的全部 `std::make_unique<T>` 与
+/// 遍历 apps/gallery/{pages,main}.cpp 的全部 `std::make_unique<T>` 与
 /// `dsl::custom<T>` 实例化点，映射到注册名（`IconView`→`"Icon"` 一类以注册名为准）。
 /// 该提取当前是**人工 grep**，登记与实物不符的风险由后续单消除：gallery 侧加
 /// 启动时运行时树自检（遍历真值树收集 `type()` 与登记集比对，见共享头尾部的口径备忘）。

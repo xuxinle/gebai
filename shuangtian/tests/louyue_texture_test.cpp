@@ -18,11 +18,11 @@
 
 #include "st/test/test.hpp"
 
-#include "examples/louyue/poster.hpp"
-#include "examples/louyue/poster.cpp"
+#include "apps/louyue/poster.hpp"
+#include "apps/louyue/poster.cpp"
 // `poster.cpp` 的图片块引用素材库（`blit_cover/blit_contain`），而测试构建只编
 // `tests/*_test.cpp` + 框架库——不把这份实现一起编进来就会缺符号。
-#include "examples/louyue/assets_lib.cpp"
+#include "apps/louyue/assets_lib.cpp"
 
 namespace {
 

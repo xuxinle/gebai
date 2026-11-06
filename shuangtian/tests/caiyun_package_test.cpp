@@ -11,14 +11,14 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/director.hpp"
-#include "examples/caiyun/package.hpp"
-#include "examples/caiyun/package_expand.hpp"
-// 测试目标不链接 examples/caiyun，所以**直接包含实现**（仓库惯例：
-// 见 caiyun_layer_test.cpp 的 `#include "examples/caiyun/layer.cpp"`）。
-#include "examples/caiyun/package.cpp"
-#include "examples/caiyun/package_expand.cpp"
-#include "examples/caiyun/package_history.cpp"
+#include "apps/caiyun/director.hpp"
+#include "apps/caiyun/package.hpp"
+#include "apps/caiyun/package_expand.hpp"
+// 测试目标不链接 apps/caiyun，所以**直接包含实现**（仓库惯例：
+// 见 caiyun_layer_test.cpp 的 `#include "apps/caiyun/layer.cpp"`）。
+#include "apps/caiyun/package.cpp"
+#include "apps/caiyun/package_expand.cpp"
+#include "apps/caiyun/package_history.cpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"

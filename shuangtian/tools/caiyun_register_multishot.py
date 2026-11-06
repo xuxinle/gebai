@@ -21,7 +21,7 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB = os.path.join(ROOT, "examples", "caiyun", "assets", "library.json")
+LIB = os.path.join(ROOT, "apps", "caiyun", "assets", "library.json")
 
 # 实测结果（tools/caiyun_audit_multishot.py 一次跑出，2026-10-27）
 # 注意：`moving` 是**像素口径**（64 宽面积加权，小元素会被稀释），只作粗筛；
@@ -53,7 +53,7 @@ for name, m in MEASURED.items():
     ENTRIES.append({
         "id": f"multishot-{name[:2]}-{name[3:]}",
         "kind": "script",
-        "path": f"examples/caiyun/styles/{name}/film-multishot.json",
+        "path": f"apps/caiyun/styles/{name}/film-multishot.json",
         "summary": (
             f"{name[3:]} 模板的三镜承接示例（承接分 {m['carry']:.2f}，"
             f"承接物：{m['carrier']}）"

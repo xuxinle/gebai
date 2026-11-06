@@ -1,4 +1,4 @@
-/// 格斗示例的姿态与战斗逻辑单测（`examples/gedou`）。
+/// 格斗示例的姿态与战斗逻辑单测（`apps/gedou`）。
 ///
 /// 为什么这些必须有单测（而不是全靠 e2e）：
 /// - **对称性**：`pose_for` 只算一个朝向，镜像靠 `to_world` 的 sign 翻转——
@@ -8,7 +8,7 @@
 ///   否则画面会看到拳头来回抽动。e2e 只看命中帧，看不见路径。
 /// - **不变量**：血条不会变负、必杀槽不越界、同种子可复现、站立姿态脚在地面。
 ///
-/// 注意：`examples/` 下的实现不参与测试目标的链接（`CONVENTIONS` §测试纪律），
+/// 注意：`apps/` 下的实现不参与测试目标的链接（`CONVENTIONS` §测试纪律），
 /// 因此这里按本仓既有做法**直接 include 实现**（同 `tests/caiyun_carry_test.cpp`）。
 
 #include <cmath>
@@ -16,11 +16,11 @@
 #include <string>
 #include <vector>
 
-#include "examples/gedou/ai.cpp"     // NOLINT(bugprone-suspicious-include) —— 见文件头
-#include "examples/gedou/battle_select.cpp"  // NOLINT(bugprone-suspicious-include)
-#include "examples/gedou/fight.cpp"  // NOLINT(bugprone-suspicious-include)
-#include "examples/gedou/fighter.cpp"  // NOLINT(bugprone-suspicious-include)
-#include "examples/gedou/pose.cpp"     // NOLINT(bugprone-suspicious-include)
+#include "apps/gedou/ai.cpp"     // NOLINT(bugprone-suspicious-include) —— 见文件头
+#include "apps/gedou/battle_select.cpp"  // NOLINT(bugprone-suspicious-include)
+#include "apps/gedou/fight.cpp"  // NOLINT(bugprone-suspicious-include)
+#include "apps/gedou/fighter.cpp"  // NOLINT(bugprone-suspicious-include)
+#include "apps/gedou/pose.cpp"     // NOLINT(bugprone-suspicious-include)
 #include "st/test/test.hpp"
 
 namespace {

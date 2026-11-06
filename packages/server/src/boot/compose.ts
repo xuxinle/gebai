@@ -1456,7 +1456,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     log.info(`[gebai] 拉起相期窗口：${plan.bin} ${plan.args.join(" ")}`)
     if (plan.uiDir === null) {
       // 缺 UI 目录时 exe 会以「装载失败」自己退出，不提前说会让人误以为是连接问题。
-      log.warn(`[gebai] 相期 UI 资源目录未找到（${plan.bin} 所在树里没有 shuangtian/examples/xiangqi/ui）——窗口可能启动即退出`)
+      log.warn(`[gebai] 相期 UI 资源目录未找到（${plan.bin} 所在树里没有 shuangtian/apps/xiangqi/ui）——窗口可能启动即退出`)
     }
     try {
       const take = await takeover

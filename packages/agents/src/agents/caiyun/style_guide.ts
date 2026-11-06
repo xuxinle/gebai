@@ -32,7 +32,7 @@ export const styleGuideTool: Tool = {
     + "01-capability-list（能力清单）/ 02-single-point（单点身份）/ 03-causal-chain（因果链）/ "
     + "04-scale-dive（尺度一镜）/ 05-contrast-split（对照分裂）/ 06-spine（脊椎串联）/ 07-pointer（在场操作）。 "
     + "**流程**：先 overview 选型，再读选中的那一个；不要一次全读（一次创作只需要一套方法论）。 "
-    + "每个模板在 `examples/caiyun/styles/<编号>-<名字>/` 有一镜示例脚本可对照。",
+    + "每个模板在 `apps/caiyun/styles/<编号>-<名字>/` 有一镜示例脚本可对照。",
   parameters: schema(
     {
       name: {

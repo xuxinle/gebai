@@ -64,7 +64,7 @@ function defaultModel(env: Record<string, string> | undefined): string {
 
 /** 默认素材落点：裁云的 media 目录（镂月也读这里，两边共用一批素材）。 */
 function defaultAssetDir(): string {
-  return join(repoRoot(), "shuangtian", "examples", "caiyun", "assets", "media")
+  return join(repoRoot(), "shuangtian", "apps", "caiyun", "assets", "media")
 }
 
 interface RunResult {
@@ -145,7 +145,7 @@ export const imagegenTool: Tool = {
       seed: { type: "integer", description: "随机种子（同种子 + 同提示词 = 同图，便于复现）。" },
       out_dir: {
         type: "string",
-        description: "输出目录（默认素材库 resources 旁的 examples/caiyun/assets/media）。",
+        description: "输出目录（默认素材库 resources 旁的 apps/caiyun/assets/media）。",
       },
       background: {
         type: "boolean",
@@ -221,7 +221,7 @@ export const imagegenAssetsTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      dir: { type: "string", description: "目录（默认 examples/caiyun/assets/media）。" },
+      dir: { type: "string", description: "目录（默认 apps/caiyun/assets/media）。" },
     },
   },
   requiresApproval: false,

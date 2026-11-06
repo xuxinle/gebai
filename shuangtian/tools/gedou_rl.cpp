@@ -28,10 +28,10 @@
 #include <string_view>
 #include <vector>
 
-#include "examples/gedou/ai.hpp"
-#include "examples/gedou/fight.hpp"
-#include "examples/gedou/policy.hpp"
-#include "examples/gedou/rl_env.hpp"
+#include "apps/gedou/ai.hpp"
+#include "apps/gedou/fight.hpp"
+#include "apps/gedou/policy.hpp"
+#include "apps/gedou/rl_env.hpp"
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/log.hpp"

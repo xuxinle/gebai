@@ -72,7 +72,7 @@ def main():
 
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out_dir = args.out or os.path.join(
-        repo, "shuangtian", "examples", "caiyun", "assets", "media")
+        repo, "shuangtian", "apps", "caiyun", "assets", "media")
     os.makedirs(out_dir, exist_ok=True)
     width, height = (int(v) for v in args.size.lower().split("x"))
 

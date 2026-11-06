@@ -85,7 +85,7 @@ constexpr int kH = 800;
 
 int main(int argc, char** argv) {
   const std::string script_path =
-      argc > 1 ? argv[1] : "examples/jianmu/scenes/bpy_watch.py";
+      argc > 1 ? argv[1] : "apps/jianmu/scenes/bpy_watch.py";
   const auto script = read_file(script_path);
   if (script.empty()) {
     std::printf("读不到脚本：%s\n", script_path.c_str());

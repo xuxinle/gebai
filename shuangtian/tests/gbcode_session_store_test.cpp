@@ -10,8 +10,8 @@
 
 // session_store 是 gbcode 的应用层源（不在框架 sources 清单里）——与
 // gbcode_lsp_bridge_test 同一策略：直接 include 实现编译进测试。
-#include "examples/gbcode/session_store.hpp"
-#include "examples/gbcode/session_store.cpp"
+#include "apps/gbcode/session_store.hpp"
+#include "apps/gbcode/session_store.cpp"
 
 namespace {
 

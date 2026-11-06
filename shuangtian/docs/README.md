@@ -52,7 +52,7 @@
 | 建一个自己的应用工程 | `independent_project.md`（清单/构建/运行全流程） | 详读 |
 | 把霜天当通用 C++ 库用 | `AS_LIBRARY.md` | 详读 |
 | 知道模块怎么分层、有哪些已知违规 | `STRUCTURE.md` | 速查 |
-| 知道有哪些示例、怎么跑全量 e2e | `EXAMPLES_E2E.md` | 速查 |
+| 知道有哪些示例、怎么跑全量 e2e | `APPS_E2E.md` | 速查 |
 
 ### 我要画东西
 
@@ -79,7 +79,7 @@
 | 量"指标测不到的那一点精致度" | `polish.md` | 速查 |
 | 写跨平台代码 | `../CONVENTIONS.md` §10（红线）→ `cross_platform.md`（详细版 + 自查清单） | 详读/速查 |
 | 写声明式界面 | `declarative.md`（**§5.5「调用方必须知道的三件事」是硬契约**） | 详读·接口 |
-| 用 XML + JS 写应用 | `xml-ui.md`（`examples/xiangqi` 通路） | 详读 |
+| 用 XML + JS 写应用 | `xml-ui.md`（`apps/xiangqi` 通路） | 详读 |
 | 改文件即生效（不重编不重启） | `hot-reload.md`（`st::ui::HotReload`；`../DESIGN.md` §4.2.28） | 速查 |
 | 写测试 | `../CONVENTIONS.md` §7；"假绿测试"的教训在 `../DESIGN.md` §8.3.2 | —— |
 | 用真按键验界面交互（输入/快捷键/回显） | `../CONVENTIONS.md` §7.7.1（三条注入通道怎么选）+ §7.7.2 | —— |
@@ -134,13 +134,13 @@
 | [`python.md`](python.md) | **内嵌 MicroPython 与 bpy 兼容层**：可用子集、三条硬边界（`@` 运算符 / 内置函数要显式开 / genhdr 重生成）、已知缺口 | 详读 | 活·**接口** |
 | [`render_alignment.md`](render_alignment.md) | **渲染对齐的方法与结论**：三路基准（本框架 / 真 three.js / 真 Blender）、为何用分位数不用均值、已修缺陷链、已知差异 | 详读 | 活 |
 | [`render_parity.md`](render_parity.md) | **与浏览器像素级对标**：真值通道（无头 Chrome + `readPixels`）、逐项归因与消融数据、统一内核 `pbr.hpp` 的口径与已知残余、`env_*`→`ibl_*` 与 bpy 重标 | 详读 | 活 |
-| [`jianmu.md`](jianmu.md) | **jianmu 示例应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、控制通道驱动、e2e 验收 | 速查 | 活 |
+| [`jianmu.md`](jianmu.md) | **jianmu 应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、控制通道驱动、e2e 验收 | 速查 | 活 |
 | [`cross_platform.md`](cross_platform.md) | 跨平台会怎么错、提交前逐条自查什么 | 速查 | 活 |
 | [`declarative.md`](declarative.md) | 声明式 UI（`st::ui::dsl` + `declarative.js`）的设计与**调用方契约** | 详读 | 活·**接口** |
 | [`perceptual_changes.md`](perceptual_changes.md) | 观感类改动怎么做：正交量、量尺三坑、八步循环 | 详读 | 活 |
 | [`PITFALLS.md`](PITFALLS.md) | **坑位速查**：按**发生场景**索引"这类事以前踩过什么" | 档案 | 活·索引 |
 | [`VERIFY-PLAYBOOK.md`](VERIFY-PLAYBOOK.md) | **收单前逐项勾的验收判据总表** | 详读 | 活·索引 |
-| [`EXAMPLES_E2E.md`](EXAMPLES_E2E.md) | 五示例 e2e 驱动入口表 | 速查 | 活 |
+| [`APPS_E2E.md`](APPS_E2E.md) | 应用 e2e 驱动入口表 | 速查 | 活 |
 | [`STRUCTURE.md`](STRUCTURE.md) | 模块分层与已知违规 | 速查 | 活 |
 | [`AS_LIBRARY.md`](AS_LIBRARY.md) | 把霜天当通用 C++ 库用 | 详读 | 活 |
 | [`independent_project.md`](independent_project.md) | 怎么用本框架建**自己的**应用工程 | 详读 | 活 |
@@ -188,7 +188,7 @@
 |---|---|---|---|
 | [`sqlite_integration.md`](sqlite_integration.md) | SQLite 源码内置：为什么这么接、边界划在哪 | 详读 | 记录（已落地） |
 | [`BUILD_CHECK.md`](BUILD_CHECK.md) | `st check` 跨编译器检查：为什么需要它 | 速查 | 记录（已落地） |
-| [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`examples/xiangqi`） | 详读 | 记录（已落地） |
+| [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`apps/xiangqi`） | 详读 | 记录（已落地） |
 | [`TERMINAL_FIXES_20261008.md`](TERMINAL_FIXES_20261008.md) | 终端修复轮：光标错位/输入回显/多会话串台 | 速查 | 记录（已落地） |
 | [`OPTIMIZATION_BASELINE.md`](OPTIMIZATION_BASELINE.md) | 结构优化**改动前**快照 | 速查 | 记录 |
 | [`OPTIMIZATION_PROGRESS.md`](OPTIMIZATION_PROGRESS.md) | 结构优化过程与交接 | 速查 | 记录 |

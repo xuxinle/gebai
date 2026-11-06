@@ -31,7 +31,7 @@ struct Renderer {
 };
 
 constexpr float kSize = 14.0f;
-const char* kLongPath = "shuangtian/examples/gbcode/page_sidebar.cpp";
+const char* kLongPath = "shuangtian/apps/gbcode/page_sidebar.cpp";
 
 }  // namespace
 

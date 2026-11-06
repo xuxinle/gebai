@@ -167,8 +167,8 @@ def reverse_verify() -> int:
     print(f"        恢复后 subsystem={after} (期望 2)")
 
     # ② 换图标：产物里 256 PNG 指纹必须变
-    icon = ROOT / "examples" / "gedou" / "assets" / "gedou.ico"
-    other = ROOT / "examples" / "louyue" / "assets" / "louyue.ico"
+    icon = ROOT / "apps" / "gedou" / "assets" / "gedou.ico"
+    other = ROOT / "apps" / "louyue" / "assets" / "louyue.ico"
     gedou_bin = binary_path("gedou")
     if not (icon.exists() and other.exists() and gedou_bin.exists()):
         print("  [SKIP] 图标逆向验证所需文件不全")

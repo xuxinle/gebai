@@ -44,7 +44,7 @@ BIN = ROOT / "build" / "dev" / "bin" / "gedou.exe"
 CASES = [
     {
         "name": "hitbox-only-in-active-window",
-        "file": "examples/gedou/fight.cpp",
+        "file": "apps/gedou/fight.cpp",
         "old": "  return fighter.move_frame >= fighter.timing.startup &&\n"
                "         fighter.move_frame < fighter.timing.startup + fighter.timing.active;",
         "new": "  // 逆向验证：删掉帧窗口约束（起手帧也给判定）\n"
@@ -55,7 +55,7 @@ CASES = [
     },
     {
         "name": "facing-mirror",
-        "file": "examples/gedou/fight.cpp",
+        "file": "apps/gedou/fight.cpp",
         "old": "  const float sign = fighter.facing_right ? 1.0f : -1.0f;\n"
                "  const float near_edge = fighter.x + sign * spec.reach_near * kBodyScale;\n"
                "  const float far_edge = fighter.x + sign * spec.reach_far * kBodyScale;",
@@ -70,7 +70,7 @@ CASES = [
     },
     {
         "name": "ko-not-ending-round",
-        "file": "examples/gedou/fight.cpp",
+        "file": "apps/gedou/fight.cpp",
         "old": "    phase_ = RoundPhase::Over;\n    end_timer_ = 120;\n  }\n  return true;\n}",
         "new": "    // 逆向验证：血空但回合不结束\n"
                "  }\n  return true;\n}",
@@ -79,7 +79,7 @@ CASES = [
     },
     {
         "name": "victory-pose-overwritten",
-        "file": "examples/gedou/fight.cpp",
+        "file": "apps/gedou/fight.cpp",
         "old": "      if (me.hp > 0.0f && other.hp <= 0.0f && me.pose_lock == 0 &&\n"
                "          me.move != MoveId::Victory && me.move != MoveId::KnockDown) {",
         "new": "      // 逆向验证：不再给胜者切胜利姿态\n"
@@ -90,7 +90,7 @@ CASES = [
     },
     {
         "name": "ai-not-reset-on-restart",
-        "file": "examples/gedou/game_view.cpp",
+        "file": "apps/gedou/game_view.cpp",
         "old": "  reset_ai();\n  player_intent_ = Intent{};",
         "new": "  // 逆向验证：重开一局不重置 AI\n  player_intent_ = Intent{};",
         "expect_msg": "同种子 AI 跑 120 帧应完全可复现",
@@ -98,7 +98,7 @@ CASES = [
     },
     {
         "name": "damage-from-wrong-table",
-        "file": "examples/gedou/fighter.cpp",
+        "file": "apps/gedou/fighter.cpp",
         "old": "    /* Light  */ {42.0f, 18.0f, 0.0f, 58.0f, 96.0f, 12, 12.0f, false, 0.0f, false, 8.0f},",
         "new": "    /* Light  */ {43.0f, 18.0f, 0.0f, 58.0f, 96.0f, 12, 12.0f, false, 0.0f, false, 8.0f},",
         "expect_msg": "",
@@ -108,7 +108,7 @@ CASES = [
     },
     {
         "name": "reach-not-from-pose",
-        "file": "examples/gedou/fighter.cpp",
+        "file": "apps/gedou/fighter.cpp",
         "old": "  if (is_attack(move)) spec.reach_far = strike_reach(move);",
         "new": "  (void)strike_reach;   // 逆向验证：距离手填、不从姿态反算",
         "expect_msg": "gedou_attack_reach_comes_from_pose",
@@ -118,7 +118,7 @@ CASES = [
     },
     {
         "name": "unit_ai_reach_scale",
-        "file": "examples/gedou/ai.cpp",
+        "file": "apps/gedou/ai.cpp",
         "old": "  return local * kBodyScale;",
         "new": "  (void)kBodyScale;\n  return local;   // 逆向验证：局部单位直接当世界用",
         "expect_msg": "gedou_ai_has_no_unit_mismatch",

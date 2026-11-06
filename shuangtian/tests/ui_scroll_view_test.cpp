@@ -2,7 +2,7 @@
 ///
 /// ## 为什么有这份用例
 ///
-/// `examples/xiangqi` 实测：`offset` 一直只在 `get_property` 里，控制通道 `set`
+/// `apps/xiangqi` 实测：`offset` 一直只在 `get_property` 里，控制通道 `set`
 /// 与脚本 `$('#x').set({offset: …})` 都**静默无效**——设了不动、也不报错。
 /// 应用要“新内容到了自动滚到底”只能去合成滚轮事件，那不是应用该干的事。
 ///

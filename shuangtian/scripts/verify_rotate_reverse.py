@@ -32,7 +32,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TARGET = os.path.join(ROOT, "examples", "caiyun", "fx.cpp")
+TARGET = os.path.join(ROOT, "apps", "caiyun", "fx.cpp")
 TEST_SRC = os.path.join(ROOT, "tests", "caiyun_fx_test.cpp")
 BACKUP = os.path.join(HERE, "_fx_backup.cpp")
 ST = os.path.join(ROOT, "build", "bin", "st.exe")

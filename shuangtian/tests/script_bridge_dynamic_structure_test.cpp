@@ -2,7 +2,7 @@
 ///
 /// ## 为什么单独测这条路径
 ///
-/// `examples/xiangqi` 实测：JS 侧 `list.clear(); 然后 append 十几张卡片元素`
+/// `apps/xiangqi` 实测：JS 侧 `list.clear(); 然后 append 十几张卡片元素`
 /// 会让进程 `std::bad_alloc` 崩掉，**没有任何 JS 异常**。
 ///
 /// 走的是桥的这条链路：
@@ -139,7 +139,7 @@ ST_TEST(bridge_clear_rebuild_with_bindings_does_not_crash) {
   ST_REQUIRE(fx.host != nullptr);
   ST_REQUIRE(fx.host->valid());
 
-  // 这是 `examples/xiangqi` 的真实形态：清空后重建卡片，**每张卡的按钮都重新 on()**。
+  // 这是 `apps/xiangqi` 的真实形态：清空后重建卡片，**每张卡的按钮都重新 on()**。
   //
   // 与上一条用例的差别就在这个 `on()`：它会往宿主 bindings 表里加一条。
   // 若绑定不随元素销毁而回收，表会随轮次线性增长，最终把进程压死
@@ -172,7 +172,7 @@ ST_TEST(bridge_clear_inside_event_handler_does_not_crash) {
   ST_REQUIRE(fx.host != nullptr);
   ST_REQUIRE(fx.host->valid());
 
-  // 这是 `examples/xiangqi` 真正的崩溃形态：**在事件处理器里清空并重建**。
+  // 这是 `apps/xiangqi` 真正的崩溃形态：**在事件处理器里清空并重建**。
   //
   // ```
   // $('#btn').on('click', () => { host.clear(); 重建一批元素... })

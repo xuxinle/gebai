@@ -14,9 +14,9 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/snapshot.hpp"
-// 测试目标不链接 examples/caiyun，所以直接包含实现（仓库惯例）。
-#include "examples/caiyun/snapshot.cpp"
+#include "apps/caiyun/snapshot.hpp"
+// 测试目标不链接 apps/caiyun，所以直接包含实现（仓库惯例）。
+#include "apps/caiyun/snapshot.cpp"
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"

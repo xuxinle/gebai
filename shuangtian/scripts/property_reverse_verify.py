@@ -22,7 +22,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEMA_CPP = ROOT / "src" / "ui" / "property_schema.cpp"
-CAIYUN_SCHEMA = ROOT / "examples" / "caiyun" / "layer_schema.cpp"
+CAIYUN_SCHEMA = ROOT / "apps" / "caiyun" / "layer_schema.cpp"
 ST_BIN = ROOT / "build" / "bin" / "st.exe"
 
 CASES = [
@@ -84,70 +84,70 @@ CASES = [
     },
     {
         "name": "浅底判据被关掉（米白片又长出黑角）",
-        "file": ROOT / "examples" / "caiyun" / "fx.cpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.cpp",
         "original": "  return std::max(luma(top), luma(bottom)) >= kLightThreshold;",
         "broken": "  return false;   // 回退：永远当成深底",
         "expect_fail": ["backdrop_light_detects_cream_and_white"],
     },
     {
         "name": "只看向 bg_top（一亮一暗的渐变漏掉）",
-        "file": ROOT / "examples" / "caiyun" / "fx.cpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.cpp",
         "original": "  return std::max(luma(top), luma(bottom)) >= kLightThreshold;",
         "broken": "  return luma(top) >= kLightThreshold;   // 回退：只看上面那侧",
         "expect_fail": ["backdrop_light_uses_the_brighter_side"],
     },
     {
         "name": "误用 WCAG 线性亮度（中浅米色被判成深色）",
-        "file": ROOT / "examples" / "caiyun" / "fx.cpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.cpp",
         "original": "  return std::max(luma(top), luma(bottom)) >= kLightThreshold;",
         "broken": "  return std::max(st::math::relative_luminance(top), st::math::relative_luminance(bottom)) >= kLightThreshold;",
         "expect_fail": ["backdrop_light_uses_the_brighter_side"],
     },
     {
         "name": "源侧销点漏算（渲染时销点随倍率漂走）",
-        "file": ROOT / "examples" / "caiyun" / "fx.cpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.cpp",
         "original": "      move.anchor_x >= 0.0f ? move.anchor_x * src_w - 0.5f : src_w * 0.5f;",
         "broken": "      src_w * 0.5f;   // 回退：源侧仍绕画面中心",
         "expect_fail": ["zoom_anchor_stays_put_at_every_scale"],
     },
     {
         "name": "销点忘了连续的→像素索引转换（半像素被放大）",
-        "file": ROOT / "examples" / "caiyun" / "fx.cpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.cpp",
         "original": "      move.anchor_x >= 0.0f ? move.anchor_x * src_w - 0.5f : src_w * 0.5f;",
         "broken": "      move.anchor_x >= 0.0f ? move.anchor_x * src_w : src_w * 0.5f;",
         "expect_fail": ["zoom_anchor_stays_put_at_every_scale"],
     },
     {
         "name": "指数曲线的归一化丢了（两端落不到 0/1）",
-        "file": ROOT / "examples" / "caiyun" / "fx.cpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.cpp",
         "original": "    t_zoom = raw / (1.0f - 1.0f / kBase);",
         "broken": "    t_zoom = t;   // 回退：退化成线性",
         "expect_fail": ["zoom_expo_in_is_mostly_late"],
     },
     {
         "name": "相机窗口失效（窗口后仍推进，钻到位停不住）",
-        "file": ROOT / "examples" / "caiyun" / "fx.cpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.cpp",
         "original": "  return std::clamp((time - window_start) / std::max(0.05f, span), 0.0f, 1.0f);",
         "broken": "  (void)window_start; (void)span; return std::clamp(time / std::max(0.2f, window_end), 0.0f, 1.0f);",
         "expect_fail": ["fx_camera_window_clamps_outside_and_advances_inside"],
     },
     {
         "name": "矢量相机锚点算错（1x 对、大倍率漂走）",
-        "file": ROOT / "examples" / "caiyun" / "fx.hpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.hpp",
         "original": "    return {(x - anchor_x) * zoom + anchor_x, (y - anchor_y) * zoom + anchor_y};",
         "broken": "    return {x * zoom, y * zoom};   // 回退：绕原点缩放（锚点无效）",
         "expect_fail": ["vector_camera_anchor_stays_put"],
     },
     {
         "name": "矢量相机 zoom=1 不再恒等",
-        "file": ROOT / "examples" / "caiyun" / "fx.hpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.hpp",
         "original": "    if (zoom == 1.0f) return {x, y};",
         "broken": "    // 回退：去掉早退（zoom=1 时多算一遍，浮点误差）",
         "expect_fail": ["vector_camera_identity_when_zoom_is_one"],
     },
     {
         "name": "物理像素入口的 scale 除错了（path/ellipse 不过相机）",
-        "file": ROOT / "examples" / "caiyun" / "fx.hpp",
+        "file": ROOT / "apps" / "caiyun" / "fx.hpp",
         "original": "    if (zoom == 1.0f) return {px, py};\n    const auto [x, y] = apply(px / scale, py / scale);",
         "broken": "    if (zoom == 1.0f) return {px, py};\n    const auto [x, y] = apply(px, py);   // 回退：忘了除 scale",
         "expect_fail": ["vector_camera_physical_entry_matches_design_entry"],

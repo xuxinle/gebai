@@ -56,7 +56,7 @@ SNAPSHOT_DIR = ROOT / ".rv-snapshots"
 CASES = [
     {
         "name": "forward-matrix-transposed",
-        "file": "examples/gedou/policy.cpp",
+        "file": "apps/gedou/policy.cpp",
         "old": "      const float* weights = layer.weight.data() + row * layer.in;",
         # 回退文本必须**能编译过**（CONVENTIONS §7.3）：整体替掉那个循环体，
         # 而不是在它前面插一段——插一段会撞 `float sum` 重复声明。
@@ -75,7 +75,7 @@ CASES = [
     },
     {
         "name": "egocentric-uses-absolute-pixels",
-        "file": "examples/gedou/rl_env.cpp",
+        "file": "apps/gedou/rl_env.cpp",
         "old": "  const float edge_band = arena.width() * 0.04f;",
         "new": "  const float edge_band = 40.0f;   // 逆向验证：绝对像素",
         "expect": "rl_observation_is_egocentric",
@@ -84,7 +84,7 @@ CASES = [
     },
     {
         "name": "reward-sign-flipped",
-        "file": "examples/gedou/rl_env.cpp",
+        "file": "apps/gedou/rl_env.cpp",
         "old": "  float reward = config_.reward.damage_dealt * (dealt / opp_max) -",
         "new": "  float reward = -config_.reward.damage_dealt * (dealt / opp_max) -   // 逆向验证",
         "expect": "rl_reward_signs",
@@ -93,7 +93,7 @@ CASES = [
     },
     {
         "name": "cooldown-removed",
-        "file": "examples/gedou/rl_env.cpp",
+        "file": "apps/gedou/rl_env.cpp",
         "old": "  if (attack_cooldown_left_ > 0) {",
         # 回退文本要**能编译且真改变行为**：把条件改成永不成立 = 冷却失效。
         # 首行同时充当 `audit_worktree()` 的残留特征串，所以必须唯一。
@@ -104,7 +104,7 @@ CASES = [
     },
     {
         "name": "observation-dim-drift",
-        "file": "examples/gedou/rl_env.cpp",
+        "file": "apps/gedou/rl_env.cpp",
         "old": '    {"time_left", "回合剩余时间比（1 = 刚开局，0 = 到时）", 0.0f, 1.0f},',
         "new": '    {"time_left", "回合剩余时间比（1 = 刚开局，0 = 到时）", 0.0f, 1.0f},\n'
                '    {"drift", "逆向验证：多一个分量但 observe 不产出", 0.0f, 1.0f},',

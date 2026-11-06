@@ -519,7 +519,7 @@ auto shorten_site(std::string_view site) -> std::string {
   // 反斜杠统一成正斜杠：Windows 上 `__FILE__` 可能是反斜杠。
   std::ranges::replace(text, '\\', '/');
   static constexpr std::array<std::string_view, 5> kAnchors{"src/", "include/", "tests/",
-                                                            "tools/", "examples/"};
+                                                            "tools/", "apps/"};
   std::size_t best = std::string::npos;
   for (const std::string_view anchor : kAnchors) {
     // 匹配 `/src/` 形态而不是裸 `src/`：避免把 `.../my_src/` 误当锚点。

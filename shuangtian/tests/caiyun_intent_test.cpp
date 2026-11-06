@@ -8,10 +8,10 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/director.hpp"
-#include "examples/caiyun/intent.hpp"
-// 测试目标不链接 examples/caiyun，所以直接包含实现（仓库惯例）。
-#include "examples/caiyun/intent.cpp"
+#include "apps/caiyun/director.hpp"
+#include "apps/caiyun/intent.hpp"
+// 测试目标不链接 apps/caiyun，所以直接包含实现（仓库惯例）。
+#include "apps/caiyun/intent.cpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"
 #include "st/test/test.hpp"

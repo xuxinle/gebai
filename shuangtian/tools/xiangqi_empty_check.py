@@ -83,7 +83,7 @@ def main():
     proc = subprocess.Popen(
         [str(BIN), "--headless", "--control-port", "0", "--control-file", str(ctl),
          "--shots", str(SHOTS), "--home", str(SHOTS / "home"),
-         "--ui", str(ROOT / "examples" / "xiangqi" / "ui"),
+         "--ui", str(ROOT / "apps" / "xiangqi" / "ui"),
          "--agent", f"ws://127.0.0.1:{server.port}/xiangqi"],
         stdout=logf, stderr=subprocess.STDOUT)
     try:

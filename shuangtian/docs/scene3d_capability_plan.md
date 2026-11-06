@@ -30,7 +30,7 @@
 | **法线贴图 / 切线空间** | ❌ | — |
 | **PBR 材质参数** | ❌ | 只有顶点色 |
 
-裁云目前用的 `examples/caiyun/model3d.cpp`（51 KB）是**单点透视 2D 投影**，
+裁云目前用的 `apps/caiyun/model3d.cpp`（51 KB）是**单点透视 2D 投影**，
 不是真 3D——这是子会话"看起来假"的直接原因之一。
 
 ## 二、三个阶段（严格按序）
@@ -326,7 +326,7 @@ set ST_SCENE3D_BACKEND=software && build\dev\bin\scene3d_color_probe.exe out\sce
 （原路径是"一个网格 + 图层相机/光照"，场景脚本自带相机与光照，混在一起
 会变成"到底用谁的相机"）。
 
-端到端实测（`examples/caiyun/assets/scene-script-demo.json`，1280×720 / 30fps / 6s）：
+端到端实测（`apps/caiyun/assets/scene-script-demo.json`，1280×720 / 30fps / 6s）：
 
 ```
 H.264 · 1280×720 · 30fps · 6.000s · 162 KB
@@ -361,8 +361,8 @@ H.264 · 1280×720 · 30fps · 6.000s · 162 KB
 
 `model_script` 加进 `Layer` 后，还必须同时改：
 
-- `examples/caiyun/schema.cpp` 的字段表（否则报"未知字段 'model_script'（已忽略）"）；
-- `examples/caiyun/layer_schema.cpp` 的属性表（否则界面看不到这个字段）。
+- `apps/caiyun/schema.cpp` 的字段表（否则报"未知字段 'model_script'（已忽略）"）；
+- `apps/caiyun/layer_schema.cpp` 的属性表（否则界面看不到这个字段）。
 
 `tests/caiyun_layer_schema_test.cpp` 有一条断言"每个 schema 字段都能读写"，
 它当场抓到了我第一版的过错：我把 setter 写成"非法 JSON 就拒绝写入"，

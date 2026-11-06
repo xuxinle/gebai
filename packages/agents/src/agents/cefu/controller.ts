@@ -1,5 +1,5 @@
 /**
- * 册府控制器：TS 直接控制霜天册府应用（`shuangtian/examples/cefu`）。
+ * 册府控制器：TS 直接控制霜天册府应用（`shuangtian/apps/cefu`）。
  *
  * ## 形态：宿主 spawn 无头册府 + 控制通道调桥函数
  *
@@ -42,8 +42,8 @@ export const CEFU_EXE_NAME = process.platform === "win32" ? "cefu.exe" : "cefu"
 /** 构建档探测顺序（与相期同表：dev 主用，quick/release 发行，debug 兜底）。 */
 export const CEFU_PROFILES = ["dev", "quick", "release", "debug"] as const
 
-/** 仓库标记：`shuangtian/examples/cefu/ui` 在源码树存在、发行产物不存在。 */
-const REPO_MARKER = ["shuangtian", "examples", "cefu", "ui"] as const
+/** 仓库标记：`shuangtian/apps/cefu/ui` 在源码树存在、发行产物不存在。 */
+const REPO_MARKER = ["shuangtian", "apps", "cefu", "ui"] as const
 
 const MAX_UP = 16
 
@@ -119,7 +119,7 @@ export function resolveCefuBin(input: CefuProbeInput): CefuBinResult {
 /** 册府 UI 资源目录（`main.xml`）：无头模式也要（应用装载失败会启动即退出）。 */
 export function resolveCefuUiDir(repoRoot: string | null, exists: (p: string) => boolean = existsSync): string | null {
   if (repoRoot === null) return null
-  const dir = join(repoRoot, "shuangtian", "examples", "cefu", "ui")
+  const dir = join(repoRoot, "shuangtian", "apps", "cefu", "ui")
   return exists(join(dir, "main.xml")) ? dir : null
 }
 

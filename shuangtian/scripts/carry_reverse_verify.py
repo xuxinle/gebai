@@ -32,7 +32,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CARRY_CPP = ROOT / "examples" / "caiyun" / "carry.cpp"
+CARRY_CPP = ROOT / "apps" / "caiyun" / "carry.cpp"
 ST_BIN = ROOT / "build" / "bin" / "st.exe"
 
 CASES = [

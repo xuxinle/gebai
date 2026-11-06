@@ -240,7 +240,7 @@ inline constexpr auto kIcons = std::to_array<IconGlyph>({
     // 与参考同级（参考的圆相对更大，视觉重心更靠中间）。
     //
     // ⚠ **图标必须登记在这张内置表里**：`Icon` 是 C++ 的 `inline constexpr` 表，
-    // 与 `examples/*/assets/icons.svg` 那份是**两套东西**（后者由 gallery 自己
+    // 与 `apps/*/assets/icons.svg` 那份是**两套东西**（后者由 gallery 自己
     // embed 来演示 SVG 渲染器）。实测踩到：只在 svg 里加 `diff` 而没登记这里，
     // 活动栏按钮渲染成空白——看不出按钮存在（现在有 `warn_unknown_icon_once` 提示）。
     //

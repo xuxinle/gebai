@@ -1,12 +1,12 @@
 // 「工作区是仓库子目录」时的路径口径。
 //
 // 缺陷实录（2026-11-05）：用户在 `gebai/shuangtian` 打开 gbcode（仓库根是 `gebai`），
-// 点变更列表里的 `shuangtian/examples/gbcode/page.hpp` —— 差异视图显示
+// 点变更列表里的 `shuangtian/apps/gbcode/page.hpp` —— 差异视图显示
 // **「（删除文件）+0 −2132」**，右栏 2132 行全是空行。
 //
 // 根因：git 报告的路径**相对仓库根**，而 `read_content_at(Worktree)` 直接
 // `join(cwd, path)`。cwd 传的是“用户打开的工作区”，于是拼成
-// `gebai/shuangtian/shuangtian/examples/...` —— 读不到 ⇒ 判成“删除文件”。
+// `gebai/shuangtian/shuangtian/apps/...` —— 读不到 ⇒ 判成“删除文件”。
 // 左栏走 `git show`（git 自己向上找仓库）所以是好的，于是差异显示成“整篇删掉”。
 //
 // 修法：先 `git rev-parse --show-toplevel` 取仓库根，所有“拼磁盘路径”的地方都用它。
@@ -20,7 +20,7 @@
 
 #include "st/test/test.hpp"
 
-#include "examples/gbcode/git_service.hpp"
+#include "apps/gbcode/git_service.hpp"
 
 namespace {
 

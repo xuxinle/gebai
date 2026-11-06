@@ -23,7 +23,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BIN = ROOT / "build" / "quick" / "bin" / "xiangqi.exe"
-UI_DIR = ROOT / "examples" / "xiangqi" / "ui"
+UI_DIR = ROOT / "apps" / "xiangqi" / "ui"
 
 sys.path.insert(0, str(ROOT / "tools"))
 from gbcode_hint_e2e import Client  # noqa: E402

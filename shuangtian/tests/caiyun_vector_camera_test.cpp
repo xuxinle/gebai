@@ -28,7 +28,7 @@
 
 #include <cmath>
 
-#include "examples/caiyun/fx.hpp"
+#include "apps/caiyun/fx.hpp"
 #include "st/math/geometry.hpp"
 #include "st/test/test.hpp"
 

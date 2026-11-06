@@ -112,18 +112,18 @@ export const scenesTool: Tool = {
   name: "scenes",
   safeMode: true,
   description:
-    "列出建木的场景脚本目录（`examples/jianmu/scenes/`）：每个脚本的扩展名（.js=three.js / .py=bpy）、"
+    "列出建木的场景脚本目录（`apps/jianmu/scenes/`）：每个脚本的扩展名（.js=three.js / .py=bpy）、"
     + "行数、以及**它是哪一类参照**（模板/资产端/组装端/能力证据）。"
     + "写新场景前先看一下现成的，比猜字段便宜得多。"
     + "可选 `dir` 看别的目录。",
   parameters: schema(
     {
-      dir: { type: "string", description: "场景目录（相对框架根；缺省 examples/jianmu/scenes）" },
+      dir: { type: "string", description: "场景目录（相对框架根；缺省 apps/jianmu/scenes）" },
     },
     [],
   ),
   async execute(args, ctx) {
-    const rel = String(args.dir ?? "").trim() || "examples/jianmu/scenes"
+    const rel = String(args.dir ?? "").trim() || "apps/jianmu/scenes"
     const dir = isAbsolute(rel) ? rel : join(frameworkRoot(ctx), rel)
     if (!existsSync(dir)) return { output: `目录不存在：${dir}` }
     const names = readdirSync(dir)

@@ -1,6 +1,6 @@
 # 「镂月裁云」示例设计 — louyue（镂月 / Lunaris）· caiyun（裁云 / Nimbus）
 
-> **状态：已实现**（2026-10-09）。两个示例已落地（`examples/louyue`、`examples/caiyun`），
+> **状态：已实现**（2026-10-09）。两个应用已落地（`apps/louyue`、`apps/caiyun`），
 > 本文档随之**退役为历史记录**——权威现状见 `README.md`「示例」节、`DESIGN.md` §8.1/§8.1.1
 > 与本文件 §7 验收标准的实现情况（`tools/louyue_e2e.py` / `tools/caiyun_e2e.py` 已全绿）。
 > 下文保留为**实现时所依据的规约**，不再随代码演进更新。
@@ -10,7 +10,7 @@
 > 视频剪辑器在时间线上剪裁片段、控制节奏（裁云）。英文并置展示：`镂月 Lunaris` / `裁云 Nimbus`
 > （中文用典，英文取意：Lunaris=月、Nimbus=云，不直译）。
 
-## 1. 为什么再加两个示例
+## 1. 为什么再加两个应用
 
 README 的现行口径是「示例只留两个、不另起示例重复验证」。新增示例必须先回答这一条：
 它们开的是 gallery / gbcode **都没碰过的职责面**，不重复单测已钉住的能力：
@@ -33,7 +33,7 @@ README 的现行口径是「示例只留两个、不另起示例重复验证」�
 | 中文名 | 镂月（图像编辑器）/ 裁云（视频剪辑器） |
 | 英文名 | Lunaris / Nimbus（标题栏并置：`镂月 Lunaris — <文件名>`） |
 | 构建目标名 | `louyue` / `caiyun`（ASCII，承 gallery/gbcode 先例） |
-| 目录 | `examples/louyue/`、`examples/caiyun/`（各含 `main.cpp` + `assets/`） |
+| 目录 | `apps/louyue/`、`apps/caiyun/`（各含 `main.cpp` + `assets/`） |
 | e2e 脚本 | `tools/louyue_e2e.py`、`tools/caiyun_e2e.py`（承 `gbcode_e2e.py` 形态） |
 
 ## 3. `louyue` 镂月 — 图像编辑器
@@ -204,7 +204,7 @@ Generator{ render(canvas, local_time, size) —— 纯函数式画一帧 }
 ## 6. 配套改动（实现轮清单）
 
 - [ ] `st.pkg`：`targets` 加 `louyue` / `caiyun`（照抄 gallery 的
-      `exclude_sources: ["src/pkg/*"]` + `embed: ["examples/<名>/assets/*"]` 形态）
+      `exclude_sources: ["src/pkg/*"]` + `embed: ["apps/<名>/assets/*"]` 形态）
 - [ ] 图标补充：`src/ui/icon.cpp` 图标表初判缺 `brush` / `eraser` / `bucket`(油漆桶) /
       `eyedropper` / `crop` / `undo` / `redo`（以实现轮 grep 图标表为准）；**加图标必须同步
       gallery 的图标全集页与 README/DESIGN 里的图标计数**（现口径 72 个）

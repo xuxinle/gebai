@@ -35,7 +35,7 @@ import sys
 
 # 每个动作的骨架关节坐标（局部空间：原点在脚下地面，x 向正面，y 向上）。
 #
-# 数值抄自 `examples/gedou/pose.cpp` 的关键帧（缩放前）。
+# 数值抄自 `apps/gedou/pose.cpp` 的关键帧（缩放前）。
 # 单位是"骨架局部单位"，画线稿时统一乘以 `SCALE` 变成像素。
 #
 # 关节顺序：hip, chest, head, shoulder_f, elbow_f, hand_f,

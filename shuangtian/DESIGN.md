@@ -47,7 +47,7 @@
 ## 2. 总体架构
 
 ```
-                         ┌──────────────────────────── 应用（examples/*）────────────────────────────┐
+                         ┌──────────────────────────── 应用（apps/*）────────────────────────────┐
                          │  gallery（组件画廊）        mdview（大模型 Markdown 应用）                │
                          └───────────────────────────────────┬───────────────────────────────────────┘
                                                              │  st::app::App（窗口/主题/事件循环/页面栈）
@@ -95,7 +95,7 @@ shuangtian/
 ├── src/<层>/*.cpp        # 实现（与头同名优先）
 │   └── **/platform_*.cpp # 平台/系统 API 单点封装（禁令受控例外）
 ├── tests/<层>_<模块>_test.cpp
- ├── examples/{gallery,gbcode,louyue,caiyun,xiangqi}/  # 示例：组件面 / 编辑器面 / 光栅面 / 动效面 / 纯 XML+JS 面（见根 README「示例」节）
+ ├── apps/{gallery,gbcode,louyue,caiyun,xiangqi}/  # 应用：组件面 / 编辑器面 / 光栅面 / 动效面 / 纯 XML+JS 面（见根 README「应用」节）
 ├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：nlohmann/json、quickjs-ng、
 │                         # batterycenter/embed、sqlite（amalgamation 源码内置）；
 │                         # 来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
@@ -779,7 +779,7 @@ ANSI 色是**协议固定语义**（`31` 永远是红、`93` 永远是亮黄，�
 
 **能力**：景深（降采样近似）、粒子场、背景颗粒、径向光晕、体积光、横向光扫、
 运镜（缩放/旋转/平移/震动 + 销点 + 曲线 + 时间窗口）、矢量相机、图元旋转。
-供任何应用复用（视频分镜、海报、启动页）——不隶属于某个示例应用。
+供任何应用复用（视频分镜、海报、启动页）——不隶属于某个应用。
 
 **三条设计约束**：① 确定性（粒子/颗粒用哈希而非随机引擎，同一时刻两次渲染逐像素相同）；
 ② 每项强度 0 = 完全不画（零开销）；③ 不假设存在整画布高斯模糊原语
@@ -1078,7 +1078,7 @@ class DiffView : public Element {
    但填充行**仍然不是内容**——所以 `begin_row` 多了一个显式 `real` 参数，
    而不是用“行号非零”推断（旧写法一给填充行编号，它们就会被当成文件内容）。
 
-数据侧（`examples/gbcode/git_service.hpp` / `.cpp`）新增端点语义表 `diff_args`（**返回 `nullopt` 表示不支持**，
+数据侧（`apps/gbcode/git_service.hpp` / `.cpp`）新增端点语义表 `diff_args`（**返回 `nullopt` 表示不支持**，
 而不是编一个命令）、`read_compare`（`--name-status` 与 `--numstat` **分成两条**命令再按下标合并）、
 `read_diff_text`、`read_content_at`（缺文件 = `missing` 而非错误）、`is_root_commit`。
 
@@ -3074,13 +3074,13 @@ ST_UI_FONT_SCALE=1.2 build/release/bin/gbcode.exe
 解析在 `resolve_ui_font_scale`（`app.cpp`），与 `--text-gamma` 同姿态：连续量没有白名单，
 只查"能否整串解析成一个数"，拼错就报错（静默回落会让"我明明设了 1.2"变成谜案）。
 
-**⚠ 应用层必须自己透传**：`examples/gallery` 与 `examples/gbcode` **各有自己的参数解析**
+**⚠ 应用层必须自己透传**：`apps/gallery` 与 `apps/gbcode` **各有自己的参数解析**
 （`st::app::parse_cli` 到不了它们）。实测踩到——框架侧接好了 `--ui-font-scale`，
-但两个示例都没接，于是**参数被静默忽略**（gallery 全屏只有 329 像素变化、gbcode 是 0）。
-两个示例都已补上透传；`ST_UI_FONT_SCALE` 环境变量路径不受影响（所以它是排查此类
+但两个应用都没接，于是**参数被静默忽略**（gallery 全屏只有 329 像素变化、gbcode 是 0）。
+两个应用都已补上透传；`ST_UI_FONT_SCALE` 环境变量路径不受影响（所以它是排查此类
 "参数没接上"的好对照）。
 
-> 教训：**新增框架级开关时，示例应用必须一起接**——否则"加了开关但看不到效果"会
+> 教训：**新增框架级开关时，应用必须一起接**——否则"加了开关但看不到效果"会
 > 被误判成功能本身有问题（本轮第一次验证就差点这样收尾）。
 
 #### 4.3.7.15 与浏览器**逐像素对照**（28 行 × 多字符集/字号/颜色/字重）——发现一个真缺陷
@@ -3726,7 +3726,7 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   从它取材，不暴露 handler、不交出内部引用（枚举面只读，写入仍只有
   register/unregister 两个口）。应用侧示范：gbcode 的快捷键卡从它生成，
   「表与代码同源」——注册、卡片、对账测试三面共用单源表
-  （`examples/gbcode/shortcut_help.hpp`；对账见 `tests/gbcode_shortcut_card_test.cpp`）。
+  （`apps/gbcode/shortcut_help.hpp`；对账见 `tests/gbcode_shortcut_card_test.cpp`）。
 - **命中拦截**：`Element::intercepts_input()`（默认 true）——不可见/不拦截的浮层不再
   截住下层内容（`Dialog` 覆写为 `visible()`）。
 - **行为注入**：`Element::set_event_handler(fn)`（组件实现之后、冒泡之前调用；免子类化
@@ -4236,7 +4236,7 @@ if (palette_open_.value()) {          // 条件声明
 `ReconcileStats::error` 与 stderr 诊断，不再静默替换。（“替换根”本身仍是合法能力：
 换页时根元素类型变了就要重建——两者靠上述标志区分。）
 
-实测：一个 2063 行的命令式 IDE 界面（`examples/gbcode`）用声明式重写后，**连同它原本的
+实测：一个 2063 行的命令式 IDE 界面（`apps/gbcode`）用声明式重写后，**连同它原本的
 声明式分身（当时叫 `gbcode-dsl`，695 行，已在整合中删除）一起合并成 1605 行**（−40%）
 ——差的不是控件数而是**同步代码**：声明式里所有「改完要点哪里」的手工同步都不存在了
 （写状态 → 框架 diff）。
@@ -4296,9 +4296,9 @@ if (palette_open_.value()) {          // 条件声明
   结构签名（type + 语义文本递归）**必须逐字节相等**（含状态推进与条件裁剪后的形态）；
 - **元素工厂 `dsl::make_element`**：类型名 → 构造（27 个内置类型），JS 窄桥就复用它。
 
-示例：**`examples/gbcode`（整个 IDE 就是声明式：五层布局 + 多标签编辑 + 真实文件工作区
+示例：**`apps/gbcode`（整个 IDE 就是声明式：五层布局 + 多标签编辑 + 真实文件工作区
 + 查找替换 + 菜单栏下拉 + 命令面板 + 全局快捷键 + 终端 + 主题；端到端 `tools/gbcode_e2e.py` 九项）
-+ `examples/gallery` 的「**声明式**」页（`dsl::mount_into` 子树挂载：状态驱动表单 + key 对齐列表
++ `apps/gallery` 的「**声明式**」页（`dsl::mount_into` 子树挂载：状态驱动表单 + key 对齐列表
 + 异步 `resource` + 条件内容）**——两者共同覆盖「整页声明式」与「页内一块声明式」两种形态。
 
 > 曾经的四个声明式小示例（`counter` / `counter-js` / `todo-js` / `gbcode-dsl`）已在示例整合中
@@ -4619,7 +4619,7 @@ Win32 侧的做法要点（**"外观自绘、行为仍用系统"**——不重�
 
 落地状态（**如实**）：**Win32 已落地**——去装饰建窗 + `WM_NCCALCSIZE`/`WM_NCHITTEST` 接管 +
 窗口控制接口齐备（真窗口验证：客户区 == 窗口矩形、最大化 == 工作区、三动作生效）；
-两个示例都已换壳为 `ui::WindowFrame`（gallery：标题栏内含品牌名 + 当前页名 + 主题/DPI/截图三控件；
+两个应用都已换壳为 `ui::WindowFrame`（gallery：标题栏内含品牌名 + 当前页名 + 主题/DPI/截图三控件；
 gbcode：标题栏内含文件名与脏点），旧的装饰性图标与自建顶部栏退役。
 
 ### 4.6.1 Linux 双后端（2026-10-15）
@@ -5676,8 +5676,8 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
   "defines": ["ST_VERSION=\"0.1.0\""],
   "targets": {
     "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp"] },
-    "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"] },
-    "gbcode": { "kind": "executable", "sources": ["examples/gbcode/*.cpp"] }
+    "gallery": { "kind": "executable", "sources": ["apps/gallery/*.cpp"] },
+    "gbcode": { "kind": "executable", "sources": ["apps/gbcode/*.cpp"] }
   },
   "dependencies": {
     "modules": [],
@@ -6015,7 +6015,7 @@ objdump -d build/debug/obj/*micropython_py_nlrx64.c.o | grep -A2 '<nlr_push>:'
 
 ```cpp
 #include "battery/embed.hpp"                 // stpm 生成到 build/<profile>/embed/.../include/
-b::embed<"examples/gallery/assets/about.txt">().str()   // 编译期路径检查 + 嵌好的字节
+b::embed<"apps/gallery/assets/about.txt">().str()   // 编译期路径检查 + 嵌好的字节
 ```
 
 语义与上游逐项对齐（标识符规则 `tolower(target_path)`、查找键 = 使用者书写的相对路径、
@@ -6147,18 +6147,18 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 ```
 关键点：**无头后端 + 软件光栅器**保证像素结果与有窗口时一致；`capture` 落盘的 PNG 即是最终外观。
 
-### 8.1 示例项目（用真实应用检验框架）
+### 8.1 应用（用真实应用检验框架）
 
-框架自带**四个功能完整**的示例应用（`examples/`），分别对应四个职责面：
+框架自带**四个功能完整**的应用（`apps/`），分别对应四个职责面：
 
-| 示例 | 定位 | 检验点 |
+| 应用 | 定位 | 检验点 |
 |---|---|---|
 | `gallery` | **组件集 / 设计系统巡检**：导航、统计卡、按钮矩阵、图标墙、表单、列表、进度条、主题与 DPI 切换、截图 | 组件库完整度、设计令牌一致性、DPI 正确性、控制通道可达性 |
 | `gbcode` | **VSCode 式代码编辑器**：标题栏/菜单栏/**常驻**活动栏+可收起侧栏（资源管理器·搜索·源代码管理·运行·扩展）/多标签编辑区（修改点、可关闭）/底部面板（**真终端**：多会话标签栏——标签默认 shell 名、`OSC` 标题实时覆盖、尾部动作钮（清屏/中止/收起）+ 回看滚动条 + 隐藏保留会话的面板显隐）/状态栏；命令面板（Ctrl+Shift+P）、**打开文件夹换工作区**（Ctrl+Shift+O）、全局快捷键、8 种内置语言 + 自定义语言 `stlog` | **易用性**（一个 IDE 形态界面 ≈ 数百行声明式组装，全部用内置组件，零自绘）、**组件库覆盖度**（MenuBar/Tabs/Tree/List/Overlay/快捷键在同一真实形态下的协同）、**控制通道全链路**（多编辑器实例的属性面与动作） |
 | **`louyue` 镂月** | **图像编辑器 + 海报生成器（含素材块）**：左工具栏（移动=平移模式/画笔/橡皮/油漆桶/吸管/选区/裁切）+ 中央**自绘画布**（内置 Viewport 外壳：棋盘格底、缩放档位 25%~800%（`snap_zoom` 吸附收口）、中键/移动工具拖拽平移）+ 右侧**海报面板**（控制权开关/应用/导出/日志）、图层列表与内置 ColorPicker + 状态栏；控制面 `#poster`（`LouyuePoster`）给出 `apply_poster`/`export_png`/**`edit_lock`** 与 `poster`/`blocks`/`edit_locked` 属性 | **像素 / 光栅创作面 + 作品生成面**：PNG 编解码**往返**首次跑在真实用户路径（此前只有单测）、**九种混合模式**首次在真实界面里被人眼与像素断言同时检验、撤销栈（命令式，非整图快照）；**作品级真值**（`PosterScript` → 图层投影）双尺寸渲染 + **素材块**（`AssetLibrary`：cover/contain/圆角/叠色）；**双层编辑权约束**（与裁云同构：`Document::can_edit()` + UI 置灰 + 人可自己拨开关） |
 | **`caiyun` 裁云** | **AI 驱动的视频生成器**（2026-10-17 从“剪辑器”升级为“AI 控制生成 + 人工微调”，2026-10-17 补 **AI 控制态**）：真值源是**导演脚本**（JSON 分镜：场景模板/文案/配色/节奏/配乐/旁白），`Project::apply_script` 投影成时间轴片段（一场景一片段）；上预览监视器 + 时间码 + 传输控制；左**AI 导演面板**（脚本路径/应用/渲染/进度/日志）、右属性检查器；下**内置 TimelineView 薄适配器**；控制面 `#director` 给出 `apply_script`/`render`/**`edit_lock`** 动作与 `render_stage`/`render_progress`/**`edit_locked`** 属性 | **时间 / 动效应用面 + AI 生成面**：唯一由应用时间轴驱动**持续动画**的示例；**确定性帧哈希**；**成片管线**（导演脚本 → 16 路并行帧序列 → 配乐 + 旁白 ducking → ffmpeg 封装）；**素材背景**（cover + 压暗 + Ken Burns）；**双层的编辑权约束**示范（数据层 `can_edit()` 全入口门禁 + UI 层 `set_enabled` 置灰）——「AI 在改时人只能看」不能只靠 UI |
 
-两个新示例都由 `dsl::custom<T>` 逃生舱**持自绘元素**（壳声明式 + 高频自绘面不
+两个新应用都由 `dsl::custom<T>` 逃生舱**持自绘元素**（壳声明式 + 高频自绘面不
 进重组树，与 `gbcode` 持 `CodeEditor` 同构）——注：caiyun 的时间轴已于 2026-10-16
 换为内置 `st::ui::TimelineView` 的薄适配器（不再是自绘元素，但仍在 `custom<T>`
 逃生舱里持它），并且都对外暴露**命令式动作面**
@@ -6213,7 +6213,7 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 - **待做（进 BACKLOG）**：取色器组件（`ColorPicker`）、画笔输入原语（指针捕获/高频
   事件合并）、撤销栈原语（`UndoStack`）、视口容器（缩放/平移/棋盘格底）、
   **Timeline 组件**（多轨道/标尺/播放头/修剪手柄/吸附——最大件）、时间码格式化
-  工具（本次已在 `examples/caiyun/project.cpp` 落地 `format_timecode`，内置化时移入框架）。
+  工具（本次已在 `apps/caiyun/project.cpp` 落地 `format_timecode`，内置化时移入框架）。
   另：`Element` 的 `hit_test`（返回 `bool`）这个**名字**会拦住自绘组件自己的命中
   判定（时间轴只好叫 `grab_at`）——名字冲突本身不是缺陷，但值得在文档里提醒。
 
@@ -6294,7 +6294,7 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 | 43 | 图标表能换行了，但仍只显示两行 | 滚动容器被放进 Row 容器时，Row 给 grow 子节点的是**无宽度约束**（Flex 的 shrink-to-fit 语义），`kUnbounded` 一路传到 `wrap` 容器 → 误判成单行 | `ScrollView::arrange` 用**已确定的内容宽重测一次**内容（宽度定下来后才测） |
 | 44 | `Slider::set_label` 设了却看不见，轨道位置也差一截 | 与第 26/38 条同一族：API 存在，但 `paint_content` 从未把 `label_` 画出来 | 补绘制（标题在左、百分比在右），并在 `measure`/`track_rect` 里为标题让出一条高度（无标题时几何不变） |
 | 45 | 占位文字“改不了”：`set` 返回成功的 `changed: []` 但值不变 | `apply_properties` 自己维护一份可写属性白名单，与各组件声明的 `property_names()` **分裂**——读得到、改不了，而且不报错 | 属性名以**元素自己的声明**为准（白名单只作并集兜底）；`tests/ui_actions_test.cpp` 用“凡声明的都必须可写”当护栏 |
-| 46 | 侧栏 5 个导航项里 4 个是死的（点了只换高亮） | 示例应用只建了 1 页，其余 4 页从未存在 | 拆出 `pages.cpp`：5 页用 `set_visible` 切换（隐藏页零布局零绘制、组件状态不丢）；切页同时复位滚动、清焦点 |
+| 46 | 侧栏 5 个导航项里 4 个是死的（点了只换高亮） | 应用只建了 1 页，其余 4 页从未存在 | 拆出 `pages.cpp`：5 页用 `set_visible` 切换（隐藏页零布局零绘制、组件状态不丢）；切页同时复位滚动、清焦点 |
 | 47 | 界面里“一半组件没人看过” | 画廊只有 1 页，组件写好了但没有展示面——**缺陷 41~45 全部是靠“把它们摆出来”才发现的** | 5 页画廊 + 72 图标全集（图形与名字并排才能看出方向错） |
 | 48 | **`st test` 在某编译器构建下启动即段错误**（`--list` 也崩；另一编译器下从未出现） | 测试注册表的互斥锁是**命名空间作用域的 `std::mutex`**，而 `ST_TEST` 生成的 `Registrar` 是其它 TU 的静态对象，在各自静态初始化阶段就调 `Registry::add` → 锁它：跨 TU 静态初始化顺序**未定义**（g++ 按链接顺序踩中未构造的临界区，MSVC 侥幸顺序正确） | 锁改为**函数内静态**（C++ 保证首次使用时构造，与调用方初始化顺序无关）；适配 g++ 构建时发现 |
 | 49 | **PCH 创建是静默空转**（日志"已生成"、消费端一律报找不到 PCH） | 编译器对".hpp 作为主文件"不报错而是**静默跳过**（只给"没有执行操作"级别的提示），而退出码仍是 0——只看退出码就把"没生成"报成"已生成" | 这是**通用**教训：判据必须落在事实（产物存在）上而不是代理信号（退出码）——现代码创建入口用 `.cpp` 包装 + 产物存在性核对（§7.4 同口径） |
@@ -7081,7 +7081,7 @@ watchdog **留在代码里**：环境没有 procdump/windbg/cdb，这是最接�
 | **v0.1** | core / codec / raster（含 **DPI 缩放**）/ text / md / ui（组件库）/ shell(headless) / control(TCP) / stpm / gallery + gbcode / 子代理 / 文档 | ✅ 已完成 |
 | **v0.1+（本期追加）** | ① **g++ 优先、clang++ 次之的同口径编译器层**（自举 / 依赖追踪；显式 `target_triple`）② **GPU 渲染全链路**（D3D11 设备层 → 着色器原语 → 路径 → **DXGI swapchain 呈现**，见 §8.3）③ **三维与网格**（平台中立的 `Scene3D` + **软件实现**：z-buffer / 逐像素光照 / 近面裁剪；`Mesh` 生成与 OBJ 加载；原 OpenGL 方案经评估后移除，见 §8.4）④ **动画与过渡**（悬浮特效、时间轴推进、续帧协议）⑤ 性能优化（整帧重绘 63.2→≈12 ms）⑥ **视口剔除**（屏幕外不再绘制）⑦ **内置通道与桌面一致性**（文本默认与 DPI 默认两侧同源，见 §4.3/§4.2.1）| ✅ 已完成 |
 | **v0.1.5（画廊全场景）** | ① 画廊补齐 Dialog/Toast/Tooltip/TextArea/禁用态/表格选中行/实时统计卡（28 组件全部有可视化场景）② `Toast` 自动消失（帧时间轴）③ `Table` 选中行（视觉+语义+属性）④ `TextArea` 属性面补齐 ⑤ **叠加层 z 序修正**（浮层在景上）+ `find/query` 覆盖叠加层 ⑥ `SceneView` 逐帧调试输出移除 | ✅ 已完成 |
-| **v0.1.6（2026-10-11 「待做」清账轮）** | ① **纯 XML + JS 应用通路**（`st::xml` 解析 / `build_from_xml` / `ScriptBridge` / `examples/xmlapp`，见 §4.2.19–22）② **编辑器行尾注解**（`LineDecoration::end_text`：blame 的作者与日期）③ **行内字符级差异**（`diff_inline` 按**码位**而非字节；编辑器行内区间底色）④ **`st::edit::UndoStack`** 撤销栈原语 ⑤ **`st::ui::Viewport`** 二维缩放/平移 + 棋盘格透明底 ⑥ **`st::ui::ColorPicker`** HSV 面板 + 十六进制 + 吸管 ⑦ **`st::text` 三方合并**（五态区段，含“两侧同改不算冲突”）⑧ **`st::ui::timeline::Model`** 时间轴数据模型 ⑨ **部分暂存**（`build_partial_patch` + `WriteOp::StagePatch`）⑩ **`TitleBar` 品牌区**（不再复用 `leading` 槽）⑪ **墙钟帧间隔**指标（`wall_p50_ms`）⑫ gbcode：`--open` / 单文件历史弹窗 / blame 开关 ⑬ **构建期根治**：测试链接命令行超限（响应文件退路，**解锁新增测试文件**）+ `dbghelp`/`nanosrv` 库口径统一（`independent_project` 长期失败转 PASS） | ✅ 已完成 |
+| **v0.1.6（2026-10-11 「待做」清账轮）** | ① **纯 XML + JS 应用通路**（`st::xml` 解析 / `build_from_xml` / `ScriptBridge` / `apps/xmlapp`，见 §4.2.19–22）② **编辑器行尾注解**（`LineDecoration::end_text`：blame 的作者与日期）③ **行内字符级差异**（`diff_inline` 按**码位**而非字节；编辑器行内区间底色）④ **`st::edit::UndoStack`** 撤销栈原语 ⑤ **`st::ui::Viewport`** 二维缩放/平移 + 棋盘格透明底 ⑥ **`st::ui::ColorPicker`** HSV 面板 + 十六进制 + 吸管 ⑦ **`st::text` 三方合并**（五态区段，含“两侧同改不算冲突”）⑧ **`st::ui::timeline::Model`** 时间轴数据模型 ⑨ **部分暂存**（`build_partial_patch` + `WriteOp::StagePatch`）⑩ **`TitleBar` 品牌区**（不再复用 `leading` 槽）⑪ **墙钟帧间隔**指标（`wall_p50_ms`）⑫ gbcode：`--open` / 单文件历史弹窗 / blame 开关 ⑬ **构建期根治**：测试链接命令行超限（响应文件退路，**解锁新增测试文件**）+ `dbghelp`/`nanosrv` 库口径统一（`independent_project` 长期失败转 PASS） | ✅ 已完成 |
 | **v0.1.7（2026-10-11 C 轮）** | ① **三方合并**：`st::text::merge_three_way`（五态区段，`BothSame` 不算冲突）+ `st::ui::MergeView`（三栏 + 逐块取舍 + 冲突跳转）+ `read_conflict_sides`（`git show :1:/:2:/:3:`）② **`st::ui::TimelineView`**（标尺/轨道/片段/播放头 + 拖拽移动与修剪）③ **逐行暂存界面**（差异视图勾选列 + 工具条 + `StagePatch`/`UnstagePatch`）④ **高频指针移动的帧内合并**（`st::ui::InputCoalescer`；louyue 做到「一笔一条历史」）⑤ **`st::ext::VideoDecoder`**（经 `ffmpeg` 子进程抽帧与读元信息，探测不到如实不支持）⑥ **测试框架的用例异常边界**（未捕获异常记 FAIL 而不再带走整进程）⑦ **`ScriptBridge::expose` 命名空间契约修正**（统一挂 `app.` 之下） | ✅ 已完成 |
 | **v0.1.8（2026-10-18 gbcode 可用性实测轮）** | ① **终端忙闲语义**（`busy()` = “命令在跑”而非“shell 活着”；新增 `running`/`running_name`/`idle_ms`/`command_issued`）② **终端标签短名**（`shell_label` + OSC 标题 `tab_label` 归一）③ **UTF-8 BOM 剥离**（`fs::read_text` 公共入口）④ **二进制文件只读保护**（`looks_binary` + `OpenBuffer::binary` + 保存双拒）⑤ **Shift+Tab 无选区反缩进** ⑥ **CRLF 行尾自动配对** ⑦ **`Tree` 行读面/写面**（`labels`/`keys`/`rows_detail`/`activate_key`）⑧ **逐行暂存修正**：选择单位抬成“改动区段”、勾选列两栏都画、补属性面与动作面、`set_diff` 相等早退 ⑨ **状态栏编码格可点** ⑩ 新增 `tools/gbcode_usability_e2e.py`（真实使用路径≈60 条断言）⑪ **大文档卡顿根治**：文本宽度缓存改真 LRU（原“超 4096 条全清”）、`max_line_width` 惰性化、`width_cache_stats()` 可观测性（5 千行编辑帧 90ms → 12.7ms）⑫ **Markdown 预览大片空白**：组背景改为遍历前统一预画（原来逐行重画把文字盖掉）+ `MarkdownView` 补 `first_visible`/`last_visible`/`draw_stats`/`painted_groups` ⑬ **命令面板配色**：`apply_theme` 把主题色**写回 style**（原来只改字段）、`Input` 补 `apply_theme`（原来只在 measure 里做一次性“未设则填”）⑭ `Tree::measure` 连最宽值一起缓存（稳态 O(1)）⑮ 查找命中改按行分桶（100 万命中编辑帧 74.2ms → 28.6ms）| ✅ 已完成 |
 | v0.2 | 文本选择与复制、更多组件（日期选择、图表）、X11 / Wayland 窗口后端 | 部分完成：**X11 / Wayland 已落地**（真后端，见 §4.6.1；2026-10-15）；文本选择与复制已实现（`ui_text_selection_*` 测试族）；日期选择、图表待做 |

@@ -15,11 +15,11 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/director.hpp"
-#include "examples/caiyun/render_preset.hpp"
-// 测试目标不链接 examples/caiyun，所以直接包含实现（仓库惯例）。
-#include "examples/caiyun/render_preset.cpp"
-#include "examples/caiyun/render_preset_table.cpp"
+#include "apps/caiyun/director.hpp"
+#include "apps/caiyun/render_preset.hpp"
+// 测试目标不链接 apps/caiyun，所以直接包含实现（仓库惯例）。
+#include "apps/caiyun/render_preset.cpp"
+#include "apps/caiyun/render_preset_table.cpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"

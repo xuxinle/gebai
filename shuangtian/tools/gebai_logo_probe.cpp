@@ -1,4 +1,4 @@
-// 歌白品牌标记的接触印相（contact sheet）：把 `examples/assets/gebai-logo.svg` 在多个尺寸下
+// 歌白品牌标记的接触印相（contact sheet）：把 `apps/assets/gebai-logo.svg` 在多个尺寸下
 // 渲成一张图，供肉眼核对"在标题栏那个尺寸（16 逻辑 px）还认不认得出"。
 //
 // ## 为什么必须看图
@@ -93,7 +93,7 @@ auto measure(const st::raster::Surface& surface) -> Metrics {
 
 auto main(int argc, char** argv) -> int {
   const st::probe::spec spec{
-      .title = "歌白品牌标记的接触印相（contact sheet）：把 `examples/assets/gebai-logo.svg` 在多个尺寸下",
+      .title = "歌白品牌标记的接触印相（contact sheet）：把 `apps/assets/gebai-logo.svg` 在多个尺寸下",
       .criterion = "",  // 判据由人补（脚本不猜合格线）
   };
   const auto opts = st::probe::options::from(argc, argv);
@@ -102,7 +102,7 @@ auto main(int argc, char** argv) -> int {
 
   const std::string out = argc > 1 ? argv[1] : "gebai-logo-sheet.png";
   const std::string path =
-      argc > 2 ? argv[2] : "examples/assets/gebai-logo.svg";
+      argc > 2 ? argv[2] : "apps/assets/gebai-logo.svg";
   const std::string source = read_file(path);
   if (source.empty()) {
     st::log::out("读不到 SVG：{}\n", path);

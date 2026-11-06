@@ -47,7 +47,7 @@ PY = sys.executable
 def newest_source_mtime() -> float:
     """裁云源码里最新的 mtime（用来判断二进制是否过期）。"""
     best = 0.0
-    for pattern in ("examples/caiyun/*.cpp", "examples/caiyun/*.hpp"):
+    for pattern in ("apps/caiyun/*.cpp", "apps/caiyun/*.hpp"):
         for path in glob.glob(os.path.join(ROOT, pattern)):
             best = max(best, os.path.getmtime(path))
     return best

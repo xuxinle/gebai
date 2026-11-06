@@ -9,8 +9,8 @@
 
 // lsp_bridge 是 gbcode 的应用层源（不在框架 sources 清单里）——与
 // git_service_test 同一策略：直接 include 实现编译进测试。
-#include "examples/gbcode/lsp_bridge.hpp"
-#include "examples/gbcode/lsp_bridge.cpp"
+#include "apps/gbcode/lsp_bridge.hpp"
+#include "apps/gbcode/lsp_bridge.cpp"
 
 namespace {
 

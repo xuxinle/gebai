@@ -146,7 +146,7 @@
 ### 守门：`check_probes.py`
 
 `tools/` 的 86 个探针过去**不在任何质量门禁之内**（`check_selfcontained.py` 只扫
-`include/ src/ tools/stpm/ tests/ examples/`）。本脚本把三类失效变成可见：
+`include/ src/ tools/stpm/ tests/ apps/`）。本脚本把三类失效变成可见：
 
 ```
 py -3 tools/check_probes.py            # 全量报告

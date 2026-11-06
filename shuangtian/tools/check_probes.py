@@ -4,7 +4,7 @@
 ## 为什么需要它
 
 `tools/` 有 86 个诊断探针，它们**不在任何质量门禁之内**：
-`check_selfcontained.py` 只扫 `include/ src/ tools/stpm/ tests/ examples/`，
+`check_selfcontained.py` 只扫 `include/ src/ tools/stpm/ tests/ apps/`，
 探针目录整个漏在外面。于是三件事没人知道：
 
 1. **清单漂移**：`st.pkg` 声明了 target 但源文件已删（构建时才炸）；

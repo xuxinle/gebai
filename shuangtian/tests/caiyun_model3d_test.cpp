@@ -15,7 +15,7 @@
 // 只包含 `model3d.cpp`（它自己 include 了 `layer.hpp`）。
 // **不能**同时 include `layer.cpp`：`caiyun_layer_test.cpp` 已经这么做了，
 // 两个测试单元链接成一个可执行文件时会出现重复符号（实测踩过）。
-#include "examples/caiyun/model3d.cpp"
+#include "apps/caiyun/model3d.cpp"
 
 #include <cmath>
 #include <string>

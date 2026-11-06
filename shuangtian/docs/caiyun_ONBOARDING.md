@@ -5,7 +5,7 @@
 
 ## 要做视觉风格时
 
-examples/caiyun/assets/ 下有两个文件是**长期资产**：
+apps/caiyun/assets/ 下有两个文件是**长期资产**：
 
 | 文件 | 用途 |
 |---|---|
@@ -69,7 +69,7 @@ python tools/caiyun_schema_crosscheck.py <导出的 schema.json>
 
 ### 2. 先查"已经好看"的官方样例，再动参数
 
-`examples/caiyun/assets/` 下的 `scene-script-demo.json`、`sample-cinematic.json`
+`apps/caiyun/assets/` 下的 `scene-script-demo.json`、`sample-cinematic.json`
 是**已验证过观感**的参照物。自己写的东西发灰/发平时，**先 diff 光照与相机参数**，
 而不是从零调——实测多次证明：参数看似相近、结果差一个数量级，往往就是某一项偏离了样例。
 
@@ -86,7 +86,7 @@ python tools/caiyun_schema_crosscheck.py <导出的 schema.json>
 ### 4. 验收用「量化 + 抽帧」替代「重渲」
 
 ```bash
-python shuangtian/examples/caiyun/styles/measure_motion.py <frames>   # 3 秒，占静止/变化密度
+python shuangtian/apps/caiyun/styles/measure_motion.py <frames>   # 3 秒，占静止/变化密度
 ffmpeg -ss 3.0 -i out/film.mp4 -frames:v 1 -y check/f3.png            # 抽帧，不重渲
 ```
 数字管"有没有在动"，人眼管"好不好看"——但**两者都不需要重渲一次全片**。
@@ -193,7 +193,7 @@ py scripts/probe_scene.py --script x.json --scene 2
 
 ```powershell
 cd shuangtian
-examples\caiyun\assets\x.json       # 要改的片子（下面的 x.json 换成它）
+apps\caiyun\assets\x.json       # 要改的片子（下面的 x.json 换成它）
 
 # ── ① 改完先确认**代码真的执行了**（不看过数字先看这一条）
 $env:CAIYUN_SHAPES_DEBUG="1"
@@ -239,9 +239,9 @@ py scripts/ot_bench.py --script x.json --out out/otbench/x
 | 要看什么 | 去哪 |
 |---|---|
 | **十三个对标案例的索引**（按“我要做什么效果”查） | **`out/otbench/INDEX.md`** |
-| 一个完整的、能跑的示例 | `examples/caiyun/assets/slot-robot-example.js` + `.json` |
-| 13 种视觉风格的做法 | `examples/caiyun/assets/STYLES.md` |
-| 弹簧/样条/实体绘制 | `examples/caiyun/assets/_kit.js` |
+| 一个完整的、能跑的示例 | `apps/caiyun/assets/slot-robot-example.js` + `.json` |
+| 13 种视觉风格的做法 | `apps/caiyun/assets/STYLES.md` |
+| 弹簧/样条/实体绘制 | `apps/caiyun/assets/_kit.js` |
 | 具体某个效果的制作过程与坑 | `out/otbench/<case>/NOTES.md`（轮次演进 + 实测数字） |
 
 > **片子产物本身不入库**。`out/` 下只有 `otbench/*/NOTES.md` 这类过程记录值得看，

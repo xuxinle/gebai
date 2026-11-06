@@ -37,7 +37,7 @@ struct LintReport {
   std::size_t suppressed_by_manifest{0};
 };
 
-/// 扫描工程根下的 include/ src/ tests/ examples/ tools/。
+/// 扫描工程根下的 include/ src/ tests/ apps/ tools/。
 /// `exemptions` 来自清单 `lint.exempt`（空 = 不豁免任何东西，与旧行为一致）。
 [[nodiscard]] auto lint_project(std::string_view root, const LintExemptions& exemptions = {})
     -> Result<LintReport>;

@@ -1,4 +1,4 @@
-# 建木（jianmu）—— 三维建模与演示工作台（示例应用）
+# 建木（jianmu）—— 三维建模与演示工作台（应用）
 
 一个常驻的三维工作窗口：**改脚本 → 画面立刻变**，并且可以旋转、缩放、平移、悬浮、点选。
 
@@ -19,12 +19,12 @@
 
 ```bash
 st build jianmu
-./build/dev/bin/jianmu                  # 有窗口（默认读 examples/jianmu/scenes/）
+./build/dev/bin/jianmu                  # 有窗口（默认读 apps/jianmu/scenes/）
 ./build/dev/bin/jianmu --dir=我的场景    # 换目录
 ./build/dev/bin/jianmu --scene=quad.py   # 直开某个脚本（裸主名也能匹，如 --scene=quad）
 ```
 
-然后编辑 `examples/jianmu/scenes/*.js` 或 `*.py`，保存即可看到变化（文件监听默认开）。
+然后编辑 `apps/jianmu/scenes/*.js` 或 `*.py`，保存即可看到变化（文件监听默认开）。
 
 > ⚠ 目录里的场景名**带扩展名**：同名两种写法（`quad.js` / `quad.py`）是常见情形
 >（就是要对比两条路），用裸主名会让清单里出现两个 "quad"，选中哪个没法分辨。

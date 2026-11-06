@@ -765,7 +765,7 @@ auto lint_file(std::string_view path) -> Result<std::vector<LintViolation>> {
 
 auto lint_project(std::string_view root, const LintExemptions& exemptions) -> Result<LintReport> {
   LintReport report;
-  const std::array<std::string_view, 5> roots{"include", "src", "tests", "examples", "tools"};
+  const std::array<std::string_view, 5> roots{"include", "src", "tests", "apps", "tools"};
 
   // ## 先收集待扫文件（串行，只走目录）
   //

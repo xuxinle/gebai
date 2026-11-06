@@ -149,7 +149,7 @@ auto collect_stats(std::string_view root, std::size_t top) -> Result<ProjectStat
   std::map<std::string, std::vector<std::string>> include_graph;
   std::vector<std::string> unit_files;   ///< 所有 `.cpp`（爆炸半径以它们为分母）
 
-  const std::array<std::string_view, 5> roots{"include", "src", "tests", "examples", "tools"};
+  const std::array<std::string_view, 5> roots{"include", "src", "tests", "apps", "tools"};
   for (const std::string_view directory : roots) {
     const std::string base = fs::join(root, directory);
     if (!fs::is_directory(base)) continue;

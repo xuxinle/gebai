@@ -16,8 +16,8 @@
 
 #include "st/test/test.hpp"
 
-#include "examples/louyue/document.hpp"
-#include "examples/louyue/document.cpp"
+#include "apps/louyue/document.hpp"
+#include "apps/louyue/document.cpp"
 
 namespace {
 

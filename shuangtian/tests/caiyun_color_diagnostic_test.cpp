@@ -14,7 +14,7 @@
 #include <string>
 #include <string_view>
 
-#include "examples/caiyun/director.hpp"
+#include "apps/caiyun/director.hpp"
 #include "st/test/test.hpp"
 
 namespace {

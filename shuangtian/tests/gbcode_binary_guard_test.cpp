@@ -10,7 +10,7 @@
 #include "st/core/fs.hpp"
 #include "st/test/test.hpp"
 
-#include "examples/gbcode/page_data.cpp"
+#include "apps/gbcode/page_data.cpp"
 
 namespace {
 

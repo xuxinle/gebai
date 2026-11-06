@@ -94,8 +94,8 @@ while (!app.quit_requested()) {
 ## 参考实现
 
 - `include/st/ui/hot_reload.hpp` / `src/ui/hot_reload.cpp`（本层）
-- `examples/xiangqi/main.cpp`（`--watch` / `--no-watch`、`app.hot.reload`；**主循环里的 `hot.poll()` 不能省**——`HotReload` 只负责比指纹与重建，推进它是调用方的事）
-- `examples/xiangqi/main.cpp`（常驻面板：默认不 watch，`--watch` 打开）
+- `apps/xiangqi/main.cpp`（`--watch` / `--no-watch`、`app.hot.reload`；**主循环里的 `hot.poll()` 不能省**——`HotReload` 只负责比指纹与重建，推进它是调用方的事）
+- `apps/xiangqi/main.cpp`（常驻面板：默认不 watch，`--watch` 打开）
 - 回归：`tests/ui_hot_reload_test.cpp`（原子/换树/清场/指纹各一条）、
   `tools/hot_reload_e2e.py`（真进程：改文件 → 控制通道看界面变没变）
 - 设计：`DESIGN.md` §4.2.24

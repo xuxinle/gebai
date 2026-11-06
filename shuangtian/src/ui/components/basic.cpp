@@ -90,7 +90,7 @@ void warn_unknown_icon_once(const std::string& name) {
   bool expected = false;
   if (!reported[slot].compare_exchange_strong(expected, true)) return;
   st::log::err("[ui] 未知图标名 `{}`（该按钮的图标不会绘制）——图标需登记在 `Icon` 表"
-             "（src/ui/icon.cpp）里，`examples/*/assets/icons.svg` 那份是另一套",
+             "（src/ui/icon.cpp）里，`apps/*/assets/icons.svg` 那份是另一套",
              name);
 }
 

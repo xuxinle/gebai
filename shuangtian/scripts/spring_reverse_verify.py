@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-LAYOUT_CPP = ROOT / "examples" / "caiyun" / "layout.cpp"
+LAYOUT_CPP = ROOT / "apps" / "caiyun" / "layout.cpp"
 ST_BIN = ROOT / "build" / "bin" / "st.exe"
 
 CASES = [

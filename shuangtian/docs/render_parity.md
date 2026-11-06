@@ -401,7 +401,7 @@ AgX 单独修。
 
 ```
 st build align_bench_probe
-build/dev/bin/align_bench_probe.exe examples/jianmu/scenes/bpy_watch.py out.png
+build/dev/bin/align_bench_probe.exe apps/jianmu/scenes/bpy_watch.py out.png
 build/dev/bin/render_compare.exe out.png blender_reference.png
 ```
 

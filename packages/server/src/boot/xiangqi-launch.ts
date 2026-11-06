@@ -15,7 +15,7 @@
  * | 二进制 / 桌面（`~/.gebai`） | 任意 | 优先 `{GEBAI_HOME}/shuangtian/build/<档>/bin/`，否则按仓库标记向上找 |
  *
  * 「向上找仓库标记」是这里唯一稳的判据：不数级数（数过一次，数少了），
- * 而是逐级上溯找 `shuangtian/examples/xiangqi/` 这个目录——它在源码树里一定存在，
+ * 而是逐级上溯找 `shuangtian/apps/xiangqi/` 这个目录——它在源码树里一定存在，
  * 在发行产物里一定不存在（那时靠 `{GEBAI_HOME}` 下的部署副本或 `XIANGQI_BIN`）。
  */
 import { existsSync } from "node:fs"
@@ -29,8 +29,8 @@ export const XINGQI_EXE_NAME = process.platform === "win32" ? "xiangqi.exe" : "x
 /** 构建档探测顺序：dev 主用；quick/release 是发行与快速验证档；debug 兜底。 */
 export const XIANGQI_PROFILES = ["dev", "quick", "release", "debug"] as const
 
-/** 仓库标记：源码树里 `shuangtian/examples/xiangqi/` 必然存在（发行产物里没有）。 */
-const REPO_MARKER = ["shuangtian", "examples", "xiangqi"] as const
+/** 仓库标记：源码树里 `shuangtian/apps/xiangqi/` 必然存在（发行产物里没有）。 */
+const REPO_MARKER = ["shuangtian", "apps", "xiangqi"] as const
 
 /** 上溯深度上限（防止病态路径下无限循环；正常仓库 6 级足够，留足余量）。 */
 const MAX_UP = 16
@@ -61,7 +61,7 @@ export interface XiangqiBinResult {
   fromOverride: boolean
 }
 
-/** 逐级上溯找仓库根（以 `shuangtian/examples/xiangqi` 为标记）。 */
+/** 逐级上溯找仓库根（以 `shuangtian/apps/xiangqi` 为标记）。 */
 function findRepoRoot(start: string, exists: (p: string) => boolean): string | null {
   let cur = resolve(start)
   for (let i = 0; i < MAX_UP; i++) {
@@ -133,10 +133,10 @@ export function resolveXiangqiBin(input: XiangqiProbeInput): XiangqiBinResult {
   return { bin: null, repoRoot: fromModule ?? fromHome, candidates, fromOverride: false }
 }
 
-/** 相期 UI 资源目录（`main.xml` + `app.js`）：仓库内的 `shuangtian/examples/xiangqi/ui`。 */
+/** 相期 UI 资源目录（`main.xml` + `app.js`）：仓库内的 `shuangtian/apps/xiangqi/ui`。 */
 export function resolveXiangqiUiDir(repoRoot: string | null, exists: (p: string) => boolean = existsSync): string | null {
   if (repoRoot === null) return null
-  const dir = join(repoRoot, "shuangtian", "examples", "xiangqi", "ui")
+  const dir = join(repoRoot, "shuangtian", "apps", "xiangqi", "ui")
   return exists(join(dir, "main.xml")) ? dir : null
 }
 
@@ -180,7 +180,7 @@ export function planXiangqiLaunch(input: XiangqiPlanInput, exists: (p: string) =
   const args = ["--agent", `ws://127.0.0.1:${input.port}/xiangqi`, "--home", home]
   // `--ui` 显式给绝对路径：exe 的资源探测是相对 cwd 的，而宿主进程的 cwd 与 exe 所在的
   // 仓库树没有任何关系（实测：从仓库根起服务时窗口「装载失败：读不到
-  // examples/xiangqi/ui/main.xml」后立刻退出——TCP 都还没连）。
+  // apps/xiangqi/ui/main.xml」后立刻退出——TCP 都还没连）。
   if (uiDir !== null) args.push("--ui", uiDir)
   return {
     action: "launch",

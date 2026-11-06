@@ -198,13 +198,13 @@ py scripts/check_layout.py --scan out/otbench        # 扫全部 case
 
 | 路径 | 作用 |
 |---|---|
-| `examples/caiyun/kit/caiyun-kit.js` | 能力层：缓动 / 相机 / 背景纹理 / 图元工厂 / 常见动效 |
-| `examples/caiyun/kit/templates/tpl-single-subject.js` | 模板 A：单体特写（一个主体演完整片） |
-| `examples/caiyun/kit/templates/tpl-multi-element.js` | 模板 B：多元素场景（几十个元素错峰入场） |
-| `examples/caiyun/kit/RECIPES.md` | 场景配方 R1~R6（界面演示 / 数据 / 图标阵 / 收尾 / 转场 / 整屏流动） |
-| `examples/caiyun/kit/MIGRATION.md` | 把已有片子渐进迁移到 kit 的顺序与边界 |
-| `examples/caiyun/kit/build.py` | 把 kit 与脚本拼成单文件（裁云无模块系统） |
-| `examples/caiyun/kit/demo.py` | 一键跑模板（拼 → 检查 → 出片 → 抽帧） |
+| `apps/caiyun/kit/caiyun-kit.js` | 能力层：缓动 / 相机 / 背景纹理 / 图元工厂 / 常见动效 |
+| `apps/caiyun/kit/templates/tpl-single-subject.js` | 模板 A：单体特写（一个主体演完整片） |
+| `apps/caiyun/kit/templates/tpl-multi-element.js` | 模板 B：多元素场景（几十个元素错峰入场） |
+| `apps/caiyun/kit/RECIPES.md` | 场景配方 R1~R6（界面演示 / 数据 / 图标阵 / 收尾 / 转场 / 整屏流动） |
+| `apps/caiyun/kit/MIGRATION.md` | 把已有片子渐进迁移到 kit 的顺序与边界 |
+| `apps/caiyun/kit/build.py` | 把 kit 与脚本拼成单文件（裁云无模块系统） |
+| `apps/caiyun/kit/demo.py` | 一键跑模板（拼 → 检查 → 出片 → 抽帧） |
 | `scripts/check_layout.py` | **渲染前**逐帧跑 layout，抓运行期错误（已接入 ot_bench 门禁） |
 | `tools/test_caiyun_kit.cjs` | kit 自测：60 条断言，每条对应一条实测教训 |
 | `scripts/ot_bench.py` | 对标评测（含 layout 门禁 + 相对判据） |

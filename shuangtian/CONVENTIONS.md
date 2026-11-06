@@ -501,7 +501,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 
 ## 8. lint 规则（`st lint`，自研实现）
 
-扫描 `src/`、`include/`、`tests/`、`examples/`、`tools/` 的 `.hpp/.cpp`，按行正则匹配，命中即失败（行内 `// lint-allow: <rule-id> 原因` 可豁免，必须写原因）：
+扫描 `src/`、`include/`、`tests/`、`apps/`、`tools/` 的 `.hpp/.cpp`，按行正则匹配，命中即失败（行内 `// lint-allow: <rule-id> 原因` 可豁免，必须写原因）：
 
 | 规则 | 模式 | 豁免 |
 |---|---|---|
@@ -522,7 +522,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L15 | raw string 无定界符（`R"(`）——内容里的 `)"` 会提前终结（提示级） | 无（改用 `R"x(…)x"`；本仓实测踩过两次） |
 | L16 | **层方向**：文件在 `src/core/`、`include/st/core/` 下且 `#include "st/ui/…"`（core 不得依赖 ui——BACKLOG P1 根因①的防护栏；`check_layer_includes` 专用检查，方向判定需文件路径，单行正则表达不了） | 无（core→ui 没有合法形态；将来若真需要，走清单豁免并在此登记） |
 | L17 | **禁止 `long` / `long long` 表达数据**（`-Werror` 的 `-Wconversion` 抓不到它——`long` 本身就是合法类型，错在**宽度随平台变**）。排除 `long double`、注释与字符串 | ①	extbf{平台 ABI 边界}：`platform_*` 文件按定义就是对系统类型的如实声明（X11 的 `XEvent` 布局、OpenSSL 函数指针签名、Win32 `LONG`、`FIONBIO` 宏），换了反而错——按文件名豁免；② C 标准库调用点（`ftell`/`fseek`/`sscanf`）用行内 `// lint-allow: L17` 就地说明 |
-| L18 | **禁止绕过日志通道的裸打印**（`printf`/`puts`/`fprintf`/`std::cout`/`std::cerr`）——直接写 stdout/stderr，不经 `st::print`（终端+镜像落盘）也不经 `ST_LOG_*`（分级/过滤/订阅）。合法通道：`st::print`/`st::eprint`（镜像落盘）、`ST_LOG_*`（日志系统） | 打印实现方（`print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*`）与独立工具区（`tools/**`、`tests/**`、`examples/**`——输出各有镜像/分片/捕获通道，迁移到 `ST_LOG` 是增量过程，存量先登记豁免） |
+| L18 | **禁止绕过日志通道的裸打印**（`printf`/`puts`/`fprintf`/`std::cout`/`std::cerr`）——直接写 stdout/stderr，不经 `st::print`（终端+镜像落盘）也不经 `ST_LOG_*`（分级/过滤/订阅）。合法通道：`st::print`/`st::eprint`（镜像落盘）、`ST_LOG_*`（日志系统） | 打印实现方（`print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*`）与独立工具区（`tools/**`、`tests/**`、`apps/**`——输出各有镜像/分片/捕获通道，迁移到 `ST_LOG` 是增量过程，存量先登记豁免） |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。
@@ -549,7 +549,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L3 | `tests/shard_parity_test.cpp`（`ST_SHARDPROBE_CASE`） | 哨兵生成 X 宏：12 个哨兵展开是同一段注册体，函数化反而藏错（且落片断言依赖哨兵按数值序注册，手写 12 段更容易插错位置）。行内豁免同样结构上放不下（多行宏首行以 `\` 结尾） | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
 | L14 | `src/shell/backend.cpp` | 需 `dlopen` 做**运行时后端探测**——而这正是 §10 第 1 条「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测本身就是平台差异的唯一判定点 | 内置 |
 | L6 | `src/raster/*simd*`（NEON/SIMD 内核） | SIMD intrinsics 的位级重解释只能在单点封装里发生（与 L6 的 `platform_*` 同一纪律） | 内置 |
-| L18 | `tools/**`、`tests/**`、`examples/**` | 存量输出已各有落盘通道：`tools/**`（stpm 的 `st::print`/`fprintf` 走 `cli_log` 镜像落盘 `st` 命令日志；探针/参考工具是独立实体不进框架库）、`tests/**`（测试输出进分片日志）、`examples/**`（应用入口错误经宿主 stderr 捕获）。迁移到 `ST_LOG` 是增量过程，新增代码应走 `st::print`/`ST_LOG_*` | **清单**（`st.pkg` 的 `lint.exempt.L18`） |
+| L18 | `tools/**`、`tests/**`、`apps/**` | 存量输出已各有落盘通道：`tools/**`（stpm 的 `st::print`/`fprintf` 走 `cli_log` 镜像落盘 `st` 命令日志；探针/参考工具是独立实体不进框架库）、`tests/**`（测试输出进分片日志）、`apps/**`（应用入口错误经宿主 stderr 捕获）。迁移到 `ST_LOG` 是增量过程，新增代码应走 `st::print`/`ST_LOG_*` | **清单**（`st.pkg` 的 `lint.exempt.L18`） |
 | L18 | `print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*` | 打印**实现方**：`print`/`console_log` 是 `st::print` 的底层、`log_file` 是 `st::log` 的落盘实现、`platform_crash` 的崩溃栈必须在日志系统不可用时仍能输出（信号处理器里不能依赖分配/锁） | 内置 |
 | L6 / L8 / L12 / L17 | `tools/window_shadow_*_probe.cpp`、`tools/present_layered_cost_probe.cpp`（窗口层探针，2026-11-01） | 它们量的是 **OS 窗口**而不是画布：要直调 Win32（`reinterpret_cast<HDC/LPARAM>` 不可避免 —— L6）；**L8 走行内单点豁免**（窗口过程无参数可传，只能靠进程级状态拿「当前这一组实验参数」，共 4 处）；**L12/L17 走清单**——L12 是**文本级误报**（探针自有的像素取值器叫 `Shot::at(x,y)`，接收者不是容器），L17 是接 Win32 `HRESULT`/`DWORD`/`long` 的 ABI 边界 | **清单**（`st.pkg` 的 `lint.exempt.L12/L17`）+ 行内（L8） |
 

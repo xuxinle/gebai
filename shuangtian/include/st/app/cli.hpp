@@ -54,7 +54,7 @@ struct CommonOptions {
   ///
   /// 为何放在通用选项里：剖析的价值在于**产物**——一份能被 `st perf --compare`
   /// 对比、能被智能体直接读的 JSON。让每个应用自己接一次这件事，
-  /// 结果就是“只有一个示例应用能产出报告”。
+  /// 结果就是“只有一个应用能产出报告”。
   std::string perf_report{};
   /// 退出时自动写报告（`--perf-report` 给出时隐含为真；`--perf-exit` 可单独要）。
   bool perf_on_exit{false};

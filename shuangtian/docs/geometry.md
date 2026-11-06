@@ -1089,7 +1089,7 @@ radius / 半宽 / 全长——那正是旧设计最容易出错的地方。
 代码里的同名 `width`/`height`）。这些分散在 C++ 字符串字面量里，
 **没有做自动迁移**——风险高于收益，且旧写法受支持并会告警。
 
-真实 JSON 脚本里只有 4 个物体用了旧字段（`examples/caiyun/assets/scene-script-demo.json`）。
+真实 JSON 脚本里只有 4 个物体用了旧字段（`apps/caiyun/assets/scene-script-demo.json`）。
 
 ## 4.14 全框架语义一致性（2026-10-31）
 

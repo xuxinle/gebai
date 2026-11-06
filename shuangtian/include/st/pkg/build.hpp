@@ -218,7 +218,7 @@ auto clear_content_hash_cache() -> void;
 /// - 任一条源内容不一致 → `true`
 /// - 读不到的源不参与（它不是"过期"的证据，真正的错误由构建阶段报）
 ///
-/// `object_dir` 用来读上一轮编译的 `.d`：测试常用 `#include "examples/x/impl.cpp"`
+/// `object_dir` 用来读上一轮编译的 `.d`：测试常用 `#include "apps/x/impl.cpp"`
 /// 把实现编进来，这类文件改了也必须重建——否则测试会一直跑旧二进制（完全静默）。
 [[nodiscard]] auto test_binary_is_stale(const std::vector<std::string>& test_files,
                                         const std::string& binary,

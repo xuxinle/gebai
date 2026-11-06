@@ -32,11 +32,11 @@ APPS = ["gallery", "gbcode", "louyue", "caiyun", "xiangqi", "cefu", "gedou"]
 
 
 def source_of(app: str) -> Path:
-    for candidate in (ROOT / "examples" / app / "src" / "main.cpp",
-                      ROOT / "examples" / app / "main.cpp"):
+    for candidate in (ROOT / "apps" / app / "src" / "main.cpp",
+                      ROOT / "apps" / app / "main.cpp"):
         if candidate.exists():
             return candidate
-    return ROOT / "examples" / app / "main.cpp"
+    return ROOT / "apps" / app / "main.cpp"
 
 
 def sets_window_icon(app: str) -> tuple[bool, str]:

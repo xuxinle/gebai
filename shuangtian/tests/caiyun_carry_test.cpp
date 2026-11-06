@@ -15,7 +15,7 @@
 ///    旧脚本必须逐像素不变，而"逐像素"没法在单测里直接断言，
 ///    所以断言它的**语义前提**（没有 active 的承接、collect 返回空）。
 
-#include "examples/caiyun/carry.cpp"
+#include "apps/caiyun/carry.cpp"
 
 #include "st/test/test.hpp"
 

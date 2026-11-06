@@ -57,7 +57,7 @@ def main():
     proc = subprocess.Popen(
         [str(BIN), "--headless", "--control-port", "0", "--control-file", str(ctl),
          "--shots", str(SHOTS), "--home", str(SHOTS / "home"),
-         "--ui", str(ROOT / "examples" / "xiangqi" / "ui")],
+         "--ui", str(ROOT / "apps" / "xiangqi" / "ui")],
         stdout=logf, stderr=subprocess.STDOUT)
     try:
         client = None

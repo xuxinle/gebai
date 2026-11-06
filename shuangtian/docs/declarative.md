@@ -39,7 +39,7 @@
 **ArkTS 风格（struct + State 成员 + build()）——C++ 的自然映射**：
 
 ```cpp
-// 形态示意（完整实例见 examples/gbcode —— 整个 IDE 就是一份 Component）
+// 形态示意（完整实例见 apps/gbcode —— 整个 IDE 就是一份 Component）
 #include "st/ui/dsl.hpp"
 
 struct CounterPage : st::ui::dsl::Component {
@@ -401,8 +401,8 @@ C++ 侧 struct 风格是**原生形态**（无需转译）；JS 侧 struct 风�
   C++ 声明式在 `ST_FEATURE_SCRIPT` 关闭时完整可用）；
 - JS 腿整体打在 `ST_FEATURE_SCRIPT` 条件编译内；C++ 重组器不 mount 声明式根时，
   帧循环无额外成本（无注册即无回调）；
-- 示例（2026-10-03 示例整合后的现状）：**`examples/gbcode/`（整个 IDE 由一份
-  `Component::build()` 描述）+ `examples/gallery/` 的「声明式」页**（用 `mount_into`
+- 示例（2026-10-03 示例整合后的现状）：**`apps/gbcode/`（整个 IDE 由一份
+  `Component::build()` 描述）+ `apps/gallery/` 的「声明式」页**（用 `mount_into`
   把声明式子树挂进手搭页壳——演示状态驱动表单 / key 对齐列表 / 异步 `resource` / 条件内容）。
   两者覆盖「整页声明式」与「页内一块声明式」两种形态。
 
@@ -448,7 +448,7 @@ C++ 侧 struct 风格是**原生形态**（无需转译）；JS 侧 struct 风�
 mingw 交叉编译通过；`tools/st_visual_check.py` dev+san × 两应用 × 亮/暗 × DPI2.0
 **0 失败步、无 sanitizer 报告**；`tools/gbcode_e2e.py` 九项全过。
 
-> 超出原计划的部分：**`examples/gbcode` 整份界面也改成了声明式**（与 `gbcode-dsl`
+> 超出原计划的部分：**`apps/gbcode` 整份界面也改成了声明式**（与 `gbcode-dsl`
 > 合并为一份，两份合计 2758 行 → 1605 行）；`counter` / `counter-js` / `todo-js`
 > 三个小示例随整合删除。
 

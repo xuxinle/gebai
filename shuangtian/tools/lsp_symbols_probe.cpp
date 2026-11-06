@@ -9,10 +9,10 @@
 #include <string>
 #include <thread>
 
-#include "../examples/gbcode/lsp_bridge.hpp"
+#include "../apps/gbcode/lsp_bridge.hpp"
 
 auto main(int argc, char** argv) -> int {
-  const std::string path = argc > 1 ? argv[1] : "examples/gbcode/page_sidebar.cpp";
+  const std::string path = argc > 1 ? argv[1] : "apps/gbcode/page_sidebar.cpp";
   gbcode::LanguageService service;
   int symbols_seen = 0;
   service.on_symbols = [&](std::int64_t id, const std::vector<st::lsp::DocumentSymbol>& symbols) {

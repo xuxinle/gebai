@@ -1165,7 +1165,7 @@ struct LanguageFlags {
     // 改动依赖产出方式时**必须**升这个版本号。
     material.append("\n<deps:2>");
     for (const auto& flag : unit_flags_for(unit)) material.append("\n").append(flag);
-    // **档位标志也必须入键**：工程单元（如示例应用自己的 .cpp）的 `unit_flags_for`
+    // **档位标志也必须入键**：工程单元（如应用自己的 .cpp）的 `unit_flags_for`
     // 只返回 st.pkg 里的 flags，不含 `-O1/-g/-DNDEBUG/-fsanitize`。
     // 不入键的话，共享缓存会把**另一个档位**编出来的对象交给本次构建
     // （实测：去掉 dev 的 `-g` 后重建，报"命中缓存 67"、产物一字节没变）。
@@ -2563,7 +2563,7 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   // 也就是说它们描述的是“优化器的推理路径”，不是源码里的真实缺陷。
   //
   // 最新一条（`-Wno-free-nonheap-object`）的取证：
-  // `examples/gbcode/git_service.cpp` 在 `-O2` 下报
+  // `apps/gbcode/git_service.cpp` 在 `-O2` 下报
   // “释放了偏移 32 的指针”（`offset 32` 恰好是 libstdc++ 下 `std::string` 的大小），
   // 而该处只有一个 `std::vector<std::string>` 临时量的析构，返回值是 `optional<string>`
   // 值拷贝——没有任何路径会释放偏移指针。**同一文件同一告警集，`-O1` 干净、`-O2` 报错**。

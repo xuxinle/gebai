@@ -11,9 +11,9 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/usd_export.hpp"
-// 测试目标不链接 examples/caiyun，所以直接包含实现（仓库惯例）。
-#include "examples/caiyun/usd_export.cpp"
+#include "apps/caiyun/usd_export.hpp"
+// 测试目标不链接 apps/caiyun，所以直接包含实现（仓库惯例）。
+#include "apps/caiyun/usd_export.cpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"
 #include "st/test/test.hpp"

@@ -13,13 +13,13 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/package.hpp"
-#include "examples/caiyun/proposal.hpp"
+#include "apps/caiyun/package.hpp"
+#include "apps/caiyun/proposal.hpp"
 // 测试目标把所有 `tests/*_test.cpp` 链成一个可执行文件，因此
 // `package.cpp` / `package_history.cpp` 的实现只能由**一个**测试文件包含
 //（它们已由 caiyun_package_test.cpp / caiyun_history 那边提供）。
 // 这里只包含本层自己的实现。
-#include "examples/caiyun/proposal.cpp"
+#include "apps/caiyun/proposal.cpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"

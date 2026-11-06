@@ -19,7 +19,7 @@ CONVENTIONS §10.3 给了 POSIX 下的 shell 一行命令，但它只覆盖 `src
 且依赖手写包含根（漏一个根就得到一堆假失败）。本脚本把这件事固化：
 
 1. **头文件**逐个做探针（`include/**/*.hpp`，除 PCH 自己）——§6.1；
-2. **翻译单元**逐组编译（`src/**` + `tools/stpm/**` + `tests/**` + 每个 `examples/<目标>/**`）——§6.6；
+2. **翻译单元**逐组编译（`src/**` + `tools/stpm/**` + `tests/**` + 每个 `apps/<目标>/**`）——§6.6；
 3. 包含根按**组**补齐（测试要工程根、示例要自己的 `battery/embed.hpp`）——避免假失败。
 
 不覆盖：第三方 C 源（另一套语言标准、`-w`）、链接期问题（ODR / 符号缺失）。
@@ -88,7 +88,7 @@ def probe_groups(manifest: dict) -> list[tuple[str, Path, list[str]]]:
         # 测试按 `tests/support/xxx.hpp` 全路径引用，需要工程根在搜索路径里
         ("测试", ROOT / "tests", [embed / "lib" / "include"]),
     ]
-    for example in sorted(p for p in (ROOT / "examples").iterdir() if p.is_dir()):
+    for example in sorted(p for p in (ROOT / "apps").iterdir() if p.is_dir()):
         inc = embed / example.name / "include"
         if not inc.is_dir():
             print(f"[warn] 示例 {example.name}: 缺 {inc.relative_to(ROOT)}"

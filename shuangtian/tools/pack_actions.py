@@ -10,7 +10,7 @@ import sys
 
 from PIL import Image
 
-OUTDIR = "examples/gedou/assets/actions"
+OUTDIR = "apps/gedou/assets/actions"
 TARGET_HEIGHT = 640
 
 

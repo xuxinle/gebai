@@ -86,7 +86,7 @@ auto truncate_at_statement(const std::string& source, std::size_t line_no) -> st
 
 int main(int argc, char** argv) {
   const std::string path =
-      argc > 1 ? argv[1] : "examples/jianmu/scenes/bpy_watch.py";
+      argc > 1 ? argv[1] : "apps/jianmu/scenes/bpy_watch.py";
   const auto source = read_file(path);
   if (source.empty()) {
     std::printf("读不到：%s\n", path.c_str());

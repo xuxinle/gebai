@@ -38,7 +38,7 @@ $('#go').on('click', () => {
 });
 ```
 
-`main.cpp` 里只有三件事（完整模板见 `examples/xiangqi/main.cpp`）：
+`main.cpp` 里只有三件事（完整模板见 `apps/xiangqi/main.cpp`）：
 
 ```cpp
 // ① 壳层先挂（窗框/标题栏）：XML 树由 HotReload 换根，落点是它当前的父元素
@@ -163,7 +163,7 @@ bridge.expose("fs.read", [](const std::vector<st::Json>& args) -> st::Result<st:
 
 ## 参考
 
-- 完整可运行示例：`examples/xiangqi/`（相期：桌面常驻卡片面板，界面零 C++ UI 代码）
+- 完整可运行示例：`apps/xiangqi/`（相期：桌面常驻卡片面板，界面零 C++ UI 代码）
 - **改文件即生效**：`docs/hot-reload.md`（`ui::HotReload`，`DESIGN.md` §4.2.28）
 - 端到端回归：`tools/hot_reload_e2e.py`（改文件即生效的四个分支）；相期自身能力面见 `tools/xiangqi_e2e.py`
 - 设计说明：`DESIGN.md` §4.2.20（XML 建树）与 §4.2.21（脚本桥）

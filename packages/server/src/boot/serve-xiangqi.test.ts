@@ -1,7 +1,7 @@
 /**
  * `/xiangqi` 走主服务端口（方案 B）的**真实握手**用例。
  *
- * 相期是原生 C++ 客户端（自带 WS 实现，`shuangtian/examples/xiangqi`），握手请求里
+ * 相期是原生 C++ 客户端（自带 WS 实现，`shuangtian/apps/xiangqi`），握手请求里
  * **没有 Origin**。而主服务在 fetch 里对所有请求先过一道 `originAllowed`（跨站防护：
  * 恶意网页能直接连 `ws://127.0.0.1:*` 以本地身份执行命令）。这两件事放在一起理解错，
  * 就会以为"相期连不上是被 origin 挡了"——实测不是（无 Origin 按非浏览器客户端放行），

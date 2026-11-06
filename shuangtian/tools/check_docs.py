@@ -32,7 +32,7 @@ print(f"CONVENTIONS.md 章节号: {len(conv_secs)} 个")
 targets = {'DESIGN.md': design_secs, 'CONVENTIONS.md': conv_secs}
 files = []
 for pat in ['*.md', 'docs/*.md', 'tools/*.md', 'include/**/*.hpp', 'src/**/*.cpp',
-            'tests/*.cpp', 'examples/**/*.cpp', 'examples/**/*.hpp']:
+            'tests/*.cpp', 'apps/**/*.cpp', 'apps/**/*.hpp']:
     files.extend(root.glob(pat))
 
 ref_re = re.compile(r'(DESIGN\.md|CONVENTIONS\.md)[`\s]*§\s*(\d+(?:\.\d+)*)')
@@ -129,7 +129,7 @@ EXTERNAL_REPO_CTX = ('Skia', 'skia', 'FreeType', 'freetype', 'Chromium', '浏览
 # 实测踩到：`tools/crash_probe` 被报“路径不存在”——而它**本就是产物名**，
 # 写成源码路径反而错（读者要的是“跑这个去复现崩溃”）。所以按源码存在性放行。
 BUILD_ARTIFACT_ROOTS = ('tools', 'build')
-path_ref = re.compile(r'`(third_party|vendor|docs|tools|include|src|tests|examples|resources)/[A-Za-z0-9_\-./]*`')
+path_ref = re.compile(r'`(third_party|vendor|docs|tools|include|src|tests|apps|resources)/[A-Za-z0-9_\-./]*`')
 # ⚠ **主仓根必须用绝对路径算**：`Path('.').parent` 就是 `Path('.')`——
 # 原先写的 `(root.parent / ref).exists()` 与 `(root / ref).exists()` **完全等价**，
 # 所谓“主仓库根回退”是死代码（实测：`docs/file-workbench-design.md` 真实存在于
@@ -167,7 +167,7 @@ DOC_FILES = sorted(
 # 读不到 git（不在仓内／没装 git／命令失败）**≠ 没问题**。此时逐项明说「本项未核」并在
 # 汇总行单独计数——**不计入通过**。绝不让“读不到”静默变成绿灯（那等于在最需要警报的
 # 环境里安静）。注意：`git ls-files --cached` 只列**文件**，从不列目录，所以目录引用必须
-# 按「有已跟踪文件以它开头」判（否则 `src/`、`examples/gbcode` 这类目录引用会被误报
+# 按「有已跟踪文件以它开头」判（否则 `src/`、`apps/gbcode` 这类目录引用会被误报
 # “未入仓”——本层实测第一版就是错在这里，52 处假红）。
 def _git_out(args, cwd=None):
     """跑一条 git 命令：成功返回 (stdout_bytes, '')，失败返回 (None, 原因)。"""
@@ -372,7 +372,7 @@ for m in re.finditer(r'(\d+)\s*用例\s*/\s*(\d+)\s*断言', design_text):
 # lint 文件数：st lint 自报「扫描 N 个文件」；这里只做存在性提示（不硬校验，允许与目录清点口径不同）
 mfile = re.search(r'扫描\s*(\d+)\s*个文件', design_text)
 src_files = list((root / 'src').rglob('*.*')) + list((root / 'include').rglob('*.hpp')) + \
-            list((root / 'tests').glob('*.cpp')) + list((root / 'examples').rglob('*.cpp')) + \
+            list((root / 'tests').glob('*.cpp')) + list((root / 'apps').rglob('*.cpp')) + \
             list((root / 'tools').rglob('*.cpp'))
 print(f"用例数核对: 实际 ST_TEST {st_test_count} 个；源文件约 {len(src_files)} 个")
 

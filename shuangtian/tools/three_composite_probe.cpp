@@ -66,7 +66,7 @@ auto run_case(const st::raster::ThreeScene& scene, float scale, bool physical_de
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string path = argc > 1 ? argv[1] : "examples/jianmu/scenes/01-product.js";
+  const std::string path = argc > 1 ? argv[1] : "apps/jianmu/scenes/01-product.js";
   const auto source = st::fs::read_text(path);
   if (!source.has_value()) {
     std::printf("读不到 %s\n", path.c_str());

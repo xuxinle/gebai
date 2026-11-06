@@ -138,7 +138,7 @@ void dump_png(const st::raster::Canvas& canvas, const std::string& path) {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
-  const std::string scene_path = argc > 1 ? argv[1] : "examples/jianmu/scenes/04-watch.js";
+  const std::string scene_path = argc > 1 ? argv[1] : "apps/jianmu/scenes/04-watch.js";
   const std::string out_dir = argc > 2 ? argv[2] : "";
 
   const std::string source = read_file(scene_path);

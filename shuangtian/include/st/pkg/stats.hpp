@@ -69,7 +69,7 @@ struct ProjectStats {
   std::vector<IncludeStat> blast_radius{};    ///< 按传递包含它的 .cpp 数降序
 };
 
-/// 扫描工程（`include/`、`src/`、`tests/`、`examples/`、`tools/`）。
+/// 扫描工程（`include/`、`src/`、`tests/`、`apps/`、`tools/`）。
 ///
 /// `top` 控制每个榜单的长度（默认 10）。`extension_filter` 为空时扫 `.cpp` 与 `.hpp`。
 [[nodiscard]] auto collect_stats(std::string_view root, std::size_t top = 10)

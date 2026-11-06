@@ -109,12 +109,12 @@ XIANGQI = svg("#3D4249", '''    <rect x="4.6" y="5.0" width="14.8" height="14.0"
     "       它不只是提醒，是**待办/等待用户介入**。")
 
 APPS = {
-    "gallery": ("examples/gallery/assets/gallery-logo.svg", GALLERY),
-    "louyue":  ("examples/louyue/assets/louyue-logo.svg",   LOUYUE),
-    "caiyun":  ("examples/caiyun/assets/caiyun-logo.svg",   CAIYUN),
-    "gedou":   ("examples/gedou/assets/gedou-logo.svg",     GEDOU),
-    "cefu":    ("examples/cefu/assets/cefu-logo.svg",       CEFU),
-    "xiangqi": ("examples/xiangqi/assets/xiangqi-logo.svg", XIANGQI),
+    "gallery": ("apps/gallery/assets/gallery-logo.svg", GALLERY),
+    "louyue":  ("apps/louyue/assets/louyue-logo.svg",   LOUYUE),
+    "caiyun":  ("apps/caiyun/assets/caiyun-logo.svg",   CAIYUN),
+    "gedou":   ("apps/gedou/assets/gedou-logo.svg",     GEDOU),
+    "cefu":    ("apps/cefu/assets/cefu-logo.svg",       CEFU),
+    "xiangqi": ("apps/xiangqi/assets/xiangqi-logo.svg", XIANGQI),
 }
 
 

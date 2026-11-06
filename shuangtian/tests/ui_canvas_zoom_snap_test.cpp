@@ -17,7 +17,7 @@
 #include "st/test/test.hpp"
 #include "st/ui/theme.hpp"
 
-#include "../../examples/louyue/canvas_view.hpp"
+#include "../../apps/louyue/canvas_view.hpp"
 
 namespace {
 
@@ -31,7 +31,7 @@ using louyue::nearest_zoom_step;
 /// 与 ui_viewport_test.cpp 的 Fixture 同形态（Theme + RenderContext + Panel 内容）。
 /// 被测对象是 louyue 的外壳：`CanvasViewport` 的档位/步进/首帧 fit 全是头内
 /// inline（只依赖基类与档位表），本测试**不链也不需要** CanvasView——
-/// tests 目标不含 examples 源，链它才是坑。
+/// tests 目标不含 apps 源，链它才是坑。
 struct Fixture {
   st::ui::Theme theme{st::ui::Theme::light()};
   st::ui::RenderContext context{theme, nullptr, 0.0};

@@ -16,7 +16,7 @@
 #include <cmath>
 #include <vector>
 
-#include "examples/caiyun/fx.hpp"
+#include "apps/caiyun/fx.hpp"
 #include "st/core/print.hpp"
 #include "st/test/test.hpp"
 

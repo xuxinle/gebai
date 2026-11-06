@@ -2,7 +2,7 @@
 //
 // ## 为什么值得单独一条探针
 //
-// `examples/jianmu/scenes/quad.py` 的注释写着“本框架 bpy 兼容层的
+// `apps/jianmu/scenes/quad.py` 的注释写着“本框架 bpy 兼容层的
 // primitive_uv_sphere_add 有几何缺陷（顶点 x 超出半径两倍，球被压扁）”，
 // 并据此**刻意改用立方体**去做对比场景。
 //

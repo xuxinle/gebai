@@ -85,7 +85,7 @@
 选型不是审美偏好，它决定了全片的**承接方式**——而承接是唯一能量出「像不像 PPT」的指标。
 选错模板，后面每一镜都在跟它打架。
 
-每个模板在 `examples/caiyun/styles/<编号>-<名字>/` 有一镜示例（脚本入库，可直接跑）。
+每个模板在 `apps/caiyun/styles/<编号>-<名字>/` 有一镜示例（脚本入库，可直接跑）。
 
 **三条选型硬门槛**（不满足就不要开写）：
 1. 全片完全静止帧 **≥ 25%**，且至少一段连续 **≥ 1.0s**；
@@ -161,7 +161,7 @@
 ## 6. 工作流（阶段 0–9）
 
 0) **读现状**：读 `docs/script_design.md`（剧本模板，**开工必读**）、
-   `examples/caiyun/assets/sample-basic.json`（基础样例）、`sample-cinematic.json`（含全部特效）、
+   `apps/caiyun/assets/sample-basic.json`（基础样例）、`sample-cinematic.json`（含全部特效）、
    `director.hpp` + `layer.hpp`（字段与默认值）。**不要凭空猜字段名。**
 1) **写剧本**（markdown，按 `script_design.md` 六部分）→ 存到 `<工程>/docs/剧本-<名字>.md` → **C1 送审**。
    拿到确认才往下走。
@@ -173,7 +173,7 @@
 4) **配音**（有旁白时）：`tts_speak` 逐句合成 WAV → 量**实测时长** → 回头重排场景 `duration` →
    写进脚本 `audio.voice` 轨（`path`/`start`/`gain`）。**音效默认不加**，见下方纪律。
 5) **写脚本**：剧本逐条抄成 JSON（对照 `script_design.md` 附录的映射表）。
-   存到会话目录（**不是** `examples/`，那是入库的示例）。素材路径写 `media/<name>.png`（相对脚本目录）。
+   存到会话目录（**不是** `apps/`，那是入库的示例）。素材路径写 `media/<name>.png`（相对脚本目录）。
 6) **校验**（**写脚本后第一件事，不要跳**）：`caiyun_script_check(script="<脚本路径>")`。
    不渲染、约 0.13 秒。返回 ok 才往下走；不 ok 就按它给的 path + 建议字段名逐条改。
    字段不确定时先 `caiyun_script_schema(query="...")` 查——**不要 grep 源码**。
@@ -460,7 +460,7 @@ motion_qa --dir out/film/frames --traj out/film/trajectory.tsv --fps 30
 **③ 呼吸必须画在所有内容之后**（放背景层会被卡片/窗口盖掉，实测让一幕 95% 静止）。
 
 现成的两层环境层（`envBackdrop` / `envOverlay`，后者可关横向快扫）在
-`shuangtian/examples/caiyun/gbfilm/src/prelude.js`；同口径量测 `gbfilm/measure.py`，
+`shuangtian/apps/caiyun/gbfilm/src/prelude.js`；同口径量测 `gbfilm/measure.py`，
 单幕快迭代 `gbfilm/probe1.py`（只渲一幕，几十秒一轮而不是重渲全片）。
 
 ### 内容密度：做动效片时最常撞到的真正瓶颈
@@ -551,13 +551,13 @@ motion_qa --dir out/film/frames --traj out/film/trajectory.tsv --fps 30
 ### 产物一律落**会话目录**（不进代码目录）
 
 成片、抽帧、量测输出、临时脚本——全部写到**当前会话工作目录**（`tmp/` 下）。
-**不要**往 `shuangtian/` 或 `examples/` 里写任何产物：
+**不要**往 `shuangtian/` 或 `apps/` 里写任何产物：
 
 - 代码目录只放**框架代码**与**入库的示例脚本**；
 - 会话目录的产物**可被历史消息按路径引用**，而代码目录的产物会被 `git clean` 的入仓检查弄丢；
 - 多个片子并行时，代码目录里的同名产物会互相覆盖，**历史消息里的引用就变成别的内容**。
 
-示例脚本（要入库的那些）例外：写到 `examples/caiyun/styles/<编号>-<名字>/`，
+示例脚本（要入库的那些）例外：写到 `apps/caiyun/styles/<编号>-<名字>/`，
 并且**只写脚本与构建脚本，不写成片/抽帧**。
 
 ### 交付内容

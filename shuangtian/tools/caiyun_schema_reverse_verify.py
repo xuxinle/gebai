@@ -31,8 +31,8 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SCHEMA_CPP = ROOT / "examples" / "caiyun" / "schema.cpp"
-DIRECTOR_CPP = ROOT / "examples" / "caiyun" / "director.cpp"
+SCHEMA_CPP = ROOT / "apps" / "caiyun" / "schema.cpp"
+DIRECTOR_CPP = ROOT / "apps" / "caiyun" / "director.cpp"
 ST_BIN = ROOT / "build" / "bin" / "st.exe"
 
 # 每条：名字、目标文件、原文（须唯一）、回退写法、应当变红的用例

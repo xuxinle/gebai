@@ -13,7 +13,7 @@
 ///
 /// ## 登记口径
 ///
-/// - **kGalleryExhibits**：gallery 代码（examples/gallery/{pages,main}.cpp）**直接
+/// - **kGalleryExhibits**：gallery 代码（apps/gallery/{pages,main}.cpp）**直接
 ///   实例化**的内置注册组件，按注册名登记（dsl.cpp `ST_COMPONENT_LIST` 的第二列）。
 ///   `dsl::custom<T>` 形态的使用同样算直接使用（gallery 当前未用，别的示例有）。
 /// - **kGalleryExempt**：注册表里确实不该有展示卡的组件，逐条写理由。两条铁律：
@@ -53,7 +53,7 @@
 namespace gallery {
 
 /// gallery 展示集：gallery 代码直接实例化的内置注册组件（注册名口径）。
-/// 与 examples/gallery/{pages,main}.cpp 的实例化点一一对应。
+/// 与 apps/gallery/{pages,main}.cpp 的实例化点一一对应。
 /// 「直接实例化」含两种形态：建卡时实例化，以及懒创建组件经按钮触发构造后挂
 /// 叠加层（后者另列 kGalleryLazy；树自检时两类都在场断言里放行）。
 inline constexpr std::array<std::string_view, 45> kGalleryExhibits{

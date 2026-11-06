@@ -33,7 +33,7 @@ struct Capability {
 // ⚠ 清单只放**三条表达层里最常用、缺失就会立刻看出来**的能力。
 // 每一条都必须能给出“脚本跑了 + 场景真的变了”的证据，否则不如不列。
 // ⚠ 脚本写法说明：每条都以 `const scene = new THREE.Scene()` 开头、以 `scene` 结尾
-// （**不带分号**），这是用户真实会写的形式（与 `examples/jianmu/scenes/*.js` 一致）。
+// （**不带分号**），这是用户真实会写的形式（与 `apps/jianmu/scenes/*.js` 一致）。
 // 探测程要验的是“这个能力能不能用”，不该用非常规写法把自身缺陷测成能力缺口。
 const Capability kCapabilities[] = {
     // ── three.js：几何生成器 ──

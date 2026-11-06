@@ -2,7 +2,7 @@
  * 相期子Agent 的**端到端**验证：真启动相期窗口，走真 WebSocket。
  *
  * 单元测试里“相期”是我用 WS 客户端冒充的；这里换成**真的相期进程**，
- * 验证的是与 `examples/xiangqi/main.cpp` 的协议真能对上——桩能测语义，
+ * 验证的是与 `apps/xiangqi/main.cpp` 的协议真能对上——桩能测语义，
  * 测不了「对端到底认不认这个报文」。
  *
  * 关键设计：**用户答复走真实路径**（经相期的控制通道点按钮），
@@ -163,7 +163,7 @@ async function main(): Promise<void> {
     "--control-file", ctlFile,
     "--shots", home,
     "--home", appHome,
-    "--ui", join(import.meta.dir, "..", "..", "..", "shuangtian", "examples", "xiangqi", "ui"),
+    "--ui", join(import.meta.dir, "..", "..", "..", "shuangtian", "apps", "xiangqi", "ui"),
     "--agent", url,
   ])
   app.stdout?.on("data", (chunk: Uint8Array) => appLog.push(String(chunk)))

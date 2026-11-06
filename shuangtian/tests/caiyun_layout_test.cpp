@@ -11,7 +11,7 @@
 //
 // 第 ② 条最容易被实现成"抛异常"，而那正是"一处脚本错误毁掉整片"的来源。
 
-#include "examples/caiyun/layout.cpp"
+#include "apps/caiyun/layout.cpp"
 
 #include <cmath>
 #include <cstdio>

@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include "examples/caiyun/layout.hpp"
+#include "apps/caiyun/layout.hpp"
 #include "st/test/test.hpp"
 
 namespace {

@@ -33,7 +33,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "build", "dev", "bin",
                    "caiyun.exe" if os.name == "nt" else "caiyun")
-STYLES = os.path.join(ROOT, "examples", "caiyun", "styles")
+STYLES = os.path.join(ROOT, "apps", "caiyun", "styles")
 
 
 def trajectory_still_ratio(path: str) -> float | None:

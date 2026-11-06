@@ -18,7 +18,7 @@
 #include "st/text/diff.hpp"
 // git_service 是 gbcode 的应用层源（不在框架 sources 清单里）——测试目标
 // 直接编译它的实现：include 源文件（单文件、无内部依赖，比改清单加钩子干净）。
-#include "examples/gbcode/git_service.hpp"
+#include "apps/gbcode/git_service.hpp"
 
 namespace {
 
@@ -98,13 +98,13 @@ struct Repo {
 
 }  // namespace
 
-#include "examples/gbcode/git_service.cpp"
+#include "apps/gbcode/git_service.cpp"
 
 /// **为何是 `ST_TEST_SLOW`（默认不跑）**
 ///
 /// 它跑真 `git` 子进程建临时仓库、真读写文件。`st test` 默认 16 片并行时，
 /// 多个片同时在文件系统上重活（建仓/索引/写对象），实测出现过偶发假红；
-/// 单跑稳定绿。这与 `tools/examples_e2e_all.py` 里“并行会抢 CPU 互相拖慢”
+/// 单跑稳定绿。这与 `tools/apps_e2e_all.py` 里“并行会抢 CPU 互相拖慢”
 /// 是同一类问题：**环境敏感用例不该与别人争资源**。
 ///
 /// 要验证它时：`st test --slow git_service`（单进程、独占）。

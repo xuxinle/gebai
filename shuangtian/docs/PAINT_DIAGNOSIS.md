@@ -217,7 +217,7 @@ p50 的比值在 **30×~47×** 之间摆、偶发一轮整体抬到 58×——�
 > ```bash
 > g++ -std=c++20 -O2 -Iinclude -Isrc/raster -Ithird_party -Ithird_party/sqlite \
 >     tools/<探针>.cpp $(ls build/release/obj/*.o \
->       | grep -v '_tests_\|test_main\|_src_test_\|examples_gallery\|platform_d3d11\|platform_gl\|shell_backend\|src_app_app\|src_shell_\|src_control_\|src_pkg_') \
+>       | grep -v '_tests_\|test_main\|_src_test_\|apps_gallery\|platform_d3d11\|platform_gl\|shell_backend\|src_app_app\|src_shell_\|src_control_\|src_pkg_') \
 >     -o build/probe/<探针> -lpthread -ldl -lm
 > ```
 >

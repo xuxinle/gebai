@@ -564,7 +564,7 @@ auto command_run(const Arguments& arguments) -> int {
   // ## 「XML + JS 应用」（xmlapp / xiangqi 这类）的**不重编**通路
   //
   // 这类应用的界面与逻辑都在**运行期读**的文件里（`ui/*.xml` / `ui/*.js`），
-  // 改它们**不需要构建**：产物的源码边界只是 `examples/xmlapp/*.cpp` 那几百行壳层。
+  // 改它们**不需要构建**：产物的源码边界只是 `apps/xmlapp/*.cpp` 那几百行壳层。
   // 但旧行为是无条件先 `build`（编辑一个 `gap` → 等 6~8 秒链接，而且产物被在跑的
   // 实例占用时直接报「结束实例再重编」）——把"调一个间距"变成一次编译。
   if (const auto reused = run_without_build(arguments, target, app_args);

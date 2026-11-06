@@ -67,7 +67,7 @@ describe("resolveCefuBin 探测顺序", () => {
 
   test("仓库树优先于 GEBAI_HOME 直查（同根时）", () => {
     const repo = tmp("repo")
-    fakeExists(repo, ["shuangtian", "examples", "cefu", "ui", "main.xml"])
+    fakeExists(repo, ["shuangtian", "apps", "cefu", "ui", "main.xml"])
     fakeExists(repo, ["shuangtian", "build", "dev", "bin", CEFU_EXE_NAME])
     // 同时放 GEBAI_HOME 直查：仓库树应优先
     fakeExists(repo, [CEFU_EXE_NAME])

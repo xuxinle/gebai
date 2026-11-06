@@ -111,7 +111,7 @@ auto render(const st::raster::SceneSpec& spec, st::codec::PngImage& out) -> bool
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string script_path = argc > 1 ? argv[1] : "examples/jianmu/scenes/bpy_watch.py";
+  const std::string script_path = argc > 1 ? argv[1] : "apps/jianmu/scenes/bpy_watch.py";
   const std::string blender_path = argc > 2 ? argv[2] : "blender_reference.png";
 
   const auto script = read_file(script_path);

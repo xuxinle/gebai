@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 
-#include "examples/gedou/policy.cpp"  // NOLINT(bugprone-suspicious-include) —— 同 gedou_test
-#include "examples/gedou/rl_env.cpp"  // NOLINT(bugprone-suspicious-include)
+#include "apps/gedou/policy.cpp"  // NOLINT(bugprone-suspicious-include) —— 同 gedou_test
+#include "apps/gedou/rl_env.cpp"  // NOLINT(bugprone-suspicious-include)
 #include "st/test/test.hpp"
 
 namespace {

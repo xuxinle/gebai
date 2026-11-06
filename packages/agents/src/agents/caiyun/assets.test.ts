@@ -6,7 +6,7 @@ import { join, resolve } from "node:path"
 import { assetsTool } from "./assets"
 
 const FRAMEWORK = resolve(process.cwd(), "shuangtian")
-const LIB = join(FRAMEWORK, "examples/caiyun/assets/library.json")
+const LIB = join(FRAMEWORK, "apps/caiyun/assets/library.json")
 const hasLib = existsSync(LIB)
 
 async function makeCtx(): Promise<unknown> {

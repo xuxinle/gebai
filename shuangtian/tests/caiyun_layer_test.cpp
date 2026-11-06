@@ -9,7 +9,7 @@
 /// 而 `"50%"` 与 `640` 是两套语义（前者跟画幅、后者跟设计基准），
 /// 混了就会在某个尺寸上偏出去。
 
-#include "examples/caiyun/layer.cpp"
+#include "apps/caiyun/layer.cpp"
 
 #include "st/test/test.hpp"
 

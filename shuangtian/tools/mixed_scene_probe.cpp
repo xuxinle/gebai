@@ -97,8 +97,8 @@ auto json_string(const std::string& text) -> std::string {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
-  const std::string bpy_path = argc > 1 ? argv[1] : "examples/jianmu/scenes/mixed_gears_asset.py";
-  const std::string three_path = argc > 2 ? argv[2] : "examples/jianmu/scenes/mixed_gears.js";
+  const std::string bpy_path = argc > 1 ? argv[1] : "apps/jianmu/scenes/mixed_gears_asset.py";
+  const std::string three_path = argc > 2 ? argv[2] : "apps/jianmu/scenes/mixed_gears.js";
   const std::string shot = argc > 3 ? argv[3] : "mixed_probe.png";
 
   const std::string bpy = read_file(bpy_path);

@@ -33,7 +33,7 @@
 #include "st/ui/ui_root.hpp"
 // gbcode 的应用层源（不在框架 sources 清单里）——与 git_service_test 同一策略：
 // 单头表直接 include（shortcut_help.hpp 全部 inline，无需 .cpp）。
-#include "examples/gbcode/shortcut_help.hpp"
+#include "apps/gbcode/shortcut_help.hpp"
 
 namespace {
 
