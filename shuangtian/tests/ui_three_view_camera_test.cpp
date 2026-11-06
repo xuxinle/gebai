@@ -301,6 +301,54 @@ scene;
   ST_CHECK(flagged->camera_state().distance < plain->camera_state().distance * 0.6f);
 }
 
+ST_TEST(three_view_frame_scene_leaves_default_margin) {
+  // ## 默认取景必须留出余量（`frame_scene()` 不带参数 = 文档说的 30%）
+  //
+  // 曾经实现是 `m = max(margin, 1.0f)` 直接乘，即 **`1.0` 反而是零余量**——
+  // 物体恰好顶到画框。后果对**竖直细长体**最严重：应县木塔 67.3 高 / 34 宽，
+  // 16:9 画面里竖向才是约束，零余量下塔基被底边裁掉，读起来像“塔浮在空中”。
+  //
+  // 此处用竖长盒子钉住：默认取景后，包围盒上下顶点必须**都落在视锥内**。
+  constexpr const char* kTallBox = R"js(
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, 16 / 9, 0.2, 500);
+camera.position.set(0, 0, 120);
+scene.add(camera);
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+// 竖长体：高 70、宽 20（比例接近古塔）
+const tower = new THREE.Mesh(new THREE.BoxGeometry(20, 70, 20),
+  new THREE.MeshStandardMaterial({ color: 0x997744 }));
+tower.name = 'tower';
+scene.add(tower);
+scene;
+)js";
+  auto view = make_view(kTallBox, "tall.js");
+  ST_REQUIRE(view->object_count() == 1U);
+  view->frame_scene();
+
+  // 把包围盒的 8 个角投到相机坐标系，逐个检查是否在视锥内
+  const auto state = view->camera_state();
+  st::raster::Bounds box_bounds = st::raster::Bounds::empty();
+  for (const auto& object : view->scene().objects) {
+    const auto pick = st::raster::make_pick_object(object.name, object.mesh, object.world);
+    if (pick.world_bounds.is_empty()) continue;
+    box_bounds = box_bounds.union_with(pick.world_bounds);
+  }
+  ST_REQUIRE(!box_bounds.is_empty());
+
+  // 直接验几何：包围盒底角与顶角的可见高度都在 tan(half_fov) 之内。
+  // （不算投影矩阵：那样会把“余量不够”与“宽高比取错”两件事混在一起。）
+  const float distance = state.distance;
+  const float half_fov = state.fov_y_degrees * 0.5f * 3.14159265f / 180.0f;
+  const float half_height_at_target = distance * std::tan(half_fov);
+  // 目标在包围盒中心，竖长体上下各一半跨度
+  const float half_span_v = box_bounds.size().y * 0.5f;
+  ST_CHECK(half_span_v < half_height_at_target);   // 严格小于 = 有余量
+  // 余量至少 20%（文档说 30%；留一点实现浮动空间）
+  ST_CHECK(half_height_at_target > half_span_v * 1.2f);
+}
+
 ST_TEST(three_view_user_data_inherits_from_group) {
   // ## `userData` 必须从组继承到子网格
   //

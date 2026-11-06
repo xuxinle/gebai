@@ -20,8 +20,16 @@
 // ============================================================================
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x22303f);
-scene.environmentIntensity = 1.15;
+// ## 背景与环境反射
+//
+// 背景选**暮色青灰**（而非纯蓝）：木构的暖橙与之对比才出“古建在黄昏里”的调子。
+// 若背景太饱和的蓝，暖木会被衬成“橘黄道服”，反而显假。
+scene.background = new THREE.Color(0x2a3644);
+// → 本框架由 `scene.background` **推导**环境反射（上方天空 / 下方地面自动分层），
+// 不存在 `environmentSky` / `environmentGround` 这类字段。
+// 所以背景色同时决定了“天光有多亮”——想给金属一件更好的反射，
+// 就选一个明度适中的背景，而不要指望另外调环境参数。
+scene.environmentIntensity = 1.35;
 
 // ── 尺寸约定（米）─────────────────────────────────────────────────────────
 const OCT = 8;                                  // 八角
@@ -58,24 +66,37 @@ const APEX_Y = 57.6; // 攒尖顶顶点
 const SPIRE_TOP = 67.3; // 塔刹顶（通高 67.31）
 
 // ── 材质 ──────────────────────────────────────────────────────────────────
+//
+// ## 为什么要分三阶木色
+//
+// 木构的层次全在**相邻构件的明度差**：柱最亮、枋次之、斗拱与椽头退入影里。
+// 全用一个色时，远看就是一根均匀的橙柱——上千个构件的细节全被抹平。
 const MAT_WOOD = new THREE.MeshStandardMaterial({
-  color: 0x9c7a52, metalness: 0.02, roughness: 0.84,
-}); // 柱、枋：风化木，偏暖
+  color: 0xa8855a, metalness: 0.02, roughness: 0.82,
+}); // 柱：受光主力，偏暖的旧木
+const MAT_WOOD_MID = new THREE.MeshStandardMaterial({
+  color: 0x86663f, metalness: 0.02, roughness: 0.86,
+}); // 阑额、平坐：比柱暗一阶，拉出横向线条
 const MAT_WOOD_DARK = new THREE.MeshStandardMaterial({
-  color: 0x6b5138, metalness: 0.02, roughness: 0.88,
+  color: 0x5b4128, metalness: 0.02, roughness: 0.90,
 }); // 斗拱、椽头、勾栏：阴影里的深木
 const MAT_TILE = new THREE.MeshStandardMaterial({
-  color: 0x4a525c, metalness: 0.08, roughness: 0.68,
+  color: 0x515a66, metalness: 0.12, roughness: 0.62,
 }); // 青瓦屋面
 const MAT_TILE_DARK = new THREE.MeshStandardMaterial({
-  color: 0x272d34, metalness: 0.04, roughness: 0.8,
+  color: 0x232932, metalness: 0.06, roughness: 0.78,
 }); // 檐口、垂脊
 const MAT_STONE = new THREE.MeshStandardMaterial({
-  color: 0x8d8a80, metalness: 0.0, roughness: 0.94,
+  color: 0x968f83, metalness: 0.0, roughness: 0.95,
 }); // 台基
 const MAT_SHADOW = new THREE.MeshStandardMaterial({
   color: 0x17120d, metalness: 0.0, roughness: 1.0,
-}); // 门窗洞内腔（不发光、深色）
+  // ## 窗洞需要“透气”，不能是纯黑
+  //
+  // 纯黑窗洞在近距离看是**一块方黑斑**——不像室内，只像“模型漏了个洞”。
+  // 给极少量自发光（室内余光）既保留“深”的观感，又让它看起来是个空间。
+  emissive: 0x2a2018, emissiveIntensity: 0.5,
+}); // 门窗洞内腔（极弱余光）
 const MAT_GOLD = new THREE.MeshStandardMaterial({
   color: 0xc9a24a, metalness: 0.88, roughness: 0.32,
 }); // 塔刹（鎏金）
@@ -260,7 +281,7 @@ function octPrism(rt, rb, h, cy) {
 
   // 阑额（廊柱头一道横枋）
   octPrism(RV * APO + 0.05, RV * APO + 0.05, 0.48, yBase + VER_H - 0.24);
-  const va = B.flush(MAT_WOOD, 'veranda_architrave');
+  const va = B.flush(MAT_WOOD_MID, 'veranda_architrave');
   if (va) scene.add(va);
 
   // 副阶斗拱（简化：每面一攒一层的三层叠斗）
@@ -298,14 +319,16 @@ function octPrism(rt, rb, h, cy) {
     const rDrip = RV * APO + 2.8;
     const rWall = 12.0 * APO + 0.3;
     const rise = 2.45;
-    const segs = 4;
+    // 与腰檐同一套举折语言（段数 8 / 指数 2.1），否则副阶与各层屋面“弯得不一样”
+    const segs = 8;
+    const kRise = 2.1;
     for (let s = 0; s < segs; s++) {
       const t0 = s / segs;
       const t1 = (s + 1) / segs;
       const r0 = rDrip + (rWall - rDrip) * t0;
       const r1 = rDrip + (rWall - rDrip) * t1;
-      const b0 = yDrip + rise * Math.pow(t0, 1.55);
-      const b1 = yDrip + rise * Math.pow(t1, 1.55);
+      const b0 = yDrip + rise * Math.pow(t0, kRise);
+      const b1 = yDrip + rise * Math.pow(t1, kRise);
       octPrism(r1, r0, b1 - b0, (b0 + b1) * 0.5);
     }
     const vr = B.flush(MAT_TILE, 'veranda_roof');
@@ -356,9 +379,12 @@ function octPrism(rt, rb, h, cy) {
       }
       for (let i = 0; i < OCT; i++) {
         const ac = Math.PI / OCT + (i * Math.PI * 2) / OCT;
+        // 翼角起翘：起点在檐口、往上向内收。
+        // 旧写法抬 0.72、外伸 0.95 —— 绠点悬在屋面之上方很多，读起来像黑棒；
+        // 改成抬 0.50、外伸 0.80，绠点刚好在屋面延长线上，才是“翘”不是“杆”。
         strut(
           [Math.cos(ac) * rDrip, yDrip + 0.04, Math.sin(ac) * rDrip],
-          [Math.cos(ac) * (rDrip + 0.95), yDrip + 0.72, Math.sin(ac) * (rDrip + 0.95)],
+          [Math.cos(ac) * (rDrip + 0.80), yDrip + 0.50, Math.sin(ac) * (rDrip + 0.80)],
           0.26, 0.22
         );
         const bell = new THREE.ConeGeometry(0.14, 0.34, 6);
@@ -396,7 +422,7 @@ for (let si = 0; si < STORIES.length; si++) {
     const pR = R + 1.7;
     octPrism(pR, pR, 0.36, y0 - 0.18); // 挑台板
     octPrism(pR, pR - 0.5, 0.34, y0 - 0.62); // 板底加劲（收进去，像斗拱挑出）
-    const m = B.flush(MAT_WOOD, 'balcony_' + (si + 1));
+    const m = B.flush(MAT_WOOD_MID, 'balcony_' + (si + 1));
     if (m) scene.add(m);
 
     // 勾栏：望柱 + 上下枋 + 蜀柱
@@ -426,6 +452,9 @@ for (let si = 0; si < STORIES.length; si++) {
   }
 
   // ── 2.2 柱网（每面 3 根，共 24 根）──
+  //
+  // 柱头 / 柱础是“近距离精致”的关键：光杆圆柱一看就是程序几何，
+  // 而真实的木柱两端都有交代（下坐石础、上顶阑额）。这里用两个方块/倒锤形解决。
   const faceW = 2 * R * Math.sin(Math.PI / OCT);
   for (let i = 0; i < OCT; i++) {
     const f = FACE[i];
@@ -436,6 +465,16 @@ for (let si = 0; si < STORIES.length; si++) {
       B.add(
         new THREE.CylinderGeometry(0.30, 0.34, S.hCol, 10),
         T(x, y0 + S.hCol * 0.5, z)
+      );
+      // 柱头：椒斗形（上宽下窄），与斗拱层衔接
+      B.add(
+        new THREE.CylinderGeometry(0.42, 0.30, 0.26, OCT),
+        T(x, y0 + S.hCol - 0.13, z)
+      );
+      // 柱础：方形石础（**石材**，不是木色——石础与木柱的色差本身就是一道层次）
+      B.add(
+        new THREE.CylinderGeometry(0.36, 0.38, 0.30, OCT),
+        T(x, y0 + 0.15, z)
       );
     }
   }
@@ -569,7 +608,7 @@ for (let si = 0; si < STORIES.length; si++) {
   // ── 2.4 额枋（柱头一圈横枋）──
   octPrism(R * APO + 0.06, R * APO + 0.06, 0.55, yArch - 0.28);
   {
-    const m = B.flush(MAT_WOOD, 'architrave_' + (si + 1));
+    const m = B.flush(MAT_WOOD_MID, 'architrave_' + (si + 1));
     if (m) scene.add(m);
   }
 
@@ -602,11 +641,20 @@ for (let si = 0; si < STORIES.length; si++) {
         put(0.32, 0.24, 1.55, 0.95, 0.70);
         // 令拱（最外一跳，承托檐口）
         put(2.35 * sc, 0.26, 0.34, 1.42, 0.94);
-        // 散斗（令拱上两个小方块）
-        put(0.30, 0.20, 0.30, 1.42, 1.10);
+        // 散斗（令拱上的小斗，**两个**——只放一个居中会像一颗钉）
+        //
+        // 实测：单个居中散斗（0.30 立方）+ 深色，远看就是檐下一排黑钉子。
+        // 拆成两个、横置且略宽，才读得出“斗”而不“钉”。
+        put(0.34, 0.20, 0.30, 1.30, 1.08);
+        put(0.34, 0.20, 0.30, 1.54, 1.08);
       }
     }
-    const m = B.flush(MAT_WOOD_DARK, 'dougong_' + (si + 1));
+    // ## 斗拱用**中间阶**而不是最暗阶
+    //
+    // 斗拱坐在檐下阴影里，本身已经很少受光。若再给它最暗的木色，
+    // 远看就是一条黑带——几何做得再细也自废。中色调刚好能让
+    // 每一跳华拱的挑出轮廓浮出来（“层层叠叠”的观感就是靠这个）。
+    const m = B.flush(MAT_WOOD_MID, 'dougong_' + (si + 1));
     if (m) scene.add(m);
 
     // 斗拱层背后的垫板（遮住梁架间的空隙）
@@ -626,15 +674,22 @@ for (let si = 0; si < STORIES.length; si++) {
   if (si < STORIES.length - 1) {
     const rWall = R * APO + 0.30;
     const rDrip = R * APO + S.oh;
-    const segs = 4;
+    // ## 举折：段数与曲率
+    //
+    // 古建屋面不是直斜面：从檐口往里先**平缓**，靠近脊部再**陡起**（凹曲线）。
+    // 段数太少会让它退化成直斜面（看上去呆板、像现代坡屋顶）；
+    // 指数决定“弯在哪里”：`pow(t,1.55)` 的弯曲靠近檐口，视觉上几乎看不出凹，
+    // 改用更大的指数与更多段，弯曲集中在近脊一半——那才是举折的样子。
+    const segs = 8;
+    const kRise = 2.1;
     for (let s = 0; s < segs; s++) {
       const t0 = s / segs;
       const t1 = (s + 1) / segs;
-      // 半径从檐口向内收；标高从檐口向墙根抬（凹曲线：t^1.55）
+      // 半径从檐口向内收；标高从檐口向墙根抬（凹曲线）
       const r0 = rDrip + (rWall - rDrip) * t0;
       const r1 = rDrip + (rWall - rDrip) * t1;
-      const yOff = ROOF_RISE * Math.pow(t1, 1.55);
-      const yOff0 = ROOF_RISE * Math.pow(t0, 1.55);
+      const yOff = ROOF_RISE * Math.pow(t1, kRise);
+      const yOff0 = ROOF_RISE * Math.pow(t0, kRise);
       const h = yOff - yOff0;
       if (h < 0.02) continue;
       octPrism(r1, r0, h, yDrip + (yOff0 + yOff) * 0.5);
@@ -707,9 +762,12 @@ for (let si = 0; si < STORIES.length; si++) {
       const cxp = Math.cos(ac) * rDrip;
       const czp = Math.sin(ac) * rDrip;
       // 起翘：从檐口角点向外上方挑出一小段
+      //
+      // 抬 0.72 / 外伸 0.95 时，绠点明显高于屋面延长线，
+      // 远看就是“檐角插了一圈黑签”。改成 0.50 / 0.80，让它贴着屋面走向。
       strut(
         [cxp, yDrip + 0.04, czp],
-        [Math.cos(ac) * (rDrip + 0.95), yDrip + 0.72, Math.sin(ac) * (rDrip + 0.95)],
+        [Math.cos(ac) * (rDrip + 0.80), yDrip + 0.50, Math.sin(ac) * (rDrip + 0.80)],
         0.26, 0.22
       );
       // 风铎：小锥体垂在翘角下
@@ -733,15 +791,16 @@ for (let si = 0; si < STORIES.length; si++) {
 {
   const rDrip = 8.6 * APO + 2.3;
   const rTop = 0.75;
-  const segs = 6;
+  const segs = 12;
   for (let s = 0; s < segs; s++) {
     const t0 = s / segs;
     const t1 = (s + 1) / segs;
     const r0 = rDrip + (rTop - rDrip) * t0;
     const r1 = rDrip + (rTop - rDrip) * t1;
-    // 凹曲线：愈上愈陡（真实举折）
-    const base0 = TOP_DRIP + (APEX_Y - TOP_DRIP) * Math.pow(t0, 1.45);
-    const base1 = TOP_DRIP + (APEX_Y - TOP_DRIP) * Math.pow(t1, 1.45);
+    // 凹曲线：愈上愈陡（真实举折）。攒尖顶是八角锥，斜率变化比腰檐更明显，
+    // 指数与段数都比腰檐再大一些，否则锥面看上去就是直棱锥。
+    const base0 = TOP_DRIP + (APEX_Y - TOP_DRIP) * Math.pow(t0, 1.85);
+    const base1 = TOP_DRIP + (APEX_Y - TOP_DRIP) * Math.pow(t1, 1.85);
     octPrism(r1, r0, base1 - base0, (base0 + base1) * 0.5);
   }
   const roof = B.flush(MAT_TILE, 'top_roof');
@@ -752,17 +811,24 @@ for (let si = 0; si < STORIES.length; si++) {
   const edge = B.flush(MAT_TILE_DARK, 'top_eave_edge');
   if (edge) scene.add(edge);
 
-  // 八条垂脊：从檐口角点到顶点
+  // 八条垂脊：从檐口角点沿**屋面爬升**到顶点
   for (let i = 0; i < OCT; i++) {
     const ac = Math.PI / OCT + (i * Math.PI * 2) / OCT;
     const p0 = [Math.cos(ac) * rDrip, TOP_DRIP + 0.12, Math.sin(ac) * rDrip];
     const p1 = [0, APEX_Y - 0.1, 0];
     strut(p0, p1, 0.34, 0.26);
-    // 脊端起翘
+    // 脊端起翘（翼角）：
+    //
+    // 它必须**贴着屋面走向**往上翊，不能凭空向外伸——旧写法从檐口向
+    // 外上方拉一根 1.15 长的斜杆，而那个位置屋面已经往下走了，
+    // 于是它整根悬在屋面外，远看就是“八角上插了一圈黑棒”。
+    //
+    // 改成：起点略向外（挠角要出檐），但绠点仍在屋面**之上**、靠近檐脊，
+    // 且抬升量小（0.55）——那样才是“翼角起翘”，而不是天线。
     strut(
-      p0,
-      [Math.cos(ac) * (rDrip + 1.15), TOP_DRIP + 0.85, Math.sin(ac) * (rDrip + 1.15)],
-      0.30, 0.24
+      [Math.cos(ac) * (rDrip + 0.30), TOP_DRIP + 0.10, Math.sin(ac) * (rDrip + 0.30)],
+      [Math.cos(ac) * (rDrip + 0.95), TOP_DRIP + 0.62, Math.sin(ac) * (rDrip + 0.95)],
+      0.30, 0.22
     );
   }
   const hips = B.flush(MAT_TILE_DARK, 'top_hips');
@@ -783,9 +849,19 @@ for (let si = 0; si < STORIES.length; si++) {
   for (let i = 0; i < 7; i++) {
     const y = APEX_Y + 3.35 + i * 0.82;
     const r = 2.05 - i * 0.19;
-    // 相轮本体：矮圆柱（盘）+ 一圈外沿（环），两者叠出“轮”的厚度
-    B.add(new THREE.CylinderGeometry(r, r, 0.34, 26), T(0, y, 0));
-    B.add(new THREE.CylinderGeometry(r * 0.62, r * 0.62, 0.48, 20), T(0, y, 0));
+    // ## 相轮要“薄”
+    //
+    // 真实的相轮是**一层层薄盘**套在刹杆上，侧面看是“一排细线”，
+    // 而不是叠起来的碗。旧写法盘厚 0.34（直径 4 时厚比接近 1:12，但间隙小），
+    // 加上 7 层紧密排列，侧面就糊成了一根圆锥。
+    //
+    // 改法：盘再薄一截（0.16），间隙略拉开，另加一圈稍大的“轮沿”（矮环）——
+    // 轮沿是相轮真正的识别特征（“轮”的轮廓靠它）。
+    B.add(new THREE.CylinderGeometry(r, r, 0.16, 28), T(0, y, 0));
+    // 轮沿：比盘略大、很矮，形成“盘 + 边”的层次
+    B.add(new THREE.CylinderGeometry(r * 1.06, r * 1.06, 0.07, 28), T(0, y, 0));
+    // 盘心凸起（套在刹杆上的毂）
+    B.add(new THREE.CylinderGeometry(r * 0.30, r * 0.30, 0.26, 18), T(0, y, 0));
   }
   // 宝盖（伞状小檐，八棱，带垂脊感）
   octPrism(1.05, 2.15, 0.62, APEX_Y + 11.25);
@@ -806,12 +882,30 @@ for (let si = 0; si < STORIES.length; si++) {
     // 半径要大到“看不到地面边缘”（半径 150 时视线会越过柱面，塔前露出一道蓝色裂口），
     // 但一旦这么大，相机 near 就不能还停在 0.5——见下面的 near_z 注释。
     new THREE.CylinderGeometry(900, 900, 0.4, 64),
-    new THREE.MeshStandardMaterial({ color: 0x554f45, metalness: 0.0, roughness: 0.96 })
+    // ## 地面不能是“纯漫反射色块”
+    //
+    // 本渲染器没有贴图与阴影，一块均匀漫反射地面必然是一个无纵深的色块。
+    // 给它**轻微金属 + 略低粗糙度**后，地面会接收环境反射与平行光的角度变化：
+    // 近处（视角大）与远处（视角缓）的亮度自然不同，纵深感就出来了。
+    // 仍保留高基础粗糙度，不至于变成镜面。
+    new THREE.MeshStandardMaterial({
+      color: 0x585044, metalness: 0.06, roughness: 0.88,
+    })
   );
   ground.name = 'ground';
   ground.position.y = -0.45;
   ground.userData.noFrame = true;
   scene.add(ground);
+
+  // ## 不做“假投影”（试过，更糟）
+  //
+  // `Scene3D` 没有 shadow map，所以试过用几层同心暗盘堆出软阴影。结果失败：
+  // `MeshBasicMaterial` 在本渲染器映射为“**自发光 + unlit**”，
+  // 暗色叠在地面上反而**比地面更亮**，加上只有 4 个步进，
+  // 画面变成一圈明显的同心光靶（反而把视线吸到地上）。
+  //
+  // 结论：接地感靠**台基自身的明度与梯度**做（石台已比地面亮一阶），
+  // 不靠假阴影。真要阴影得先给渲染器加 shadow map。
 }
 
 // ============================================================================
@@ -822,29 +916,50 @@ for (let si = 0; si < STORIES.length; si++) {
 // 一块半径 900 的地面是个“巨大三角形”，深度在三角形内部插值——near 越小、
 // far 越大，远处同一像素上的深度分辨率就越粗（near=0.5/far=1200 时约 3mm），
 // 台基与地面的微小间隙就会抖成一片碎片。
-// 塔高 67、相机距离约 150，near=2 / far=600 已经够用，且精度提高一个量级。
-const camera = new THREE.PerspectiveCamera(36, 16 / 9, 2.0, 600);
-camera.position.set(88, 44, 116);
-camera.lookAt(0, 33, 0);
+// 塔高 67、相机距离约 150，near=2 / far=900 已经够用，且精度提高一个量级。
+//
+// ## 取景的两难（实测数据）
+//
+// 塔是竖直细长体（67.3 高 / 台基约 34 宽），在 16:9 画面里**竖向才是约束**。
+// 两端都试过：
+//   · 距离 112（旧值，零余量）→ 塔能撑满，但**塔基被底边裁掉**（读起来像浮在空中）
+//   · 距离 159（+30% 余量）→ 完整入画，但主体只占画面 8.4%（显得小）
+// 取中间值：距 142 / fov 36 —— 既有余量让台基与塔刹都在框内，又不至于太小。
+const camera = new THREE.PerspectiveCamera(36, 16 / 9, 2.0, 900);
+camera.position.set(76, 50, 118);
+camera.lookAt(0, 33.0, 0);
 scene.add(camera);
 
-scene.add(new THREE.HemisphereLight(0x9dc4ef, 0x4a4034, 0.62));
-scene.add(new THREE.AmbientLight(0x8fa6c4, 0.30));
+// ## 布光分层（为何是这个配置）
+//
+// 木构的“精美”全靠**向光面 / 背光面 / 檐下阴影**三层拉开。
+// 环境光给太多会把檐下填平（斗拱就糊成一片），给太少则背光面死黑。
+// 所以：压环境、抬主光、补光只负责“不让背面死黑”、轮廓光只负责勾边。
+scene.add(new THREE.HemisphereLight(0xa8c8ee, 0x3a2e20, 0.5));
+scene.add(new THREE.AmbientLight(0x8fa6c4, 0.22));
 
-// 主光：左前上方，暖白（木构要有明确的方向性明暗才不"糊"）
-const key = new THREE.DirectionalLight(0xfff2dc, 3.1);
-key.position.set(-52, 74, 40);
+// 主光：左前上方，暖白。强度 3.6 是因为塔身是多面体，
+// 只有一两个面真正迎着光，其余面靠补光——主光不够就整座塔“平”。
+const key = new THREE.DirectionalLight(0xfff0d4, 3.6);
+key.position.set(-58, 82, 46);
 key.target.position.set(0, 30, 0);
 scene.add(key, key.target);
 
-// 补光：右侧冷色，把背光面从死黑里提起来
-const fill = new THREE.DirectionalLight(0x9fb8d8, 1.05);
-fill.position.set(58, 22, 34);
+// 补光：右侧偏冷，把背光面从死黑里提起来（不参与造型，只保证看得见）
+const fill = new THREE.DirectionalLight(0xa8c0de, 0.85);
+fill.position.set(62, 26, 38);
 scene.add(fill);
 
-// 轮廓光：后上方，勾出檐口与塔刹的边缘
-const rim = new THREE.DirectionalLight(0xa9c4e8, 1.0);
-rim.position.set(8, 40, -60);
+// 轮廓光：后上方，勾出檐口与塔刹的边缘（逆光轮廓是立体感的主要来源）
+const rim = new THREE.DirectionalLight(0xb8d0f0, 1.35);
+rim.position.set(12, 46, -68);
 scene.add(rim);
+
+// 底图反光：从台基下方往上打一点暖光，模拟石台面的漫反射，
+// 避免一层檐下与台基之间出现一条死黑带。
+const bounce = new THREE.DirectionalLight(0xd8b890, 0.35);
+bounce.position.set(-10, -30, 20);
+bounce.target.position.set(0, 24, 0);
+scene.add(bounce, bounce.target);
 
 scene;

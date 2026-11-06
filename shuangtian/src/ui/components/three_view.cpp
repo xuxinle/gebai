@@ -323,7 +323,16 @@ void ThreeView::frame_scene(float margin) {
   const float aspect = bounds_.height > 0.5f ? bounds_.width / bounds_.height : 1.0f;
   const float half_fov_v = std::max(orbit_.fov_y_degrees, 1.0f) * 0.5f * kPi / 180.0f;
   const float half_fov_h = std::atan(std::tan(half_fov_v) * std::max(aspect, 0.05f));
-  const float m = std::max(margin, 1.0f);
+  // ## 默认余量：`1.0` 不等于“刚好塞满”
+  //
+  // 接口文档写的是“留空（`1.0`）时给 30% 余量”，而实现曾只做 `max(margin, 1.0f)`
+  // 就直接乘——即 **`1.0` 反而是零余量**，物体恰好顶到画框。
+  // 后果是实测级的：竖直细长体（应县木塔 67.3 高 / 34 宽）在 16:9 画面里
+  // 竖向才是约束，零余量下**塔基被底边裁掉**，读起来像“塔浮在空中”。
+  //
+  // 两种取法统一到同一语义：`margin <= 1.0` 视为“用默认 30%”，`> 1.0` 按倍数。
+  const float kDefaultMargin = 1.3f;
+  const float m = margin <= 1.0f ? kDefaultMargin : margin;
   const float d_v = half_span_v * m / std::max(std::tan(half_fov_v), 0.05f);
   const float d_h = half_span_h * m / std::max(std::tan(half_fov_h), 0.05f);
   orbit_.distance = std::max(std::max(d_v, d_h), 0.1f);
