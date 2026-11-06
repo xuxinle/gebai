@@ -1158,7 +1158,7 @@ private activeSchemas(sessionId: string) {
       let history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
       // 自动压缩（DESIGN「上下文保护」）：**窗口剩余不够一次回复**（上水位 = 窗口 - 输出预留）时先压缩最早历史，
       // 保证最新上下文完整、压缩过程对进行中的任务透明（水位与摘要均用任务级模型）。
-      // 压缩目标为**下水位**（窗口 × COMPACT_TARGET_RATIO，缺省 40%；GEBAI_COMPACT_TARGET_RATIO 可调）——
+      // 压缩目标为**下水位**（窗口 × COMPACT_TARGET_RATIO，缺省 20%；GEBAI_COMPACT_TARGET_RATIO 可调）——
       // 压到目标即停，近消息由滑动窗口原样保留。
       // 占用口径：只认模型服务返回的真实 input tokens——上次任务最后一次调用持久化的 usage
       // 基线（session.ctxInputTokens，含 system 与工具 schema）。基线本身已超阈值即先压缩

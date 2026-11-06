@@ -15,8 +15,15 @@ const COMPACT_OUTPUT_RESERVE_MIN = 1024
 /** 压缩目标水位：压缩后输入占窗口的比例（**压到该水位即停**）。上水位（触发）由引擎按
  *  「剩余 < 输出预留」判定（见 engine.lacksOutputRoom），下水位即本比例。
  *  取值权衡：偏高则该次压缩「压了等于没压」（后续若干轮立刻再触发）；偏低则一次丢弃过多
- *  历史（原文不另存，仅数百字摘要承载）。环境变量 GEBAI_COMPACT_TARGET_RATIO 可调。 */
-export const COMPACT_TARGET_RATIO = 0.4
+ *  历史（原文不另存，仅数百字摘要承载）。环境变量 GEBAI_COMPACT_TARGET_RATIO 可调。
+ *
+ *  **取 0.2 而不是 0.4 的实测理由**：保留得多（0.4）看起来更「安全」，但长会话里
+ *  触发一次压缩后只腾出不到四成窗口，几步工具调用就把水填回去——于是**在同一个水位
+ *  反复压缩**（每次都调一次模型写摘要，每次都把「刚才在做什么」揉进摘要里）。
+ *  这正是模型「原地打转」的温床：摘要里剩一半旧上下文碎片、任务却始终没推进。
+ *  压到 0.2 留的是一段**连贯的近期历史**（近消息滑动窗口另保证最近 12 条原文不压），
+ *  足够接上上下文；同时腾出的空间能跑完一整段子任务，压缩间隔显著拉长。 */
+export const COMPACT_TARGET_RATIO = 0.2
 /** 目标水位的合法区间（环境变量越界/非法时忽略取缺省）。 */
 const COMPACT_TARGET_RATIO_MIN = 0.1
 const COMPACT_TARGET_RATIO_MAX = 0.9
@@ -176,7 +183,7 @@ export function alignPairingBounds(messages: Message[], from: number, to: number
  *    永不进压缩区间，随新消息自然向前滑动；
  * ② **远消息压缩后完全抛弃**：区间取最早的连续一段（远的先压），区间内可压缩消息由摘要替换并从上下文移除；
  * ③ **压到目标水位即停**：上水位（触发）= `reserve` 驱动的「窗口剩余 < 输出预留」（见 engine）；
- *    下水位（目标）= 窗口 × `targetRatio`（COMPACT_TARGET_RATIO，缺省 40%；环境变量
+ *    下水位（目标）= 窗口 × `targetRatio`（COMPACT_TARGET_RATIO，缺省 20%；环境变量
  *    GEBAI_COMPACT_TARGET_RATIO 可调），且不高于触发线（目标高于触发线等于永远压不到，夹到触发线即停）
  *    ——需腾出量 = 真值基线 − 目标输入，按估算逐条累计到量即止；可压消息不够（窗口外全压完仍高于目标）
  *    时压满窗口外，不足部分交给迭代压缩（run 前至多 4 轮）与溢出恢复；
