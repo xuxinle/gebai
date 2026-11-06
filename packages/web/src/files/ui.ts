@@ -7,6 +7,10 @@
 
 import { nextScopeId, popKeyScope, pushEscScope, pushKeyScope, type FocusKind } from "../keymap"
 import { extOfPath } from "@gebai/sdk"
+// DOM 构造函数统一在微框架（fw/dom.ts）：此前这里与主界面各有一份 h()，两份写法还不同
+// （这里 onclick 风格 + 数组子节点；微框架 on:{} 风格）。合流后只有一份实现，
+// 本文件保留同名导出作为**薄适配层**（38 个引用方的签名不变）。
+import { append as fwAppend, clear as fwClear, h as fwH } from "../fw/dom"
 
 /* ------------------------------ DOM ------------------------------ */
 
@@ -14,33 +18,18 @@ type Attrs = Record<string, string | number | boolean | undefined | null | ((e: 
 
 /** 创建元素：`h("div", { class: "x", onclick: fn }, [child, "text"])`。 */
 export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = {}, children: Array<Node | string | null | undefined> = []): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag)
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === undefined || v === null || v === false) continue
-    if (k === "class") node.className = String(v)
-    else if (k === "text") node.textContent = String(v)
-    else if (k === "html") node.innerHTML = String(v)
-    else if (k === "value" && node instanceof HTMLInputElement) node.value = String(v)
-    else if (k === "checked" && node instanceof HTMLInputElement) node.checked = v === true || v === "true"
-    else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v as EventListener)
-    else if (k === "style") node.setAttribute("style", String(v))
-    else if (v === true) node.setAttribute(k, "")
-    else node.setAttribute(k, String(v))
-  }
-  append(node, children)
+  const node = fwH(tag, attrs as never) as HTMLElementTagNameMap[K]
+  fwAppend(node, ...children)
   return node
 }
 
 /** 追加子节点（字符串转文本节点，null/undefined 跳过）。 */
 export function append(parent: Node, children: Array<Node | string | null | undefined>): void {
-  for (const c of children) {
-    if (c === null || c === undefined) continue
-    parent.appendChild(typeof c === "string" ? document.createTextNode(c) : c)
-  }
+  fwAppend(parent as HTMLElement, ...children)
 }
 
 export function clear(node: Element): void {
-  while (node.firstChild) node.removeChild(node.firstChild)
+  fwClear(node as HTMLElement)
 }
 
 export function qs<T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T {

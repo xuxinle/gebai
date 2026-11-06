@@ -17,7 +17,9 @@
  *  拖动范式照 cny-cat.ts（pointerdown + setPointerCapture + 位移钳制 + 丢失捕获兜底）。 */
 import type { UserTodo } from "@gebai/sdk"
 import { autosize, syncSendButton } from "./composer"
-import { clampPos, defaultPos, dropTargetIndex, moveItem, parsePos, type PopPos } from "./todo-core"
+import { defaultPos, dropTargetIndex, moveItem } from "./todo-core"
+import { makeDraggable } from "./fw/draggable"
+import { createPoller, createScope } from "./fw/scope"
 import { client, el, focusInput, input } from "./state"
 import { confirmDialog, toast } from "./ui"
 import { describeIdleWindow } from "./idle-window-core"
@@ -63,11 +65,13 @@ let opened = false
 let bound = false
 /** 行内编辑中的待办 id（编辑期间跳过自动重绘，避免打断输入）。 */
 let editingId: string | null = null
-let pollTimer: number | null = null
+/** 资源作用域：面板级副作用（轮询/监听）随面板销毁一并回收。 */
+const scope = createScope()
 /** 列表拖动排序的源索引。 */
 let dragFromIndex: number | null = null
 /** 浮层拖动会话（指针位移起点）。 */
-let dragWindow: { dx: number; dy: number; pid: number } | null = null
+/** 拖动/位置记忆（微框架通用件，见 fw/draggable.ts）。 */
+let drag: ReturnType<typeof makeDraggable> | null = null
 /** 展开全文的待办 id（长文本折叠状态）。 */
 const expandedIds = new Set<string>()
 /** 上次渲染的数据签名（无变化时跳过重绘——不打断滚动与编辑）。 */
@@ -97,7 +101,7 @@ export async function openTodoPop(): Promise<void> {
   writeLocal(OPEN_KEY, "1")
   refs.root.hidden = false
   refs.root.classList.add("show")
-  if (!wasOpen) applyPos(clampNow(loadPos()), true)
+  if (!wasOpen) drag?.show()
   await refresh()
   // 首次打开默认聚焦新增输入框，直接敲键盘即可记待办
   if (!wasOpen && !editingId) refs.addInput.focus()
@@ -135,17 +139,26 @@ async function refresh(force = false): Promise<void> {
   if (force || sig !== lastSig) render()
 }
 
-function startPoll(): void {
-  stopPoll()
-  pollTimer = window.setInterval(() => {
-    if (!opened || document.visibilityState !== "visible" || editingId) return
+/**
+ * 轮询走微框架的单飞轮询器（fw/scope.ts）：上一轮没结束就跳过本轮、后台标签页不跑。
+ * 手写版把这两个判断（单飞、可见性）分别放在两处，改起来容易漏；而且 `refresh` 内含网络请求，
+ * 不单飞会在慢网下堆叠出一堆并行请求。
+ */
+const poller = createPoller(
+  () => {
+    if (editingId) return
     void refresh()
-  }, POLL_MS)
+  },
+  POLL_MS,
+  { scope },
+)
+
+function startPoll(): void {
+  poller.start()
 }
 
 function stopPoll(): void {
-  if (pollTimer) clearInterval(pollTimer)
-  pollTimer = null
+  poller.stop()
 }
 
 /* ---------- 渲染 ---------- */
@@ -358,85 +371,23 @@ function buildPop(): TodoPopRefs {
   document.body.appendChild(root)
 
   const r: TodoPopRefs = { root, list, empty, count, addForm, addInput, addBtn }
-  bindHeadDrag(r)
+  // 拖动/位置记忆交给微框架通用件（与设置抽屉、人设弹窗共用一份实现）：
+  // 手写两份的代价是「一边修了视口钳制、另一边没修」——窄屏下浮层会被拖出屏幕抓不回来。
+  drag = makeDraggable({
+    root,
+    handle: ".todo-pop-head",
+    storageKey: POS_KEY,
+    initial: (vw) => defaultPos(root.getBoundingClientRect().width || 640, vw),
+  })
   // 回车提交（textarea 内 Enter 为换行，表单只有 Ctrl/Cmd+Enter 与按钮两条提交路径）
   addForm.addEventListener("submit", (e) => {
     e.preventDefault()
     void addTodo(false)
   })
   window.addEventListener("resize", () => {
-    if (opened) applyPos(clampNow(currentPos()), true)
+    if (opened) drag?.reclamp()
   })
   return r
-}
-
-function bindHeadDrag(r: TodoPopRefs): void {
-  const head = r.root.querySelector(".todo-pop-head") as HTMLElement
-  head.addEventListener("pointerdown", (e) => {
-    if ((e.target as HTMLElement).closest("button")) return
-    if (e.button !== 0) return
-    const rect = r.root.getBoundingClientRect()
-    dragWindow = { dx: e.clientX - rect.left, dy: e.clientY - rect.top, pid: e.pointerId }
-    r.root.classList.add("dragging")
-    head.setPointerCapture(e.pointerId)
-    e.preventDefault()
-  })
-  const move = (e: PointerEvent) => {
-    if (!dragWindow || e.pointerId !== dragWindow.pid) return
-    const rect = r.root.getBoundingClientRect()
-    const p = clampPos(e.clientX - dragWindow.dx, e.clientY - dragWindow.dy, rect.width, rect.height, window.innerWidth, window.innerHeight)
-    applyPos(p, false)
-  }
-  const end = (e: PointerEvent) => {
-    if (!dragWindow || e.pointerId !== dragWindow.pid) return
-    dragWindow = null
-    r.root.classList.remove("dragging")
-    savePos()
-  }
-  head.addEventListener("pointermove", move)
-  head.addEventListener("pointerup", end)
-  head.addEventListener("pointercancel", end)
-  head.addEventListener("lostpointercapture", end)
-}
-
-function applyPos(p: PopPos, persist: boolean): void {
-  const r = refs
-  if (!r) return
-  r.root.style.left = `${p.x}px`
-  r.root.style.top = `${p.y}px`
-  if (persist) savePos()
-}
-
-function currentPos(): PopPos {
-  const r = refs
-  if (!r) return { x: 0, y: 0 }
-  const rect = r.root.getBoundingClientRect()
-  return { x: rect.left, y: rect.top }
-}
-
-function clampNow(p: PopPos): PopPos {
-  const r = refs
-  if (!r) return p
-  const rect = r.root.getBoundingClientRect()
-  const w = rect.width || 640
-  const h = rect.height || 560
-  return clampPos(p.x, p.y, w, h, window.innerWidth, window.innerHeight)
-}
-
-function loadPos(): PopPos {
-  const saved = parsePos(readLocal(POS_KEY))
-  // 保存的位置来自上一个窗口尺寸（换设备/横竖屏切换后可能整个落在视口外），首次应用前先钳回可视区
-  if (saved) return clampNow(saved)
-  const r = refs
-  const w = r ? r.root.getBoundingClientRect().width || 640 : 640
-  return defaultPos(w, window.innerWidth)
-}
-
-function savePos(): void {
-  const r = refs
-  if (!r) return
-  const p = currentPos()
-  writeLocal(POS_KEY, JSON.stringify(p))
 }
 
 function readLocal(key: string): string | null {

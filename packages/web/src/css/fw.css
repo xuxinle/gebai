@@ -1,0 +1,64 @@
+/* ---------- 微框架基础件（fw/）----------
+ * 这些类名由 fw/form.ts 的 field/textInput/button 等通用件产出。样式集中在这里，
+ * 而不是散回各面板的 CSS：否则「同一个控件在待办弹窗与设置抽屉里长得不一样」会再次发生
+ * （这正是抽通用件要解决的问题之一）。
+ * 面板自己的私有样式仍写在自己的 CSS 里，只复用这里的控件外观。
+ */
+
+.fw-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.fw-field.wide { grid-column: 1 / -1; }
+.fw-field-label { font-size: 12px; color: var(--text-muted); }
+.fw-field-hint { font-size: 11.5px; line-height: 1.45; color: var(--text-faint); }
+.fw-field-error { font-size: 11.5px; color: var(--danger); }
+.fw-field.bad .fw-input { border-color: var(--danger); }
+
+.fw-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input, var(--bg));
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.fw-input:focus { outline: none; border-color: var(--accent); }
+.fw-input.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.fw-textarea { resize: vertical; line-height: 1.5; }
+select.fw-input { cursor: pointer; }
+
+.fw-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+.fw-check input { width: auto; }
+
+.fw-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.fw-seg-btn {
+  padding: 5px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.fw-seg-btn + .fw-seg-btn { border-left: 1px solid var(--border); }
+.fw-seg-btn:hover { background: var(--bg-hover); }
+.fw-seg-btn.active { background: var(--accent-soft); color: var(--accent); }
+
+.fw-btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.fw-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.fw-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.fw-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.fw-btn.primary:hover { filter: brightness(1.08); }
+.fw-btn.danger { color: var(--danger); border-color: var(--danger); }
+.fw-btn.ghost { background: transparent; }

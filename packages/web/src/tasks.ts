@@ -43,6 +43,12 @@ import {
   type TaskFormValues,
 } from "./tasks-core"
 import { createIdleWindowFields, type IdleWindowFields } from "./idle-window-ui"
+import {
+  checkbox as fwCheckbox,
+  selectInput as fwSelectInput,
+  textArea as fwTextArea,
+  textInput as fwTextInput,
+} from "./fw/form"
 
 /** 面板打开期间兜底轮询间隔（事件为主，轮询只防漏）。 */
 const POLL_MS = 15_000
@@ -339,6 +345,9 @@ interface EditorRefs {
   fields: Record<string, HTMLElement>
 }
 
+// 字段构造统一走微框架（fw/form.ts）：此前本文件与 settings.ts 各写一份 field/textInput/selectInput，
+// 新增一种控件要在两处各改一遍，且两处的类名已经不一致。保留一层薄封装是为了沿用
+// 本面板既有类名（tasks-field/tasks-hint/tasks-check→fw 等价物），保证视觉不变。
 function field(label: string, control: HTMLElement, hint?: string): HTMLElement {
   const wrap = el("div", "tasks-field")
   wrap.append(el("div", "settings-form-label", label), control)
@@ -346,40 +355,14 @@ function field(label: string, control: HTMLElement, hint?: string): HTMLElement 
   return wrap
 }
 
-function textInput(value: string, placeholder = ""): HTMLInputElement {
-  const i = document.createElement("input")
-  i.type = "text"
-  i.value = value
-  i.placeholder = placeholder
-  return i
-}
-
-function textArea(value: string, rows = 4, placeholder = ""): HTMLTextAreaElement {
-  const t = document.createElement("textarea")
-  t.rows = rows
-  t.value = value
-  t.placeholder = placeholder
-  return t
-}
-
-function selectInput(options: Array<[string, string]>, value: string): HTMLSelectElement {
-  const s = document.createElement("select")
-  for (const [v, label] of options) {
-    const o = document.createElement("option")
-    o.value = v
-    o.textContent = label
-    if (v === value) o.selected = true
-    s.appendChild(o)
-  }
-  return s
-}
+/** 单行/多行/下拉/开关：直接用微框架实现（行为与外观统一，避免两份实现漂移）。 */
+const textInput = fwTextInput
+const textArea = fwTextArea
+const selectInput = fwSelectInput
 
 function checkboxField(label: string, checked: boolean): { root: HTMLElement; input: HTMLInputElement } {
-  const root = el("label", "tasks-check")
-  const input = document.createElement("input")
-  input.type = "checkbox"
-  input.checked = checked
-  root.append(input, el("span", undefined, label))
+  const { root, input } = fwCheckbox(label, checked)
+  root.classList.add("tasks-check")
   return { root, input }
 }
 

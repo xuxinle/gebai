@@ -2,6 +2,8 @@ import { uuid } from "./uuid"
 import { blockNativeContextMenu } from "./native-menu"
 import type { ContentBlock, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
+// 微框架基础件样式（在 base 之后、面板样式之前：面板可覆盖控件外观）
+import "./css/fw.css"
 import "./css/chat.css"
 import "./css/composer.css"
 import "./css/persona-panel.css"

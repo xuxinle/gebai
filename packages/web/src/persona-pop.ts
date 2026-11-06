@@ -22,7 +22,8 @@
  * - **打开时静默轮询**（15s）：状态是外部世界在变的（凭据会过期、消息会进来），
  *   打开着就该看到它变，而不是停在打开那一刻的快照
  */
-import { clampPos, defaultPos, parsePos, type PopPos } from "./todo-core"
+import { clampPos } from "./todo-core"
+import { makeDraggable } from "./fw/draggable"
 import { el } from "./state"
 import { fetchPersonaState, renderPersonaPanel, type PersonaStateView } from "./persona-panel"
 
@@ -43,7 +44,8 @@ let pollTimer: number | null = null
 /** 上次渲染的数据签名（无变化时跳过重绘——不打断滚动）。 */
 let lastSig = ""
 /** 浮层拖动会话（指针位移起点）。 */
-let dragWindow: { dx: number; dy: number; pid: number } | null = null
+/** 拖动/位置记忆（微框架通用件，见 fw/draggable.ts）。 */
+let drag: ReturnType<typeof makeDraggable> | null = null
 /** 上次拉到的快照（供签名与徽标使用）。 */
 let lastSnapshot: PersonaStateView | null = null
 
@@ -107,7 +109,7 @@ export async function openPersonaPop(): Promise<void> {
   writeLocal(OPEN_KEY, "1")
   refs.root.hidden = false
   refs.root.classList.add("show")
-  if (!wasOpen) applyPos(clampNow(loadPos()), true)
+  if (!wasOpen) drag?.show()
   await refresh(true)
   startPoll()
 }
@@ -242,67 +244,17 @@ function buildPop(): PersonaPopRefs {
   document.body.appendChild(root)
 
   const r: PersonaPopRefs = { root, body, badge }
-  bindHeadDrag(r)
+  // 拖动/位置记忆交给微框架通用件（原先与 todo-pop 各写一份，35+ 行逐字相同）；
+  // 首次位置：靠右、标题栏下方，与待办弹窗错开。
+  drag = makeDraggable({
+    root,
+    handle: ".persona-pop-head",
+    storageKey: POS_KEY,
+    initial: (vw) => {
+      const rect = root.getBoundingClientRect()
+      const w = rect.width || 420
+      return clampPos(vw - w - 16, 64, w, rect.height || 480, vw, window.innerHeight)
+    },
+  })
   return r
-}
-
-/** 标题栏拖动（照 todo-pop：pointerdown + 捕获 + 位移钳制 + 丢失捕获兜底）。 */
-function bindHeadDrag(r: PersonaPopRefs): void {
-  const head = r.root.querySelector<HTMLElement>(".persona-pop-head")
-  if (!head) return
-  head.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return
-    // 点在按钮上不启动拖动（否则「刷新」会变成拖一下）
-    if ((e.target as HTMLElement).closest("button")) return
-    const rect = r.root.getBoundingClientRect()
-    dragWindow = { dx: e.clientX - rect.left, dy: e.clientY - rect.top, pid: e.pointerId }
-    head.setPointerCapture(e.pointerId)
-    r.root.classList.add("dragging")
-  })
-  head.addEventListener("pointermove", (e) => {
-    if (!dragWindow || dragWindow.pid !== e.pointerId) return
-    applyPos(clampTo(e.clientX - dragWindow.dx, e.clientY - dragWindow.dy), false)
-  })
-  const end = (e: PointerEvent) => {
-    if (!dragWindow || dragWindow.pid !== e.pointerId) return
-    dragWindow = null
-    r.root.classList.remove("dragging")
-    try {
-      head.releasePointerCapture(e.pointerId)
-    } catch {
-      /* 已释放 */
-    }
-    const rect = r.root.getBoundingClientRect()
-    writeLocal(POS_KEY, JSON.stringify({ x: Math.round(rect.left), y: Math.round(rect.top) }))
-  }
-  head.addEventListener("pointerup", end)
-  head.addEventListener("pointercancel", end)
-}
-
-/* ---------- 位置 ---------- */
-
-function loadPos(): PopPos | null {
-  return parsePos(readLocal(POS_KEY))
-}
-
-/** 把位置钳制到当前视口内（窗口缩小后旧坐标可能整体在屏幕外）。 */
-function clampNow(pos: PopPos | null): PopPos {
-  if (!refs) return pos ?? defaultPos(420, window.innerWidth)
-  const rect = refs.root.getBoundingClientRect()
-  const w = rect.width || 420
-  const h = rect.height || 480
-  return clampPos(pos?.x ?? window.innerWidth - w - 16, pos?.y ?? 64, w, h, window.innerWidth, window.innerHeight)
-}
-
-function clampTo(x: number, y: number): PopPos {
-  if (!refs) return { x, y }
-  const rect = refs.root.getBoundingClientRect()
-  return clampPos(x, y, rect.width || 420, rect.height || 480, window.innerWidth, window.innerHeight)
-}
-
-function applyPos(pos: PopPos, initial: boolean): void {
-  if (!refs) return
-  refs.root.style.left = `${pos.x}px`
-  refs.root.style.top = `${pos.y}px`
-  if (initial) refs.root.style.visibility = "visible"
 }
