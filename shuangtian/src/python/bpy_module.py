@@ -55,16 +55,100 @@ _mathutils.Matrix = Matrix
 _mathutils.Euler = Euler
 _mathutils.Quaternion = Quaternion
 class _World:
-    """世界背景（只实现环境反射需要的最小面）。"""
+    """世界背景（只实现环境反射需要的最小面）。
+
+    ## 为何同时提供 `background_color` 与 `node_tree`（2026-11-06 补）
+
+    真 bpy 的颜色**只在节点树里**：
+
+        bg = world.node_tree.nodes['Background']
+        bg.inputs['Color'].default_value = (0.05, 0.05, 0.05, 1.0)
+
+    而本兼容层只想提供一个直接字段（实现节点树的成本远高于收益）。
+    代价是：「两边都能跑」的脚本必须写两套。实测撞过：
+
+        AttributeError: 'World' object has no attribute 'background_color'
+
+    ## 解法：一个极小的节点树影子
+
+    只实现 `world.node_tree.nodes['Background'].inputs['Color'|'Strength']`
+    这一个路径——它写进去直接落到 `background_color` / `background_strength`。
+    于是两种写法看到的是**同一份数据**，不会漂移。
+    """
 
     def __init__(self, name='World'):
         self.name = name
         # 与 Blender 默认世界灰一致（0.05 中性灰）
         self.background_color = (0.05, 0.05, 0.05)
+        self.background_strength = 1.0
         self.use_nodes = False
+        self.node_tree = _WorldNodeTree(self)
 
     def __repr__(self):
         return 'World(%r)' % (self.name,)
+
+
+class _WorldSocket:
+    """`Background` 节点上的一个输入口（只有 `default_value`）。"""
+
+    __slots__ = ('_world', '_kind')
+
+    def __init__(self, world, kind):
+        self._world = world
+        self._kind = kind
+
+    @property
+    def default_value(self):
+        if self._kind == 'color':
+            c = self._world.background_color
+            return (c[0], c[1], c[2], 1.0)
+        return self._world.background_strength
+
+    @default_value.setter
+    def default_value(self, value):
+        if self._kind == 'color':
+            self._world.background_color = (float(value[0]), float(value[1]),
+                                            float(value[2]))
+        else:
+            self._world.background_strength = float(value)
+
+
+class _BackgroundNode:
+    """`Background` 节点：只给 `inputs`。"""
+
+    __slots__ = ('inputs',)
+
+    def __init__(self, world):
+        self.inputs = {
+            'Color': _WorldSocket(world, 'color'),
+            'Strength': _WorldSocket(world, 'strength'),
+        }
+
+
+class _WorldNodes:
+    """`world.node_tree.nodes`：只支持 `nodes['Background']` 与 `.get(...)`。"""
+
+    __slots__ = ('_background',)
+
+    def __init__(self, world):
+        self._background = _BackgroundNode(world)
+
+    def __getitem__(self, key):
+        if key == 'Background':
+            return self._background
+        raise KeyError('找不到节点：%r（本兼容层只实现 Background）' % (key,))
+
+    def get(self, key, default=None):
+        return self._background if key == 'Background' else default
+
+
+class _WorldNodeTree:
+    """`world.node_tree`：只给 `nodes`。"""
+
+    __slots__ = ('nodes',)
+
+    def __init__(self, world):
+        self.nodes = _WorldNodes(world)
 
 
 
@@ -96,18 +180,60 @@ class _Data:
         第一个的残留，报 `ValueError: 已存在同名数据块`。
 
         宿主侧 `BpySceneExtractor::extract` 每次跑脚本前会调它。
+
+        ## 为何连 scene 上的自定义属性也要清（2026-11-06 修）
+
+        `self.cameras.clear()` 这些只清了**数据块**，而 `bpy.context.scene`
+        上由脚本挂的**自定义属性**（如 `__st_compat__`）不在任何 collection 里，
+        于是会跨 run 残留。
+
+        实测后果（很严重）：先跑一份声明了 `__st_compat__='cycles'` 的脚本，
+        再跑一份**没声明**的，后者会意外继承对标口径
+        （`tone_map` 从 AgX 变成 None、`ambient` 从 0.35 变成 0）。
+        现象是“后一份场景无故变暗”，而报错为零。
+
+        所以把 scene 上的可写属性也清掉（除了 `name` 与 `world`——
+        后者由模块初始化负责）。
         """
         self.meshes.clear()
         self.objects.clear()
         self.materials.clear()
         self.cameras.clear()
         self.lights.clear()
+        _reset_scene_attributes()
 
 
 _data = _Data()
 _context = _Context()
 _context.scene = _Module('Scene')
 _context.scene.name = 'Scene'
+
+
+# 场景上的自定义属性（脚本挂的，不在任何 collection 里）。
+#
+# ## 为何要单独记一份
+#
+# `_Module` 是普通对象，脚本可以随时 `scene.任意名 = 值`。`_Data.reset()`
+# 只能清数据块，清不了这些。而它们会跨 run 残留——实测后果見
+# `_Data.reset()` 的说明（后一份场景意外继承对标口径）。
+#
+# 用一份白名单不行（无法预知脚本会挂什么），所以重置时直接重建一个
+# 干净的 `_Module`，只保留 `name` 与 `world`。
+_SCENE_RESERVED = ('name', 'world')
+
+
+def _reset_scene_attributes():
+    """把 `bpy.context.scene` 上的自定义属性清掉（保留 `name` / `world`）。
+
+    用「重建」而不是「逐项删除」：属性名不可枚举（`_Module` 没有
+    `__dict__` 遍历的保证），而重建一定干净。
+    """
+    fresh = _Module('Scene')
+    fresh.name = 'Scene'
+    for key in _SCENE_RESERVED:
+        if hasattr(_context.scene, key):
+            setattr(fresh, key, getattr(_context.scene, key))
+    _context.scene = fresh
 
 
 # ---- 世界背景（环境反射的来源）----

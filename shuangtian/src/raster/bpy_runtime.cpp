@@ -173,12 +173,36 @@ auto read_camera(const Json& value) -> Camera {
 /// 两者同一量纲，所以常数只负责一件事：**把 Blender 的数值尺度映射到
 /// 本框架"1.0 = 正常受光"的尺度**。
 ///
-/// 取 `energy 1000 W/m² → intensity 1.0`（Blender 点光的默认能量就是 1000W，
-/// 这是有据可依的锚点，不是拟合出来的）：
+/// 取 `energy 1 W/m² → intensity 1.0`（量纲 1:1，不做单位换算）：
 ///
 ///     kSunEnergyToIrradiance = 1.0
 ///
-/// ## 已知残余（不假装对齐）
+/// ## 为何不再除 1000（2026-11-06 修）
+///
+/// 旧代码是 `energy / 1000.0 * kSunEnergyToIrradiance`，与本函数的注释
+/// **自相矛盾**：注释说“1000 W/m² → 1.0”，而对 `energy = 1.0` 算出 `0.001`。
+///
+/// 那个 `/1000` 是旧式 `energy/1000 × 0.769` 的分母残留（`0.769` 已删，
+/// 分母没人清理）。它是**量纲错**，不是取舍：
+///
+/// Blender 的 SUN `energy` 单位就是 **W/m²（辐照度）**，而内核的
+/// `diffuse` 乘进 `irradiance = n·l × color × intensity` 之后也是辐照度。
+/// 两者同量纲，系数只能是 1。
+///
+/// ## 实测依据（不是推的）
+///
+/// 受控平面（0.5 灰 + SUN energy=1 正对 + 无环境光）：
+///
+/// | | 像素 |
+/// |---|---|
+/// | 真 Cycles（`tools/blender_cycles_truth.py`） | **111** |
+/// | 本框架（去掉 /1000 且 ambient=0、ibl=0、tone=None） | **112** |
+/// | 本框架（旧：/1000 + ambient .35 + ibl 1.0 + AgX） | 123 |
+///
+/// 全画面 262144 个像素**最大差 1 级**（p50=p90=p99=max=1），
+/// 那 1 级来自 Principled 的镜面项（实测占比 0.796%）与 8bit 舍入边界。
+///
+/// ## 为何也不用“补偿 AgX”
 ///
 /// 真 Blender 的观感还经过它自己的 AgX 3D LUT，而本框架的 AgX 是解析拟合、
 /// 低值区偏亮（见 `docs/BACKLOG.md` P1）。**那个偏差不由本系数补偿**——
@@ -235,9 +259,9 @@ auto read_lighting(const Json& items) -> Lighting {
   // 所以这里只保留一个常数 `kSunEnergyToIrradiance`，它的意义明确定义为：
   // **「Blender SUN energy 1 W/m² 对应本内核的多少 irradiance」**。
   //
-  // 标定方法与数值记在 `docs/render_parity.md` 的“bpy 重标”一节。
+  // 标定依据与实测表记在 `docs/bpy_render_parity.md`。
   if (key_energy > 0.0) {
-    lighting.diffuse = static_cast<float>(key_energy / 1000.0) * kSunEnergyToIrradiance;
+    lighting.diffuse = static_cast<float>(key_energy) * kSunEnergyToIrradiance;
   }
 
   // `extra_lights` 是**定长 `std::array`**（渲染器按固定上限循环，
@@ -258,12 +282,15 @@ auto read_lighting(const Json& items) -> Lighting {
     light.color = math::Vec3{static_cast<float>(rgb[0]), static_cast<float>(rgb[1]),
                              static_cast<float>(rgb[2])};
     const double energy = json_get_double(items[i], "energy", 1000.0);
-    // 与主光**同一系数**（物理口径）。
+    // 与主光**同一系数**（物理口径，量纲 1:1）。
     //
     // 旧值 `× 0.75` 与主光的 `× 0.769` 是两个不同的数——历史上两次分别调参
     // 留下的。现在都归到同一个常量：同一类灯就该用同一个换算，否则
     // “换一个灯当主光”会让画面亮度跳变。
-    light.intensity = static_cast<float>(energy / 1000.0) * kSunEnergyToIrradiance;
+    //
+    // ⚠ 这里曾与主光一起多除了一次 1000（已修，见 `kSunEnergyToIrradiance` 的说明）。
+    // 两者必须同步：只修一处会让“多灯场景里主光换了就变色”。
+    light.intensity = static_cast<float>(energy) * kSunEnergyToIrradiance;
     lighting.extra_lights[slot++] = light;
   }
   return lighting;
@@ -391,6 +418,14 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
       scene.background_set = true;
     }
   }
+
+  // 「对标」声明与「脚本是否真的设了 world」——两者都必须从 Python 侧取，
+  // 不能在 C++ 侧推（兼容层的 scene.world 永远非空，见 extract.py 的说明）。
+  const Json& compat = json_at(root, "compat");
+  if (compat.is_string()) {
+    scene.bpy_compat = compat.get<std::string>();
+  }
+  scene.world_set = json_get_bool(root, "world_set", false);
 
   const Json& warnings = json_at(root, "warnings");
   if (warnings.is_array()) {

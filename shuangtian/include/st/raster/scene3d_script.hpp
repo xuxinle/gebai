@@ -326,6 +326,26 @@ struct SceneObjectSpec {
 /// 但两级都接受 `time`（不让人因为拼写而被拒）。
 /// 完整场景描述。
 struct SceneSpec {
+  /// 「对标」模式（2026-11-06 加）。
+  ///
+  /// ## 为何需要它
+  ///
+  /// 与真渲染器做**像素级对标**时，必须把「本框架特有、对方没有」项全关掉：
+  /// `ambient` 保底、无 world 时的 IBL 保底、以及用 AgX 还是 Standard。
+  /// 而那三项关掉会让背光面**真的全黑**——物理正确，但会改变存量出片。
+  ///
+  /// 所以沿用 three 那条路已验证过的设计：**默认不改，脚本声明了才切**。
+  ///
+  /// | 值 | 含义 | 声明方式 |
+  /// |---|---|---|
+  /// | `None` | 不启用（默认） | — |
+  /// | `Cycles` | 对标 Cycles（无偏、真值来源） | `bpy.context.scene.__st_compat__ = 'cycles'` |
+  /// | `Eevee` | 对标 EEVEE（有屏幕空间 GI；**不推荐**，见 `docs/eevee_vs_cycles.md`） | `... = 'eevee'` |
+  enum class CompatMode : std::uint8_t { None = 0, Cycles = 1, Eevee = 2 };
+
+  /// 当前生效的「对标」模式。`None` = 普通出片，逐像素与改动前相同。
+  CompatMode compat{CompatMode::None};
+
   Camera camera{};
   Lighting lighting{};
   PlanarShadow shadow{};

@@ -284,14 +284,76 @@ class Matrix:
 
 
 class Euler:
-    """欧拉角（弧度）。order 只支持 XYZ / ZYX。"""
+    """欧拉角（弧度）。order 只支持 XYZ / ZYX。
 
-    __slots__ = ('x', 'y', 'z', 'order')
+    ## 构造签名：与真 bpy **一致**（2026-11-06 实测校正）
 
-    def __init__(self, x=0.0, y=0.0, z=0.0, order='XYZ'):
-        self.x = float(x)
-        self.y = float(y)
-        self.z = float(z)
+    真 bpy 5.2 的签名是（`mathutils.Euler.__doc__` 逐字）：
+
+        class Euler(angles=(0.0, 0.0, 0.0), order='XYZ', /)
+
+    实测行为：
+
+    | 写法 | 真 bpy 5.2 |
+    |---|---|
+    | `Euler()` | OK |
+    | `Euler((0.1, 0.2, 0.3))` | OK |
+    | `Euler((0.1, 0.2, 0.3), 'XYZ')` | OK |
+    | `Euler(0.1, 0.2, 0.3)` | **TypeError: takes at most 2 arguments (3 given)** |
+
+    ## 一条被推翻的判断（记在这里避免再犯）
+
+    我一开始以为“三个位置参数”是真 bpy 最常见写法、是兼容层缺失。
+    实测发现**相反**：真 bpy 恰恰**不**接受三参数，而本兼容层旧实现
+    （`__init__(self, x, y, z, order)`）反而**宽容**了它。
+
+    也就是说：`apps/jianmu/scenes/bpy_watch.py:398` 的
+    `Euler(math.radians(8.0), 0.0, 0.0)` 在**真 Blender 里是错的**（会抡 TypeError）。
+    那份脚本能出片，是因为它从没在真 Blender 里跑过——它只在兼容层里跑。
+
+    ## 所以怎么办：两种写法都收，但报 warning
+
+    为了不破存量脚本（`bpy_watch.py` 就用了三参数），兼容层继续接受三参数，
+    但抽取器会报一条 warning：这份脚本拿到真 Blender 会挂。
+    “宽容 + 说出来”比“静默宽容”或“直接拒绝”都好。
+    """
+
+    __slots__ = ('x', 'y', 'z', 'order', 'positional_form')
+
+    def __init__(self, *args, **kwargs):
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+        # 是否用了真 bpy **不支持**的三参数写法（供抽取器报 warning）
+        self.positional_form = False
+        order = kwargs.get('order', 'XYZ')
+        if len(args) == 0:
+            pass
+        elif len(args) == 1:
+            # Euler((x, y, z)) —— 1 个位置参数 = angles 元组
+            first = args[0]
+            if isinstance(first, (tuple, list)):
+                seq = first
+                self.x = float(seq[0])
+                self.y = float(seq[1])
+                self.z = float(seq[2])
+            else:
+                self.x = float(first)
+        elif len(args) == 2 and isinstance(args[0], (tuple, list)):
+            # Euler((x, y, z), 'ZYX') —— 真 bpy 支持
+            seq = args[0]
+            self.x = float(seq[0])
+            self.y = float(seq[1])
+            self.z = float(seq[2])
+            order = args[1]
+        else:
+            # Euler(x, y, z) —— 真 bpy **不**支持，但存量脚本在用。宽容 + 标记。
+            self.x = float(args[0])
+            self.y = float(args[1])
+            self.z = float(args[2])
+            self.positional_form = True
+            if len(args) > 3:
+                order = args[3]
         if order not in ('XYZ', 'ZYX'):
             raise ValueError("Euler 只支持 order='XYZ' / 'ZYX'")
         self.order = order

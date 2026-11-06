@@ -1556,6 +1556,18 @@ auto parse_scene_spec_text(std::string_view text) -> Result<SceneSpec> {
 }
 
 
+/// 把脚本声明的 `__st_compat__` 串翻译成枚举。
+///
+/// 只认 `"cycles"` 与 `"eevee"`（大小写不敏感，Python 侧已 lower）。
+/// 其余值一律 `None`——**不报错**：对标模式是调试/验证开关，
+/// 写错了不该让出片直接挂掉（那与“默认不改”的立场一致）。
+/// 而“写错了没生效”这件事要靠看图像素验证，不能只靠报错。
+auto read_compat_mode(const std::string& value) -> SceneSpec::CompatMode {
+  if (value == "cycles") return SceneSpec::CompatMode::Cycles;
+  if (value == "eevee") return SceneSpec::CompatMode::Eevee;
+  return SceneSpec::CompatMode::None;
+}
+
 auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
     -> Result<SceneSpec> {
   if (script.empty()) {
@@ -1625,6 +1637,39 @@ auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
   //
   // 想要 three 场景也不做映射时，在 JSON 里写 `lighting.tone_map: "none"`。
   spec.lighting.tone_map = ToneMap::Agx;
+
+  // ## 「对标」模式：脚本显式声明后，把观测性差项全部关掉
+  //
+  // 与 three 那条路同一个设计：**默认不改，声明了才切**。
+  //
+  // three 用 `globalThis.renderer = { compat: 'three' }`，bpy 这边用：
+  //
+  //     bpy.context.scene.__st_compat__ = 'cycles'   # 或 'eevee'
+  //
+  // 为什么必须显式：下面三项关掉会让背光面**真的全黑**。那是物理正确的
+  // （真 Cycles 就是这么渲染的），但会改变存量出片的观感。
+  //
+  // | 项 | 默认 | 对标 Cycles 时 | 依据 |
+  // |---|---|---|---|
+  // | `ambient` | 0.35（常量保底） | **0** | Cycles 里没写 world 就是 0 环境光 |
+  // | `ibl_strength` | 0.45（上面刚设） | **0**（脚本没设 world 时） | 同上 |
+  // | `tone_map` | AgX | **None** | `Standard` 才是纯 sRGB 编码；AgX 是 OCIO LUT |
+  //
+  // 实测依据（`docs/bpy_render_parity.md §3.0`）：三项都对齐后，受控平面
+  // 262144 个像素**最大差 1 级**（真值 111，本框架 112）。
+  //
+  // ⚠ **不管声明什么，都不要去对标 AgX**：本框架的 AgX 是解析拟合，
+  // 而 Blender 的是 3D LUT，实测线性 0.18 处差 +73 级（`§11.5`）。
+  // 要像素级就只能用 Standard。
+  const auto compat = read_compat_mode(extracted->bpy_compat);
+  if (compat != SceneSpec::CompatMode::None) {
+    spec.lighting.ambient = 0.0f;
+    // 只有脚本**自己没设 world** 时才关 IBL。设了 world 的脚本（如
+    // `bpy_watch.py` 显式写 0.05 灰）应当保留——那是场景的真实内容。
+    if (!extracted->world_set) spec.lighting.ibl_strength = 0.0f;
+    spec.lighting.tone_map = ToneMap::None;
+    spec.compat = compat;
+  }
   spec.bpy_script = std::string(script);
   spec.bpy_script_name = std::string(script_name);
   return spec;

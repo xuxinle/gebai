@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "shuangtian",
   "version": "0.1.0",
   "kind": "static_library",
@@ -830,6 +830,46 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "诊断：把抽出来的灯光/材质/分组数值打出来。全黑时分不清是光反了、强度 0、还是基色没设"
     },
+    "bpy_flat_ablate": {
+      "kind": "executable",
+      "sources": ["tools/bpy_flat_ablate.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "受控平面消融：把 bpy 路径与真 Blender 的 12 级差逐项归因（energy/1000 / ambient 保底 / rim / ACES）"
+    },
+    "bpy_brdf_compare": {
+      "kind": "executable",
+      "sources": ["tools/bpy_brdf_compare.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "BRDF 层对照：把非 BRDF 的四项偏差（world/ambient/energy 标度/色调映射）对齐真 Blender 后，逐像素量残留（只可能来自 BRDF 与光栅化）"
+    },
+    "bpy_energy_scale": {
+      "kind": "executable",
+      "sources": ["tools/bpy_energy_scale.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "工件级标度验证：同一份 .py 扫 ENERGY_SCALE，看哪个标度让本框架与真 Blender 落在同一曝光（判据：主体均值与全白占比）"
+    },
+    "bpy_scale_impact": {
+      "kind": "executable",
+      "sources": ["tools/bpy_scale_impact.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "标度改动的影响面预演：不改代码，用覆盖参数模拟「去掉 energy/1000」后每个存量 bpy 场景的曝光变化，据此判断哪条改法不会把现有出片打爆"
+    },
+    "bpy_compat_diag": {
+      "kind": "executable",
+      "sources": ["tools/bpy_compat_diag.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "诊断：同一份 bpy 文本在默认口径与声明 compat 时 SceneSpec 的关键字段（tone/ambient/ibl/diffuse/compat），用于排查测试与探针口径不一致"
+    },
     "bpy_export_asset": {
       "kind": "executable",
       "sources": ["tools/bpy_export_asset.cpp", "src/python/mp_bridge.c",
@@ -1234,3 +1274,8 @@
     "system": ["pthread", "dl", "m"]
   }
 }
+
+
+
+
+

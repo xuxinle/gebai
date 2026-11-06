@@ -71,8 +71,9 @@ int main(int argc, char** argv) {
   std::printf("\nlighting:\n");
   std::printf("  light_from = (%.3f %.3f %.3f)\n", double(l.light_from.x),
               double(l.light_from.y), double(l.light_from.z));
-  std::printf("  ambient=%.3f diffuse=%.3f rim=%.3f exposure=%.3f\n", double(l.ambient),
-              double(l.diffuse), double(l.rim), double(l.exposure));
+  std::printf("  ambient=%.3f diffuse=%.3f exposure=%.3f ibl_strength=%.3f\n",
+              double(l.ambient), double(l.diffuse), double(l.exposure),
+              double(l.ibl_strength));
   std::printf("  tone_map=%d（0=None 1=Reinhard 2=ACES 3=Filmic）\n",
               static_cast<int>(l.tone_map));
 

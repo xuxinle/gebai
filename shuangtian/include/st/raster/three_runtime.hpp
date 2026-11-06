@@ -175,6 +175,21 @@ struct ThreeScene {
   bool background_set{false};
   math::Vec3 background_linear{0.0f, 0.0f, 0.0f};
 
+  /// bpy 脚本声明的「对标」模式（`bpy.context.scene.__st_compat__`）。
+  ///
+  /// 为何不复用 `three_parity`：那个是 bool（three 只有一种对口）；
+  /// bpy 有三种真值源（Cycles / EEVEE / 不对标），必须能区分。
+  /// 空串 = 脚本没声明（普通出片）。
+  std::string bpy_compat{};
+
+  /// 脚本是否**显式设了 world**。
+  ///
+  /// 为何要单独抽：真 Blender 里「没设 world」= 零环境光，而「设了 0.05 灰
+  /// 的 world」= 有环境光。本框架的兼容层**总是**给一个默认 world，
+  /// 所以抽取时区分不了这两者——而对标时必须区分（否则会把真的写了
+  /// world 的场景也当无环境光，背光面全黑）。
+  bool world_set{false};
+
   [[nodiscard]] auto empty() const noexcept -> bool { return objects.empty(); }
 };
 

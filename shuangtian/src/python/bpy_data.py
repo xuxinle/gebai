@@ -50,12 +50,28 @@ class MeshPolygon:
 
 
 class Mesh:
-    """网格数据（几何 + 面）。不含变换——那是 Object 的事。"""
+    """网格数据（几何 + 面）。不含变换——那是 Object 的事。
+
+    ## 为何要有一份 `materials`（2026-11-06 加）
+
+    真 bpy 里挂材质的标准写法是：
+
+        obj.data.materials.append(mat)      # ← 冒、真 bpy 都认
+
+    而本兼容层原本只有 `obj.material_slots.append(mat)`。于是“两边都能跑”
+    的脚本必须写两套（实测撞过：`AttributeError: bpy_prop_collection:
+    attribute "append" not found`）。
+
+    解法：给 Mesh 一个双向代理列表，append 时**同时**写进 obj.material_slots。
+    这样两种写法都能用，而且只存一份数据（不会两份漂移）。
+    """
 
     def __init__(self, name='Mesh'):
         self.name = name
         self.vertices = []
         self.polygons = []
+        # 由 Object 建立关联时回填（见 Object.__init__）
+        self.materials = None
 
     def __repr__(self):
         return 'Mesh(%r, %d verts, %d faces)' % (
@@ -75,9 +91,49 @@ class Mesh:
         self.polygons = []
 
 
+class _MaterialSlotProxy:
+    """`obj.data.materials` 的代理：把操作转给 `obj.material_slots`。
+
+    ## 为何需要一层代理而不是直接给个 list
+
+    真 bpy 里这两个是不同的东西：
+
+        obj.data.materials          # 网格上的材质槽（列表，append 直接加槽）
+        obj.material_slots          # 对象的槽（带 link/offset 等额外属性）
+
+    本兼容层只实现了后者。如果给 `data.materials` 一个**独立的** list，
+    两份数据就会漂移（向一个 append、从另一个读不到）。那正是本仓反复
+    批判的“同一个概念有两份真相”。
+
+    所以做成代理：**只有一份数据**（`material_slots`），两种写法都指向它。
+    """
+
+    __slots__ = ('_owner',)
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def append(self, mat):
+        self._owner.material_slots.append(mat)
+
+    def clear(self):
+        del self._owner.material_slots[:]
+
+    def __len__(self):
+        return len(self._owner.material_slots)
+
+    def __iter__(self):
+        return iter(self._owner.material_slots)
+
+    def __getitem__(self, index):
+        return self._owner.material_slots[index]
+
+    def __repr__(self):
+        return 'bpy_prop_collection(%d materials)' % len(self._owner.material_slots)
+
+
 class Material:
     """材质（PBR 子集：基色 / 金属度 / 粗糙度 / 自发光）。"""
-
     def __init__(self, name='Material'):
         self.name = name
         # 用 bpy 的属性名（diffuse_color 是 RGBA，线性空间）
@@ -149,13 +205,26 @@ class Camera:
 
 
 class Light:
-    """灯光（点/平行/聚光）。"""
+    """灯光（点/平行/聚光）。
 
-    def __init__(self, name='Light', light_type='POINT'):
+    ## 为何默认仍是 'POINT' 但要报告分歧
+
+    真 bpy 的 `bpy.data.lights.new(name)` **必须给 type**（实测：
+    `TypeError: BlendDataLights.new(): required parameter "type" not specified`）。
+    而本兼容层允许省。宽严不一致的代价是：一份在霜天能跑的脚本，
+    拿到真 Blender 里直接挂。
+
+    所以这里只记一个 `type_specified` 标志，由抽取器汇总成 warning——
+    **不破现有脚本**（那会让存量全部失效），但把差异说出来。
+    """
+
+    def __init__(self, name='Light', light_type='POINT', type_specified=False):
         self.name = name
         self.type = light_type     # 'POINT' / 'SUN' / 'SPOT' / 'AREA'
         self.energy = 1000.0
         self.color = (1.0, 1.0, 1.0)
+        # 脚本建灯时是否显式给了 type（真 bpy 要求给）
+        self.type_specified = type_specified
 
 
 class Object:
@@ -172,11 +241,17 @@ class Object:
         self.name = name
         self.data = data
         self.location = Vector((0.0, 0.0, 0.0))
-        self.rotation_euler = Euler(0.0, 0.0, 0.0)
+        self.rotation_euler = Euler((0.0, 0.0, 0.0))
         self.scale = Vector((1.0, 1.0, 1.0))
         self.visible = True
         # 材料槽（bpy 是列表，本框架只取第 0 个——见抽取器说明）
         self.material_slots = []
+        # `obj.data.materials.append(mat)` 也给通（真 bpy 的标准写法）。
+        #
+        # 内建一个极小的列表代理：append/clear/下标/len 都转给 material_slots，
+        # 于是两种写法看到的是**同一份数据**（不会两份漂移）。
+        if data is not None and hasattr(data, 'materials'):
+            data.materials = _MaterialSlotProxy(self)
 
     def __repr__(self):
         return 'Object(%r)' % (self.name,)
@@ -243,6 +318,15 @@ class _Collection:
                 if suffix > 999:
                     raise ValueError('同名数据块过多：%r' % (name,))
             unique = '%s.%03d' % (name, suffix)
+        # `lights` 集合：把「脚本有没有给 type」记下来。
+        #
+        # 真 bpy 的 `lights.new(name)` **必须** 给 type（实测 TypeError）。
+        # 本兼容层允许省，但要把分歧报出来——否则用户写出一份
+        # “在霜天能跑、在 Blender 直接挂”的脚本而不可知。
+        if self._factory is Light:
+            if args or 'light_type' in kwargs:
+                kwargs = dict(kwargs)
+                kwargs['type_specified'] = True
         item = self._factory(unique, *args, **kwargs)
         self._items.append(item)
         return item

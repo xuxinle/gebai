@@ -627,6 +627,78 @@ def _extract_camera(context):
     }
 
 
+def _extract_world_set():
+    """脚本是否**显式**设了 world（区别于兼容层在模块初始化时塞的默认值）。
+
+    ## 为何不能直接看 `scene.world is not None`
+
+    `bpy_module.py` 在加载时就执行了 `_context.scene.world = _World()`，
+    所以兼容层里它**永远不是 None**。于是“脚本写没写 world”这个信息
+    在 `scene.world` 上已经丢了。
+
+    ## 判据：与默认值逐分量比较
+
+    默认 `_World()` 是 `background_color = (0.05, 0.05, 0.05)`（与 Blender
+    默认世界灰一致）。脚本只要改过颜色（哪怕也是 0.05），或先删再建，
+    都算“显式设”。这条判据会有极少数误判（脚本把 world 设成恰好 0.05 时
+    判为“没设”），但那个误判的后果是“多关一次 IBL”，比反向误判（该关
+    不关）轻。
+
+    ## 对标时的用途
+
+    只有 `world_set == False` 时才把 `ibl_strength` 归零。
+    """
+    scene = _host.get('context')
+    if scene is None:
+        return False
+    scene = getattr(scene, 'scene', None)
+    if scene is None:
+        return False
+    world = getattr(scene, 'world', None)
+    if world is None:
+        return False
+    color = getattr(world, 'background_color', None)
+    if color is None:
+        # 真 bpy 没有 `background_color`（色在节点树），说明脚本动过 world
+        return True
+    default = 0.05
+    for k in range(3):
+        if abs(float(color[k]) - default) > 1.0e-6:
+            return True
+    return False
+
+
+def _extract_compat():
+    """脚本声明的「对标」模式（`bpy.context.scene.__st_compat__`）。
+
+    ## 写法
+
+        bpy.context.scene.__st_compat__ = 'cycles'   # 或 'eevee'
+
+    ## 为何用这个名字
+
+    下划线开头 + `st_` 前缀 = “这是本框架的扩展，不是 bpy 的 API”。
+    这样不会让模型以为真 Blender 里也有这个东西而去用它。
+
+    ## 为何允许 `getattr` 不给默认值就报错
+
+    不给——用 getattr 的缺省值。因为 `__st_compat__` 不是 bpy 的属性，
+    `_Module` 上本来就没，读它会 `AttributeError`。
+    """
+    scene = _host.get('context')
+    if scene is None:
+        return ''
+    scene = getattr(scene, 'scene', None)
+    if scene is None:
+        return ''
+    mode = getattr(scene, '__st_compat__', None)
+    if mode is None:
+        return ''
+    if not isinstance(mode, str):
+        return ''
+    return mode.lower()
+
+
 def _extract_world():
     """场景的世界背景色 → `[r, g, b]` 线性值（取不到时返回 None）。
 
@@ -686,6 +758,10 @@ def _extract_lights():
             'direction': list(direction),
             'color': [float(light.color[0]), float(light.color[1]), float(light.color[2])],
             'energy': float(light.energy),
+            # 真 bpy 要求 `lights.new(name, 'SUN')` 必须给 type；
+            # 没给时这个字段为 False，抽取器会在 warnings 里报一条
+            'type_specified': bool(getattr(light, 'type_specified', True)),
+            'name': getattr(light, 'name', ''),
         })
     return out
 
@@ -725,6 +801,18 @@ def extract():
     camera = _extract_camera(_host['context'])
     lights = _extract_lights()
 
+    # ## 兼容性分歧必须报出来，而不是默默宽容
+    #
+    # 真 bpy 的 `lights.new()` 必须给 type；本兼容层允许省。
+    # 宽容本身不是错，但“静默宽容”会让用户写出一份在霜天能跑、
+    # 在真 Blender 直接 `TypeError` 的脚本。所以报 warning。
+    for light in lights:
+        if not light.get('type_specified', True):
+            warnings.append(
+                '灯光 %r 建时没给 type（`lights.new(name)`）——'
+                '真 Blender 要求 `lights.new(name, "SUN")`，那份脚本拿过去会报 TypeError'
+                % (light.get('name', '?'),))
+
     if not objects:
         warnings.append('场景里没有可导出的 mesh 对象（检查脚本是否建了几何）')
     if camera is None:
@@ -732,12 +820,43 @@ def extract():
     if not lights:
         warnings.append('场景里没有灯光（渲染会得到全黑或仅有环境光）')
 
+    # ## Euler 的三参数写法：真 bpy 不认，必须报
+    #
+    # 实测（Blender 5.2.3）：`mathutils.Euler(0.1, 0.2, 0.3)` →
+    # `TypeError: takes at most 2 arguments (3 given)`。
+    # 而 `apps/jianmu/scenes/bpy_watch.py:398` 就是这么写的。
+    #
+    # 兼容层宽容了它（否则那份脚本跑不了），但“静默宽容”会让用户
+    # 以为那份脚本能拿到真 Blender 里用。所以报 warning。
+    for obj in _host['data'].objects:
+        rot = getattr(obj, 'rotation_euler', None)
+        if rot is not None and getattr(rot, 'positional_form', False):
+            warnings.append(
+                '物体 %r 的 rotation_euler 用了 `Euler(x, y, z)` 三参数写法——'
+                '真 bpy 只接受 `Euler((x, y, z))`，拿过去会报 TypeError'
+                % (getattr(obj, 'name', '?'),))
+
     return {
         'objects': objects,
         'camera': camera,
         'lights': lights,
         # 世界背景色（环境反射用）。None = 脚本没配世界，C++ 侧用默认
         'world': _extract_world(),
+        # 脚本是否**显式**设了 world。
+        #
+        # ## 为何要单独给一个字段（而不是靠 world 是否 None）
+        #
+        # 兼容层的 `scene.world` 在模块初始化时就被赋了一个默认 `_World()`
+        # （见 `bpy_module.py`），所以 `_extract_world()` **永远拿得到值**——
+        # 靠它判断不了“脚本到底写没写 world”。
+        #
+        # 而对标时必须区分：真 Blender 里没写 world = 零环境光，
+        # 写了 0.05 灰的 world = 有环境光。两者混在一起就会把
+        # “真的设了 world 的场景”也关掉 IBL，背光面变成死黑。
+        'world_set': _extract_world_set(),
+        # 脚本声明的「对标」模式（`bpy.context.scene.__st_compat__`）。
+        # 空串 = 没声明。C++ 侧按它决定是否切到对标口径。
+        'compat': _extract_compat(),
         'warnings': warnings,
     }
 
