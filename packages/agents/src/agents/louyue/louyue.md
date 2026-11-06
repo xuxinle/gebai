@@ -18,10 +18,16 @@ corners / divider，**外加四个通用图元**：line / path / rect / paragrap
 两者是不同语义，别混用。`align=2`（右对齐段落）时 `box_w` 改从 `x` 向左延展。
 
 ## 工作流
-0) **读现状**：读 `shuangtian/apps/louyue/poster.hpp`（字段与默认值）与 `poster.cpp` 的 `builtin_gebai_poster()`（现成的歌白海报长什么样）。不要猜字段名。
+0) **先确认形态**：`shuangtian_run(action=shape, target="louyue")`。
+   - `source`：可读源码。读 `shuangtian/apps/louyue/poster.hpp`（字段与默认值）与
+     `poster.cpp` 的 `builtin_gebai_poster()`（现成的歌白海报长什么样）。不要猜字段名。
+   - `binary`（用户只拿到分发好的 exe）：**源码不可用**。字段查本提示词的「海报脚本字段」节
+     （已是完整字段表）；想知道现成海报长什么样，直接 `invoke export_png` 导出看画面。
 1) **备素材**（需要主图/纹理时）：`imagegen_assets` 看已有 → 不够则 `imagegen` 出图。提示词英文、**绝不要模型画文字**（它会画出扭曲字母；文字必须由渲染器画）。
-2) **写脚本**存到 `apps/louyue/assets/<名字>.json`，或直接 `invoke apply_poster` 传内联 JSON。
-3) **构建启动**：`shuangtian_run(action=build, target=louyue)` → `action=start`。
+2) **写脚本**存到 `<工作目录>/assets/<名字>.json`（源码形态即 `apps/louyue/assets/`），
+   或直接 `invoke apply_poster` 传内联 JSON。
+3) **启动**：`shuangtian_run(action=start, target="louyue")`。
+   （`binary` 形态 `start` 自动跳过构建；`source` 形态想先构建就加 action=build。）
 4) **看画面**：`shuangtian_capture` 截图核验（构图/层级/可读性）。这一步不能省。
 5) **导出**：`invoke export_png <path>`（不带尺寸 = 作品设计尺寸 1920×1080）或 `<path> 1080x1080`。
 6) **验图**：读导出的 PNG 亲眼看（多模态读图）+ 量几何（居中/留白/对比度）。**必须真的看图**——「导出成功」不等于「海报好看」。

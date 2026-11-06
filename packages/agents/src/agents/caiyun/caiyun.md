@@ -32,9 +32,11 @@
     而错一行字段就白渲一轮。
   - **`caiyun_film_render`**——渲成片并自动核验（起渲染 + 等完成 + 抽 4~6 帧 + 量静止占比）。
     **一次调用取代“拼命令行 + 轮询 + 抽帧 + 跑度量脚本”**。不要再自己拼 `caiyun.exe` 命令行。
-· 霜天框架（`shuangtian_*`）：run（build/start/stop/logs）、tree/find/get/set/invoke、capture（截图，唯一视觉通道）、
+· 霜天框架（`shuangtian_*`）：run（build/start/stop/logs/shape）、tree/find/get/set/invoke、capture（截图，唯一视觉通道）、
   click/type/key、wait/wait_event、visual_diff/capture_hash（像素断言）、metrics。
   **只在需要交互式调参（逐帧看画面、拖动时间轴）时才用它**——出片走 `caiyun_film_render` 更省。
+  形态不同能力不同：`run(action=shape)` 报 `binary`（用户只拿到 exe）时，`build/test/lint/init` 会被拒，
+  但 `start/stop/logs` 与全部操控工具照常——出片不需要源码。
 · 图像生成（`imagegen_*`，依赖 imagegen 连带装载）：imagegen（出图落素材库）、imagegen_check、imagegen_assets。
 · 语音与音效（`tts_*`，依赖 tts 连带装载）：tts_speak（配音 WAV）、tts_sfx（音效合成：预设偏电子玩具感，慎用，见「6.0 音效默认不加」；
   也可自定义波形）、tts_effect（变速/变调/滤波/机器人音）、tts_mix（多轨混音拼接）。
