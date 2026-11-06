@@ -259,9 +259,31 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 | `/api/*` | REST HTTP（同步通道） |
 | `/api/docs` | OpenAPI 文档 |
 
+### 前端结构：微框架（`packages/web/src/fw/`）
+
+前端**不引入 Vue/React**：这些面板是短列表、低频更新，虚拟 DOM 只会多一层 diff 成本与心智负担；真正缺的是「公共件」与「回收纪律」，不是响应式框架。所以只抽一层极薄的基础件：
+
+| 模块 | 职责 |
+|---|---|
+| `fw/dom.ts` | `h/svg/frag/append/clear/on/css/when`。`on:{click}` 与 `onclick:` 两种写法都支持；`value/checked` 走 **property**（读真值，避免“设了却不生效”）；`on()` **返回解绑函数** |
+| `fw/draggable.ts` | `makeDraggable()`：可拖浮层通用件（把手、按钮排除、视口钳制、位置持久化、指针捕获丢失兜底） |
+| `fw/scope.ts` | `createScope()` 资源作用域（监听/定时器/观察者一次回收，幂等，单条失败不阻断）；`createPoller()` 单飞轮询（上一轮未完跳过、后台标签页不跑） |
+| `fw/form.ts` | `field/textInput/textArea/selectInput/checkbox/segmented/button`（字段自带就地标错位） |
+| `css/fw.css` | 上述控件统一样式（在 base 之后、面板样式之前，面板仍可覆盖） |
+
+**唯一实现原则**：`files/ui.ts` 的 `h/append/clear` 转发到 `fw/dom.ts`（保留同名导出作薄适配层，38 个引用方签名不变）。两套 DOM 实现并存必然漂移——实际已漂移：`value` 一个走 attribute（只改默认值）、一个走 property。`fw/dom.ts` 是零依赖叶子模块，独立入口 `/files` 引用它不会把主界面模块图拖进来。
+
+**判断记录**：设置抽屉是停靠式侧栏（固定右侧 + 遮罩），不参与自由拖动，**不**套浮层件——强行统一只会多一层无意义的抽象。
+
 服务端对外提供双通道接口，方便业务系统集成：
 
 - **WebSocket（`/ws`，实时通道）**：双向。客户端发起请求-应答 RPC（会话管理、审批决策等）；同时服务端**主动推送引擎事件**（`event.*` 前缀消息，如 `event.tool.call` / `event.approval.request` / `event.tool.result` / `event.message.delta` / `event.task.done`），每个连接订阅事件总线并按「会话归属」过滤——仅推送该连接用户可访问会话的事件，多用户隔离。SDK 侧 `onEvent(cb)` 接收推送事件。
+- **连接内消息按领域分队列**（`server/src/ws-lanes.ts`）：Bun 对 async `websocket.message` 处理器**不保证串行**，因此每条连接需要自己定序。这里不采用「全连接一条链」（那会让终端按键、LSP 编辑、会话读盘全排一队——一次慢操作就让用户觉得“点哪都没反应”），而是按**领域**拆成 `auth`/`session`/`prompt`/`term`/`lsp`/`interaction`/`admin`/`default` 八条队列：
+  - **同 lane 严格保序**：认证先后、同一会话的「先切后读」、同一条终端的按键顺序由这条保证（实现上每条 lane 一条 promise 链，新消息接在**本 lane 队尾**）；
+  - **跨 lane 真并发**：`term.input`（每次按键一条）、`lsp.change`（每次编辑一条）不会被会话读盘堵住，反之亦然；
+  - **auth 屏障**：`auth.login`/`auth.logout` 完成后，其后提交的所有 lane 消息才放行——保证「刚登录就发的请求」看到已登录身份（拆队时必须原样保住这条语义）；
+  - **队列深度护栏**：单 lane 积压超过 64 条即拒绝该消息（回 `queue_full`），不无限堆内存；慢的只挡自己的 lane。
+  划分口径按「乱序会造成什么后果」而非按代码目录；未知消息类型落 `default`（仍保序，不阻塞其余域）。
 - **REST HTTP（`/api/*`，同步通道）**：会话管理/文件/审批决策等；`POST /api/v1/sessions/:id/prompt` 为**非流式 JSON**（同步等待任务完成，返回 `{ message: 最终 assistant 消息, error?: 任务错误 }`），供业务系统与无 WS 环境集成；**流式输出统一走 WebSocket**（`/ws`）
 
 消息发送与流式输出**统一走 WebSocket 单通道**：`sendPrompt`（SDK）经 WS `session.prompt` 发起任务，引擎事件（`event.message.delta`/`tool_call`/`tool_result`/`approval`/`task.done` 等）由连接级订阅推送，SDK 将事件流转换为 `ChatChunk` 迭代返回（`wsEventToChunk`，字段与原 SSE 契约一致）。
@@ -1139,7 +1161,7 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | 浏览器响应体提取上限 | 20MB | `capture_body` 完整响应体落盘上限（文本预览 200KB 截断，超长/二进制走 file 参数直接写盘）；透明浏览器代理（`GEBAI_BROWSER_PROXY`）的单响应体临时文件中转同限，单次代理请求超时 110s |
 | 浏览器对话框/下载记录 | 100 条/会话 | dialog 记录（list 默认返回最近 50）与下载记录上限（下载文件保留在系统临时目录，仅记录淘汰） |
 | 上下文压缩触发 | 窗口剩余 < 一次回复的输出预留 | **不以窗口百分比判定**——真正约束是「留给输出的空间」：窗口剩余（`maxContextTokens - 最近一次真实 input tokens`）不足以支撑一次回复（输出预留 = 模型单次响应输出上限 `maxOutputTokens`，即 `GEBAI_LLM_MAX_OUTPUT_TOKENS`；未声明时缺省 16384，并夹在 `[1024, 窗口一半]` 内）时触发压缩（`outputReserveTokens`/`lacksOutputRoom`）（见「上下文保护」） |
-| 上下文压缩目标 | **窗口 × 40%**（下水位，压到即停） | 上水位（触发）= 剩余 < 输出预留（见上行）；下水位（目标）= `窗口 × COMPACT_TARGET_RATIO`（缺省 0.4，`GEBAI_COMPACT_TARGET_RATIO` 可调，合法区间 0.1~0.9），且不高于触发线（配置矛盾时以触发线为准）——需腾出量 = 真实基线 − 目标输入，按 `estTotal/基线` 比率折算为估算口径后逐条累计（比率越界退回 1:1，`COMPACT_EST_SCALE_MIN/MAX`）；可压消息不够（窗口外全压完仍高于目标）时压满窗口外，不足部分交给迭代压缩与溢出恢复；基线已低于目标（如接口已报溢出）时至少腾挪窗口 5%（`COMPACT_MIN_ROOM_RATIO`） |
+| 上下文压缩目标 | **窗口 × 20%**（下水位，压到即停） | 上水位（触发）= 剩余 < 输出预留（见上行）；下水位（目标）= `窗口 × COMPACT_TARGET_RATIO`（缺省 **0.2**，`GEBAI_COMPACT_TARGET_RATIO` 可调，合法区间 0.1~0.9），且不高于触发线（配置矛盾时以触发线为准）——需腾出量 = 真实基线 − 目标输入，按 `estTotal/基线` 比率折算为估算口径后逐条累计（比率越界退回 1:1，`COMPACT_EST_SCALE_MIN/MAX`）；可压消息不够（窗口外全压完仍高于目标）时压满窗口外，不足部分交给迭代压缩与溢出恢复；基线已低于目标（如接口已报溢出）时至少腾挪窗口 5%（`COMPACT_MIN_ROOM_RATIO`）。**为何 20%**：留下的历史要够模型延续上下文（任务中途、多步工具链不至于摸不清前情），但太多会让它反复回看旧结论、原地打转无效功——20% 是这两个方向的平衡点 |
 | 上下文压缩可压缩口径 | 除系统提示词外全部 | `isCompressibleMessage`：**仅 role=system 不可压缩**（系统提示词/装载提示词区间夹带时原位保留）；用户输入、assistant、tool 结果、引擎注入提醒进区间后被摘要替换并**完全移除**（滑动窗口内的近消息不入区间）；子会话运行存档（session/subAgent 标记）不进主上下文也不动。与超限截断口径（`isProtectedMessage`：user/system/存档不做无摘要丢弃）分开 |
 | 上下文占用口径 | 模型服务返回的 usage 真值 | 压缩判定只认接口返回的 `input_tokens`（含 system 提示词与工具 schema）：run 前按上次调用持久化基线、任务中途按每轮真实 usage（窗口剩余 < 输出预留时压缩，见上行）、接口上下文长度 4xx 拒绝时压缩重试（溢出恢复）。**基线每轮即时落盘**——每轮真值到达时 `store.updateCtxStats` 一并写入真实 `input_tokens` 与索引锚点（随后任意一次正文落盘即进 chat.json，不只任务结束）：任务中断/进程重启后，下一次 run 的压缩判定与列表展示仍有真值可用，不退回估算。**展示口径与真值同点位同步**：每轮真值到达时推送 `event.session.ctx` 并调 `store.updateCtxStats` 落盘（只写 meta.json，不重写正文）——列表/快照/刷新与推送一致；压缩与护栏降级改写历史时把展示值重算为当前消息估算（旧数不得残留）。估算（`estimateCharsTokens`，CJK 约 1 token/字、ASCII 约 4 字符/token；**多模态图片块按张常量**——`estimateContentTokens`/`IMAGE_TOKEN_ESTIMATE`，内联块携 base64，按序列化长度折算会把一张 1MB 图片算成 30 万 token）用于压缩量规划（`estimateMessageTokens`，真值口径的需腾出量按 `estTotal/基线` 比率折算）与会话列表 ctxTokens 展示的增量补足（`estimateCtxTokens`/`estimateTokens` 均已计入工具 schema 段估算 `estimateSchemasTokens`）（见「上下文保护」）。缓存命中（`cachedTokens`/`ctxCachedTokens`）为纯展示口径，随 usage 基线同点位建立/清除（见「自动压缩」的缓存命中度量） |
 | 压缩保留最近下限 | **滑动窗口 12 条消息**（任意角色） | 近消息窗口（`COMPACT_WINDOW_MESSAGES`，`GEBAI_COMPACT_WINDOW` 可调）：最近这么多条消息永不进压缩区间（原样保留），随新消息自然向前滑动；上限为历史一半（`floor(len/2)`）——否则短会话永远压不动。有真实占用基线时窗口仅为**保底下限**（压多少由水位算出的需腾出量决定，实际会话一般不会触及窗口）；无基线（老会话/接口不返回 usage/窗口未知）时退保守口径：只压掉窗口外可压缩消息的一半 |
