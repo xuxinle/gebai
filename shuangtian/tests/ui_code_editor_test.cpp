@@ -1166,6 +1166,116 @@ ST_TEST(code_editor_indent_guides_paint_pixels_where_expected) {
   ST_CHECK_EQ(same, total);
 }
 
+ST_TEST(code_editor_indent_guides_sit_on_the_parent_alignment_column) {
+  // 参考线的**横向位置**：它必须落在“父级内容的对齐列”上，而不是本级内容起点。
+  //
+  // 口径：两行缩进都是 2 空格（`unit = 2`），各自内容是 `X`/`Y`。
+  //   缩进 1 级的行：└ 列 0 不画（那是正文最左缘），所以**没有**线；
+  //   缩进 2 级的行：线应在列 `unit` = 2 处——那里正是**上一行内容的起点**。
+  //
+  // 旧写法把线放在 `(step + 1) * unit` = 4 处：那是本级内容起点，线直接压在本行
+  // 首字上（看起来像下划线/删除线遇到文字），而且与父级内容列错开一个字。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_text("  X\n    Y\n");
+  fx.editor.arrange(fx.context, st::math::Rect{0.0f, 0.0f, 400.0f, 120.0f});
+
+  const auto render = [&](bool guides) {
+    fx.editor.set_indent_guides(guides);
+    st::raster::Canvas canvas(400, 120);
+    canvas.clear(fx.theme.colors().surface);
+    fx.editor.paint_content(fx.context, canvas);
+    return canvas;
+  };
+  const st::raster::Canvas with_guides = render(true);
+  const st::raster::Canvas without = render(false);
+  fx.editor.set_indent_guides(true);
+
+  // 逐列统计差异（只关心第二行那一带：第一行即便有线也不该画在列 0）。
+  const float row_height =
+      std::stof(fx.editor.get_property("line_height").value_or("20"));
+  std::vector<int> diff_columns;
+  for (int x = static_cast<int>(fx.editor.bounds().x);
+       x < static_cast<int>(fx.editor.bounds().right()); ++x) {
+    for (int y = static_cast<int>(fx.editor.bounds().y + row_height);
+         y < static_cast<int>(fx.editor.bounds().y + row_height * 2.0f); ++y) {
+      const st::math::Point p{static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f};
+      if (with_guides.pixel_at_point(p) != without.pixel_at_point(p)) {
+        diff_columns.push_back(x);
+        break;
+      }
+    }
+  }
+  ST_REQUIRE(!diff_columns.empty());   // 第二行真的画了线
+
+  // 定位“内容原点”（正文左缘）：让它成为量尺（行号栏宽度是内部细节，不硬编码）。
+  fx.editor.set_cursor_index(0);
+  const float origin_x = fx.editor.bounds().x + fx.editor.caret_offset_x(fx.context);
+  const float space_w = fx.context.text->measure_width(" ", fx.editor.font_size(),
+                                                      st::text::FontRole::Monospace);
+  // 期望：线在 `origin_x + 2 * space_w`（父级内容列），而不是 `origin_x + 4 * space_w`。
+  const float expected = origin_x + 2.0f * space_w;
+  const float forbidden = origin_x + 4.0f * space_w;
+  float nearest = 1e9f;
+  for (const int column : diff_columns) {
+    nearest = std::min(nearest, std::abs(static_cast<float>(column) - expected));
+    // 线不能落在本级内容起点（旧缺陷：线压在首字上）
+    ST_CHECK(std::abs(static_cast<float>(column) - forbidden) > 1.5f);
+  }
+  ST_CHECK(nearest <= 1.5f);   // 真的落在父级对齐列（舍入范围内）
+}
+
+ST_TEST(code_editor_indent_guides_follow_detected_indent_width) {
+  // 2 空格缩进的文件（缩进单位不是 4）也必须画线，且位置仍按**父级对齐列**算。
+  //
+  // 旧写法把“一级缩进”硬取 `tab_width_`（默认 4）：两空格的行永远凑不满一级，
+  // 整篇一条线也不画——“开了参考线却什么也没有”是最难归因的一类现象。
+  //
+  // 场景：父行缩进 1 级（`unit = 2`），子行缩进 2 级。子行的父级内容起于列 2，
+  // 所以它身上应有一条列 2 的线，而**不该**有列 4（它自己的内容起点）的线。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_tab_width(4);
+  fx.editor.set_text("  P\n    Q\n");
+  fx.editor.arrange(fx.context, st::math::Rect{0.0f, 0.0f, 400.0f, 120.0f});
+  const auto render = [&](bool guides) {
+    fx.editor.set_indent_guides(guides);
+    st::raster::Canvas canvas(400, 120);
+    canvas.clear(fx.theme.colors().surface);
+    fx.editor.paint_content(fx.context, canvas);
+    return canvas;
+  };
+  const st::raster::Canvas on = render(true);
+  const st::raster::Canvas off = render(false);
+  fx.editor.set_indent_guides(true);
+
+  const float row_height =
+      std::stof(fx.editor.get_property("line_height").value_or("20"));
+  std::vector<int> second_row_columns;
+  for (int x = 0; x < 400; ++x) {
+    for (int y = static_cast<int>(row_height); y < static_cast<int>(row_height * 2.0f); ++y) {
+      if (on.pixel_at(x, y) != off.pixel_at(x, y)) {
+        second_row_columns.push_back(x);
+        break;
+      }
+    }
+  }
+  ST_REQUIRE(!second_row_columns.empty());   // 两空格缩进也画得出线
+
+  fx.editor.set_cursor_index(0);
+  const float origin_x = fx.editor.bounds().x + fx.editor.caret_offset_x(fx.context);
+  const float space_w = fx.context.text->measure_width(" ", fx.editor.font_size(),
+                                                      st::text::FontRole::Monospace);
+  const float parent_column = origin_x + 2.0f * space_w;    // 父级内容对齐
+  const float own_column = origin_x + 4.0f * space_w;       // 子行自己的内容起点
+  float to_parent = 1e9f;
+  for (const int column : second_row_columns) {
+    to_parent = std::min(to_parent, std::abs(static_cast<float>(column) - parent_column));
+    ST_CHECK(std::abs(static_cast<float>(column) - own_column) > 1.5f);
+  }
+  ST_CHECK(to_parent <= 1.5f);
+}
+
 ST_TEST(code_editor_current_line_is_highlighted_in_gutter_and_row) {
   // 当前行高亮：行底色 + 行号槽都要变（行号槽高亮是"我在哪一行"的锚点）。
   Fixture fx;

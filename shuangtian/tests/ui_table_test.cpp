@@ -323,3 +323,32 @@ ST_TEST(ui_table_null_text_port_via_root) {
   ST_CHECK(canvas.pixel_at_point(st::math::Point{200.0f, 18.0f}) == dark.colors().surface_alt);
   ST_CHECK(canvas.pixel_at_point(st::math::Point{200.0f, 52.0f}) == dark.colors().bg);
 }
+
+ST_TEST(table_lane_band_reserves_width_for_the_first_column) {
+  // 泳道（分支线 + 圆点）是画在表格**最左侧**的图形，而单元格文本也从左缘开始——
+  // 不给泳道留宽度的话，圆点与竖线会直接压在首列文字上。
+  //
+  // 实测症状（gbcode 的 Git 日志表）：每个提交信息的首字被竖线遮住半截。
+  st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::RenderContext context{theme, nullptr, 0.0};
+  st::ui::Table table;
+  table.set_columns({{.name = "subject", .width = 0.0f},
+                     {.name = "author", .width = 120.0f}});
+  table.add_row({"first commit", "E2E"});
+  table.add_row({"second commit", "E2E"});
+
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 400.0f, 200.0f});
+  const st::math::Rect no_lane = table.cell_rect(0U, 0U);
+  ST_CHECK_NEAR(no_lane.x, 0.0f, 0.01f);   // 没开泳道：零影响（旧行为不变）
+
+  table.set_row_lanes(std::vector<int>{0, 0});
+  table.set_lane_column_width(34.0f);
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 400.0f, 200.0f});
+  const st::math::Rect with_lane = table.cell_rect(0U, 0U);
+  // 首列从泳道带**之后**开始（而不是与圆点重叠）
+  ST_CHECK_NEAR(with_lane.x, 34.0f, 0.01f);
+  ST_CHECK_NEAR(with_lane.width, 400.0f - 34.0f - 120.0f, 0.5f);
+  // 列必须整体右移同样的量（否则列与表头错位）
+  ST_CHECK_NEAR(table.header_cell_rect(0U).x, 34.0f, 0.01f);
+  ST_CHECK_NEAR(table.cell_rect(0U, 1U).x, 400.0f - 120.0f, 0.5f);
+}

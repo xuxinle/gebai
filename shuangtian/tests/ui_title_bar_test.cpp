@@ -303,7 +303,11 @@ ST_TEST(title_bar_double_click_toggles_maximize) {
 ST_TEST(title_bar_edge_press_starts_resize_when_supported) {
   BarFixture fixture;
   // 左下角：缩放带内（按钮区在右上，互不干扰）。
-  ST_CHECK(fixture.send(EventKind::MouseDown, Point{1.0f, 39.0f}));
+  //
+  // y 取 `bar_height() - 1`（而不是写死的 39）：栏高是组件常量，写死数字会在
+  // 栏高调整后把点落到栏外——那时用例失败的是“没触发缩放”，离真因（测试硬编码）很远。
+  const float bottom_y = st::ui::TitleBar::bar_height() - 1.0f;
+  ST_CHECK(fixture.send(EventKind::MouseDown, Point{1.0f, bottom_y}));
   ST_CHECK_EQ(fixture.control.resize_calls, 1);
   ST_CHECK(fixture.control.last_resize_edge == WindowEdge::BottomLeft);
   ST_CHECK_EQ(fixture.control.move_calls, 0);

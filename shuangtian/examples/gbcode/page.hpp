@@ -314,7 +314,14 @@ struct CodeEditorPage : Component {
   State<std::string> tag_new_name_{};
   State<bool> tag_new_annotated_{false};
   /// 底部面板当前标签：0=终端 1=Git。
-  /// Git 内的子视图：分支 / 日志 / 标签 / 暂存 / 远程。
+  ///
+  /// Git 内的子分组（左栏）：1=分支 2=标签 4=暂存 5=远程。
+  ///
+  /// 默认 **1（分支）**：左栏存在的意义是“我现在在看哪个分支”，且分支是进 Git
+  /// 面板的第一入口（日志/提交内容都是它的下游）；旧值 2 已不在枚举里，
+  /// 落到 `switch` 的 default → 显示“远程”，与用户预期相反。
+  ///
+  /// ⚠ 索引与 `build_git_tabs` 的 `numbers` 表是**同一套**（1/2/4/5）。
   State<std::size_t> git_tab_{1};
   /// 日志过滤（提交信息 / 作者 / 路径）与“只显示当前分支”。
   State<std::string> log_filter_text_{};
@@ -1061,10 +1068,6 @@ auto open_recent(const std::string& path) -> void;
 
   /// 一栏的标题行（标题 + 右侧一个可选图标钮）——三栏各一份，职责一眼可辨。
    void build_pane_head(Composer& c, const char* id, std::function<std::string()> title, const char* action_id);
-
-
-  /// 日志工具栏：三个过滤输入 + “仅当前分支” + 刷新。
-   void build_log_filters(Composer& c);
 
 
   /// 日志行的展示文本（泳道标记 + 短 hash + 主题 + refs 胶囊）。

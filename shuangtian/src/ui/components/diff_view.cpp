@@ -120,7 +120,7 @@ void DiffView::set_layout(DiffLayout layout) {
 void DiffView::set_show_line_numbers(bool value) {
   if (show_line_numbers_ == value) return;
   show_line_numbers_ = value;
-  push_to_editors();
+  apply_editor_config();
   mark_layout_dirty();
 }
 
@@ -143,9 +143,12 @@ void DiffView::set_disabled_lines(std::vector<std::size_t> old_lines,
 void DiffView::set_read_only(bool value) {
   if (read_only_ == value) return;
   read_only_ = value;
-  // 具体到每一栏的只读位由 `push_to_editors` 统一算（左栏看 `allow_left_edit_`，
-  // 右栏看并列/内联）——这里不另写一套，以免两处口径分叉（刚刚就分叉过）。
-  push_to_editors();
+  // 具体到每一栏的只读位由 `apply_editor_config` 统一算（左栏看 `allow_left_edit_`，
+  // 右栏看并列/内联）——这里不另写一套，以免两处口径分叉。
+  //
+  // **不碰文本**：本函数是声明式宿主每帧都会调的“配置面”接口，
+  // 而重建快照可能落后于用户刚打的字（见 `apply_editor_config` 的说明）。
+  apply_editor_config();
 }
 
 void DiffView::set_font_size(float size) {
@@ -537,7 +540,7 @@ void DiffView::rebuild_unified() {
   }
 }
 
-void DiffView::push_to_editors() {
+void DiffView::apply_editor_config() {
   const bool side_by_side = layout_ == DiffLayout::SideBySide;
   // 左栏可写的判据只算一次（两处都用）：内联模式左栏是**唯一**那一栏，它必须可写。
   const bool left_writable = allow_left_edit_;
@@ -549,17 +552,6 @@ void DiffView::push_to_editors() {
     // 滚动同步：两栏必须一起滚，且不能互相唤醒（见 `sync_scroll_from`）。
     // 接在这里而不是 `arrange`：后者是布局，重复接线在切布局时会把回调覆盖成同一个。
     left_->on_scroll = [this](float, float) { sync_scroll_from(*left_); };
-    // **保留光标与滚动**：重算会把整栏文本重新合成（带对齐填充行），
-    // 而用户正在改的地方必须待在眼皮底下。
-    //
-    // ⚠ 这里用 `replace_text_keep_state` 而不是 `set_text`：后者语义是“换了一份文档”
-    // （光标归 0、滚动回顶、撤销栈清空）——逐键重算时就是“每敲一个字光标跳回行首”。
-    //
-    // ⚠ 必须把**两份 `real` 表**一起交上去：填充行的数量随重算变化，
-    // 只看显示行号会把光标定位到别的行上（实测：跑到当前行倒数第二个字符之后）。
-    left_->replace_text_keep_state(old_side_.text, pushed_real_left_, old_side_.real);
-    pushed_real_left_ = old_side_.real;
-    left_->set_line_decorations(old_side_.marks);
     // 左栏也可写时（空白文本对比：两侧都是用户自己的内容）同样把“变了”交给宿主。
     // 传**逻辑文本**：对齐填充行不是内容，带出去会把整篇当成改动。
     if (left_writable) {
@@ -581,21 +573,13 @@ void DiffView::push_to_editors() {
     right_->set_read_only(read_only_ || !side_by_side);
     if (font_size_ > 0.0f) right_->set_font_size(font_size_);
     right_->on_scroll = [this](float, float) { sync_scroll_from(*right_); };
-    // 同左栏：保留光标与滚动（两份 `real` 表都交，见左栏那段说明）。
-    // 内联模式下右栏被清空，它不可见也不可写，位置无所谓。
-    right_->replace_text_keep_state(side_by_side ? new_side_.text : std::string{},
-                                    pushed_real_right_,
-                                    side_by_side ? new_side_.real : std::vector<char>{});
-    pushed_real_right_ = side_by_side ? new_side_.real : std::vector<char>{};
-    right_->set_line_decorations(side_by_side ? new_side_.marks
-                                              : std::vector<CodeEditor::LineDecoration>{});
     // **右栏可编辑**（只读关闭时）：它是「当前内容」那一侧。编辑后交给宿主重算差异
     //（宿主才知道“跟什么比”）。
     //
     // ⚠ 传的是**本组件自己算的逻辑文本**（剔掉了对齐填充行与 `@@` 分隔行），
     // 而不是 `right_->text()`：后者带着那些造出来的行，拿它去比会把整篇算成改动
     //（实测：自动对比一次之后 +39 −283，画面上一片红——那正是这个坑）。
-    if (!read_only_) {
+    if (!read_only_ && side_by_side) {
       right_->on_change = [this](std::string_view /*text*/) {
         if (on_text_edit) on_text_edit(logical_text(true));
       };
@@ -605,6 +589,35 @@ void DiffView::push_to_editors() {
   }
 }
 
+void DiffView::push_to_editors() {
+  const bool side_by_side = layout_ == DiffLayout::SideBySide;
+  if (left_ != nullptr) {
+    // **保留光标与滚动**：重算会把整栏文本重新合成（带对齐填充行），
+    // 而用户正在改的地方必须待在眼皮底下。
+    //
+    // ⚠ 这里用 `replace_text_keep_state` 而不是 `set_text`：后者语义是“换了一份文档”
+    // （光标归 0、滚动回顶、撤销栈清空）——逐键重算时就是“每敲一个字光标跳回行首”。
+    //
+    // ⚠ 必须把**两份 `real` 表**一起交上去：填充行的数量随重算变化，
+    // 只看显示行号会把光标定位到别的行上（实测：跑到当前行倒数第二个字符之后）。
+    left_->replace_text_keep_state(old_side_.text, pushed_real_left_, old_side_.real);
+    pushed_real_left_ = old_side_.real;
+    left_->set_line_decorations(old_side_.marks);
+  }
+  if (right_ != nullptr) {
+    // 同左栏：保留光标与滚动（两份 `real` 表都交，见左栏那段说明）。
+    // 内联模式下右栏被清空，它不可见也不可写，位置无所谓。
+    right_->replace_text_keep_state(side_by_side ? new_side_.text : std::string{},
+                                    pushed_real_right_,
+                                    side_by_side ? new_side_.real : std::vector<char>{});
+    pushed_real_right_ = side_by_side ? new_side_.real : std::vector<char>{};
+    right_->set_line_decorations(side_by_side ? new_side_.marks
+                                              : std::vector<CodeEditor::LineDecoration>{});
+  }
+  // 配置面（语言/行号/只读/字号/回调）每次推完都重算一次：
+  // 文本变了可能改变“右栏是否参与”（切布局走的不是本函数）。
+  apply_editor_config();
+}
 auto DiffView::hunk_first_line(std::size_t index, bool new_side) const -> std::size_t {
   const Side& side = new_side ? new_side_ : old_side_;
   if (index >= side.hunk_rows.size()) return 0;
@@ -702,25 +715,38 @@ void DiffView::arrange(const RenderContext& context, math::Rect rect) {
   const float body_height = std::max(0.0f, rect.height - header_height);
   const float half = side_by_side ? std::floor(rect.width * 0.5f) : rect.width;
 
+  bool left_created = false;
+  bool right_created = false;
+
   if (left_ == nullptr) {
     auto owned = std::make_unique<CodeEditor>();
     left_ = owned.get();
     left_->set_id("diff-left");
     add_child(std::move(owned));
+    left_created = true;
   }
   if (side_by_side && right_ == nullptr) {
     auto owned = std::make_unique<CodeEditor>();
     right_ = owned.get();
     right_->set_id("diff-right");
     add_child(std::move(owned));
+    right_created = true;
   }
-  // 新建后统一走 `push_to_editors` 把文本/装饰/只读位/回调**一次配齐**。
+  // 编辑器新建：统一走 `push_to_editors` 把文本/装饰/只读位/回调**一次配齐**。
   //
   // ⚠ 以前在 `arrange` 里自己写了一份（`set_read_only(true)` 写死等），
   // 与 `push_to_editors` 的口径分叉——后果是右栏永远是只读的：
   // 组件自己的 `editable` 属性报“可编辑”，实际那个编辑器却拒绕所有输入。
   // 两处都设“同一个量”就是这类缺陷的温床，所以只留一处。
-  push_to_editors();
+  //
+  // ⚠ **只在刚造出编辑器时推**：`arrange` 每帧都跑，而两栏文本的真值源是
+  // `set_diff`/`set_full_texts` 重建出的快照。宿主“用户编辑 → 重算 → 下一帧
+  // 重建”之间存在一个窗口，此时快照还是**上一帧**的；在 arrange 里无条件推
+  // 就会把用户刚打的字**回退**掉，且光标被夹回上一版行尾——现象是“在行尾
+  // 每输一个字光标就退回一个字符”（实测：编辑器 `abc1`、光标 4 → 快照 `abc`
+  // 覆盖后光标夹到 3）。
+  const bool created = left_created || right_created;
+  if (created) push_to_editors();
   if (right_ != nullptr) {
     // 切模式只翻可见位（子元素与其状态保留，切回来时滚动位置还在）。
     right_->set_visible(side_by_side);

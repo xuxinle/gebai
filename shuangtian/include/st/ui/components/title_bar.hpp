@@ -44,8 +44,9 @@ namespace st::ui {
 ///   接口返回 false 时**不影响拖动/按钮**，只是这条路不通）；
 /// - 三个控制按钮：`hover` 高亮、**关闭按钮 hover 用 danger 色**（系统惯例，防误点）。
 ///
-/// 高度缺省 `metrics.control_height_lg`（40px）：标题栏比正文控件略高一档，
-/// 是"窗框"与"工具栏"在视觉上分开的最小代价。
+/// 高度缺省 34px（`control_height` 档）：栏里挂的是菜单栏（32px）与标题文字，
+/// 两边同属一档控件高度；再高就只剩空白（它不会把内容推得更开，只会把窗口上方
+/// 拉出一道“空条”）。
 class TitleBar : public Element {
  public:
   explicit TitleBar(std::string title = {});
@@ -159,8 +160,12 @@ class TitleBar : public Element {
   // —— 几何（命中、绘制、单测共用同一份；避免"测试复刻布局公式"的假绿）——
   /// 三个控制按钮的边长（逻辑像素）。
   [[nodiscard]] static constexpr auto control_button_size() noexcept -> float { return 46.0f; }
-  /// 标题栏高度（逻辑像素）。
-  [[nodiscard]] static constexpr auto bar_height() noexcept -> float { return 40.0f; }
+  /// 标题栏高度（逻辑像素）= 控件大档 `metrics.control_height`（34px）。
+  ///
+  /// 为何不是 40：本栏挂的是**菜单栏**（32px）与标题文字，两边都是 32~34 一档；
+  /// 栏高 40 时文字上下各留 12px，整条看起来就是一道“空条”（用户报的“上方空条有点宽”）。
+  /// 34 保住了比菜单栏高 2px 的层次，同时把空余压到常规控件内边距的水平。
+  [[nodiscard]] static constexpr auto bar_height() noexcept -> float { return 34.0f; }
   /// 单个控制按钮的矩形（`index`：0=最小化 1=最大化 2=关闭），绝对坐标。
   [[nodiscard]] auto control_button_rect(std::size_t index) const -> math::Rect;
   /// 控制按钮区（三个按钮加起来的占位）：附属槽排在它左侧，标题带也要避开它。

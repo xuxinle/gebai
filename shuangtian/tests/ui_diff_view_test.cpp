@@ -356,3 +356,62 @@ ST_TEST(diff_view_passes_inline_ranges_to_editors) {
     }
   }
 }
+
+ST_TEST(diff_view_config_calls_do_not_roll_back_editor_text) {
+  // **声明式宿主的每帧配置调用不能碰文本**。
+  //
+  // 宿主每帧都会调 `set_both_sides_editable` / `set_read_only` / `set_show_line_numbers`，
+  // 而“编辑器里的文本”可能已经比“重建快照”新一步（用户刚敲的那个字正在
+  // 回调链上，差异重算要下一次重组才落地）。如果这些配置接口顺手
+  // `push_to_editors()`，就会把**旧快照**写回去——现象是“在行尾每输一个字，
+  // 光标就退回一格”（编辑器 `abc1`+光标 4 → 快照 `abc` 覆盖后光标夹到 3）。
+  Fixture fx;
+  // **整文件模式**（`set_full_texts`）：两栏都是完整文本，与 gbcode 的
+  // “空白文本对比”同一条路径（差异块模式下相同内容不产生任何行，栏里是空的）。
+  fx.view.set_full_texts("abc", "abc", {}, /*keep_numbers=*/true);
+  fx.view.set_both_sides_editable(true);
+  fx.view.set_read_only(false);
+  fx.layout();
+  st::ui::CodeEditor* left = fx.view.left_editor();
+  ST_REQUIRE(left != nullptr);
+
+  // 模拟“用户刚敲了一个字”：只改编辑器，不改差异快照。
+  left->set_cursor_index(3);
+  left->insert_text("1");
+  ST_REQUIRE(left->text() == "abc1");
+  ST_REQUIRE(left->cursor_index() == 4U);
+
+  // 宿主下一帧的配置调用（顺序与 gbcode 的 build 一致）。
+  fx.view.set_both_sides_editable(true);
+  fx.view.set_read_only(false);
+  fx.view.set_show_line_numbers(true);
+
+  ST_CHECK_EQ(left->text(), std::string("abc1"));   // 刚打的字没被回退
+  ST_CHECK_EQ(left->cursor_index(), 4U);              // 光标留在字后面
+}
+
+ST_TEST(diff_view_rebuild_keeps_cursor_at_end_of_line) {
+  // 重算（重建快照 + 推文本）时，**行尾输入的光标必须留在行尾**。
+  //
+  // 反向验证已做过：把 `push_to_editors` 里那份“保留光标”换成 `set_text`，
+  // 本用例会在“列号”上立刻变红。
+  Fixture fx;
+  fx.view.set_full_texts("abc", "abc", {}, /*keep_numbers=*/true);
+  fx.view.set_both_sides_editable(true);
+  fx.view.set_read_only(false);
+  fx.layout();
+  st::ui::CodeEditor* left = fx.view.left_editor();
+  ST_REQUIRE(left != nullptr);
+
+  left->set_cursor_index(3);
+  left->insert_text("1");
+  // 宿主重算：新文本进视图（空白对比的编辑回调就是这条）。
+  fx.view.set_full_texts("abc1", "abc1", {}, /*keep_numbers=*/true);
+  fx.layout();
+
+  ST_CHECK_EQ(left->text(), std::string("abc1"));
+  ST_CHECK_EQ(left->cursor_index(), 4U);
+  fx.view.set_show_line_numbers(true);
+  ST_CHECK_EQ(left->cursor_index(), 4U);   // 再跑一次配置面调用，仍不回退
+}
+

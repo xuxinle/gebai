@@ -164,7 +164,14 @@ class DiffView : public Element {
   /// 让**两侧都可编辑**（空白对比用；文件差异不要用它——左栏是基线）。
   ///
   /// 与 `set_read_only(false)` 的区别：那个只开右栏（刻意），这个是“两份都是我的”。
-  void set_both_sides_editable(bool value) { allow_left_edit_ = value; push_to_editors(); }
+  ///
+  /// ⚠ 只改配置（`apply_editor_config`），**不推文本**：宿主每帧都调它，
+  /// 而重建快照可能落后于用户刚打的字。
+  void set_both_sides_editable(bool value) {
+    if (allow_left_edit_ == value) return;
+    allow_left_edit_ = value;
+    apply_editor_config();
+  }
 
   /// **显式请求**“下一次排完就跳到第一个差异”（一次性）。
   ///
@@ -279,8 +286,15 @@ class DiffView : public Element {
                         std::string_view text, bool gutter_bar = false,
                         std::vector<std::pair<std::size_t, std::size_t>> inline_ranges = {},
                         bool real = true);
-  /// 把重建结果推给两侧编辑器（文本 + 装饰 + 只读位）。
+  /// 把重建结果推给两侧编辑器（文本 + 装饰 + 配置面）。
   void push_to_editors();
+  /// 只同步**配置面**（语言/行号/只读/字号/滚动与变更回调），**不碰文本**。
+  ///
+  /// 为何要拆开：宿主声明式每帧都会调 `set_read_only`/`set_both_sides_editable` 等
+  /// 配置接口，而它们不该把**重建快照**推回编辑器——快照是上一轮差异计算的结果，
+  /// 用户可能刚改过一两个字（宿主重算在下一帧）。推快照会把那些字回退掉，
+  /// 光标也被夹到旧文本行尾（现象：行尾打字时每输一个字符光标退一格）。
+  void apply_editor_config();
   /// 行高是否真的量出来了（`scroll_to_line` 能不能算出非零偏移）。
   ///
   /// 为何不能只看 `bounds().height > 0`：那是**本组件**的矩形，它非零不代表内部

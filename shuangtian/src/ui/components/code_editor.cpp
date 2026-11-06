@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include <cstdio>
+
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/paint.hpp"
@@ -572,6 +574,45 @@ auto CodeEditor::line_indent(std::size_t line) const -> std::string {
 auto CodeEditor::indent_unit() const -> std::string {
   if (!insert_spaces_) return "\t";
   return std::string(static_cast<std::size_t>(tab_width_), ' ');
+}
+
+auto CodeEditor::indent_unit_columns() const -> std::size_t {
+  // 文件实际缩进宽度（与 `tab_width_` 无关）：取**最小正缩进**作一级。
+  //
+  // 为何取最小而不是众数：缩进参考线的目的是“把同一层级的兄弟行串起来”，
+  // 而最小正缩进就是最内一层的步长；众数在混合缩进（顶层 4、块内 2）的文件上
+  // 会把层级算错。与 VSCode 的 indent detection 同一口径。
+  //
+  // 缓存键是文本世代号（`span_generation_`）：每帧扫全文件是每帧一次全文遍历，
+  // 在几万行的文件上直接变成逐帧开销。
+  if (indent_unit_generation_ == span_generation_ && indent_unit_cache_ != 0) {
+    return indent_unit_cache_;
+  }
+  rebuild_spans();
+  std::size_t unit = 0;
+  const std::size_t probe_limit = std::min<std::size_t>(line_spans_.size(), 400);
+  for (std::size_t line = 0; line < probe_limit; ++line) {
+    const auto [begin, end] = line_spans_[line];
+    std::size_t visual = 0;
+    std::size_t index = begin;
+    for (; index < end; ++index) {
+      const char raw = text_[index];
+      if (raw == ' ') {
+        ++visual;
+      } else if (raw == '\t') {
+        visual += static_cast<std::size_t>(std::max(1, tab_width_)) -
+                  (visual % static_cast<std::size_t>(std::max(1, tab_width_)));
+      } else {
+        break;
+      }
+    }
+    if (index >= end || visual == 0) continue;   // 空行 / 无缩进行
+    if (unit == 0 || visual < unit) unit = visual;
+    if (unit == 2) break;   // 2 已是最常见的下限，不可能再小得有意义
+  }
+  indent_unit_cache_ = unit == 0 ? static_cast<std::size_t>(std::max(1, tab_width_)) : unit;
+  indent_unit_generation_ = span_generation_;
+  return indent_unit_cache_;
 }
 
 // ————————————————————————————————————————————————————————————————————————————
@@ -1976,21 +2017,39 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     // 只带来 ~7% 的亮度变化（AA 后又只剩一半），13.5px 代码上基本看不见——
     // “缩进参考线”这类装饰“看不见就等于没有”。亮度差拉到 ~25% 既不抢正文，
     // 又能一眼看出缩进层次（与主流编辑器同量级）。
+    //
+    // 横向位置：画在**每级缩进段的左边界**上（列 `step * unit`，即“父级内容的
+    // 对齐位置”）。
+    //
+    // 为何不是 `(step + 1) * unit`（旧写法）：那是**本级内容起点**，线会紧贴第一
+    // 个字符的墨迹，看起来像下划线/删除线掠过文字；而参考线存在的意义是把**同一
+    // 层级的兄弟行**串起来——那一条列就是它们共同的对齐基，即该级缩进的左缘
+    // （缩进 1 级 → 列 0 = 顶层内容对齐位置；缩进 2 级 → 列 `unit` = 父级内容对齐位置）。
+    //
+    // 为何 `unit` 取 `indent_unit_columns()` 而不是 `tab_width_`：2 空格缩进的文件在
+    // 4 宽的制表位下永远凑不满一级——整篇一条线也不画（“设了但看不见”）。
     if (indent_guides_ && !row.empty()) {
       const float space_w = text_port_of(context).measure_width(" ", font_size(),
                                                                text::FontRole::Monospace);
-      const std::size_t unit = static_cast<std::size_t>(std::max(1, tab_width_));
+      const std::size_t unit = indent_unit_columns();
       // 缩进宽度按**展开后**的视觉列算（与绘制/命中同一量尺）——原先 Tab 按
       // `tab_width`、空格按 1 各自累加，含 Tab 的行参考线会与字符错位。
       std::size_t visual = 0;
       for (std::size_t probe = begin; probe < end; ++probe) {
         const char raw = text_[probe];
         if (raw != ' ' && raw != '\t') break;
-        const std::size_t previous_level = visual / unit;
         visual += raw == '\t' ? unit - (visual % unit) : 1U;
         const std::size_t level = visual / unit;
-        for (std::size_t step = previous_level; step < level; ++step) {
-          const float x = origin_x + static_cast<float>((step + 1) * unit) * space_w - 0.5f;
+        // 线画在**每级缩进段的左边界**上（列 `step * unit`，`step = 0..level-1`）。
+        //
+        // 这些列恰好就是各级的**父级内容对齐位置**：缩进 2 级的行，线在列 `unit`
+        // 处——那里正是父级那一行内容的起点；缩进 1 级的行，线在列 0（顶层内容
+        // 对齐位置）。所以同一层的兄弟行会被同一条线串起来，而不会掠过首字墨迹。
+        //
+        // 列 0 的线不算“压字”：没缩进的行（level 0）不画任何线，而有缩进的行
+        // 在列 0 处本来就是空白。
+        for (std::size_t step = 0; step < level; ++step) {
+          const float x = origin_x + static_cast<float>(step * unit) * space_w - 0.5f;
           canvas.fill_rect(math::Rect{x, row_top, 1.0f, height},
                            raster::Paint::solid(colors.border_strong), 0.0f);
         }

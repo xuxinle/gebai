@@ -119,13 +119,22 @@ auto Table::cell_tone(std::size_t row, std::size_t column) const -> CellTone {
 void Table::set_row_lanes(std::vector<int> lanes) {
   row_lanes_ = std::move(lanes);
   row_lanes_.resize(rows_.size(), -1);
-  mark_dirty();
+  // **布局脏**（不是只重绘）：泳道带占宽度，列宽要重算（见 `lane_inset`）。
+  mark_layout_dirty();
 }
 
 void Table::set_lane_column_width(float width) {
   // 夹到合理范围：太窄画不出线、太宽就是在抢内容区。
   lane_column_width_ = std::clamp(width, 8.0f, 80.0f);
   mark_layout_dirty();
+}
+
+auto Table::lane_inset() const noexcept -> float {
+  // **任何一行**有泳道就整表让位：同一张表里列必须对齐，不能按行变。
+  for (const int lane : row_lanes_) {
+    if (lane >= 0) return lane_column_width_;
+  }
+  return 0.0f;
 }
 
 void Table::clear_rows() {
@@ -255,6 +264,8 @@ void Table::recompute_columns(float available) {
   if (columns_.empty()) return;
 
   const float visible = available > 0.0f ? available : 0.0f;
+  // 自适应列均分的是“泳道带之外”的宽度（见 `lane_inset`）。
+  const float content_visible = std::max(0.0f, visible - lane_inset());
   float fixed_total = 0.0f;
   std::size_t auto_count = 0;
   for (const TableColumn& column : columns_) {
@@ -268,7 +279,7 @@ void Table::recompute_columns(float available) {
   if (auto_count == 0) {
     // 全部为固定宽：不足以填满时按比例拉伸；超出则保持（触发横向滚动）。
     if (fixed_total <= 0.0f) return;
-    const float scale = visible > fixed_total ? visible / fixed_total : 1.0f;
+    const float scale = content_visible > fixed_total ? content_visible / fixed_total : 1.0f;
     for (std::size_t index = 0; index < columns_.size(); ++index) {
       column_widths_[index] = columns_[index].width * scale;
     }
@@ -277,18 +288,18 @@ void Table::recompute_columns(float available) {
   }
 
   const auto auto_columns = static_cast<float>(auto_count);
-  float auto_width = (visible - fixed_total) / auto_columns;
+  float auto_width = (content_visible - fixed_total) / auto_columns;
   if (auto_width < kMinColumnWidth) auto_width = kMinColumnWidth;
   for (std::size_t index = 0; index < columns_.size(); ++index) {
     column_widths_[index] = columns_[index].width > 0.0f ? columns_[index].width : auto_width;
   }
   total_width_ = fixed_total + auto_width * auto_columns;
-  if (total_width_ < visible) {
-    const float extra = (visible - total_width_) / auto_columns;
+  if (total_width_ < content_visible) {
+    const float extra = (content_visible - total_width_) / auto_columns;
     for (std::size_t index = 0; index < columns_.size(); ++index) {
       if (columns_[index].width <= 0.0f) column_widths_[index] += extra;
     }
-    total_width_ = visible;
+    total_width_ = content_visible;
   }
 }
 
@@ -297,7 +308,7 @@ auto Table::column_width(std::size_t column) const noexcept -> float {
 }
 
 auto Table::column_x(std::size_t column) const noexcept -> float {
-  float x = bounds_.x - scroll_offset_;
+  float x = bounds_.x + lane_inset() - scroll_offset_;
   const std::size_t limit = std::min(column, column_widths_.size());
   for (std::size_t index = 0; index < limit; ++index) x += column_widths_[index];
   return x;

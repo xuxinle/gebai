@@ -198,7 +198,7 @@ namespace gbcode_ui {
     build_git_tabs(c);
     (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-refs-body"}, [&] {
       switch (git_tab_.value()) {
-        case 0:
+        case 1:
           (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-branches",
                            .key = "pane:branches"}, [&] { build_branches_pane(c); });
           break;
@@ -206,7 +206,7 @@ namespace gbcode_ui {
           (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-tags",
                            .key = "pane:tags"}, [&] { build_tags_pane(c); });
           break;
-        case 3:
+        case 4:
           (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-stashes",
                            .key = "pane:stashes"}, [&] { build_stashes_pane(c); });
           break;
@@ -236,9 +236,12 @@ namespace gbcode_ui {
     const std::string remotes =
         std::format("远程{}", git_remotes_.empty() ? "" : std::format(" {}", git_remotes_.size()));
     const std::array<std::string, 4> labels{branches, tags, stashes, remotes};
-    // 内部索引仍沿用旧编号（0=分支 2=标签 3=暂存 4=远程）：它只是“当前分组”的键，
-    // 与数组下标无关，不重排能少一次无意义的坐标变换。
-    const std::array<std::size_t, 4> numbers{0, 2, 3, 4};
+    // 分组编号：1=分支 2=标签 4=暂存 5=远程。
+    //
+    // 为何是这几个数（而不是 0/1/2/3）：它们是**历史索引**，`git_tab_` 会被会话
+    // 恢复/快捷键写入；且 3 曾是“日志”（现已上提为中栏），留着编号不动就少一次
+    // 数据迁移。`build_ref_sidebar` 的 `switch` 与这里必须同源。
+    const std::array<std::size_t, 4> numbers{1, 2, 4, 5};
     const std::array<const char*, 4> ids{"git-tab-branches", "git-tab-tags", "git-tab-stashes",
                                          "git-tab-remotes"};
     // 高 30 → **34**、距离 2 → **6**：与编辑器标签条和侧栏头部同高，
@@ -489,17 +492,53 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   }
 
 
-  /// 中栏：日志（过滤 + 泳道图 + 范围提示）。
+  /// 中栏：日志（标题 + 过滤 + 泳道图 + 范围提示）。
   ///
   /// 与右栏的分工：中栏回答“**发生了什么**”（一笔笔提交），右栏回答
   /// “**这一笔改了什么**”（文件与具体差异）。两者同屏才能“选中即看内容”，
   /// 而互斥标签页会把这条动线打断。
   void CodeEditorPage::build_log_pane(Composer& c) {
-    build_pane_head(c, "git-log-head", [this] {
-      return std::format("日志{}  {}", git_log_.empty() ? "" : std::format(" {}", git_log_.size()),
-                         git_.branch.empty() ? std::string{} : "· " + git_.branch);
-    }, "log-refresh");
-    build_log_filters(c);
+    // —— 标题与筛选**共一行** ——
+    //
+    // 旧形态是两行（26px 标题行 + 30px 过滤行）：标题只剩一个“日志 N · 分支”的
+    // 短语，却独占一整行，而中栏本身不高（与右栏分屏）——一屏日志少两行。
+    // 合成一行后：左边是标题（窄、不收缩），右边是过滤框 + “仅当前分支” + 刷新。
+    //
+    // ⚠ `#git-log-head` 这个 id 保留在**这一行**上：`tools/gbcode_git_e2e.py`
+    // 与自动化靠它判“中栏在不在”（换成别的 id 会让既有断言静默变成“找不到”）。
+    (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "git-log-head"}, [&] {
+      (void)text(c, [this] {
+        return std::format("日志{}",
+                           git_log_.empty() ? std::string{} : std::format(" {}", git_log_.size()));
+      }, {.weight = FontWeight::Regular, .id = "git-log-head-title"});
+      // 当前分支名另起一个弱化小字：它是**范围提示**，不是标题的一部分
+      //（标题里的数字会变，把分支拼进去会让它每切一次分支就整段重排）。
+      if (!git_.branch.empty()) {
+        (void)text(c, [this] { return git_.branch; },
+                   {.color = Tone::Muted, .id = "git-log-head-branch"});
+      }
+      (void)custom<Input>(c, [this](Input& field) {
+        field.set_id("log-filter-text");
+        field.set_placeholder("提交信息 / 作者 / 路径");
+        field.style().grow = true;
+        field.on_change = [this](std::string_view value) {
+          log_filter_text_.set(std::string(value));
+        };
+      }, {.height = 24.0f, .grow = true, .key = "log-filter-text"});
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("log-filter-current");
+        b.set_label("仅当前分支");
+        b.set_variant(log_filter_current_branch_.value() ? Button::Variant::Soft
+                                                         : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] {
+          log_filter_current_branch_.set(!log_filter_current_branch_.value());
+        };
+      }, {.height = 24.0f, .key = "log-filter-current"});
+      scm_icon_button(c, "log-refresh", "refresh", "重新读取日志", [this] {
+        git_log_loaded_ = false;
+      });
+    });
     // —— 多列表格（IDEA 同款）——
     //
     // 旧形态是“一行一个 Button + 空格拼起来的字符串”，问题是：
@@ -512,6 +551,11 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       table.set_id("git-log-table");
       const auto entries = filtered_log();
       table.clear_rows();   // 每次重组重建：日志量与过滤条件都会变
+      // 泳道带宽：默认值（28）只够画一条线，而“圆点+线”与首字之间还需要一档空白。
+      // 旧版**根本没给泳道留宽度**（`column_x` 从 `bounds_.x` 起算），圆点与竖线直接
+      // 压在提交信息首字上（“提交线和信息贴太紧”的那个现象）。现在框架的 `Table`
+      // 会把这块宽度真的让出来（见 `Table::lane_inset`），这里只调宽。
+      table.set_lane_column_width(34.0f);
       table.set_columns({
           {.name = "提交信息", .width = 0.0f},
           {.name = "作者", .width = 110.0f},
@@ -574,32 +618,6 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   }
 
 
-  /// 日志工具栏：三个过滤输入 + “仅当前分支” + 刷新。
-  void CodeEditorPage::build_log_filters(Composer& c) {
-    (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "git-log-filters"}, [&] {
-      (void)custom<Input>(c, [this](Input& field) {
-        field.set_id("log-filter-text");
-        field.set_placeholder("提交信息 / 作者 / 路径");
-        field.style().grow = true;
-        field.on_change = [this](std::string_view value) { log_filter_text_.set(std::string(value)); };
-      }, {.height = 24.0f, .grow = true, .key = "log-filter-text"});
-      (void)custom<Button>(c, [this](Button& b) {
-        b.set_id("log-filter-current");
-        b.set_label("仅当前分支");
-        b.set_variant(log_filter_current_branch_.value() ? Button::Variant::Soft
-                                                         : Button::Variant::Ghost);
-        b.set_size(Button::Size::Small);
-        b.on_click = [this] {
-          log_filter_current_branch_.set(!log_filter_current_branch_.value());
-        };
-      }, {.height = 24.0f, .key = "log-filter-current"});
-      scm_icon_button(c, "log-refresh", "refresh", "重新读取日志", [this] {
-        git_log_loaded_ = false;
-      });
-    });
-  }
-
-
   /// 日志行的展示文本（泳道标记 + 短 hash + 主题 + refs 胶囊）。
   auto CodeEditorPage::log_line_label(const gbcode::LogEntry& entry) const -> std::string {
     std::string refs;
@@ -644,67 +662,90 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
                  {.color = Tone::Muted, .id = "git-detail-empty"});
       return;
     }
-    // —— 元信息分级（IDEA 同款）——
+    // —— 整栏可垂直滚动 ——
     //
-    // 三级层次，靠字号/字重/色调三个正交手段区分（不是只靠颜色）：
-    //   ① **提交标题**：最大、最重、主色——它回答“这笔提交干了什么”；
-    //   ② **作者 · 日期**：小、中灰——背景信息；
-    //   ③ **增删统计**：右缘、+/− 分色——回答“改动多大”。
+    // 为何必须包一层 `ScrollView`：提交信息是**多行**的（用户会把一整段说明写进提交
+    // 消息），文件清单也随改动文件数变长。旧版把两层堆在一个固定高度的列里，
+    // 超额部分直接被裁掉（没有滚动，下面的文件根本看不到）。
     //
-    // 旧版三条都是 `Tone::Muted` 的小字，扫一眼分不出主次（“标题”与“作者”同在），
-    // 而这一栏的存在意义正是“选中一笔提交后快速看清它”——主次必须成立。
-    (void)custom<Text>(c, [this](Text& t) {
-      t.set_id("git-commit-summary");
-      t.set_content(git_commit_summary_.value());
-      t.set_weight(FontWeight::SemiBold);
-      t.set_font_size(14.0f);
-    }, {.grow = true});
-    (void)row(c, {.gap = 8.0f, .height = 20.0f}, [&] {
-      (void)custom<Text>(c, [this](Text& t) {
-        t.set_id("git-commit-meta");
-        // 作者与日期放在同一行（它们回答同一个问题：“谁、什么时候”）。
-        t.set_content(std::format("{} · {}", git_selected_author_, git_selected_date_));
-        t.set_tone(Tone::Muted);
-        t.set_font_size(12.0f);
-      }, {.grow = true});
-      // 增删统计：从**存下来的**统计层读（不在渲染期重算：那是“同一量两处推导”的温床）。
-      (void)custom<Text>(c, [this](Text& t) {
-        t.set_id("git-commit-stat");
-        t.set_content(std::format("{} 个文件  +{} −{}", git_selected_stat_.files,
-                                  git_selected_stat_.added, git_selected_stat_.removed));
-        t.set_tone(Tone::Muted);
-        t.set_font_size(12.0f);
-      }, {.id = "git-commit-stat"});
-    });
-    if (git_commit_files_.empty()) {
-      (void)text(c, [] { return std::string("（这笔提交没有改动文件）"); },
-                 {.id = "git-detail-no-files"});
-      return;
-    }
-    // —— 文件清单：**表格**（路径 / 增 / 删）——
-    //
-    // 旧版是一行一个 Button，文本拼成 `path  +N −M`：路径长短不一时
-    // 增删数字**参差不齐**，而“哪些文件动得多”恰恰要靠这两列对齐才扫得出来。
-    (void)custom<Table>(c, [this](Table& table) {
-      table.set_id("git-commit-files-table");
-      table.clear_rows();
-      table.set_columns({
-          {.name = "文件", .width = 0.0f},
-          {.name = "+", .width = 52.0f},
-          {.name = "−", .width = 52.0f},
-      });
-      table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
-                              Table::CellTone::Muted});
-      table.set_row_height(24.0f);
-      for (const auto& [path, plus, minus] : git_commit_files_) {
-        table.add_row({path, std::format("+{}", plus), std::format("−{}", minus)});
-      }
-      // 点文件 → 看该文件在这笔提交里的差异（与旧版同一动线）。
-      const auto files = git_commit_files_;
-      table.set_on_row_click([this, files](std::size_t row) {
-        if (row < files.size()) open_commit_file(git_selected_hash_, std::get<0>(files[row]));
-      });
-    }, {.grow = true, .id = "git-commit-files"});
+    // 而 `ScrollView` 的宿主是 `custom_container`：它的子声明回调用**外层 `c`**
+    //（不是组件的 composer）——写错会直接编译报错。
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          (void)column(c, {.gap = 6.0f, .padding_x = 2.0f, .id = "git-detail-body"}, [&] {
+            // —— 元信息分级（IDEA 同款）——
+            //
+            // 三级层次，靠字号/字重/色调三个正交手段区分（不是只靠颜色）：
+            //   ① **提交标题**：最大、最重、主色——它回答“这笔提交干了什么”；
+            //   ② **作者 · 日期**：小、中灰——背景信息；
+            //   ③ **增删统计**：右缘、+/− 分色——回答“改动多大”。
+            //
+            // ⚠ 提交信息用多行 `Text`（`set_multiline`）：单行 `Text` 会 `ellipsize`，
+            // 长句被截成一行省略号（“消息看不全”）。多行的高度由折行结果自然撑开，
+            // 即“高度适应内容”。
+            (void)custom<Text>(c, [this](Text& t) {
+              t.set_id("git-commit-summary");
+              t.set_content(git_commit_summary_.value());
+              t.set_weight(FontWeight::SemiBold);
+              t.set_font_size(14.0f);
+              t.set_multiline(true);
+            }, {.id = "git-commit-summary"});
+            (void)row(c, {.gap = 8.0f, .height = 20.0f}, [&] {
+              (void)custom<Text>(c, [this](Text& t) {
+                t.set_id("git-commit-meta");
+                // 作者与日期放在同一行（它们回答同一个问题：“谁、什么时候”）。
+                t.set_content(std::format("{} · {}", git_selected_author_, git_selected_date_));
+                t.set_tone(Tone::Muted);
+                t.set_font_size(12.0f);
+              }, {.grow = true});
+              // 增删统计：从**存下来的**统计层读（不在渲染期重算：那是“同一量两处推导”的温床）。
+              (void)custom<Text>(c, [this](Text& t) {
+                t.set_id("git-commit-stat");
+                t.set_content(std::format("{} 个文件  +{} −{}", git_selected_stat_.files,
+                                          git_selected_stat_.added, git_selected_stat_.removed));
+                t.set_tone(Tone::Muted);
+                t.set_font_size(12.0f);
+              }, {.id = "git-commit-stat"});
+            });
+            if (git_commit_files_.empty()) {
+              (void)text(c, [] { return std::string("（这笔提交没有改动文件）"); },
+                         {.id = "git-detail-no-files"});
+              return;
+            }
+            // —— 文件清单：**表格**（路径 / 增 / 删）——
+            //
+            // 旧版是一行一个 Button，文本拼成 `path  +N −M`：路径长短不一时
+            // 增删数字**参差不齐**，而“哪些文件动得多”恰恰要靠这两列对齐才扫得出来。
+            //
+            // 表格不 `grow`：放进 `ScrollView` 后它该按**行数**撑开自然高
+            //（grow 会把它拉到视口高，短清单下面挂一大片空白，长清单又被压回去）。
+            (void)custom<Table>(c, [this](Table& table) {
+              table.set_id("git-commit-files-table");
+              table.clear_rows();
+              table.set_columns({
+                  {.name = "文件", .width = 0.0f},
+                  {.name = "+", .width = 52.0f},
+                  {.name = "−", .width = 52.0f},
+              });
+              table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
+                                      Table::CellTone::Muted});
+              table.set_row_height(24.0f);
+              for (const auto& [path, plus, minus] : git_commit_files_) {
+                table.add_row({path, std::format("+{}", plus), std::format("−{}", minus)});
+              }
+              // 点文件 → 看该文件在这笔提交里的差异（与旧版同一动线）。
+              const auto files = git_commit_files_;
+              table.set_on_row_click([this, files](std::size_t row) {
+                if (row < files.size()) {
+                  open_commit_file(git_selected_hash_, std::get<0>(files[row]));
+                }
+              });
+            }, {.id = "git-commit-files"});
+          });
+        },
+        [](ScrollView& scroll) { scroll.set_id("git-detail-scroll"); },
+        {.grow = true, .id = "git-detail-host"});
   }
 
 

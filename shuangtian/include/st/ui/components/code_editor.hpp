@@ -667,6 +667,12 @@ class CodeEditor : public Element {
   void move_document_edge(bool to_end, bool extend);
   void clamp_cursor();
   [[nodiscard]] auto indent_unit() const -> std::string;
+  /// 一级缩进占多少个**视觉列**（缩进参考线与缩进折叠的唯一量尺）。
+  ///
+  /// 不直接用 `tab_width_`：缩进参考线要跟着**文件实际用的缩进宽度**走，
+  /// 而 `tab_width_` 是“按 Tab 展开到哪”的渲染口径（默认 4）。两者混用会让
+  /// 2 空格缩进的文件一条参考线也不画（不满一级）。
+  [[nodiscard]] auto indent_unit_columns() const -> std::size_t;
   [[nodiscard]] auto indent_columns(const std::string& line) const -> std::size_t;
 
   std::string text_{};
@@ -708,6 +714,9 @@ class CodeEditor : public Element {
   /// 与亮/暗切换对编辑器全部无效）。
   std::optional<ThemeSnapshot> applied_theme_{};
   int tab_width_{4};
+  /// 缩进参考线用的“一级缩进列数”缓存（键：`span_generation_`；见 `indent_unit_columns`）。
+  mutable std::size_t indent_unit_cache_{0};
+  mutable std::size_t indent_unit_generation_{static_cast<std::size_t>(-1)};
   bool insert_spaces_{true};
   bool read_only_{false};
   bool show_line_numbers_{true};

@@ -66,7 +66,11 @@ class Table : public Element {
   /// “第 n 行现在在屏幕上第几个像素”（那是 `row_rect` 的内部知识）。
   /// 取值语义与 git 泳道图一致：0 = 主干，n = 第 n 条分支线。
   void set_row_lanes(std::vector<int> lanes);
-  /// 在该列位置画泳道（负值保持默认 28px；0 会吃掉列宽，不要传）。
+  /// 设在该列位置画泳道（负值保持默认 28px；0 会吃掉列宽，不要传）。
+  ///
+  /// 这个宽度是**真的从左边留出来**的：开了泳道的表格，各列的 `bounds_` 从
+  /// `x + lane_inset()` 起算（见 `column_x`），否则第一个字会与泳道圆点叠在一起——
+  /// 实测症状就是“提交信息的首字被竖线和圆点盖住”。
   void set_lane_column_width(float width);
 
   // —— 数据 ——
@@ -149,6 +153,8 @@ class Table : public Element {
   [[nodiscard]] auto column_x(std::size_t column) const noexcept -> float;
   /// 指针所在行（不在数据行内返回 kNoRow）。
   [[nodiscard]] auto row_at(math::Point point) const noexcept -> std::size_t;
+  /// 泳道带占掉的左缘宽度（没开泳道时为 0）。
+  [[nodiscard]] auto lane_inset() const noexcept -> float;
 
   static constexpr std::size_t kNoRow = static_cast<std::size_t>(-1);
 
