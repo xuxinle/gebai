@@ -376,7 +376,7 @@ const kLaunchTimeoutMs = 3_000
 const runTool: Tool = {
   name: "run",
   description:
-    "构建与运行霜天应用（框架生命周期入口）。action=build 构建（自动自举 stpm 工具链）；action=test 跑框架单元测试（可选 san=true 开 ASan/UBSan）；action=lint 跑禁用特性静态扫描；action=start 以无头模式启动应用并等待控制通道**验证就绪**（文件新鲜 + 握手成功才算；返回 port 与 PID；已有存活实例时明确拒绝，先 stop）；action=stop 结束进程；action=status 查看进程与端口；action=logs 取运行日志尾部。target 为应用名（gallery/mdeditor 或自带工程的目标名），profile 为构建档（dev/debug/release/san）。",
+    "构建与运行霜天应用（框架生命周期入口）。action=build 构建（自动自举 stpm 工具链）；action=test 跑框架单元测试（可选 san=true 开 ASan/UBSan）；action=lint 跑禁用特性静态扫描；action=start 启动应用并等待控制通道**验证就绪**（文件新鲜 + 握手成功才算；返回 port 与 PID；已有存活实例时明确拒绝，先 stop）。**默认以无头模式启动**（开发/回归用）；需要**真实窗口**让用户亲手操作（鼠标缩放/拖动/键盘）时传 window=true——那时不注入 --headless，后端会自动落到 win32/x11 真窗口（无显示服务时框架自己回退无头）。action=stop 结束进程；action=status 查看进程与端口；action=logs 取运行日志尾部。target 为应用名（gallery/mdeditor 或自带工程的目标名），profile 为构建档（dev/debug/release/san）。",
   parameters: schema(
     {
       action: {
@@ -399,6 +399,11 @@ const runTool: Tool = {
       },
       name: { type: "string", description: "action=init 时的工程名（缺省取目录名）" },
       args: { type: "string", description: "start 时附加命令行参数（如 --demo-stream）" },
+      window: {
+        type: "boolean",
+        description:
+          "start 时为 true 则不注入 --headless，开启**真实窗口**（用户可亲手用鼠标缩放/拖动/键盘）。用于「让用户实际上手」的场景；自动化回归仍用默认无头（截图与控制通道两者都能用，但无头不依赖桌面环境）",
+      },
       scale: { type: "number", description: "DPI 缩放（start 时透传 --scale，2.0 = 200%）" },
       theme: { type: "string", enum: ["light", "dark"], description: "主题" },
       timeout_ms: { type: "number", description: "构建/测试超时（默认 600000）" },
@@ -518,8 +523,9 @@ const runTool: Tool = {
         await ctx.runCommand(`mkdir -p "${dirname(log_file)}"`, { workdir: root })
       }
 
-      const extra = asString(args as Json, "args")
-      const scale = asNumber(args as Json, "scale", 0)
+        const extra = asString(args as Json, "args")
+  const wantWindow = (args as Json).window === true
+  const scale = asNumber(args as Json, "scale", 0)
       const theme = asString(args as Json, "theme")
       // ⚠ **启动前必须处理陈旧控制文件**（本条由一次真实误连换来）。
       //
@@ -549,10 +555,16 @@ const runTool: Tool = {
       // 参数用**数组**拼（不经 shell 的引号规则）：两条路径对引号的要求相反——
       // POSIX 需要手动加引号防词分割，PowerShell 的 `-ArgumentList` 数组则不能带引号
       // （带了就会把引号当作参数内容传过去，控制文件路径变成 `"C:\…"`）。
-      const flagArgs = [
-        "--headless",
-        "--control-port",
-        "0",
+        const flagArgs = [
+    // ## 默认无头，但 `window:true` 时不注入
+    //
+    // 无头是**自动化回归**的正确默认（不依赖桌面环境、截图与控制通道齐全）。
+    // 但“让用户亲手缩放/拖动”这个需求它满足不了：无头没有窗口，用户看不见也摸不着。
+    // 曾经这里无条件写死 `--headless`，于是从工具层根本起不出真实窗口——
+    // 调用方只能放弃使用工具、自己拼命令，而那会把控制文件/令牌/就绪探测全部重做一遍。
+    ...(wantWindow ? [] : ["--headless"]),
+    "--control-port",
+    "0",
         "--control-file",
         control_file,
         "--shots",
@@ -653,16 +665,23 @@ const runTool: Tool = {
       }
       // 启动（从拉起进程到握手成功）的耗时：与 build_ms 分开报告，便于区分
       // “这次花在编译上”还是“花在启动上”。
-      const startup_ms = Date.now() - launched_at
-      return {
-        output:
-          `已启动 ${target}（headless）\n  PID      : ${pid} · 端口 ${port} · 构建 ${build_ms}ms · 启动 ${startup_ms}ms\n` +
-          `  控制文件 : ${control_file}\n  日志     : ${log_file}\n  ${handshake}\n` +
-          `后续调用 target 二选一：① 省略 target（自动选中本会话唯一存活实例）；` +
-          `② 传控制文件路径 target="${control_file}"` +
-          `（注意：纯端口 / host:port 写法不带 token，会在握手阶段被拒）`,
-        data: { ok: true, action, target, pid, port, control_file, log_file, build_ms, startup_ms },
-      }
+        const startup_ms = Date.now() - launched_at
+  // 真实窗口与否以**握手回报的后端**为准（不信我们的意图）：
+  // 传了 window=true 但机器无显示服务时，框架会自己回退 headless——如实转述它。
+  const reportedHeadless = /无头=true/.test(handshake)
+  const modeText = reportedHeadless ? "headless 无头" : "真实窗口"
+  return {
+    output:
+      `已启动 ${target}（${modeText}）\n  PID      : ${pid} · 端口 ${port} · 构建 ${build_ms}ms · 启动 ${startup_ms}ms\n` +
+      `  控制文件 : ${control_file}\n  日志     : ${log_file}\n  ${handshake}\n` +
+      (wantWindow && reportedHeadless
+        ? "⚠ 请求了真实窗口但后端回退为无头（本机无可用显示服务）；请改用截图与控制通道验证。\n"
+        : "") +
+      `后续调用 target 二选一：① 省略 target（自动选中本会话唯一存活实例）；` +
+      `② 传控制文件路径 target="${control_file}"` +
+      `（注意：纯端口 / host:port 写法不带 token，会在握手阶段被拒）`,
+    data: { ok: true, action, target, pid, port, control_file, log_file, build_ms, startup_ms },
+  }
     }
 
     if (action === "stop" || action === "status" || action === "logs") {

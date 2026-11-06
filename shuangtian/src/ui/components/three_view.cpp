@@ -29,6 +29,20 @@ constexpr float kMaxPitch = 89.0f * kPi / 180.0f;
 constexpr float kMinDistance = 0.15f;
 /// 判定"拖拽"而不是"点击"的位移阈值（逻辑像素）。
 constexpr float kDragThreshold = 3.0f;
+/// 鼠标按钮号（**后端口径**：与 `platform_win32.cpp` 的 `push_mouse(..., 1/2/3, ...)`
+/// 以及 `platform_x11.cpp` 的 1/2/3 映射一致）。
+///
+/// ## 为何必须照后端写，而不能自定一套
+///
+/// 本组件曾用 `0` 表示左键——那是**图形 API 的惯例**（X11 的 Button1 = 0），
+/// 却不是本框架的惯例。后端的真实取值是 1=左 / 2=右 / 3=中，而 `0` 只会出现在
+/// 不携带按钮号的 `MouseMove` 上（Win32 的 `WM_MOUSEMOVE` 里没有按键状态）。
+/// 后果：**真鼠标左键永远不能旋转**（按住拖变成了什么都没发生），
+/// 而单元测试也按 `0` 写，于是测试全绿（实测踩到，真窗口里才发现）。
+/// 同一仓的 `viewport.cpp` / `timeline_view.cpp` 早就写着 `kMiddleButton{3}`。
+constexpr int kLeftButton{1};
+constexpr int kRightButton{2};
+constexpr int kMiddleButton{3};
 
 /// 世界包围盒（用于 `frame_scene`）。
 auto scene_bounds(const raster::ThreeScene& scene) -> raster::Bounds {
@@ -803,9 +817,9 @@ auto ThreeView::on_event(const RenderContext& context, Event& event) -> bool {
       press_origin_ = event.position;
       drag_last_ = event.position;
       press_moved_ = false;
-      if (event.button == 0 && orbit_enabled_) {
+      if (event.button == kLeftButton && orbit_enabled_) {
         drag_mode_ = DragMode::Orbit;
-      } else if ((event.button == 1 || event.button == 2) && pan_enabled_) {
+      } else if ((event.button == kRightButton || event.button == kMiddleButton) && pan_enabled_) {
         drag_mode_ = DragMode::Pan;
       } else {
         drag_mode_ = DragMode::None;
@@ -814,9 +828,20 @@ auto ThreeView::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
 
+    case EventKind::DoubleClick: {
+      // 双击回到初始视角（头文件声明的交互契约）。
+      //
+      // 之前只有声明没有实现：`on_event` 的 switch 里根本没有这个分支，
+      // 而“双击没反应”极易被当成“手势没发出来”。
+      if (!box.contains(event.position)) return false;
+      reset_view();
+      event.handled = true;
+      return true;
+    }
+
     case EventKind::MouseUp: {
       if (drag_mode_ == DragMode::None) return false;
-      const bool was_click = !press_moved_ && event.button == 0 && pick_enabled_;
+      const bool was_click = !press_moved_ && event.button == kLeftButton && pick_enabled_;
       drag_mode_ = DragMode::None;
       if (was_click && box.contains(event.position)) {
         // 点击拾取：命中就选中，点空白处取消选中
@@ -831,7 +856,14 @@ auto ThreeView::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::Wheel: {
       if (!zoom_enabled_ || !box.contains(event.position)) return false;
       // 等比缩放：每格 1.12 倍。用乘法而不是加法，才能在近处也保持手感一致。
-      const float factor = event.wheel_delta > 0.0f ? 1.12f : (1.0f / 1.12f);
+      //
+      // ## 方向：**delta 为正（滚轮前推/向上）= 放大 = 距离变小**
+      //
+      // 后端的 delta 约定就是“前推为正”（`platform_x11.cpp`：X11 button 4 → +1；
+      // `platform_win32.cpp`：`HIWORD(wparam) / 120`，前推为正），与 `scroll.cpp` /
+      // `viewport.cpp` 同一个口径。而这里原先写的是“正 delta → 距离变大”——
+      // 方向反了，于是“往前滚”会把模型**推远**（实测复现：distance 112 → 125）。
+      const float factor = event.wheel_delta > 0.0f ? (1.0f / 1.12f) : 1.12f;
       orbit_.distance *= factor;
       orbit_.clamp();
       mark_dirty();

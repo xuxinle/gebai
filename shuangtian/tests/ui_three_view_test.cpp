@@ -220,17 +220,17 @@ ST_TEST(three_view_click_selects_object) {
   }
   ST_REQUIRE(found);
 
-  // 按下 + 抬起（不移动 → 判定为点击）
+  // 按下 + 抬起（不移动 → 判定为点击）；左键在后端口径里是 1
   st::ui::Event down;
   down.kind = st::ui::EventKind::MouseDown;
   down.position = target;
-  down.button = 0;
+  down.button = 1;
   ST_CHECK(view->on_event(context, down));
 
   st::ui::Event up;
   up.kind = st::ui::EventKind::MouseUp;
   up.position = target;
-  up.button = 0;
+  up.button = 1;
   ST_CHECK(view->on_event(context, up));
 
   ST_CHECK(view->click_events() > 0);
@@ -250,7 +250,7 @@ ST_TEST(three_view_drag_orbits_but_does_not_select) {
   st::ui::Event down;
   down.kind = st::ui::EventKind::MouseDown;
   down.position = st::math::Point{320.0f, 200.0f};
-  down.button = 0;
+  down.button = 1;   // 左键（后端口径：1=左）
   (void)view->on_event(context, down);
   for (int step = 1; step <= 6; ++step) {
     st::ui::Event move;
@@ -261,7 +261,7 @@ ST_TEST(three_view_drag_orbits_but_does_not_select) {
   st::ui::Event up;
   up.kind = st::ui::EventKind::MouseUp;
   up.position = st::math::Point{440.0f, 200.0f};
-  up.button = 0;
+  up.button = 1;
   (void)view->on_event(context, up);
 
   // 拖拽必须转相机
@@ -280,7 +280,7 @@ ST_TEST(three_view_wheel_zooms) {
   st::ui::Event wheel;
   wheel.kind = st::ui::EventKind::Wheel;
   wheel.position = st::math::Point{320.0f, 200.0f};
-  wheel.wheel_delta = 120.0f;
+  wheel.wheel_delta = 1.0f;
   ST_CHECK(view->on_event(context, wheel));
 
   const float after = view->camera_state().distance;
@@ -288,9 +288,113 @@ ST_TEST(three_view_wheel_zooms) {
 
   // 反向滚轮应回到接近原值（等比缩放的两个方向必须对称）
   st::ui::Event back = wheel;
-  back.wheel_delta = -120.0f;
+  back.wheel_delta = -1.0f;
   (void)view->on_event(context, back);
   ST_CHECK_NEAR(view->camera_state().distance, before, 0.02);
+}
+
+ST_TEST(three_view_wheel_forward_zooms_in) {
+  // ## 方向约定：`Event::wheel_delta` **向上/向前为正**
+  //
+  // 后端就是这么给的（`platform_x11.cpp`：X11 button 4 → +1；
+  // `platform_win32.cpp`：`HIWORD(wparam) / 120`，前推为正）。
+  //
+  // 而“正 delta = 距离变大”是**反**的：老百姓推一下滚轮是“放大”，
+  // 不是“退后”。这一条单独断言，是因为原来的用例只查了 “距离变了”——
+  // 方向反了也照样绿（实测真踩到）。
+  auto view = make_view(640.0f, 400.0f);
+  view->frame_scene();
+  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+                                             nullptr, 0.0, nullptr};
+  const float before = view->camera_state().distance;
+
+  st::ui::Event wheel;
+  wheel.kind = st::ui::EventKind::Wheel;
+  wheel.position = st::math::Point{320.0f, 200.0f};
+  wheel.wheel_delta = 1.0f;   // 前推（放大）
+  (void)view->on_event(context, wheel);
+  ST_CHECK(view->camera_state().distance < before);   // 必须变**小**（靠近）
+}
+
+ST_TEST(three_view_real_button_numbers_drive_orbit_and_pan) {
+  // ## 按钮号必须跟**后端**的口径走：1=左 / 2=右 / 3=中
+  //
+  // `platform_win32.cpp` 的 `push_mouse(..., 1/2/3, ...)`、`platform_x11.cpp`
+  // 的 1/2/3 映射、`viewport.cpp` / `timeline_view.cpp` 的 `kMiddleButton{3}`
+  // 全部是这一口径。本组件曾用 `button == 0` 表示左键——于是**真鼠标左键
+  // 永远不能旋转**（`0` 只有“无按钮”的 move 事件才有），而单元测试里
+  // 按的也是 `0`，所以一直绿。
+  auto view = make_view(640.0f, 400.0f);
+  view->frame_scene();
+  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+                                             nullptr, 0.0, nullptr};
+  const auto drag = [&](int button, st::math::Point to) {
+    st::ui::Event down;
+    down.kind = st::ui::EventKind::MouseDown;
+    down.position = st::math::Point{320.0f, 200.0f};
+    down.button = button;
+    (void)view->on_event(context, down);
+    for (int step = 1; step <= 5; ++step) {
+      const float t = static_cast<float>(step) / 5.0f;
+      st::ui::Event move;
+      move.kind = st::ui::EventKind::MouseMove;
+      move.position = st::math::Point{320.0f + (to.x - 320.0f) * t,
+                                      200.0f + (to.y - 200.0f) * t};
+      (void)view->on_event(context, move);
+    }
+    st::ui::Event up;
+    up.kind = st::ui::EventKind::MouseUp;
+    up.position = to;
+    up.button = button;
+    (void)view->on_event(context, up);
+  };
+
+  // 左键（1）= 绕目标旋转
+  const float yaw_before = view->camera_state().yaw;
+  drag(1, st::math::Point{500.0f, 200.0f});
+  ST_CHECK(std::abs(view->camera_state().yaw - yaw_before) > 0.1f);
+
+  // 右键（2）= 平移 target；左键不该平移
+  const st::math::Vec3 target_before = view->camera_state().target;
+  drag(2, st::math::Point{420.0f, 260.0f});
+  const st::math::Vec3 target_after = view->camera_state().target;
+  const float moved = std::abs(target_after.x - target_before.x) +
+                      std::abs(target_after.y - target_before.y) +
+                      std::abs(target_after.z - target_before.z);
+  ST_CHECK(moved > 0.05f);
+}
+
+ST_TEST(three_view_double_click_returns_home) {
+  // 双击回到初始视角（头文件里声明的交互契约）。
+  auto view = make_view(640.0f, 400.0f);
+  view->frame_scene();
+  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+                                             nullptr, 0.0, nullptr};
+  const float home_yaw = view->camera_state().yaw;
+
+  // 先用左键拉开视角
+  st::ui::Event down;
+  down.kind = st::ui::EventKind::MouseDown;
+  down.position = st::math::Point{320.0f, 200.0f};
+  down.button = 1;
+  (void)view->on_event(context, down);
+  st::ui::Event move;
+  move.kind = st::ui::EventKind::MouseMove;
+  move.position = st::math::Point{500.0f, 200.0f};
+  (void)view->on_event(context, move);
+  st::ui::Event up;
+  up.kind = st::ui::EventKind::MouseUp;
+  up.position = st::math::Point{500.0f, 200.0f};
+  up.button = 1;
+  (void)view->on_event(context, up);
+  ST_CHECK(std::abs(view->camera_state().yaw - home_yaw) > 0.1f);
+
+  st::ui::Event dbl;
+  dbl.kind = st::ui::EventKind::DoubleClick;
+  dbl.position = st::math::Point{320.0f, 200.0f};
+  dbl.button = 1;
+  (void)view->on_event(context, dbl);
+  ST_CHECK_NEAR(view->camera_state().yaw, home_yaw, 0.02f);
 }
 
 ST_TEST(three_view_failed_load_keeps_previous_scene) {

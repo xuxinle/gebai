@@ -574,6 +574,24 @@
 | **断言绝对耗时 = 并行跑测试时假红**〔测试〕 | `self < 3.5ms` 这类阈值在机器忙时必挂（忙等循环会被刮让）。性能类用例要断言**结构关系**（`self + child ≈ total`、`p50 < p95 ≤ max`、样本计数），而不是绝对值 | `tests/perf_profiler_test.cpp::perf_nested_*` |
 | **“测试挂死”先怀疑量尺自身**〔测试〕 | 同一批用例里，前 6 条绿、第 7 条挂——而第 7 条只多了一句 `recorder.end()`。花了十几轮才发现根因是剖析器自身的生命周期（上条）。**判据：挂了就别再加打印，先看被测基础设施有没有共享可变状态** | 本轮实测代价 |
 
+## 场景 24：鼠标输入 / 三维交互 / GPU 静默降级
+
+> **总判据：组件里写鼠标按钮号，只能照**后端**的口径（1=左/2=右/3=中）。**
+> **照着图形 API 的习惯写（X11 的 Button1 = 0）会得到一个「真鼠标永远不生效、单测全绿」的组件。**
+
+| 坑 | 一句话 | 出处 |
+|---|---|---|
+| **`button == 0` 不是左键**〔交互〕 | 后端只发 1/2/3（`platform_win32.cpp` 的 `push_mouse(..., 1/2/3, ...)`、`platform_x11.cpp` 的 1/2/3 映射），`0` 只出现在不携带按钮号的 `MouseMove` 上。用 `0` 判左键 ⇒ **真鼠标左键拖拽什么也不发生**，而单测里按的也是 `0`，于是测试恒绿。同一仓的 `viewport.cpp` / `timeline_view.cpp` 早就写着 `kMiddleButton{3}` | `src/ui/components/three_view.cpp` 的 `kLeftButton/kRightButton/kMiddleButton`；`tests/ui_three_view_test.cpp` 的 `three_view_real_button_numbers_drive_orbit_and_pan` |
+| **控制通道 `input.mouse` 的 `button` 是**原始值**，不做映射**〔交互〕 | 协议把 `button` 直接写进 `Event::button`（`server.cpp` 的 `json_get_i64(params, "button", 1)`）。所以脚本里写 `button: 1` 才是左键，写 `0` 什么也做不了——而“什么都没发生”看起来像组件没实现 | 同上；`src/control/server.cpp` 的 `handle_input_mouse` |
+| **滚轮方向：正向 = 前推 = **放大**〔交互〕 | 后端约定 `wheel_delta > 0` 是前推（X11 button 4 → `+1`；Win32 `HIWORD(wparam)/120`）。写成“正 → 距离变大”就变成**往前滚把模型推远**（实测：111.98 → 125.42），而只看“距离变了”的用例照样绿。要单独断言**方向** | `three_view.cpp` 的 `Wheel` 分支；`three_view_wheel_forward_zooms_in` |
+| **只在头文件/文档里声明的交互等于没实现**〔交互〕 | `three_view.hpp` 写了“双击回初始视角”，而 `on_event` 的 switch 里**根本没有 `DoubleClick` 分支**——而“双击没反应”极易被归因为“手势没发出来” | `three_view.cpp` 的 `EventKind::DoubleClick` 分支；`three_view_double_click_returns_home` |
+| **HLSL 编译失败 = **静默**回退软件腿**〔渲染〕 | `Scene3D::create` 编译不过只打一行 warn，随后用软件腿，**能力全都在**、像素甚至更准。代价：单帧从 39.5ms 变 **14093ms**（1100×760），用户只看到“窗口一片空白、卡得动不了”。**判据：强制 `ST_SCENE3D_BACKEND=gpu` 后 `create` 必须成功且 `backend()=="gpu"`、且真出图** | `src/raster/platform_d3d11.cpp` 的 `kScene3dShader`；`tests/raster_scene3d_two_legs_test.cpp` 的 `scene3d_gpu_shader_compiles_and_renders` |
+| **着色器里的变量作用域要以**最远使用者**为准**〔渲染〕 | `a2`/`f0` 声明在直接光那个 `if`/`{}` 块里，却被**额外灯光循环**和**IBL 高光**（都在块外）引用 ⇒ `error X3004: undeclared identifier`。修好一个又报下一个：**一次只报一个**，所以修完必须**再跑一次强制 GPU 的用例**，不要以为一次就好 | 同上（注释里记了「修好 a2 后又报 f0」） |
+| **真窗口空白先拿别的应用做对照**〔诊断〕 | 看到“真窗口一片空白”时，先在同一台机器上起一个**不需要三维**的应用（如 gallery）。它正常 ⇒ 窗口上屏通路没问题，问题在场景/渲染那条路上，不要在 `present`/DWM/DPI 里白挖 | 本文件 · 场景 18（窗口呈现）；实测 2026-11-06 |
+| **`shuangtian_run` 默认无头：要用户亲手操作必须显式要窗口**〔工具〕 | 工具曾**无条件注入** `--headless` ⇒ 从工具层根本起不出真窗口，而“让用户自己缩放拖动”这个需求它满足不了。已加 `window: true`（不注入该参数），且**以握手回报的 `backend`/`headless` 为准**（机器无显示服务时框架会自己回退，如实转述，不假报成功） | `packages/agents/src/agents/shuangtian/shuangtian_tools.ts` 的 `wantWindow` |
+| **桌面截图的坐标系可能被 DPI 虚拟化骗你**〔观测〕 | 高 DPI（1.5×）下，**非 DPI-aware** 的抓图进程拿到的是**逻辑视图**：它报“屏幕 2560×1440”、`GetWindowRect` 报 2355×1281，而真实物理是 **3840×2160 / 3533×1921**。于是 `CopyFromScreen(rect)` 抓出来的是**错误区域**——表现为“画面只画在右半边/错位”，看着像框架的合成偏了。**判据：同一时刻 `capture`（应用内部画布）正常 + 屏幕抓图错位 ⇒ 先怀疑抓图，不是渲染**。先 `SetProcessDPIAware()` 再抓 | 本文件 · 场景 18；实测 2026-11-06（先在合成路径里白查了一轮） |
+| **屏幕抓图与 `capture` 要成对看**〔观测〕 | `capture` 截的是**应用内部画布**（恒定正确，它是唯一的运行时真相源）；屏幕抓图受 DWM/DPI/遮挡影响。两者不一致时，用它俩的**差异**区分“没画”与“没上屏”，而不是拿其中一张去猜 | `include/st/ui/components/three_view.hpp` 的 `paint_frames` / `backend_rebuilds` |
+
 ## 怎么用这份速查
 
 **开工前**：扫一眼你**当前场景**那一节（30 秒）。

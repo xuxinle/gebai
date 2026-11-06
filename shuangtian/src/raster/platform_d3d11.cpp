@@ -3661,21 +3661,32 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   //   directDiffuse += irradiance · diffuseColor/π
   //   directSpecular+= irradiance · D·V·F   （V 已含 1/(4·n·l·n·v)）
   float3 lit = float3(0.0, 0.0, 0.0);
+  // ## 材质量必须声明在**函数作用域**（不只是外层块内）
+  //
+  // `a2` / `f0` 被三处使用：直接光高光、额外灯光循环、IBL 高光。
+  // 它们曾写在直接光那个 `if` 块里，而 IBL 高光在那块之外——于是 HLSL 编译报
+  // `error X3004: undeclared identifier`，整份着色器失败。
+  //
+  // 这个缺陷最阴的地方：编译失败只打一行日志，随后**静默回退软件腿**。
+  // 功能看着都对（同一份场景、同一套参数，软件腿甚至更准），代价是单帧从
+  // 亳秒级变成**秒级**（实测 1100×760 单帧 paint 14093 ms）——
+  // 用户看到的只是“窗口一片空白、卡得动不了”，而不会想到是着色器没编过。
+  // 回归：`scene3d_gpu_shader_compiles_and_renders`（强制 gpu 腿并断言真出图）。
+  const float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
+  const float roughness_clamped = clamp(max(roughness, 0.0525), 0.0, 1.0);
+  float alpha = roughness_clamped * roughness_clamped;
+  const float a2 = alpha * alpha;
   {
     float3 view_dir = normalize(g_eye.xyz - input.world);
     float n_dot_v = max(dot(n, view_dir), 0.0);
     float n_dot_l = max(dot(n, light), 0.0);
     float3 diffuse_color = base * diffuse_weight;
-    // three：material.roughness = max(roughness, 0.0525)，然后 alpha = roughness²
-    float r = clamp(max(roughness, 0.0525), 0.0, 1.0);
-    float alpha = r * r;
     float3 irradiance = n_dot_l * g_light_color.rgb * g_tune.x;
     lit += irradiance * diffuse_color * 0.31830988618;
     if (n_dot_l > 0.0 && n_dot_v > 0.0) {
       float3 h = normalize(view_dir + light);
       float n_dot_h = max(dot(n, h), 0.0);
       float v_dot_h = max(dot(view_dir, h), 0.0);
-      float a2 = alpha * alpha;
       float denom_d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
       float D = 0.31830988618 * a2 / (denom_d * denom_d);
       // V_GGX_SmithCorrelated：0.5 / max(gv+gl, EPSILON)
@@ -3683,7 +3694,6 @@ float4 ps_scene3d(VsOut input) : SV_Target {
       float gl = n_dot_v * sqrt(a2 + (1.0 - a2) * n_dot_l * n_dot_l);
       float V = 0.5 / max(gv + gl, 1e-7);
       // F_Schlick 的 exp2 拟合（不是 (1-v·h)^5）
-      float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
       float fc = exp2((-5.55473 * v_dot_h - 6.98316) * v_dot_h);
       float3 F = f0 * (1.0 - fc) + fc;
       lit += irradiance * D * V * F;
@@ -3757,7 +3767,6 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   if (g_env.w > 0.0 && g_probe_tune.x > 0.0) {
     float3 view_dir = normalize(g_eye.xyz - input.world);
     float n_dot_v = max(dot(n, view_dir), 0.0);
-    float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
     float3 diffuse_color = base * diffuse_weight;
 
     // ① 漫反射：余弦加权（sharpness = 1）

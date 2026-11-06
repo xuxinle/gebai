@@ -187,6 +187,43 @@ ST_TEST(scene3d_unavailable_gpu_falls_back_to_software) {
   ST_CHECK(Scene3D::available());   // 软件腿永远可用，这条是框架的底线承诺
 }
 
+ST_TEST(scene3d_gpu_shader_compiles_and_renders) {
+  // ## 着色器必须**真的编译通过**
+  //
+  // 这条拦的是一个极隐蔽的失效模式：HLSL 编译失败时 `create()` **不会报错**
+  // （它会静默回退软件腿），于是一切功能看着都对，只是每帧从亳秒级变成秒级。
+  //
+  // 实测（2026-11-06，建木真窗口）：着色器里 `a2` 声明在主光的 `if` 块内、
+  // 却在块外的“额外灯光”循环里被引用 → `error X3004: undeclared identifier 'a2'`
+  // → GPU 腿整体不可用。后果是 1100×760 的单帧 paint **14093 ms**，
+  // 用户看到的是“窗口一片空白、卡得动不了”。
+  //
+  // 所以要**强制** GPU 腿并断言：建得出来、`backend()=="gpu"`、并且真的出图。
+  if (!st::raster::gpu::available()) return;   // 无 GPU 的机器只跑软件腿
+  const ForcedBackend force("gpu");
+  auto created = Scene3D::create(kWidth, kHeight);
+  ST_CHECK(created.has_value());
+  if (!created.has_value()) return;
+  // 强制了 gpu 却拿到 software = 着色器/设备层出了问题，**不能静默接受**
+  ST_CHECK_EQ((*created)->backend(), std::string("gpu"));
+
+  // 真画一帧：能建出来但画不出东西也算失败
+  const Mesh mesh = Mesh::sphere(0.9f, 20);
+  Canvas canvas{kWidth, kHeight, 1.0f};
+  canvas.clear(Color{0, 0, 0, 255});
+  Scene3D& scene = **created;
+  Camera camera;
+  camera.eye = Vec3{0.0f, 0.0f, 3.2f};
+  camera.fov_y_degrees = 42.0f;
+  scene.begin_frame(Color{0, 0, 0, 255});
+  scene.set_camera(camera);
+  scene.set_lighting(Lighting{});
+  scene.draw_mesh(mesh, Mat4::rotation(Vec3{0.0f, 1.0f, 0.0f}, 0.4f));
+  scene.end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth), static_cast<float>(kHeight)});
+  scene.flush();
+  ST_CHECK(lit_ratio(canvas) > 0.03);
+}
+
 ST_TEST(scene3d_two_legs_agree_on_the_same_scene) {
   // 同一个场景、同一光照，两条腿的画面必须**近似一致**。
   //
