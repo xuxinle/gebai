@@ -870,6 +870,28 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "诊断：同一份 bpy 文本在默认口径与声明 compat 时 SceneSpec 的关键字段（tone/ambient/ibl/diffuse/compat），用于排查测试与探针口径不一致"
     },
+    "bpy_compat_gap": {
+      "kind": "executable",
+      "sources": ["tools/bpy_compat_gap.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "量默认口径与对标口径的实际像素差：AgX 修好后默认口径变暗，那条 >20 断言的阈值需要按实测重定"
+    },
+    "agx_two_legs": {
+      "kind": "executable",
+      "sources": ["tools/agx_two_legs.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "两腿 AgX 一致性：同一份受控平面在软件腿与 GPU 腿上取中心像素。受控平面只有一个数，两腿之差只可能来自色调映射链"
+    },
+    "agx_verify": {
+      "kind": "executable",
+      "sources": ["tools/agx_verify.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "AgX 逐点对账：9 个样本（中性灰 5 档 + 红绿蓝 + 黄铜）与真 Blender 比，覆盖曲线与色相；判据最大差 ≤2"
+    },
     "bpy_export_asset": {
       "kind": "executable",
       "sources": ["tools/bpy_export_asset.cpp", "src/python/mp_bridge.c",
@@ -1274,6 +1296,11 @@
     "system": ["pthread", "dl", "m"]
   }
 }
+
+
+
+
+
 
 
 

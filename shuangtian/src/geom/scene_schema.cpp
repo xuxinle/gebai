@@ -29,8 +29,17 @@ auto build_tables() -> std::vector<FieldTable> {
                {"写 camra 会被拒（不是静默忽略）"}},
               {"lighting", "object", false, "", "光照（light_from/ambient/diffuse/rim/…）",
                R"j({"ambient":0.3,"diffuse":0.8})j", {}},
-              {"shadow", "object", false, "", "平面投影阴影（strength/ground_y/lift/color）",
-               R"j({"strength":0.35,"ground_y":0})j", {}},
+                {"shadow", "object", false, "", "平面投影阴影（strength/ground_y/lift/color）",
+  R"j({"strength":0.35,"ground_y":0})j", {}},
+  {"shadow_map", "object", false, "",
+  "**阴影贴图**（物体间互相遮挡）：strength/light_index/resolution/bias/soft_radius/extent。"
+  "与 `shadow` 不互斥，可同时开",
+  R"j({"strength":0.6,"resolution":512,"extent":5})j",
+  {"只对 extra_lights 里的 directional/spot 生效；点光需立方体贴图，本实现不做"}},
+  {"occlusion", "object", false, "",
+  "**缝隙遮蔽**（AO，真 GI 的便宜近似）：strength/radius。**默认关**（0）",
+  R"j({"strength":0.7,"radius":0.5})j",
+  {"只乘间接光（环境光+IBL），不乘直接光；永远不会与 Cycles 逐像素相同"}},
               {"cull", "string", false, R"j("none"/"back"/"front")j", "背面剔除模式", R"j("back")j",
                {"拼成 culling 会被拒"}},
               {"objects", "array", false, "",
@@ -255,6 +264,48 @@ auto build_tables() -> std::vector<FieldTable> {
               {"ground_y", "number", false, "", "投影地面的 Y 高度", "0", {}},
               {"lift", "number", false, ">= 0", "阴影抬起量（防 z-fighting）", "0.01", {}},
               {"color", "color", false, "", "阴影颜色", R"j("#000000")j", {}},
+          },
+      .open = false,
+  });
+
+  // ── occlusion（缝隙遮蔽 / AO）──
+  //
+  // 真 GI 的便宜近似。默认 `strength = 0`（关）：所有像素级基准在关闭态下
+  // 对账，开着会把那些基准整体变暗、全部变红。
+  tables.push_back(FieldTable{
+      .scope = "occlusion",
+      .fields =
+          {
+              {"strength", "number", false, "0..1",
+               "遮蔽强度（0 = 关闭，保持与像素级基准一致）", "0",
+               {"0.5~0.8 是产品展示的常见档位"}},
+              {"radius", "number", false, "> 0",
+               "射线长度（世界单位）：多大范围的接触会被算成遮蔽", "0.5",
+               {"它是场景尺度相关的：值太小只暗在棱角上，太大整面都变暗"}},
+          },
+      .open = false,
+  });
+  //
+  // 为何它曾是个“就空的接口”：`ShadowMap` 结构早就写在 `scene3d.hpp`
+  // 并写了完整的设计说明，但**脚本里声明不了、GPU 腿没实现、测试为零**。
+  // 现在补上声明与软件腿路径。
+  tables.push_back(FieldTable{
+      .scope = "shadow_map",
+      .fields =
+          {
+              {"strength", "number", false, "0..1", "阴影强度（0 = 关闭）", "0.6", {}},
+              {"light_index", "number", false, "",
+               "用 `extra_lights` 里哪一个光源做投影（仅 directional/spot）", "0",
+               {"点光需要立方体贴图（6 张），本实现不做"}},
+              {"resolution", "number", false, "64..2048",
+               "阴影贴图边长（正方形）；越大阴影越锐、一次深度渲染越贵", "512", {}},
+              {"bias", "number", false, "", "深度偏移（防自阴影条纹 shadow acne）",
+               "0.0015", {"太小会出现条纹，太大阴影会脱离物体"}},
+              {"soft_radius", "number", false, ">= 0",
+               "PCF 柔化半径（贴图纹素为单位；0 = 硬阴影）", "1.0", {}},
+              {"extent", "number", false, "> 0",
+               "投影相机包络半径（世界单位）：覆盖场景所需的正交盒半径", "6",
+               {"它是场景尺度相关的：太小阴影被裁掉，太大阴影发糊"}},
           },
       .open = false,
   });

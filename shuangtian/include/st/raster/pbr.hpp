@@ -221,6 +221,36 @@ struct ShadeInput {
   int ibl_count{0};
   /// IBL 强度倍数（0 = 关闭）。
   float ibl_strength{0.0f};
+  /// **缝隙遮蔽**（ambient occlusion，0~1；1 = 无遮蔽）。
+  ///
+  /// ## 它乘在哪里（这个定义很重要）
+  ///
+  /// **只乘 IBL 与环境光的入射辐照度**，不乘直接光：
+  ///
+  /// ```
+  /// indirectDiffuse  = occlusion * (ambient + iblDiffuse) * diffuseColor/π
+  /// indirectSpecular = occlusion * iblSpecular * (F0·A + B)
+  /// directDiffuse    = （不受 occlusion 影响）
+  /// ```
+  ///
+  /// 为何不乘直接光：直接光**有它自己的**投影阴影路径（`ShadowMap` /
+  /// `PlanarShadow`）。两套遮蔽相乘没有物理意义，而且会让暗部黑得不真实。
+  ///
+  /// ## 它能替代 GI 吗（不能，但能补上哪一部分）
+  ///
+  /// Cycles 的路径追踪会算「光线在沟壑/接触处反复弹射衰减」——那是**真 GI**。
+  /// AO 是它的便宜近似：只看“半球里被挡了多少”，不反弹也不传色。
+  ///
+  /// | 项 | 真 GI（Cycles） | AO |
+  /// |---|---|---|
+  /// | 沟壑/接触处变暗 | ✅ | ✅（主要价值）|
+  /// | 物体间色彩传递 | ✅ | ❌ |
+  /// | 大范围反弹光 | ✅ | ❌ |
+  /// | 算力 | 几十倍 | 几乎为零 |
+  ///
+  /// 所以开了 AO 之后**暗部会明显接近** Cycles，但永远不会逐像素相同。
+  /// 像素级基准（受控平面 / 球面）**不开 AO**。
+  float occlusion{1.0f};
   /// 自发光（已含强度）。
   math::Vec3 emissive{0.0f, 0.0f, 0.0f};
   /// 曝光（乘在最后，在色调映射之前）。

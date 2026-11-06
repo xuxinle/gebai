@@ -144,20 +144,37 @@ ST_TEST(bpy_cycles_parity_flat_plane_is_154) {
 /// ## 这条测试守什么
 ///
 /// 2026-11-06 修掉了 `energy / 1000` 这个量纲错。修完之后默认口径
-/// （AgX + `ambient=0.35` + IBL 保底）下同一个场景是 **155**。
+/// 在同一个场景上是 **129**（实测，`tools/bpy_compat_gap`）。
 ///
 /// 若有人把 `/1000` 又加回去，这条会掉到 100 以下 → 红。
 /// 而 `bpy_cycles_parity_flat_plane_is_111` 因为显式声明了对标模式，
 /// **不会**发现那个回归（对标模式会覆盖 tone_map/ambient，但不覆盖标度）。
 /// 两条测试各守一侧，缺一不可。
+///
+/// ## 阈值为何是 8 而不是 20（2026-11-06 重定）
+///
+/// 原先写 20，基于那时默认口径是 **155**（AgX 是解析拟合，偏亮）。
+/// 把 AgX 换成真 OCIO LUT 之后，AgX **压中调**，默认口径降到 **129**：
+///
+/// | 口径 | AgX 修前 | AgX 修后 |
+/// |---|---|---|
+/// | 默认（AgX + ambient + ibl） | 155 | **129** |
+/// | 对标（Standard + 无 ambient/ibl） | 112 | 112 |
+/// | 差 | 43 | **17** |
+///
+/// 那个缩小是**正确的**（真 AgX 本来就比解析拟合暗），不是回归。
+/// 若强行保留 20，会逼着后来的人把 AgX 改回拟合——那是相反的方向。
+///
+/// 但也不能取消下限：两条口径若真的相等，说明对标模式被做成了“默认生效”，
+/// 那会改变所有存量出片。所以保留一个有区分度的底限。
 ST_TEST(bpy_default_mode_differs_from_parity_mode) {
   const int parity = render_flat_center(1.0f, /*compat=*/true, 128);
   const int normal = render_flat_center(1.0f, /*compat=*/false, 128);
-  // 默认口径（AgX + ambient 保底）必然比 Standard + 无环境光更亮
-  ST_CHECK(parity < normal);
-  // 且两者差距显著（实测 112 vs 155，差 43 级）：
-  // 若有人误把对标模式做成「默认生效」，这里会变成相等 → 红。
-  ST_CHECK(normal - parity > 20);
+  // 默认口径（AgX + ambient 保底 + IBL）必然比 Standard + 无环境光更亮
+  ST_CHECK(normal > parity);
+  // 且有区分度（实测 17）：底限取 8，既容得下后续算子精进，
+  // 又能抓住“对标模式意外变成默认”那种回归。
+  ST_CHECK(normal - parity >= 8);
 }
 
 /// 背光面在**对标模式**下必须是纯黑。

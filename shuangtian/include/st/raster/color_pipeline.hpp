@@ -94,10 +94,28 @@ enum class ToneMap : std::uint8_t {
 /// 负数按 0 处理、超过 1 按 1（sRGB 编码前必须先 clamp——编码函数定义域是 [0,1]）。
 [[nodiscard]] auto linear_to_srgb8(float linear) noexcept -> std::uint8_t;
 
-/// 色调映射：HDR 线性值 → [0,1] 线性值（**之后**再做 sRGB 编码）。
+/// 色调映射：HDR 线性值 → [0,1] **线性值**（之后再做 sRGB 编码）。
 ///
 /// 顺序不能反：先编码再映射等于在非线性空间做曲线，暗部会被压得不均匀。
+///
+/// ## 一个必须知道的例外：`ToneMap::Agx`
+///
+/// 它的返回值**已经是显示编码值**（幂 2.4），不能再过 `linear_to_srgb8`。
+///
+/// 为何这样设计：Blender 的 AgX 是 OCIO LUT（`AgX_Base_sRGB.cube`），
+/// 那个 LUT 的产物**本身就是幂 2.4 编码的影像**（文件头注释逐字：
+/// 「the end image formation will be from -10 to 6.5 encoded in power 2.4」）。
+/// 要拿到它的值就必须走完这条链，拆不开。
+///
+/// 实现上不能在 `tone_map` 里把它“退编码”成线性——那会引入一次
+/// `pow(x,2.4)` 再 `pow(x,1/2.4)` 的往返，量化损失不可逆。所以把
+/// 「这个算子输出已编码」的事实告知调用方，由 `encode_pixel` 判断。
 [[nodiscard]] auto tone_map(math::Vec3 hdr, ToneMap op) noexcept -> math::Vec3;
+
+/// 该算子的输出是否**已经显示编码**（即不能再做 sRGB 编码）。
+///
+/// 只有 `Agx` 是 `true`（见 `tone_map` 的说明）；其余算子输出线性值。
+[[nodiscard]] auto tone_map_outputs_encoded(ToneMap op) noexcept -> bool;
 
 /// 单通道版本（供探针逐算子对照）。
 [[nodiscard]] auto tone_map_channel(float x, ToneMap op) noexcept -> float;

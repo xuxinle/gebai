@@ -349,6 +349,29 @@ struct SceneSpec {
   Camera camera{};
   Lighting lighting{};
   PlanarShadow shadow{};
+  /// **阴影贴图**（物体间互相遮挡）。与 `shadow` 不互斥，可同时开。
+  ///
+  /// ## 为何它是新增的（2026-11-06）
+  ///
+  /// `ShadowMap` 结构本来就写在 `scene3d.hpp`，并在那里写了完整的设计说明，
+  /// 但**脚本里声明不了、两腿都没实现、测试覆盖为零**——一个就空的接口。
+  ///
+  /// 按本仓「不留死代码」的立场，两种选择：删掉那段声明，或者补实现。
+  /// 选后者，因为“物体间互相遮挡”是产品展示场景的真实需求（嵌套结构、
+  /// 多零件装配），而平面投影只能投到**一个水平面**，做不到。
+  ///
+  /// ## 它能到什么精度（不假装）
+  ///
+  /// 阴影**边缘不会与 Cycles 逐像素相同**：Cycles 是真阴影光线，
+  /// 本实现是深度图 + PCF 采样。判据只能是「遮挡关系成立」与
+  /// 「阴影强度随光方向单调」。所有像素级基准（受控平面 / 球面）
+  /// 都不开阴影贴图。
+  ShadowMap shadow_map{};
+  /// **缝隙遮蔽**（AO）。默认关：所有像素级基准在关闭态下对账。
+  ///
+  /// 它是真 GI 的便宜近似——只乘间接光（环境光 + IBL），不乘直接光。
+  /// 详见 `scene3d.hpp` 的 `AmbientOcclusion`。
+  AmbientOcclusion occlusion{};
   CullMode cull_mode{CullMode::Back};
   std::vector<SceneObjectSpec> objects{};
 

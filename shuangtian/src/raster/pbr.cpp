@@ -355,11 +355,19 @@ auto pbr_shade(const ShadeInput& in) noexcept -> math::Vec3 {
   }
 
   // ② 均匀环境光（Blender 的 world / three 的 AmbientLight）
+  //
+  // ## 为何乘 `occlusion`
+  //
+  // 环境光是**间接光**（它来自四面八方，没有单一方向）。而缝隙遮蔽（AO）
+  // 的定义就是“半球里被挡了多少”——所以它应当只乘间接光，**不乘直接光**。
+  // 直接光有自己的投影阴影路径（`ShadowMap` / `PlanarShadow`），
+  // 两套遮蔽相乘没有物理意义，且会让暗部黑得不真实。
+  const float ao = std::clamp(in.occlusion, 0.0f, 1.0f);
   {
     const math::Vec3 ambient = pbr_ambient_diffuse(in.base_color, m, in.ambient_irradiance);
-    result.x += ambient.x;
-    result.y += ambient.y;
-    result.z += ambient.z;
+    result.x += ambient.x * ao;
+    result.y += ambient.y * ao;
+    result.z += ambient.z * ao;
   }
 
   // ③ IBL（方向探针）：漫反射 + 高光两个分量**必须分开**
@@ -371,9 +379,10 @@ auto pbr_shade(const ShadeInput& in) noexcept -> math::Vec3 {
     const math::Vec3 ibl_diffuse =
         pbr_ibl_diffuse(n, in.ibl_dirs, in.ibl_colors, in.ibl_count);
     const math::Vec3 indirect_diffuse{
-        ibl_diffuse.x * in.base_color.x * one_minus_metal * kReciprocalPi * in.ibl_strength,
-        ibl_diffuse.y * in.base_color.y * one_minus_metal * kReciprocalPi * in.ibl_strength,
-        ibl_diffuse.z * in.base_color.z * one_minus_metal * kReciprocalPi * in.ibl_strength};
+        ibl_diffuse.x * in.base_color.x * one_minus_metal * kReciprocalPi * in.ibl_strength * ao,
+        ibl_diffuse.y * in.base_color.y * one_minus_metal * kReciprocalPi * in.ibl_strength * ao,
+        ibl_diffuse.z * in.base_color.z * one_minus_metal * kReciprocalPi * in.ibl_strength *
+            ao};
     result.x += indirect_diffuse.x;
     result.y += indirect_diffuse.y;
     result.z += indirect_diffuse.z;
@@ -383,9 +392,9 @@ auto pbr_shade(const ShadeInput& in) noexcept -> math::Vec3 {
     const auto [a, b] = pbr_env_brdf(in.roughness, n_dot_v);
     // `F0·A + B`：split-sum 的强度因子（B 是掠射角补偿）
     const math::Vec3 specular{
-        radiance.x * (f0.x * a + b) * in.ibl_strength,
-        radiance.y * (f0.y * a + b) * in.ibl_strength,
-        radiance.z * (f0.z * a + b) * in.ibl_strength};
+        radiance.x * (f0.x * a + b) * in.ibl_strength * ao,
+        radiance.y * (f0.y * a + b) * in.ibl_strength * ao,
+        radiance.z * (f0.z * a + b) * in.ibl_strength * ao};
     result.x += specular.x;
     result.y += specular.y;
     result.z += specular.z;

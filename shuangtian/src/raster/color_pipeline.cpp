@@ -18,6 +18,10 @@
 #include <array>
 #include <cmath>
 
+// AgX 的真值路径（OCIOLUT）。见 `agx_lut.hpp` 的说明：解析拟合在 0.18 灰处
+// 差 70 级，不够像素级。LUT 不可用时它内部会退回解析拟合。
+#include "st/raster/agx_lut.hpp"
+
 namespace st::raster {
 namespace {
 
@@ -165,6 +169,13 @@ auto linear_to_srgb8(float linear) noexcept -> std::uint8_t {
   const float encoded = linear_to_srgb(linear);
   const int value = static_cast<int>(std::lround(encoded * 255.0f));
   return static_cast<std::uint8_t>(std::clamp(value, 0, 255));
+}
+
+auto tone_map_outputs_encoded(ToneMap op) noexcept -> bool {
+  // 只有 AgX 走 OCIO LUT，而那个 LUT 的产物已是幂 2.4 编码的显示值。
+  // 其余算子都是「输出线性值」的数学曲线（包括 `AcesThree`——它的
+  // `RRTAndODTFit` 也是线性域运算）。
+  return op == ToneMap::Agx;
 }
 
 auto tone_map_channel(float x, ToneMap op) noexcept -> float {
@@ -425,7 +436,7 @@ auto tone_map(math::Vec3 hdr, ToneMap op) noexcept -> math::Vec3 {
                       std::clamp(hdr.z, 0.0f, 1.0f)};
   }
   // AgX / ACESFilmic 都是**三维色彩变换**，不能逐色道做——各走一条路。
-  if (op == ToneMap::Agx) return tone_map_agx(hdr);
+  if (op == ToneMap::Agx) return agx::apply(hdr);
   // 注意：`AcesThree` 需要曝光才能算（`color * exposure / 0.6`），
   // 而本函数没有曝光参数，所以取“已经曝过光”的约定：由 `encode_pixel`
   // 先把曝光乘进 hdr，这里传 exposure = 1.0（语义上已是曝后线性值）。
@@ -438,6 +449,18 @@ auto encode_pixel(math::Vec3 hdr_linear, float exposure, ToneMap op) noexcept ->
   const float gain = exposure > 0.0f ? exposure : 0.0f;
   const math::Vec3 exposed{hdr_linear.x * gain, hdr_linear.y * gain, hdr_linear.z * gain};
   const math::Vec3 mapped = tone_map(exposed, op);
+  // AgX 走的是 OCIO LUT，它的产物**已经是显示编码值**（幂 2.4）。
+  //
+  // 再套一次 `linear_to_srgb8` 等于**编码两次**：实测 0.18 灰会从真值 118
+  // 抬到 186（+68 级），而且看上去“只是风格更亮”很难定位——这正是本仓
+  // 反复记的那类「看起来像配色不对」的错误。
+  if (tone_map_outputs_encoded(op)) {
+    const auto to8 = [](float v) -> std::uint8_t {
+      const float c = std::clamp(v, 0.0f, 1.0f);
+      return static_cast<std::uint8_t>(std::lround(c * 255.0f));
+    };
+    return math::Color{to8(mapped.x), to8(mapped.y), to8(mapped.z), 255};
+  }
   return math::Color{linear_to_srgb8(mapped.x), linear_to_srgb8(mapped.y),
                      linear_to_srgb8(mapped.z), 255};
 }

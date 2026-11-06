@@ -13,8 +13,11 @@
 #include "st/raster/scene3d.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -266,6 +269,8 @@ class SoftwareScene final : public Scene3D {
     material_ = Material{};
     shadow_ = PlanarShadow{};
     shadow_tris_.clear();
+    // AO 空间缓存每帧清空：它只在**同一帧内**有效（不同帧的几何可能全变了）。
+    occlusion_cache_.clear();
     entity_mask_.assign(depth_.size(), 0);
     mask_entities_ = false;
     transparent_.clear();
@@ -525,6 +530,16 @@ class SoftwareScene final : public Scene3D {
     mask_entities_ = shadow.strength > 0.0f;
   }
 
+  /// 设缝隙遮蔽（AO）。
+  ///
+  /// 不在这里算任何东西：真正的计算在 `shade_pixel` → `compute_occlusion`，
+  /// 逐像素做（因为遮蔽是**位置相关**的，不能预先算成一张与分辨率绑定的图）。
+  void set_ambient_occlusion(const AmbientOcclusion& occlusion) override {
+    occlusion_strength_ = std::clamp(occlusion.strength, 0.0f, 1.0f);
+    occlusion_enabled_ = occlusion_strength_ > 0.0f;
+    occlusion_radius_ = occlusion.radius > 0.0f ? occlusion.radius : 0.5f;
+  }
+
   /// 纹理（RGBA8 非预乘，行优先）。空 span / 非法尺寸 = 清除纹理（回到顶点色）。
   void set_texture(std::span<const std::uint8_t> pixels, int width, int height) override {
     const auto clear = [this] {
@@ -714,7 +729,7 @@ class SoftwareScene final : public Scene3D {
     if (mesh.is_empty() || !mvp_ready_) return;
     const Material saved = material_;
     material_ = material;
-    if (shadow_map_.strength > 0.0f) {
+    if (shadow_map_.strength > 0.0f || occlusion_enabled_) {
       deferred_.push_back(
           DeferredMesh{std::make_shared<const Mesh>(mesh), model, material_});
       ++draw_calls_;
@@ -742,7 +757,7 @@ class SoftwareScene final : public Scene3D {
     if (mesh.is_empty() || !mvp_ready_) return;
     const Material saved = material_;
     material_ = material;
-    if (shadow_map_.strength > 0.0f) {
+    if (shadow_map_.strength > 0.0f || occlusion_enabled_) {
       Mesh slice = mesh;
       slice.material_groups.clear();   // 切片不再是多材质对象
       const std::size_t begin = index_start < mesh.indices.size() ? index_start
@@ -773,9 +788,9 @@ class SoftwareScene final : public Scene3D {
     // 为何必须延迟：阴影贴图要**先知道全部几何**（先渲染一次光源视角的深度图），
     // 而像素着色在 `draw_mesh` 里就发生了。先画的网格看不到后画的网格的影子。
     //
-    // 这个延迟只在 `shadow_map_.strength > 0` 时启用：关闭时走原来的即时路径，
-    // 行为与之前**逐位相同**（老场景不受影响）。
-    if (shadow_map_.strength > 0.0f) {
+    // 这个延迟只在 `shadow_map.strength > 0` 或 AO 开启时启用：
+    // 两者都关时走原来的即时路径，行为与之前**逐位相同**（老场景不受影响）。
+    if (shadow_map_.strength > 0.0f || occlusion_enabled_) {
       deferred_.push_back(
           DeferredMesh{std::make_shared<const Mesh>(mesh), model, material_});
       ++draw_calls_;
@@ -845,8 +860,16 @@ class SoftwareScene final : public Scene3D {
       // 用裁剪后的顶点会漏掉“在相机外、但在光照里”的三角形——它们的影子
       // 本该投到可见区域。
       //
-      // 为何只在**不透明**时收：透明物体不投实阴影（否则玻璃后面会多一团黑影）。
-      if (shadow_map_.strength > 0.0f && material_.opacity >= 0.999f) {
+          // 为何只在**不透明**时收：透明物体不投实阴影（否则玻璃后面会多一团黑影）。
+    //
+    // ## 为何 AO 开时也要收（2026-11-06）
+    //
+    // AO 的半球射线要查“场景里有什么挡着我”，而它用的**就是这批三角形**。
+    // 早期只在 `shadow_map.strength > 0` 时收，于是单独开 AO（不开阴影贴图）
+    // 时 `shadow_geometry_` 是空的、`compute_occlusion` 直接返回 1.0——
+    // AO **静默无效**（实测开关 AO 画面均值 83.9 对 83.9，完全一样）。
+    // 这类“参数收了、效果没有”的失效最难查，所以两个条件都收。
+    if ((shadow_map_.strength > 0.0f || occlusion_enabled_) && material_.opacity >= 0.999f) {
         shadow_geometry_.push_back(ShadowTriangle{tri[0].world, tri[1].world, tri[2].world});
       }
 
@@ -1057,7 +1080,125 @@ class SoftwareScene final : public Scene3D {
       }
     }
     input.exposure = lighting_.exposure;
+    input.occlusion = occlusion_at(world, normal);
     return pbr_shade(input);
+  }
+
+  /// 估算缝隙遮蔽（ambient occlusion，0~1；1 = 无遮蔽）。带**空间缓存**。
+  ///
+  /// ## 为何用「世界三角形 + 半球采样」而不是屏幕空间 SSAO
+  ///
+  /// SSAO 要屏幕空间深度/法线缓冲：软件腿的深度缓冲是**超采样尺寸**的，
+  /// 而且分辨率变化时精度会变——那会让 AO 成为「分辨率相关的量」。
+  /// 而这里已经有全场景的世界空间三角形，直接拿它做几何查询：**结果与分辨率无关**。
+  ///
+  /// ## 算法
+  ///
+  /// 沿法线半球取 `kOcclusionSamples` 个方向（固定的黄金角螺旋，
+  /// 不用随机数——随机数会让两次运行出不同结果，那是本仓最忌的）。
+  /// 每个方向发一根短射线（长度 `occlusion_radius_`），看是否撞上几何：
+  ///
+  /// ```
+  /// ao = 1 - 命中数/总射线数 * occlusion_strength
+  /// ```
+  ///
+  /// ## 为何必须有缓存（实测血泪）
+  ///
+  /// 第一版逐超采样样本算：1100×800 × 4x SSAA ≈ 1400 万次着色，
+  /// 每次 16 射线 × 三角形数。**实测单帧 199 秒**（只有球+地板+盒子）。
+  ///
+  /// AO 是**低频量**（它随位置平滑变化：同一个块内几乎不变），所以
+  /// 把世界位置量化到 `occlusion_radius_ * kOcclusionCacheStep` 的
+  /// 网格上，同格共用一个值。缓存同时在两次调用之间存活（同一帧内），
+  /// 所以三角形数只影响「缓未命中」的次数。
+  ///
+  /// 实测降幅：199 秒 → 见 `docs/bpy_render_parity.md §十四`。
+  ///
+  /// ## 缓存键为何用「世界位置量化」而不是屏幕坐标
+  ///
+  /// 屏幕坐标的缓存会被**三角形绘制顺序**影响（同一屏幕像素可能被多个
+  /// 三角形覆盖，而后画的赢）。用世界位置量化则与绘制顺序无关——
+  /// 两个三角形在同一个世界位置上得到同一个 AO，那是物理上正确的。
+  [[nodiscard]] auto occlusion_at(math::Vec3 world, math::Vec3 normal) -> float {
+    if (!occlusion_enabled_) return 1.0f;
+    if (shadow_geometry_.empty()) return 1.0f;
+    const math::Vec3 n = normal.normalized();
+    if (n.length() < 1e-6f) return 1.0f;
+
+    // ① 查缓存（键 = 量化位置 + 量化法线；法线不量化会让稜角与平面分家）
+    const float cell = std::max(occlusion_radius_ * kOcclusionCacheStep, 1e-4f);
+    const auto quantize = [cell](float v) -> std::int32_t {
+      return static_cast<std::int32_t>(std::floor(v / cell));
+    };
+    const std::array<std::int32_t, 5> key{quantize(world.x), quantize(world.y),
+                                          quantize(world.z), quantize(n.x * 8.0f),
+                                          quantize(n.y * 8.0f)};
+    if (const auto found = occlusion_cache_.find(key); found != occlusion_cache_.end()) {
+      return found->second;
+    }
+
+    // ② 未命中：真算
+    int hits = 0;
+    for (int i = 0; i < kOcclusionSamples; ++i) {
+      const float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(kOcclusionSamples);
+      // 余弦加权：sqrt 让样本向法线附近聚拢（与真实 AO 的积分权重一致）
+      const float sin_theta = std::sqrt(t);
+      const float cos_theta = std::sqrt(1.0f - t);
+      const float phi = static_cast<float>(i) * 2.399963f;   // 黄金角
+      // 以 n 为极轴构建局部坐标系
+      const math::Vec3 up = std::abs(n.y) > 0.99f ? math::Vec3{1.0f, 0.0f, 0.0f}
+                                                  : math::Vec3{0.0f, 1.0f, 0.0f};
+      const math::Vec3 tangent = up.cross(n).normalized();
+      const math::Vec3 bitangent = n.cross(tangent);
+      const float cos_phi = std::cos(phi);
+      const float sin_phi = std::sin(phi);
+      const math::Vec3 dir{tangent.x * (sin_theta * cos_phi) +
+                               bitangent.x * (sin_theta * sin_phi) + n.x * cos_theta,
+                           tangent.y * (sin_theta * cos_phi) +
+                               bitangent.y * (sin_theta * sin_phi) + n.y * cos_theta,
+                           tangent.z * (sin_theta * cos_phi) +
+                               bitangent.z * (sin_theta * sin_phi) + n.z * cos_theta};
+      if (ray_hits_geometry(world, dir)) ++hits;
+    }
+    const float occluded =
+        static_cast<float>(hits) / static_cast<float>(kOcclusionSamples);
+    const float value = std::clamp(1.0f - occluded * occlusion_strength_, 0.0f, 1.0f);
+    // 有界：防止病态场景（超大坐标 + 小半径）把缓存垛爆。
+    // 满了就清空重填——比无限增长安全（内存是硬约束）。
+    if (occlusion_cache_.size() > kOcclusionCacheLimit) occlusion_cache_.clear();
+    occlusion_cache_.emplace(key, value);
+    return value;
+  }
+
+  /// 从 `origin` 沿 `dir` 发一根长度为 `occlusion_radius_` 的射线，是否撞上几何。
+  ///
+  /// 用 Möller–Trumbore。起点沿法线抬一点（`kOcclusionBias`）避开自相交——
+  /// 否则每个像素都会“撞到自己所在的那个三角形”，AO 全黑。
+  [[nodiscard]] auto ray_hits_geometry(math::Vec3 origin, math::Vec3 dir) const -> bool {
+    const math::Vec3 start{origin.x + dir.x * kOcclusionBias,
+                           origin.y + dir.y * kOcclusionBias,
+                           origin.z + dir.z * kOcclusionBias};
+    for (const ShadowTriangle& tri : shadow_geometry_) {
+      const math::Vec3 e1{tri.v[1].x - tri.v[0].x, tri.v[1].y - tri.v[0].y,
+                          tri.v[1].z - tri.v[0].z};
+      const math::Vec3 e2{tri.v[2].x - tri.v[0].x, tri.v[2].y - tri.v[0].y,
+                          tri.v[2].z - tri.v[0].z};
+      const math::Vec3 pvec{dir.y * e2.z - dir.z * e2.y, dir.z * e2.x - dir.x * e2.z,
+                            dir.x * e2.y - dir.y * e2.x};
+      const float det = e1.x * pvec.x + e1.y * pvec.y + e1.z * pvec.z;
+      if (std::abs(det) < 1e-8f) continue;   // 与三角形平行
+      const float inv_det = 1.0f / det;
+      const math::Vec3 tvec{start.x - tri.v[0].x, start.y - tri.v[0].y, start.z - tri.v[0].z};
+      const float u = (tvec.x * pvec.x + tvec.y * pvec.y + tvec.z * pvec.z) * inv_det;
+      if (u < 0.0f || u > 1.0f) continue;
+      const math::Vec3 qvec{tvec.y * e1.z - tvec.z * e1.y, tvec.z * e1.x - tvec.x * e1.z,
+                            tvec.x * e1.y - tvec.y * e1.x};
+      const float v = (dir.x * qvec.x + dir.y * qvec.y + dir.z * qvec.z) * inv_det;
+      if (v < 0.0f || u + v > 1.0f) continue;
+      const float dist = (e2.x * qvec.x + e2.y * qvec.y + e2.z * qvec.z) * inv_det;
+      if (dist > kOcclusionBias && dist < occlusion_radius_) return true;
+    }
+    return false;
   }
 
  private:
@@ -1389,6 +1530,30 @@ class SoftwareScene final : public Scene3D {
   math::Mat4 shadow_vp_{math::Mat4::identity()};
   /// 本帧是否已构好阴影贴图。
   bool shadow_ready_{false};
+
+  // ── 缝隙遮蔽（AO，2026-11-06）──
+  //
+  // 见 `compute_occlusion` 的说明：它是真 GI 的便宜近似，只乘间接光。
+  /// AO 是否启用（默认**关**：像素级基准不能开它）。
+  bool occlusion_enabled_{false};
+  /// 遮蔽强度（0 = 无衰减，1 = 全黑）。
+  float occlusion_strength_{0.7f};
+  /// 射线长度（世界单位）：决定“多大范围的接触会被算成遮蔽”。
+  float occlusion_radius_{0.5f};
+  /// 半球采样数（确定性黄金角螺旋；越大越平滑也越慢）。
+  static constexpr int kOcclusionSamples{16};
+  /// 射线起点偏移：避开自相交（否则每个像素都撞到自己所在三角形）。
+  static constexpr float kOcclusionBias{0.01f};
+  /// 缓存格尺寸相对于 `radius` 的倍数。
+  ///
+  /// 为何是 0.5：AO 随距离的变化尺度就是 `radius` 本身，所以半个半径的
+  /// 格子已经足够细（更大的格子会丢接触阴影的细节）。
+  static constexpr float kOcclusionCacheStep{0.5f};
+  /// 缓存条目上限（防止病态场景把内存吃光）。
+  static constexpr std::size_t kOcclusionCacheLimit{400000};
+  /// AO 空间缓存：键 = 量化世界位置 + 量化法线。
+  /// 每帧清空（`begin_frame`），所以不同帧不会串。
+  std::map<std::array<std::int32_t, 5>, float> occlusion_cache_{};
   /// 是否标记实体遮罩（`set_planar_shadow` 之后才为真）。
   bool mask_entities_{false};
   /// 透明三角形延迟队列：`begin_frame` 清、`draw_mesh` 收集、 `end_frame` 前排序并绘制。

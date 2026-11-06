@@ -134,7 +134,7 @@
 | [`python.md`](python.md) | **内嵌 MicroPython 与 bpy 兼容层**：可用子集、三条硬边界（`@` 运算符 / 内置函数要显式开 / genhdr 重生成）、已知缺口 | 详读 | 活·**接口** |
 | [`render_alignment.md`](render_alignment.md) | **渲染对齐的方法与结论**：三路基准（本框架 / 真 three.js / 真 Blender）、为何用分位数不用均值、已修缺陷链、已知差异 | 详读 | 活 |
 | [`render_parity.md`](render_parity.md) | **与浏览器像素级对标**：真值通道（无头 Chrome + `readPixels`）、逐项归因与消融数据、统一内核 `pbr.hpp` 的口径与已知残余、`env_*`→`ibl_*` 与 bpy 重标 | 详读 | 活 |
-| [`bpy_render_parity.md`](bpy_render_parity.md) | **bpy 渲染与真 Cycles 像素级对标**（二期已落地）：`__st_compat__='cycles'` 开关、真值通道（EXR+PNG，确定性逐像素）、四条参数错归因、标度修正影响面、兼容层 6 处 API 宽严策略、永久基线测试表 | 详读 | 活·**接口** |
+| [`bpy_render_parity.md`](bpy_render_parity.md) | **bpy 渲染与真 Cycles 像素级对标**（三期）：`__st_compat__='cycles'` 开关、真值通道（EXR+PNG，确定性逐像素）、四条参数错归因、**AgX 像素级（OCIO LUT，9 样本 max=2）**、**`shadow_map` 接通与实测**、**AO 近似 GI（含 199s→1.58s 的性能教训）**、永久基线测试表 | 详读 | 活·**接口** |
 | [`eevee_vs_cycles.md`](eevee_vs_cycles.md) | **EEVEE 与 Cycles 的算法分界**：屏幕空间 GI vs 全场景光传输（画面外光源 34.4 vs 2.5 级实测）、有偏/无偏的收敛证据、霜天内核最像谁、对标该选哪个 | 速查 | 活 |
 | [`jianmu.md`](jianmu.md) | **jianmu 应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、控制通道驱动、e2e 验收 | 速查 | 活 |
 | [`cross_platform.md`](cross_platform.md) | 跨平台会怎么错、提交前逐条自查什么 | 速查 | 活 |

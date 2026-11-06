@@ -303,6 +303,28 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
   return lit;
 }
 
+/// 读**缝隙遮蔽**（`occlusion` 字段）。
+///
+/// 默认关闭（`strength = 0`）：所有像素级基准都在关闭态下对账。
+auto read_occlusion(const Json& json) -> Result<AmbientOcclusion> {
+  AmbientOcclusion occlusion{};
+  const Json* node = json_find(json, "occlusion");
+  if (node == nullptr) return occlusion;
+  if (!node->is_object()) {
+    return st::unexpected(ErrorCode::Parse, "occlusion：需要对象");
+  }
+  if (const auto* table = st::raster::find_field_table("occlusion"); table != nullptr) {
+    if (const auto status = st::raster::check_unknown_fields(*node, *table, "occlusion");
+        !status) {
+      return st::forward_error(status.error());
+    }
+  }
+  occlusion.strength = read_unit(*node, "strength", 0.0f);
+  const double radius = json_get_double(*node, "radius", 0.5);
+  occlusion.radius = radius > 0.0 ? static_cast<float>(radius) : 0.5f;
+  return occlusion;
+}
+
 auto read_shadow(const Json& json) -> Result<PlanarShadow> {
   PlanarShadow shadow{};
   const Json* node = json_find(json, "shadow");
@@ -324,6 +346,42 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
                       static_cast<float>(color->g) / 255.0f,
                       static_cast<float>(color->b) / 255.0f};
   return shadow;
+}
+
+/// 读**阴影贴图**（`shadow_map` 字段）。
+///
+/// ## 与 `shadow`（平面投影）的分工
+///
+/// 两者不互斥，可以同时开：
+///
+/// | | `shadow` | `shadow_map` |
+/// |---|---|---|
+/// | 投影到哪 | 只有**一个水平面**（`ground_y`）| 任意表面（球面、墙面、物体之间）|
+/// | 成本 | 几乎为零 | 一次额外深度渲染 |
+/// | 适用 | 产品展示的接触阴影 | 多物体互相遮挡、嵌套结构 |
+///
+/// ## 为何需要这个字段（2026-11-06）
+///
+/// `ShadowMap` 结构本来就写在 `scene3d.hpp`，但**脚本里声明不了、两腿都
+/// 没实现、测试覆盖为零**——一个就空的接口。本函数把它接上。
+auto read_shadow_map(const Json& json) -> Result<ShadowMap> {
+  ShadowMap map{};
+  const Json* node = json_find(json, "shadow_map");
+  if (node == nullptr) return map;
+  if (!node->is_object()) {
+    return st::unexpected(ErrorCode::Parse, "shadow_map：需要对象");
+  }
+  map.strength = read_unit(*node, "strength", 0.0f);
+  map.light_index = int(json_get_double(*node, "light_index", 0.0));
+  const int resolution = int(json_get_double(*node, "resolution", 512.0));
+  // 分辨率夹到合理区间：太小无意义，太大一次深度渲染会把内存吃光。
+  // 2048 以上的收益极小（阴影本身是柔化的），而代价是 16MB+ 深度缓冲。
+  map.resolution = std::clamp(resolution, 64, 2048);
+  map.bias = static_cast<float>(json_get_double(*node, "bias", map.bias));
+  map.soft_radius = static_cast<float>(json_get_double(*node, "soft_radius",
+                                                      map.soft_radius));
+  map.extent = static_cast<float>(json_get_double(*node, "extent", map.extent));
+  return map;
 }
 
 /// JSON 值的类型名（用于报错时说明"收到的是什么"）。
@@ -1128,6 +1186,14 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
   const auto shadow = read_shadow(json);
   if (!shadow) return st::forward_error(shadow.error());
   spec.shadow = *shadow;
+
+  const auto shadow_map = read_shadow_map(json);
+  if (!shadow_map) return st::forward_error(shadow_map.error());
+  spec.shadow_map = *shadow_map;
+
+  const auto occlusion = read_occlusion(json);
+  if (!occlusion) return st::forward_error(occlusion.error());
+  spec.occlusion = *occlusion;
 
   const std::string cull = json_get_string(json, "cull", "back");
   if (cull == "none") {
@@ -2606,6 +2672,12 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     if (!status) return st::forward_error(status.error());
   }
   scene.set_planar_shadow(spec.shadow);
+  // 阴影贴图（物体间互相遮挡）：与平面投影**不互斥**，可同时开。
+  //
+  // 必须在画实体**之前**设：两条腿都是「`draw_mesh` 时收集遮影几何，
+  // `end_frame` 时建深度图」。设晚了那个物体就不会投阴影。
+  scene.set_shadow_map(spec.shadow_map);
+  scene.set_ambient_occlusion(spec.occlusion);
   for (const st::raster::ResolvedNode& node : resolved->nodes) {
     const auto found = spec_of.find(node.name);
     if (found != spec_of.end() && found->second->ground) continue;

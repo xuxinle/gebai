@@ -138,6 +138,7 @@ namespace st::raster {
 #include "st/raster/canvas.hpp"
 #include "st/raster/glyph_atlas_content.hpp"
 #include "st/raster/color_pipeline.hpp"
+#include "st/raster/agx_lut.hpp"
 #include "st/raster/scene3d.hpp"
 
 namespace st::raster::gpu {
@@ -3870,6 +3871,7 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   // 4=Agx / 5=AcesThree）。AgX 是**色彩空间变换**，逐色道做不到，这里退到
   // Narkowicz（与 C++ 侧 `tone_map_channel` 的 AgX 退法一致，便于两腿对得上）。
   float3 hdr = lit;
+  bool agx_linear = false;
   const int tone_op = (int)(g_tune2.x + 0.5);
   if (tone_op == 0) {
     hdr = saturate(hdr);
@@ -3899,13 +3901,38 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     c = a / b;
     c = mul(aces_out, c);
     hdr = saturate(c);
+  } else if (tone_op == 4) {
+    // 4 = Agx：**不做映射**，只钳制，留给 CPU 侧回读后用 OCIO LUT 处理。
+    //
+    // ## 为何不在这里做（实测判定，2026-11-06）
+    //
+    // AgX 是**三维 OCIO LUT**（57³ = 2.2MB），着色器里放不下（D3D11 的
+    // cbuffer 上限 64KB）。而旧实现让它“退到 Narkowicz ACES”——
+    // 实测 0.18 灰得 186，真值 118，差 **68 级**，且纯红渲成橙色。
+    //
+    // 所以这里只输出**线性值**（钳到 [0,1] 以免 8bit 目标截断丢信息），
+    // 回读后由 `GpuScene3d::ensure_readback` 用与软件腿**同一个**
+    // `agx::apply()` 做变换——两腿共用一份实现，避免“各自长一副样子”。
+    //
+    // ⚠ 本档的输出是**线性**，与其余档（sRGB 编码）不同。那个差异由
+    // 回读后的后处理负责收聾。
+    //
+    // ⚠ 不能用 `return` 提前退：着色器的花括号与外层输出路径必须
+    // 保持单一出口（实测泄一个 `return` 会让 HLSL 报
+    // `X3000: syntax error: unexpected end of file`——那个报错指向文件末尾，
+    // 与实际出错位置无关，极难查）。
+    hdr = saturate(lit);
+    agx_linear = true;
   } else {
-    // 2 = Aces（Narkowicz）/ 4 = Agx（退到 Narkowicz）
+    // 2 = Aces（Narkowicz）
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     hdr = saturate((hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e));
   }
-  // sRGB 编码交给硬件（RTV/_SRGB 视图）——手工再编码一次会偏亮
   float3 encoded = hdr;
+  // AgX 档输出**线性值**（后处理在 CPU 侧做 LUT，见上）
+  if (agx_linear) {
+    return float4(encoded, g_opacity.x);
+  }
   // ## alpha 两个字的意义（不要混淆）
   //
   // - `rgb` 是 **sRGB 编码值**（显示用，与软件腿逐像素对齐）；
@@ -4372,12 +4399,62 @@ class GpuScene3d final : public st::raster::Scene3D {
     shadow_ = shadow;
   }
 
+  /// 缝隙遮蔽（AO）：**参数保留但本腿不实现**（2026-11-06）。
+  ///
+  /// 与 `set_shadow_map` 同一取舍：软件腿有完整的 AO（世界三角形半球射线），
+  /// GPU 腿没有。静默忽略会让“开了 AO 却没效果”变成隐形差异，
+  /// 而这类失效最难查。所以报一条 warning（只第一次）。
+  void set_ambient_occlusion(const st::raster::AmbientOcclusion& occlusion) override {
+    if (occlusion.strength > 0.0f && !occlusion_warned_) {
+      occlusion_warned_ = true;
+      st::log::warn(
+          "[scene3d] GPU 腿未实现缝隙遮蔽（occlusion.strength={:.2f}）——"
+          "本次暗部不会有接触遮蔽；软件腿（ST_SCENE3D_BACKEND=software）有\n",
+          static_cast<double>(occlusion.strength));
+    }
+  }
+
+  /// 阴影贴图：**参数保留但本腿不实现**（2026-11-06）。
+  ///
+  /// ## 为何不静默忽略
+  ///
+  /// 软件腿有完整的阴影贴图（`software_scene.cpp` 的 `build_shadow_map` +
+  /// `shadow_factor_at`），而 GPU 腿没有——**同一个场景两腿会出不同的画**：
+  /// 软件腿有球在地板上的投影阴影，GPU 腿没有。
+  ///
+  /// 「静默忽略」会让这个差异隐形。所以：
+  /// · 参数存下来（将来实现时不用改接口）
+  /// · 报一条 warning（一眼看到“这次没阴影是因为后端不支持”）
+  /// · `capabilities()` 里声明不支持（调用方可以查后降级）
+  ///
+  /// 这是从 `set_material` 那次学的：那时也是“参数收了、路径没实现”，
+  /// 而后果是“材质静默失效”，极难查。
+  void set_shadow_map(const st::raster::ShadowMap& shadow) override {
+    shadow_map_ = shadow;
+    if (shadow.strength > 0.0f && !shadow_map_warned_) {
+      shadow_map_warned_ = true;
+      st::log::warn(
+          "[scene3d] GPU 腿未实现阴影贴图（shadow_map.strength={:.2f}）——"
+          "本次不会有物体间投影阴影；软件腿（ST_SCENE3D_BACKEND=software）有\n",
+          static_cast<double>(shadow.strength));
+    }
+  }
+
   /// 当前剔除模式（每帧在 `begin_frame` 重置为 `Back`）。
   st::raster::CullMode cull_mode_{st::raster::CullMode::Back};
   /// 相机世界位置（算逐像素视向用；GGX 的 Fresnel 依赖它）。
   math::Vec3 eye_{0.0f, 0.0f, 4.0f};
   /// 平面投影阴影（`strength = 0` = 关闭）。
   st::raster::PlanarShadow shadow_{};
+  /// 阴影贴图参数（**本腿不实现**，只存来待将来）。见 `set_shadow_map`。
+  st::raster::ShadowMap shadow_map_{};
+  /// 是否已经报过一次“GPU 腿不支持阴影贴图”。
+  ///
+  /// 为何需要：`set_shadow_map` 每帧都会被调（`render_scene` 的固定顺序），
+  /// 不拦住会刷屏。只报第一次，后续静默——差异已经在第一行说清楚了。
+  bool shadow_map_warned_{false};
+  /// 同上，AO 的 warning 只报一次。
+  bool occlusion_warned_{false};
   /// 阴影是否已在本帧绘制（避免重复）。
   bool shadow_done_{false};
 
@@ -4982,6 +5059,25 @@ class GpuScene3d final : public st::raster::Scene3D {
   }
 
   /// 回读成画布布局（`0xRRGGBBAA`）。每帧 `end_frame` 调一次。
+  ///
+  /// ## AgX 的 CPU 后处理（2026-11-06）
+  ///
+  /// 着色器对 `tone_op == 4` 只输出**线性值**（三维 OCIO LUT 放不进着色器，
+  /// 而旧实现“退到 Narkowicz”实测 0.18 灰差 **68 级**，且纯红渲成橙色）。
+  ///
+  /// 所以回读后在这里用 `agx::apply()` 做变换——与软件腿**同一个函数**。
+  /// 两腿共用一份实现是唯一能保证「逐像素相同」的做法；本仓历史上
+  /// 「两腿各实现一套」已出过多次事故。
+  ///
+  /// ## 为何在回读后（而不是绘制时）
+  ///
+  /// 回读是**唯一**确定性拿到整帧像素的地方（导出/截图/合成都走它）。
+  /// 在绘制时做需要读目标纹理再写回，会引入额外的同步点。
+  ///
+  /// ## 代价
+  ///
+  /// 每像素一次三维 LUT（tetrahedral）+ 两次 pow。AgX 只在出片/对标时用
+  ///（实时预览用 ACES），不影响交互。
   void ensure_readback() {
     // 回读必须取 **resolve 后**的纹理：MSAA 纹理不能 CopyResource 到单采样 staging。
     resolve_if_needed();
@@ -5006,6 +5102,7 @@ class GpuScene3d final : public st::raster::Scene3D {
     if (FAILED(context_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped))) return;
     readback_.resize(static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_));
     const auto* source = static_cast<const std::uint8_t*>(mapped.pData);
+    const bool postprocess_agx = (lighting_.tone_map == ToneMap::Agx);
     for (int y = 0; y < height_; ++y) {
       const std::uint8_t* row = source + static_cast<std::size_t>(y) * mapped.RowPitch;
       for (int x = 0; x < width_; ++x) {
@@ -5021,6 +5118,44 @@ class GpuScene3d final : public st::raster::Scene3D {
       }
     }
     context_->Unmap(staging_, 0);
+
+    // AgX：显示值 → 重新过一次 AgX
+    //
+    // ## 这里有个必须说清楚的“双重 sRGB”（实测撞到）
+    //
+    // 渲染目标是 `R8G8B8A8_UNORM_SRGB`，硬件会在**写入时**把着色器输出
+    // 当作线性值自动编码成 sRGB。于是：
+    //
+    // | 阶段 | 值 |
+    // |---|---|
+    // | 着色器输出（AgX 档） | 线性 lit |
+    // | 硬件写入 _SRGB 目标 | sRGB(线性 lit) |
+    // | 回读拿到 | **已是 sRGB 编码值** |
+    // | 真 Cycles AgX 期望 | sRGB(AgX_curve(线性 lit)) |
+    //
+    // 所以要先把回读值**反解回线性**（`srgb_to_linear`），再走 AgX，
+    // 才是「一次 AgX」。直接对回读值调 `agx::apply` 等于多套一层，
+    // 实测两腿相差 **71 级**（63.8 vs 134.8）。
+    if (postprocess_agx) {
+      const auto to8 = [](float v) -> std::uint8_t {
+        const float c = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        return static_cast<std::uint8_t>(std::lround(c * 255.0f));
+      };
+      for (auto& packed : readback_) {
+        // 打包布局是 0xRRGGBBAA
+        const float sr = static_cast<float>((packed >> 24U) & 0xFFU) / 255.0f;
+        const float sg = static_cast<float>((packed >> 16U) & 0xFFU) / 255.0f;
+        const float sb = static_cast<float>((packed >> 8U) & 0xFFU) / 255.0f;
+        const std::uint32_t a = packed & 0xFFU;
+        // ① 反解硬件做的 sRGB 编码，回到线性
+        const math::Vec3 linear = st::raster::srgb_to_linear(math::Vec3{sr, sg, sb});
+        // ② 走 AgX（返回 sRGB 显示值）
+        const math::Vec3 display = st::raster::agx::apply(linear);
+        packed = (static_cast<std::uint32_t>(to8(display.x)) << 24U) |
+                 (static_cast<std::uint32_t>(to8(display.y)) << 16U) |
+                 (static_cast<std::uint32_t>(to8(display.z)) << 8U) | a;
+      }
+    }
   }
 
   struct CacheEntry {
