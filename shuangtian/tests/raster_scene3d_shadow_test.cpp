@@ -118,7 +118,16 @@ ST_TEST(planar_shadow_darkens_the_ground) {
   const Canvas off = render(0.0f);
   const Canvas on = render(0.6f);
   const double delta = max_luma_delta(off, on);
-  ST_CHECK(delta > 30.0);   // 实测 125.7，留足余量
+  // ## 阈值随着色模型重标（2026-11-06）
+  //
+  // 旧值 30.0 是按旧模型（缺 1/π + 0.35 常量保底）的亮度体系定的，实测 125.7。
+  // 换物理内核后整体亮度基座变了（背光面本来就是暗的，"再压暗"的绝对幅度
+  // 自然变小），但**"开启阴影必须产生肉眼可见的差异"**这条语义没变。
+  //
+  // 所以判据改成“差异显著”而不是“差异 ≥ 某个绝对值”：实测约 15 级，
+  // 取 8 留余量。真要退化（方向判反/深度竞争）会是 **0**，仍然抓得住——
+  // 而 0 与 8 之间的距离足够大，不会误报。
+  ST_CHECK(delta > 8.0);
 }
 
 ST_TEST(planar_shadow_strength_is_monotonic) {
@@ -141,12 +150,58 @@ ST_TEST(planar_shadow_never_covers_the_caster) {
   // 若不测深度，球体上就会被涂一片黑。
   const Canvas off = render(0.0f);
   const Canvas on = render(0.6f);
-  // 球体高光附近（画面中上部）亮度必须完全不变
-  const double before = luma_at(off, 160, 115, 12);
-  const double after = luma_at(on, 160, 115, 12);
+
+  // ## 采样点改为“球体最亮处”，不再写死坐标（2026-11-06）
+  //
+  // 旧实现钉的是 `(160,115)` 附近 + 绝对亮度 `> 120`——两个都对着色模型的
+  // **亮度体系**与**高光位置**敏感。换物理内核后高光位置变了（GGX 的瓣更窄、
+  // 峰值更高更集中），写死坐标就会采到球体的过渡区而不是高光。
+  //
+  // 判据改成两条，都只依赖定性事实：
+  //   1. 球体上**至少有一个像素明显比背景亮**（证明那是球，不是背景）；
+  //   2. 那个像素在开/关阴影时**亮度完全不变**（证明阴影没涂到实体上）。
+  //
+  // 为什么这样仍然抓得住原缺陷：若阴影盖到实体，球体上那一片会被压暗——
+  // 那么"最亮处"要么变暗（违反第 2 条），要么整体压到与背景同亮
+  // （违反第 1 条）。
+  // 在**整幅画面**里找最亮像素（不猜球体位置）
+  int best_x = kW / 2;
+  int best_y = kH / 2;
+  double best = -1.0;
+  for (int y = 0; y < kH; ++y) {
+    for (int x = 0; x < kW; ++x) {
+      const Color c = off.pixel_at(x, y);
+      const double luma = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+      if (luma > best) {
+        best = luma;
+        best_x = x;
+        best_y = y;
+      }
+    }
+  }
+  // ## 判据基准改成“地面”，不是“画面角落”（2026-11-06）
+  //
+  // 实测亮度分布（320×320，行/列步长 40）：
+  //
+  //     行   0.. 40: 108 108 108 ...     ← 上半部不是背景，是**空地**
+  //     行  80..160:  52  23  60  57 ... ← 地面 + 球体
+  //     行 200..280:  21  21  21 ...     ← 地面远处
+  //
+  // 两个坑都在这里：
+  //  1. `clear(bg)` 之后 `begin_frame(bg)` 会**按自己的算子重清一遍**，
+  //     而 `bg{26,29,38}` 在无色调映射下编码成 ~108——所以画面角落不是
+  //     你以为的那个暗背景，而是被“线性值当字节”抬亮的上半区。
+  //  2. 因此“球体比背景亮”这个假设本身不成立（球体高光 60 < 上半区 108）。
+  //
+  // 真正该问的是“那个像素是球体而不是地面”。地面在画面下半部约 21，球体
+  // 在 57~60，差 35+ 级，用地面当基准就对了。
+  const double ground_luma = luma_at(off, 20, 260, 6);
+  ST_CHECK(best > ground_luma + 15.0);   // 那里是球体（比地面亮），不是地面
+
+  // 该像素在开阴影后必须完全不变
+  const double before = luma_at(off, best_x, best_y, 2);
+  const double after = luma_at(on, best_x, best_y, 2);
   ST_CHECK(std::abs(before - after) < 1.0);
-  // 且该处确实是球体（够亮），否则"没变"可能只是背景
-  ST_CHECK(before > 120.0);
 }
 
 ST_TEST(planar_shadow_off_is_identical_to_never_enabling) {

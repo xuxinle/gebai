@@ -132,7 +132,6 @@ class ForcedBackend {
   lighting.light_from = Vec3{0.4f, 0.8f, 0.6f};
   lighting.ambient = 0.35f;
   lighting.diffuse = 0.8f;
-  lighting.rim = 0.25f;
   lighting.exposure = 1.0f;
   scene.begin_frame(Color{40, 44, 52, 255});
   scene.set_camera(camera);
@@ -295,11 +294,10 @@ ST_TEST(scene3d_feature_env_reflection_both_legs) {
     lighting.light_from = Vec3{0.4f, 0.8f, 0.6f};
     lighting.ambient = 0.35f;
     lighting.diffuse = 0.8f;
-    lighting.rim = 0.25f;
     lighting.exposure = 1.0f;
-    lighting.env_sky = Vec3{0.55f, 0.68f, 0.95f};
-    lighting.env_ground = Vec3{0.10f, 0.10f, 0.12f};
-    lighting.env_strength = enabled ? 1.2f : 0.0f;
+    lighting.ibl_sky = Vec3{0.55f, 0.68f, 0.95f};
+    lighting.ibl_ground = Vec3{0.10f, 0.10f, 0.12f};
+    lighting.ibl_strength = enabled ? 1.2f : 0.0f;
     scene.begin_frame(Color{40, 44, 52, 255});
     scene.set_camera(camera);
     scene.set_lighting(lighting);
@@ -375,7 +373,6 @@ ST_TEST(scene3d_feature_texture_both_legs) {
     lighting.light_from = Vec3{0.4f, 0.8f, 0.6f};
     lighting.ambient = 0.5f;
     lighting.diffuse = 0.85f;
-    lighting.rim = 0.2f;
     lighting.exposure = 1.0f;
     scene.begin_frame(Color{40, 44, 52, 255});
     scene.set_camera(camera);

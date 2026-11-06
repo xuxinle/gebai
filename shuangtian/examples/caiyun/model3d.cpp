@@ -83,7 +83,24 @@ auto evaluate_model3d(const Layer& layer, float local_time, float scene_duration
   pose.fov_y_degrees = std::clamp(layer.cam_fov, 8.0f, 110.0f);
   pose.light_direction = light_vector(layer.light_azimuth, layer.light_elevation);
   pose.ambient = std::clamp(layer.light_ambient, 0.0f, 1.0f);
-  pose.rim = std::clamp(layer.light_rim, 0.0f, 1.0f);
+
+  // ## `light_rim` → 背后的补光（2026-11-06 重接）
+  //
+  // ### 为何不能直接丢掉
+  //
+  // `light_rim` 是**对外剧本字段**（`layer_schema` 里有它、`director` 会序列化它），
+  // 已有剧本在写 `light_rim: 0.5`。物理内核里没有“边缘光”这个概念——真实的
+  // 轮廓亮边是环境光在掠射角下的菲涅耳反射。
+  //
+  // ### 映射方式
+  //
+  // 用一盏**从背后来、冷色、低强度**的平行光做“轮廓光”：这与摄影里的
+  // rim light 同一语义，而且走的是内核里已有的直接光路径（不新增任何
+  // 着色分支）。
+  //
+  // 强度上限 0.6：再亮就不再是“轮廓”而变成“第二个主光”了（实测超过 0.6
+  // 会把主体背光面从黑抬成中灰，观感从“立体”变成“发灰”）。
+  pose.rim_as_back_light = std::clamp(layer.light_rim, 0.0f, 1.0f) * 0.6f;
 
   // ## 环境反射（IBL）参数
   //
@@ -105,11 +122,11 @@ auto evaluate_model3d(const Layer& layer, float local_time, float scene_duration
     const st::math::Vec3 light_dir = pose.light_direction.normalized();
     // 天空色：跟主光去，强度受环境项影响
     const float sky_gain = 0.55f + 0.55f * std::clamp(light_dir.y, 0.0f, 1.0f);
-    pose.env_sky = st::math::Vec3{0.38f * sky_gain + 0.16f, 0.46f * sky_gain + 0.18f,
+    pose.ibl_sky = st::math::Vec3{0.38f * sky_gain + 0.16f, 0.46f * sky_gain + 0.18f,
                                   0.64f * sky_gain + 0.24f};
     // 地面色：暗、偏冷（反射朝下的那一半）
-    pose.env_ground = st::math::Vec3{0.09f, 0.10f, 0.13f};
-    pose.env_strength = 0.55f + 0.45f * pose.ambient;
+    pose.ibl_ground = st::math::Vec3{0.09f, 0.10f, 0.13f};
+    pose.ibl_strength = 0.55f + 0.45f * pose.ambient;
   }
   return pose;
 }
@@ -994,11 +1011,28 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
   st::raster::Lighting lighting{};
   lighting.light_from = pose.light_direction;
   lighting.ambient = pose.ambient;
-  lighting.rim = pose.rim;
-  // 环境反射：金属"活起来"的关键。由场景背景色推导（见 `Pose::env_sky` 的说明）。
-  lighting.env_sky = pose.env_sky;
-  lighting.env_ground = pose.env_ground;
-  lighting.env_strength = pose.env_strength;
+  // 环境反射：金属"活起来"的关键。由场景背景色推导（见 `Pose::ibl_sky` 的说明）。
+  lighting.ibl_sky = pose.ibl_sky;
+  lighting.ibl_ground = pose.ibl_ground;
+  lighting.ibl_strength = pose.ibl_strength;
+  // ## `light_rim` 重接成“背后补光”（2026-11-06）
+  //
+  // 物理内核没有假边缘光；`light_rim` 映射成一盏从背后来、偏冷、低强度的
+  // 平行光（摄影里的 rim light），走内核已有的直接光路径。
+  //
+  // 方向：与主光**相反**（主光在 `pose.light_direction`），略微上抬——
+  // 完全水平会让轮廓线落在画面中线，看着像“半个身子亮”。
+  if (pose.rim_as_back_light > 0.0f) {
+    const st::math::Vec3 back{-pose.light_direction.x, -pose.light_direction.y,
+                              -pose.light_direction.z};
+    const st::math::Vec3 rim_dir = st::math::Vec3{back.x, back.y + 0.35f, back.z}.normalized();
+    st::raster::Light rim{};
+    rim.kind = st::raster::LightKind::Directional;
+    rim.direction = rim_dir;
+    rim.color = st::math::Vec3{0.78f, 0.86f, 1.0f};   // 偏冷（与摄影 rim light 同惯例）
+    rim.intensity = pose.rim_as_back_light;
+    lighting.extra_lights[0] = rim;
+  }
 
   // 模型变换：先按矩形长宽比适配，再缩放/倾斜/自转/浮动。
   //
@@ -1117,11 +1151,28 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
   st::raster::Lighting lighting{};
   lighting.light_from = pose.light_direction;
   lighting.ambient = pose.ambient;
-  lighting.rim = pose.rim;
-  // 环境反射：金属"活起来"的关键。由场景背景色推导（见 `Pose::env_sky` 的说明）。
-  lighting.env_sky = pose.env_sky;
-  lighting.env_ground = pose.env_ground;
-  lighting.env_strength = pose.env_strength;
+  // 环境反射：金属"活起来"的关键。由场景背景色推导（见 `Pose::ibl_sky` 的说明）。
+  lighting.ibl_sky = pose.ibl_sky;
+  lighting.ibl_ground = pose.ibl_ground;
+  lighting.ibl_strength = pose.ibl_strength;
+  // ## `light_rim` 重接成“背后补光”（2026-11-06）
+  //
+  // 物理内核没有假边缘光；`light_rim` 映射成一盏从背后来、偏冷、低强度的
+  // 平行光（摄影里的 rim light），走内核已有的直接光路径。
+  //
+  // 方向：与主光**相反**（主光在 `pose.light_direction`），略微上抬——
+  // 完全水平会让轮廓线落在画面中线，看着像“半个身子亮”。
+  if (pose.rim_as_back_light > 0.0f) {
+    const st::math::Vec3 back{-pose.light_direction.x, -pose.light_direction.y,
+                              -pose.light_direction.z};
+    const st::math::Vec3 rim_dir = st::math::Vec3{back.x, back.y + 0.35f, back.z}.normalized();
+    st::raster::Light rim{};
+    rim.kind = st::raster::LightKind::Directional;
+    rim.direction = rim_dir;
+    rim.color = st::math::Vec3{0.78f, 0.86f, 1.0f};   // 偏冷（与摄影 rim light 同惯例）
+    rim.intensity = pose.rim_as_back_light;
+    lighting.extra_lights[0] = rim;
+  }
 
   const st::math::Color clear_color =
       head.model_backdrop

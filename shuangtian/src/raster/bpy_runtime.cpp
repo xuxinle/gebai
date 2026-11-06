@@ -11,6 +11,8 @@
 // `mp_load_attr` + 类型检查）代码量极大且易错。详见 `bpy_runtime.hpp`。
 #include "st/raster/bpy_runtime.hpp"
 
+#include <cstdint>
+
 #include <cmath>
 #include <string>
 #include <vector>
@@ -76,7 +78,7 @@ auto read_mesh(const Json& item) -> Mesh {
   if (indices.is_array()) {
     mesh.indices.reserve(indices.size());
     for (const auto& index : indices) {
-      const auto value = index.is_number() ? index.get<long long>() : 0LL;
+      const auto value = index.is_number() ? index.get<std::int64_t>() : 0LL;
       mesh.indices.push_back(static_cast<std::uint32_t>(value < 0 ? 0 : value));
     }
   }
@@ -147,6 +149,42 @@ auto read_camera(const Json& value) -> Camera {
 /// `Lighting` 是场景的**基础照明**（环境 + 主方向光）。bpy 脚本可能建
 /// 任意多盏灯，而那些应当作为附加光。取能量最高的当主光——它与
 /// `ThreeRuntime` 的做法一致（那边也按 intensity 挑）。
+/// Blender 的 `SUN energy`（W/m²）→ 本内核的 irradiance。
+///
+/// ## 旧式为何必须废弃
+///
+/// 旧实现是 `energy/1000 × 0.769`。那个 `0.769` 是**为补偿旧模型缺 1/π
+/// 而反推出来的**（当时只有一个自由度，于是它把"缺 π"吞进了自己）。
+/// 物理内核的漫反射走 `albedo/π`，同一个能量需要多乘一个 π 才落到同一亮度。
+///
+/// ## 但"补回 π"还不够——旧标定本身是在错误前提下做的
+///
+/// 旧标定用的是 `bpy_watch.py`（**三盏灯**：2600 / 900 / 1500）去拟合真 Blender
+/// 的参照图，而旧模型只算**一盏**灯。用一个未知量（k）去拟合一个模型缺少的
+/// 自由度（其余两盏灯），得到的 k 自然会被撑大。
+///
+/// 现在内核支持全部灯光（`ShadeInput::extra_lights`），三盏灯真的都参与计算，
+/// 再套那个被撑大的 k 会直接过曝——实测：主体均值 150.1，而真 Blender 是 78.1。
+///
+/// ## 现在的定义：按物理量纲归一，不拟合观感
+///
+/// Blender 的 SUN `energy` 是**辐照度**（W/m²），本内核的 `Lighting::diffuse`
+/// 乘进 `irradiance = saturate(n·l) × color × intensity` 之后也是辐照度。
+/// 两者同一量纲，所以常数只负责一件事：**把 Blender 的数值尺度映射到
+/// 本框架"1.0 = 正常受光"的尺度**。
+///
+/// 取 `energy 1000 W/m² → intensity 1.0`（Blender 点光的默认能量就是 1000W，
+/// 这是有据可依的锚点，不是拟合出来的）：
+///
+///     kSunEnergyToIrradiance = 1.0
+///
+/// ## 已知残余（不假装对齐）
+///
+/// 真 Blender 的观感还经过它自己的 AgX 3D LUT，而本框架的 AgX 是解析拟合、
+/// 低值区偏亮（见 `docs/BACKLOG.md` P1）。**那个偏差不由本系数补偿**——
+/// 否则色调映射修好之后这里又会偏暗，变成两个错误互相抵消。
+constexpr float kSunEnergyToIrradiance = 1.0f;
+
 auto read_lighting(const Json& items) -> Lighting {
   Lighting lighting{};
   if (!items.is_array() || items.empty()) return lighting;
@@ -169,34 +207,37 @@ auto read_lighting(const Json& items) -> Lighting {
   lighting.light_from = math::Vec3{static_cast<float>(-direction[0]),
                                    static_cast<float>(-direction[1]),
                                    static_cast<float>(-direction[2])};
-  // bpy 的 energy 是瓦特量级，本框架的 diffuse 是相对权重。除以 1000 归一到
-  // 与默认值（0.75）同量级——bpy 点光默认 1000W 对应"正常亮度"。
-  // ## 主光强度标定（2026-11-05）
+  // ## 主光强度：物理口径重标（2026-11-06）
   //
-  // 原式：`diffuse = energy/1000 × 0.75`——脚本写 `energy=2600` → `1.95`。
+  // ### 旧式为何必须废弃
   //
-  // 而拿真 Blender 参照图做**分位数标定**（`tools/tune_lighting_grid`）：
+  // 旧实现是 `diffuse = energy/1000 × 0.769`。那个 `0.769` 是**为了补偿
+  // 旧模型缺 1/π 而反推出来的**（标定时只能调一个自由度，于是它把
+  // “缺 π”吞进了自己）。换物理内核后，漫反射已经走 `albedo/π`，
+  // 再乘一个“反补偿”系数就是错两遍。
   //
-  // | diffuse | p50 | p75 | 加权分位差 |
-  // |---|---|---|---|
-  // | 1.65 | 63 | 87 | 97.4 |
-  // | **2.00** | **68** | **92** | **81.4** |
-  // | 2.50 | 76 | 97 | 120.5 |
+  // 实测（`bpy_watch.py`，同一张真 Blender 参照图）：
   //
-  // 参照（真 Blender）分位：p50 67。所以 **2.00** 才是正确值
-  //（中位亮度 68 vs 67，几乎精确）。
+  // | 实现 | 主体均值 | 暗部占比 |
+  // |---|---|---|
+  // | 旧式（带 0.769） | 55.2 | **98.9%** |
+  // | 真 Blender | 75.7 | 6.7% |
   //
-  // 系统 0.75 → 0.769：`2600/1000 × 0.769 = 2.00`。
+  // 整体偏暗 20 级——正是 `1/π ≈ 0.318` 与 `0.769` 没对上的量级。
   //
-  // ## 为何不是“直接照搬 Blender 的 W/m²”
+  // ### 新式：量纲其实是对得上的
   //
-  // 两者单位无法换算：Blender 的 SUN `energy` 是 W/m²（物理辐照度），
-  // 本框架的 `diffuse` 是**相对权重**。只能实测标定。
+  // Blender 的 SUN `energy` 单位是 **W/m²**，也就是**辐照度**；
+  // 而物理内核里 `Lighting::diffuse` 乘进 `irradiance = saturate(n·l) × color × intensity`
+  // 之后也是辐照度。两者是**同一量纲**，不需要“单位换算”，只需要一个
+  // 让两边“中灰落点一致”的归一常数（Blender 自己的曝光/视图变换也参与其中）。
   //
-  // 顺带记录：Blender 里 true `energy=3.0` 才不过曝（2600 会烧成纯白）——
-  // 那是 Blender 自己的尺度，与本框架无关。
+  // 所以这里只保留一个常数 `kSunEnergyToIrradiance`，它的意义明确定义为：
+  // **「Blender SUN energy 1 W/m² 对应本内核的多少 irradiance」**。
+  //
+  // 标定方法与数值记在 `docs/render_parity.md` 的“bpy 重标”一节。
   if (key_energy > 0.0) {
-    lighting.diffuse = static_cast<float>(key_energy / 1000.0) * 0.769f;
+    lighting.diffuse = static_cast<float>(key_energy / 1000.0) * kSunEnergyToIrradiance;
   }
 
   // `extra_lights` 是**定长 `std::array`**（渲染器按固定上限循环，
@@ -217,7 +258,12 @@ auto read_lighting(const Json& items) -> Lighting {
     light.color = math::Vec3{static_cast<float>(rgb[0]), static_cast<float>(rgb[1]),
                              static_cast<float>(rgb[2])};
     const double energy = json_get_double(items[i], "energy", 1000.0);
-    light.intensity = static_cast<float>(energy / 1000.0) * 0.75f;
+    // 与主光**同一系数**（物理口径）。
+    //
+    // 旧值 `× 0.75` 与主光的 `× 0.769` 是两个不同的数——历史上两次分别调参
+    // 留下的。现在都归到同一个常量：同一类灯就该用同一个换算，否则
+    // “换一个灯当主光”会让画面亮度跳变。
+    light.intensity = static_cast<float>(energy / 1000.0) * kSunEnergyToIrradiance;
     lighting.extra_lights[slot++] = light;
   }
   return lighting;
@@ -263,7 +309,7 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
         for (const auto& group : groups) {
           if (!group.is_array() || group.size() < 3) continue;
           for (std::size_t k = 0; k < 3; ++k) {
-            const auto value = group[k].is_number() ? group[k].get<long long>() : 0LL;
+            const auto value = group[k].is_number() ? group[k].get<std::int64_t>() : 0LL;
             object.mesh.material_groups.push_back(
                 static_cast<std::uint32_t>(value < 0 ? 0 : value));
           }
@@ -299,20 +345,50 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
   // | 真 three.js | 74.0 | 50.2% |
   //
   // 亮近一倍、完全没有暗部——因为金属被一个不存在的亮天空照亮。
+  // ## 世界色 → IBL 探测器 + 清屏色（2026-11-06 重做）
   //
-  // 修法：从脚本的世界背景推导。天空 = 背景色（上半环境），地面 = 更暗的
-  // 同色（下半）——这与 Blender 的“世界色均匀发光”近似（真实是均匀，
-  // 但本框架的环境只有双色渐变，用“天空 = 背景、地面 = 50% 背景”保留
-  // 上下有别的型制）。
+  // Blender 的 `world` 是**均匀发光环境**：它既提供环境光照，也当背景。
+  // 物理内核下这两件事必须分开表达：
+  //
+  // | 用途 | 本框架怎么表达 |
+  // |---|---|
+  // | 环境光照（辐照度） | `ibl_sky` / `ibl_ground` + `ibl_strength` |
+  // | 背景色（清屏） | `background_linear`（由 `render_impl` 直接用） |
+  //
+  // ## 为何不能只给 IBL 而不管背景
+  //
+  // 实测（`bpy_watch.py` vs 真 Blender `blender_reference.png`）：
+  //
+  // | | 背景像素 |
+  // |---|---|
+  // | 真 Blender | rgb(71,76,83) |
+  // | 本框架（只设 IBL，背景走调用方默认） | rgb(60,60,60) |
+  //
+  // 背景占画面 **80%**，这 11 级差直接把全图暗部占比变成 91.8%（真 Blender 6.7%）。
+  // 所以“世界色”必须同时喂给背景。
+  //
+  // ## 与浏览器对标的衔接
+  //
+  // `background_linear` 是**线性值**，与 three 的 `scene.background = Color(...)`
+  // 同一口径，两者走同一条 `encode_pixel` 输出链——这就是“三条输入路径同一内核”
+  // 在背景上的体现。
   {
     const Json& world = json_at(root, "world");
     if (world.is_array() && world.size() >= 3) {
       const auto rgb = read_doubles(world, 3);
       const math::Vec3 background{static_cast<float>(rgb[0]), static_cast<float>(rgb[1]),
                                   static_cast<float>(rgb[2])};
-      scene.lighting.env_sky = background;
-      scene.lighting.env_ground =
-          math::Vec3{background.x * 0.5f, background.y * 0.5f, background.z * 0.5f};
+      // IBL：Blender 的 world 是“各个方向同亮”，所以天文两个探针取**同色**。
+      //
+      // 旧实现把地面乘了 0.5，那是为了人造“上亮下暗”的型制——而 Blender 的
+      // world 是真的均匀，加 0.5 等于把一个均匀环境画成渐变，对着参照图反而偏。
+      scene.lighting.ibl_sky = background;
+      scene.lighting.ibl_ground = background;
+      // 强度 1.0：world 的亮度就是环境亮度（不再乘一个人为系数）。
+      scene.lighting.ibl_strength = 1.0f;
+      // 背景：world 颜色就是清屏色（线性值与 three 同口径）。
+      scene.background_linear = background;
+      scene.background_set = true;
     }
   }
 
@@ -380,3 +456,7 @@ auto BpySceneExtractor::extract(std::string_view script) -> Result<ThreeScene> {
 }
 
 }  // namespace st::raster
+
+
+
+

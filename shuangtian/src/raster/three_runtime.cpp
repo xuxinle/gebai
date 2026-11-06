@@ -1062,11 +1062,10 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
     if (aligned) {
       scene.three_parity = true;
       // three 没有“边缘光”；留着它会让轮廓一侧凭空亮 25%。
-      scene.lighting.rim = 0.0f;
       // three 的纯色 `scene.background` **不产生 IBL**：环境反射必须关。
-      scene.lighting.env_strength = 0.0f;
-      scene.lighting.env_sky = math::Vec3{0.0f, 0.0f, 0.0f};
-      scene.lighting.env_ground = math::Vec3{0.0f, 0.0f, 0.0f};
+      scene.lighting.ibl_strength = 0.0f;
+      scene.lighting.ibl_sky = math::Vec3{0.0f, 0.0f, 0.0f};
+      scene.lighting.ibl_ground = math::Vec3{0.0f, 0.0f, 0.0f};
     }
   }
 
@@ -1317,8 +1316,8 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
             // 天空色同时是**背景色**（`begin_frame` 用它清屏）。提亮它会
             // 直接把画面底色改了，四格里就无法与参照对比。而 `env_ground`
             // 只影响反射，不碰背景——所以动它。
-            scene.lighting.env_sky = linear;
-            scene.lighting.env_ground =
+            scene.lighting.ibl_sky = linear;
+            scene.lighting.ibl_ground =
                 math::Vec3{linear.x * 2.6f, linear.y * 2.6f, linear.z * 2.6f};
             // 清屏色：three 就是拿 `scene.background` 当清屏色（线性值）。
             scene.background_linear = linear;
@@ -1328,8 +1327,8 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
             // ⚠ 对齐模式下**不推导**：three 的纯色 `scene.background` 不产生 IBL，
             // 金属只能反射直接光。旧路径凭空多一层环境反射，实测让背光面从 0
             // 抬到 84/255。
-            if (!aligned && scene.lighting.env_strength <= 0.0f) {
-              scene.lighting.env_strength = 0.45f;
+            if (!aligned && scene.lighting.ibl_strength <= 0.0f) {
+              scene.lighting.ibl_strength = 0.45f;
             }
           }
         }
@@ -1414,7 +1413,7 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
     if (!JS_IsUndefined(intensity.get()) && !JS_IsNull(intensity.get())) {
       double value = 0.0;
       if (JS_ToFloat64(impl_->context, &value, intensity.get()) == 0 && value > 0.0) {
-        scene.lighting.env_strength = static_cast<float>(value);
+        scene.lighting.ibl_strength = static_cast<float>(value);
       }
     }
   }

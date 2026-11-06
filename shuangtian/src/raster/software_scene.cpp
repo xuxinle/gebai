@@ -24,7 +24,7 @@
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/surface.hpp"
-#include "st/raster/three_parity.hpp"
+#include "st/raster/pbr.hpp"
 
 namespace st::raster {
 namespace {
@@ -202,456 +202,21 @@ struct LightSample {
   return out;
 }
 
-auto shade_terms_at(math::Vec3 normal, math::Vec3 color, const Lighting& lighting,
-                    math::Vec3 world_position) -> math::Vec3 {
-  const math::Vec3 n = normal.normalized();
-  const math::Vec3 light = lighting.light_from.normalized();
-  const float diffuse = std::max(n.dot(light), 0.0f);
-  // 边缘光：视线沿 -Z（相机朝 -Z 看），所以 `1 - n.z` 就是“偏离正对相机”的程度。
-  const float rim_base = 1.0f - std::max(n.z, 0.0f);
-  const float rim = rim_base * rim_base * lighting.rim;
-  // ⚠ 边缘光 **乘在固有色上**，不是加到最终色上。
-  //
-  // 实测踩过（用户一眼就看出来的“边缘锯启”其实是这个）：早先写 `color*scale + rim`，
-  // 于是盒子的**侧壁**（n.z=0）拿到 rim 满值，亮度被抬到 0.905——**比顶面 0.969
-  // 只暗一点点**，而它本该是最暗的面之一。观感上就是“盒子上贴了一片白边”，
-  // 那片假面的两条硬边被误认为是抗锯齿失败。
-  //
-  // 改成乘法后：侧壁 = color × 1.115、顶面 = color × 1.35（自身受光多），
-  // 明暗关系（顶 > 侧 > 正）得以保持，且不会出现“比亮面还亮”的反相。
-  const float scale = lighting.ambient + diffuse * lighting.diffuse + rim;
-  const auto clamp01 = [](float value) noexcept -> float {
-    return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
-  };
-  const float gain = scale * lighting.exposure;
-  math::Vec3 result{color.x * gain, color.y * gain, color.z * gain};
-
-  // ## 附加光源（本次新增）
-  //
-  // 关键约束：`extra_lights` 全为空时结果必须与上面**逐位相同**。
-  // 所以这里是“追加”，而不是把主光也重构成循环。
-  //
-  // 为何不在 `shade_surface` 里做：`shade_terms` 是两条腿的唯一参考实现，
-  // 主光 + 环境 + 边缘光的语义已经在它里面钉住了。附加光源作为**后加的
-  // 漫反射项**追加，两边都好维护。
-  // 附加光源：走 `sample_light`，把平行光/点光/聚光统一折算成「方向 + 强度」。
-  //
-  // ## 为何两条路径（本函数与 `shade_surface`）都必须用 `sample_light`
-  //
-  // 材质默认值（`specular=0, emission=0, metallic=0`）时走的就是**本函数**。
-  // 只改 `shade_surface` 会让“没设材质的场景里点光完全不生效”——
-  // 实测踩过：探针里点光/聚光四项全红，数值一字不变。
-  for (const Light& extra_light : lighting.extra_lights) {
-    if (extra_light.intensity <= 0.0f) continue;
-    const LightSample sample = sample_light(extra_light, world_position);
-    if (sample.intensity <= 0.0f) continue;
-    const float lambert = std::max(n.dot(sample.direction), 0.0f);
-    if (lambert <= 0.0f) continue;
-    const float weight = lambert * sample.intensity;
-    result.x += color.x * extra_light.color.x * weight;
-    result.y += color.y * extra_light.color.y * weight;
-    result.z += color.z * extra_light.color.z * weight;
-  }
-
-  return math::Vec3{clamp01(result.x), clamp01(result.y), clamp01(result.z)};
-}
-
-// ── GGX 高光与 Principled 着色 ──
-
-/// `alpha` 的下限。
-///
-/// 为何要夹：`roughness → 0` 时 GGX 的 D 项分母趋于 0，解析式会溢出成 inf/NaN。
-/// 实测：不夹时 `roughness=0` 会输出 NaN，整幅变黑（NaN 在色调映射里传插）。
-constexpr float kMinAlpha = 1e-3f;
-
-/// ## alpha 的映射必须是 roughness²（2026-11-05 修，这是个关键缺陷）
-///
-/// 原实现把 `roughness` **直接当 alpha**。标准 GGX（Disney / Cook-Torrance）
-/// 的定义是：
-///
-///     alpha = roughness²
-///     D(h) = alpha² / (π · ((n·h)²(alpha²-1) + 1)²)
-///
-/// 用 `roughness` 当 alpha 会让瓣**宽得多**：`rough=0.22` 的实际瓣宽
-/// 相当于标准映射下的 `rough≈0.47`。
-///
-/// 实测后果（`tools/ggx_lobe_width_probe`）：
-///
-/// | | 瓣内跨度（>10% 峰值） | 最低相对峰值 |
-/// |---|---|---|
-/// | 修前 | **95°**（扫到哪都在瓣内） | 0.59 |
-/// | 标准 GGX | 约 30~40° | 应 < 0.1 |
-///
-/// 瓣太宽的后果是**每个朝向的面都拿到接近同样的高光** —— 画面没有明暗
-/// 层次（"平"）。这正是分位数对比里「p50 +25、p75 +48」的形状：
-/// 中层被抬高、高层没拉开。
-auto ggx_distribution(float n_dot_h, float roughness) noexcept -> float {
-  const float r = std::max(roughness, kMinAlpha);
-  // ⚠ 这里是 roughness²，不是 roughness。改这一行会改变所有金属的观感。
-  const float alpha = std::max(r * r, kMinAlpha);
-  const float a2 = alpha * alpha;
-  const float nh = std::max(n_dot_h, 0.0f);
-  const float nh2 = nh * nh;
-  const float denom = nh2 * (a2 - 1.0f) + 1.0f;
-  if (denom <= 1e-12f) return 0.0f;
-  return a2 / (3.14159265358979f * denom * denom);
-}
-
-auto ggx_geometry(float n_dot_v, float n_dot_l, float roughness) noexcept -> float {
-  // Smith 的 Schlick-GGX 近似：k = (alpha+1)²/8（直接光照用这个，IBL 用 alpha²/2）
-  //
-  // ⚠ alpha 与 `ggx_distribution` 必须用**同一个映射**（roughness²），
-  // 否则 D 与 G 的瓣宽不一致，高光形状会怪（实测会看到"亮环"）。
-  const float r_geom = std::max(roughness, kMinAlpha);
-  const float alpha = std::max(r_geom * r_geom, kMinAlpha);
-  const float k = (alpha + 1.0f) * (alpha + 1.0f) * 0.125f;
-  const float nv = std::max(n_dot_v, 0.0f);
-  const float nl = std::max(n_dot_l, 0.0f);
-  const float gv = nv / (nv * (1.0f - k) + k);
-  const float gl = nl / (nl * (1.0f - k) + k);
-  return gv * gl;
-}
-
-auto ggx_specular(math::Vec3 normal, math::Vec3 view_dir, math::Vec3 light_dir,
-                  float roughness, float metallic, math::Vec3 base_color,
-                  math::Vec3 specular_tint) noexcept -> math::Vec3 {
-  const math::Vec3 n = normal.normalized();
-  const math::Vec3 v = view_dir.normalized();
-  const math::Vec3 l = light_dir.normalized();
-  const math::Vec3 h = (v + l).normalized();
-
-  const float n_dot_v = std::max(n.dot(v), 0.0f);
-  const float n_dot_l = std::max(n.dot(l), 0.0f);
-  if (n_dot_v <= 0.0f || n_dot_l <= 0.0f) return math::Vec3{0.0f, 0.0f, 0.0f};
-  const float n_dot_h = std::max(n.dot(h), 0.0f);
-  const float v_dot_h = std::max(v.dot(h), 0.0f);
-
-  // Fresnel（Schlick）：掠射角下反射率趋于 1
-  // 非金属的 F0 = 0.04（常见绝缘体的平均值）；金属的 F0 = 固有色。
-  const math::Vec3 f0 = math::Vec3{0.04f + (base_color.x - 0.04f) * metallic,
-                                   0.04f + (base_color.y - 0.04f) * metallic,
-                                   0.04f + (base_color.z - 0.04f) * metallic};
-  const float one_minus_vh = 1.0f - v_dot_h;
-  const float fresnel_scalar = one_minus_vh * one_minus_vh * one_minus_vh * one_minus_vh *
-                               one_minus_vh;   // ^5，写成乘法避开 pow
-
-  const float d = ggx_distribution(n_dot_h, roughness);
-  const float g = ggx_geometry(n_dot_v, n_dot_l, roughness);
-  // 分母 4·(n·v)·(n·l)：能量守恒的归一化因子
-  const float denom = 4.0f * n_dot_v * n_dot_l;
-  if (denom <= 1e-9f) return math::Vec3{0.0f, 0.0f, 0.0f};
-
-  // ## 为何要乘 `n·l`
-  //
-  // BRDF 是“出射辐亮度 / 入射辐照度”的比值，而真正进入着色方程的是
-  // `BRDF · 辐照度`，其中辐照度含 `n·l`（余弦因子）。
-  //
-  // 漏掉它的后果很具体：实测 `spec` 只有 **0.0003~0.0067**——比漫反射
-  // （0.5 量级）小两个数量级，高光在画面上完全看不见，而这不会报任何错。
-  const float cosine = n_dot_l;
-  const auto channel = [&](float f0_c, float tint_c) -> float {
-    const float f = f0_c + (1.0f - f0_c) * fresnel_scalar;
-    return d * g * f / denom * tint_c * cosine;
-  };
-  return math::Vec3{channel(f0.x, specular_tint.x), channel(f0.y, specular_tint.y),
-                    channel(f0.z, specular_tint.z)};
-}
-
-math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 view_dir,
-                         const Lighting& lighting, float metallic, float roughness,
-                         float specular, float emission, math::Vec3 specular_tint,
-                         math::Vec3 world_position, math::Vec3 emissive_color,
-                         bool emission_unlit) {
-  const math::Vec3 n = normal.normalized();
-  const math::Vec3 l = lighting.light_from.normalized();
-
-  // ## 渐进采用：高光为 0 时必须与旧 `shade_terms` 逐位相同
-  if (specular <= 0.0f && emission <= 0.0f && metallic <= 0.0f) {
-    return shade_terms_at(normal, base_color, lighting, world_position);
-  }
-
-  const float n_dot_l = std::max(n.dot(l), 0.0f);
-  const float rim_base = 1.0f - std::max(n.z, 0.0f);
-  const float rim = rim_base * rim_base * lighting.rim;
-
-  // 金属没有漫反射（自由电子吸收透射光）——这是金属与非金属的物理分界线。
-  // 漏掉它时，金色球会显得像“黄色塑料”，一眼就假。
-  const float diffuse_weight = 1.0f - metallic;
-  const float diffuse_scale =
-      lighting.ambient * diffuse_weight + n_dot_l * lighting.diffuse * diffuse_weight + rim;
-
-  math::Vec3 result{base_color.x * diffuse_scale, base_color.y * diffuse_scale,
-                    base_color.z * diffuse_scale};
-
-  // ## 环境反射（金属"不发黑"的唯一原因）
-  //
-  // 纯 Cook-Torrance 只处理**直接光**：平行光/点光在金属表面留下一个亮点，
-  // 其余像素 = 固有色 × (漫反射权重 0) = **纯黑**。
-  //
-  // 实测代价：把 metallic 从 0 调到 1，球从"浅蓝球"变成"黑球"（只剩一个小高光）。
-  // 而现实中的金属（不锈钢、黄金）之所以看得见，几乎全靠**环境反射**——
-  // 它反射天空、墙壁、地面。没有环境项，金属就是黑的。
-  //
-  // 环境用**程序化双色渐变**（`env_sky` / `env_ground`）而不是 HDR 立方图：
-  // 本项目的渲染对象是产品演示/信息图，需要的是"上亮下暗"这个型制，
-  // 不是真实世界的云彩——而一份 HDR 要几十 MB。
-  {
-    const math::Vec3 v = view_dir.normalized();
-    const float n_dot_v = std::max(n.dot(v), 0.0f);
-    // 菲涅耳（Schlick，F0 随 metallic 走）
-    const math::Vec3 f0 = math::Vec3{0.04f + (base_color.x - 0.04f) * metallic,
-                                     0.04f + (base_color.y - 0.04f) * metallic,
-                                     0.04f + (base_color.z - 0.04f) * metallic};
-    const float one_minus_nv = 1.0f - n_dot_v;
-    const float nv2 = one_minus_nv * one_minus_nv;
-    const float fresnel = f0.x + (1.0f - f0.x) * nv2 * nv2;
-
-    // ## 用**反射向量**采样环境（2026-10-31 改）
-    //
-    // 旧实现用**法线**的 Y 分量当“天空因子”——那等于把环境当成“只看朝哪边”的
-    // 半球光，曲面上的反射不会随视角移动（看上去像涂了一层渐变，不像镜面）。
-    //
-    // 真实反射要 `reflect(-v, n)`：同一块表面，视角一动反射点就动——
-    // 这正是“金属跟着相机变”的观感来源。
-    const math::Vec3 r = (v * -1.0f + n * (2.0f * n_dot_v)).normalized();
-    // 把反射向量的 Y 映到 [0,1]：上方 = 天空色，下方 = 地面色。
-    const float sky_t = std::clamp(0.5f + 0.5f * r.y, 0.0f, 1.0f);
-
-    // 环境色：可配（`env_sky`/`env_ground`），未配置时回退到原来的硬编码中性色，
-    // 保证旧场景逐位不变（`env_strength` 默认 0 = 完全关闭）。
-    const math::Vec3 sky = lighting.env_strength > 0.0f ? lighting.env_sky
-                                                         : math::Vec3{0.52f, 0.58f, 0.68f};
-    const math::Vec3 ground = lighting.env_strength > 0.0f ? lighting.env_ground : sky;
-    const math::Vec3 env_color{ground.x + (sky.x - ground.x) * sky_t,
-                               ground.y + (sky.y - ground.y) * sky_t,
-                               ground.z + (sky.z - ground.z) * sky_t};
-
-    // ## 探针采样（2026-11-05 新增）
-    //
-    // `env_probe_count > 0` 时改用“方向探针”而不是“Y 分量插值”。
-    //
-    // ### 为何必须有这条分支
-    //
-    // Y 分量插值让**同一平面上的金属反射完全一样**（法线相同 → reflect
-    // 只差一点 Y → 插值差不多）。实测：齿轮场景无论把 `env_strength`
-    // 从 0.45 提到 3.5，壳部都只从 6.7% 到 7.9%，而暗部从 10.5% 降到 0%
-    // ——“挖了一层灰蜡”，不是金属。
-    //
-    // 真 three.js 的金属是“大面积暗 + 少量亮”（暗部 54.7%），因为反射
-    // 到的环境**有空间结构**（窗、墙、天花）——每一块朝向不同的微面
-    // 反射到不同的东西。
-    //
-    // ### 采样公式
-    //
-    // ```
-    // w_i = max(0, dot(r, dir_i))^sharpness
-    // env = Σ(w_i · color_i) / Σw_i
-    // ```
-    //
-    // 归一化保证“探针有多少个”不影响整体亮度（只影响分布）。若所有
-    // 权重都为 0（反射方向落在探针覆盖面之外），回退到 Y 分量插值。
-    math::Vec3 probe_sampled = env_color;
-    bool probe_hit = false;
-    if (lighting.env_probe_count > 0) {
-      const float sharpness = lighting.env_probe_sharpness > 0.0f
-                                  ? lighting.env_probe_sharpness
-                                  : 3.0f;
-      float sum_w = 0.0f;
-      math::Vec3 sum_c{0.0f, 0.0f, 0.0f};
-      const std::size_t count = lighting.env_probe_count < Lighting::kMaxEnvProbes
-                                    ? lighting.env_probe_count
-                                    : Lighting::kMaxEnvProbes;
-      for (std::size_t i = 0; i < count; ++i) {
-        const auto& probe = lighting.env_probes[i];
-        const math::Vec3 dir = probe.direction.normalized();
-        const float cos_angle = r.x * dir.x + r.y * dir.y + r.z * dir.z;
-        if (cos_angle <= 0.0f) continue;
-        float w = 1.0f;
-        for (int k = 0; k < static_cast<int>(sharpness); ++k) w *= cos_angle;
-        if (sharpness < 1.0f) w = std::pow(cos_angle, sharpness);
-        sum_w += w;
-        sum_c.x += probe.color.x * w;
-        sum_c.y += probe.color.y * w;
-        sum_c.z += probe.color.z * w;
-      }
-      if (sum_w > 1e-6f) {
-        probe_sampled = math::Vec3{sum_c.x / sum_w, sum_c.y / sum_w, sum_c.z / sum_w};
-        probe_hit = true;
-      }
-    }
-
-    // 粗糙度把锐利反射打散成“模糊的一整片”：越粗糙越向环境均值靠拢。
-    //
-    // ⚠ 注意：它**不改变强度**——原实现额外乘了 `(0.35 + 0.65×blur)`
-    // 当作强度倍数，那是错的（详见下方 `weight` 处的说明）。
-    const float rough = std::clamp(roughness, 0.0f, 1.0f);
-    // 环境均值：探针模式下取**探针颜色的加权均值**，否则取天地色的中点。
-    //
-    // 为何探针模式不能仍用天地中点：探针表达的是一个有多个斑块的环境，
-    // 它的“弥散后结果”应当是这些斑块的平均，而不是天空与地面的中点
-    //（那两者在探针模式下可能都不存在）。
-    math::Vec3 env_mean;
-    if (probe_hit) {
-      math::Vec3 sum{0.0f, 0.0f, 0.0f};
-      const std::size_t count = lighting.env_probe_count < Lighting::kMaxEnvProbes
-                                    ? lighting.env_probe_count
-                                    : Lighting::kMaxEnvProbes;
-      for (std::size_t i = 0; i < count; ++i) {
-        sum.x += lighting.env_probes[i].color.x;
-        sum.y += lighting.env_probes[i].color.y;
-        sum.z += lighting.env_probes[i].color.z;
-      }
-      const float inv = count > 0 ? 1.0f / static_cast<float>(count) : 0.0f;
-      env_mean = math::Vec3{sum.x * inv, sum.y * inv, sum.z * inv};
-    } else {
-      env_mean = math::Vec3{(sky.x + ground.x) * 0.5f, (sky.y + ground.y) * 0.5f,
-                            (sky.z + ground.z) * 0.5f};
-    }
-    // `env_rough_falloff` 控制“越粗糙越弥散”的强度（默认 0.6）。
-    const float mix_to_mean = rough * lighting.env_rough_falloff;
-    const math::Vec3 env_base = probe_hit ? probe_sampled : env_color;
-    math::Vec3 env_sampled{env_base.x + (env_mean.x - env_base.x) * mix_to_mean,
-                           env_base.y + (env_mean.y - env_base.y) * mix_to_mean,
-                           env_base.z + (env_mean.z - env_base.z) * mix_to_mean};
-
-    // ## 反射色：金属映**固有色**（不是“固有色当增益”）
-    //
-    // 物理上：金属的反射率 = F0 = 固有色；非金属的 F0 ≈ 0.04。
-    //
-    // ## 原实现的错（2026-11-05 修）
-    //
-    // 原式：`env_color × (0.45 + 0.55 × base_color × metallic)`
-    //
-    // 对黄铜 base=(0.72,0.55,0.24)、metallic=0.95：
-    //
-    // | 通道 | 原式系数 | 正确系数（= base） | 倍数 |
-    // |---|---|---|---|
-    // | R | 0.45 + 0.55×0.72×0.95 = **0.83** | 0.72 | 1.15× |
-    // | G | 0.45 + 0.55×0.55×0.95 = 0.74 | 0.55 | 1.35× |
-    // | B | 0.45 + 0.55×0.24×0.95 = 0.58 | 0.24 | **2.4×** |
-    //
-    // B 通道差 2.4 倍——于是颜色被抽淡（黄铜发灰而不是金黄），
-    // 同时整块亮度被抬高。这直接相关「主体均值 99.9 vs 78.1」：
-    // 金属盘面（大面积）的亮度几乎全来自环境反射（漫反射权重 0.05）。
-    const auto reflect_tint = [&](float env_c, float base_c) noexcept -> float {
-      // 金属用 F0 = 固有色；非金属用 F0 ≈ 0.04（按 metallic 插值）
-      const float f0_c = 0.04f + (base_c - 0.04f) * metallic;
-      return env_c * f0_c;
-    };
-    const math::Vec3 tinted{reflect_tint(env_sampled.x, base_color.x),
-                            reflect_tint(env_sampled.y, base_color.y),
-                            reflect_tint(env_sampled.z, base_color.z)};
-
-    // 强度：显式配置的 `env_strength` 优先；未配置时沿用旧的 `ambient` 挂钩。
-    //
-    // ## `(0.35 + 0.65 × blur)` 这个因子是错的（2026-11-05 修）
-    //
-    // 原式把粗糙度当成**强度倍数**：`blur = 1 - roughness`，于是
-    // 粗糙度越低（越光）→ blur 越大 → **反射越强**。
-    //
-    // 物理上粗糙度影响的是反射的**锐利度**，不是强度：
-    // 低粗糙度 → 反射集中在一个方向（镜面）；高粗糙度 → 反射弥散。
-    // 两者在**能量上都是 F0 比例**，不会因为“更光”而“更亮”。
-    //
-    // 对黄铜（roughness 0.22）：blur = 0.78，因子 = 0.35 + 0.65×0.78 = **0.857**
-    // ——凭空多给 86% 的反射能量。这也是“主体偏亮”的一部分。
-    //
-    // 修法：去掉这个因子。粗糙度的效果已经由 `env_sampled`
-    //（向环境均值弥散）表达。
-    const float ambient_strength = lighting.env_strength > 0.0f
-                                       ? lighting.env_strength
-                                       : (0.30f + 0.70f * (0.5f + 0.5f * n.y)) *
-                                             (lighting.ambient + 0.55f);
-    const float weight = ambient_strength * fresnel;
-    result.x += tinted.x * weight;
-    result.y += tinted.y * weight;
-    result.z += tinted.z * weight;
-  }
-
-  // 附加光源：与 `shade_terms` 同一口径（漫反射项，乘固有色与光色）。
-  // 材质路径不能漏这一步，否则“设了材质就少了几盏灯”。
-  for (const Light& extra_light : lighting.extra_lights) {
-    if (extra_light.intensity <= 0.0f) continue;
-    const LightSample sample = sample_light(extra_light, world_position);
-    if (sample.intensity <= 0.0f) continue;
-    const float lambert = std::max(n.dot(sample.direction), 0.0f);
-    if (lambert <= 0.0f) continue;
-    const float weight = lambert * sample.intensity * diffuse_weight;
-    result.x += base_color.x * extra_light.color.x * weight;
-    result.y += base_color.y * extra_light.color.y * weight;
-    result.z += base_color.z * extra_light.color.z * weight;
-    // 点光/聚光也产生高光——这才是「灯泡在金属上留下亮点」的关键。
-    // 平行光那条走下面的主光路径（保持旧数值不变）。
-    if (specular > 0.0f && extra_light.kind != LightKind::Directional) {
-      const math::Vec3 spike =
-          ggx_specular(n, view_dir, sample.direction, roughness, metallic, base_color,
-                       specular_tint);
-      result.x += spike.x * specular * sample.intensity;
-      result.y += spike.y * specular * sample.intensity;
-      result.z += spike.z * specular * sample.intensity;
-    }
-  }
-
-  // ## 主光高光：开关不能只看 `specular`（2026-11-05 修）
-  //
-  // 原实现在 `specular <= 0` 时**完全不算**平行光高光。而 `specular` 的默认
-  // 值是 0——于是**默认材质没有任何方向性高光**。
-  //
-  // 实测（`tools/ggx_highlight_probe`，黄铜 metallic=0.95 rough=0.22）：
-  //
-  // | specular | 高光峰值 |
-  // |---|---|
-  // | **0（默认）** | **0.13**（只是漫反射残留，没有高光） |
-  // | 1.0 | 1.00 |
-  //
-  // 而三路对照显示本框架「最亮 203 vs 真渲染器 255」——高光不够，这就是根源。
-  //
-  // ## 为何金属必须无计算
-  //
-  // 镜面反射的存在性由**菲涅耳 F0** 决定：
-  //
-  // | 材质 | F0 |
-  // |---|---|
-  // | 绝缘体（塑料/陶瓷） | 0.04（固定） |
-  // | 金属 | **= 固有色**（黄铜 ≈ 0.72/0.55/0.24） |
-  //
-  // 金属的 F0 远大于 0.04，所以它的反射不该被一个“额外的开关”关掉。
-  // `specular` 在语义上是**非金属反射的缩放**（Blender 的 `Specular IOR Level`
-  // 就是这种含义），它不该控制金属。
-  //
-  // 修法：`specular > 0` **或** `metallic > 0` 都算高光；非金属时按 `specular`
-  // 缩放，金属时按 F0 全量（不再乘 `specular`——否则还是要靠用户手动把它
-  // 调非零，问题没解决）。
-  const bool has_metal_reflection = metallic > 0.0f;
-  if (specular > 0.0f || has_metal_reflection) {
-    const math::Vec3 spike =
-        ggx_specular(n, view_dir, l, roughness, metallic, base_color, specular_tint);
-    // 非金属按 `specular` 缩放（旧行为）；金属全量（F0 已是固有色）
-    const float scale = has_metal_reflection ? std::max(specular, 1.0f) : specular;
-    result.x += spike.x * scale;
-    result.y += spike.y * scale;
-    result.z += spike.z * scale;
-  }
-
-  // 自发光：加在**色调映射之前**（线性 HDR 域），这样才能被色调映射滚降。
-  //
-  // ## `emission_unlit` 的意义（2026-10-24）
-  //
-  // Blender 的 Emission 项**不受光照影响**；而本管线旧实现是“加在受光结果上”。
-  // 两者在暗场景里差别很大：霓虹灯管应当自己亮着（哪怕环境全黑），
-  // 而不是“被环境照亮后再亮一点”。
-  // 所以 `emission_unlit = true` 时把前面的受光项**整体丢掉**，只留自发光。
-  if (emission > 0.0f) {
-    if (emission_unlit) {
-      result = math::Vec3{0.0f, 0.0f, 0.0f};
-    }
-    result.x += emissive_color.x * emission;
-    result.y += emissive_color.y * emission;
-    result.z += emissive_color.z * emission;
-  }
-  return math::Vec3{result.x * lighting.exposure, result.y * lighting.exposure,
-                    result.z * lighting.exposure};
-}
+// ────────────────────────────────────────────────────────────────────────────
+// Legacy 着色模型已删除（2026-11-06）
+//
+// 这里原本有 `shade_terms_at` / `ggx_distribution` / `ggx_geometry` / `ggx_specular`
+// / `shade_surface` 一整族函数，实现的是本框架自研的近似模型：
+//
+//     lit = albedo × (ambient + n·l·diffuse + rim) + GGX + 假环境反射
+//
+// 它对标浏览器时逐项都是硬差（缺 1/π、有 0.35 常量保底、凭空加 rim、
+// 从背景推导环境反射），实测 0.5 灰面 176 vs 浏览器 76。
+//
+// 现在**只有一套公式**：`st::raster::pbr` 的物理 BRDF（见 `pbr.hpp`）。
+// 三条输入路径（three 脚本 / bpy 脚本 / JSON 剧本）都走它，差异全部在适配层。
+// 历史对照数据见 `docs/render_parity.md`。
+// ────────────────────────────────────────────────────────────────────────────
 
 namespace {
 
@@ -760,6 +325,20 @@ class SoftwareScene final : public Scene3D {
     const ToneMap previous = tone_map_;
     lighting_ = lighting;
     tone_map_ = lighting.tone_map;
+    // ## 预折算主光与 IBL 探针（逐像素复用）
+    //
+    // 主光是平行光（`Lighting::light_from` 的语义），所以 `surface_position`
+    // 不影响结果——传零向量即可。但**点光/聚光**不行：它们的方向随像素变，
+    // 必须在像素级重算（见 `shade_pixel` 里对 `extra_lights` 的处理）。
+    key_light_ = pbr_sample_light(0, lighting_.light_from, math::Vec3{0.0f, 0.0f, 0.0f},
+                                  lighting_.light_color, lighting_.diffuse, 0.0f, 0.0f, 0.0f,
+                                  math::Vec3{0.0f, 0.0f, 0.0f});
+    // IBL：把环境描述折成方向探针（**两条腿走同一个函数**，见 `scene3d.cpp`）。
+    //
+    // 归一化只做一次是刻意的：实测踩过“软件腿自己合成天/地探针、GPU 腿没合成”，
+    // 于是同一个剧本两条腿差出一整层环境光。
+    ibl_count_ = static_cast<int>(
+        lighting_.make_ibl_probes(ibl_dirs_.data(), ibl_colors_.data(), ibl_dirs_.size()));
     // ## 清屏色要跟着算子重做（2026-11-06 修）
     //
     // `begin_frame()` 不知道本次会用哪个算子（`set_lighting` 总在它之后），
@@ -1417,58 +996,68 @@ class SoftwareScene final : public Scene3D {
   void flush() override {}
 
  private:
-  /// 逐像素着色分发：按 `lighting_.model` 选公式。
+  /// 逐像素着色：**统一内核**（`pbr_shade`）。
   ///
-  /// ## 为何在这里分发而不是在上层
+  /// ## 为何这里没有 `if (model == ...)`
   ///
-  /// 着色发生在像素级（逐像素法线/视向/世界位置），两个模型的输入完全一样，
-  /// 差别只在**公式**。放在光栅化内部就不必让上层知道模型的存在，
-  /// 也保证了「两条腿 × 两种模型」里每个组合都走同一条插值路径。
+  /// 曾经有两种模型（Legacy / three 同构）。统一之后只剩一套公式，
+  /// 于是着色分发这个分支**整体消失**——三条输入路径（three 脚本 / bpy 脚本 /
+  /// JSON 剧本）都走它，差别只在上层怎么填 `ShadeInput`。
+  ///
+  /// 这正是「底层渲染统一」的具体含义：**公式只有一份，差异都在适配层**。
   [[nodiscard]] auto shade_pixel(math::Vec3 normal, math::Vec3 base_color, math::Vec3 view_dir,
-                                 math::Vec3 world) const -> math::Vec3 {
-    if (lighting_.model == Lighting::Model::Three) {
-      // ── three.js 同构 ──
-      // 直接光：`lighting_.diffuse` 当 `DirectionalLight.intensity`（three 里它已乘进
-      // irradiance，所以**不需要**再乘 π）。
-      math::Vec3 lit = three_direct_light(normal, view_dir, lighting_.light_from,
-                                          lighting_.light_color, lighting_.diffuse, base_color,
-                                          material_.metallic, material_.roughness);
-      // 环境光：`lighting_.ambient` 当 `AmbientLight` 的 irradiance（走 /π）。
-      // `ambient = 0` 时这一项**真的是 0**（背光面会全黑）——这正是 three 的行为，
-      // 也是旧模型「暗部占 0%」被修掉的关键。
-      if (lighting_.ambient > 0.0f) {
-        // three 的 `AmbientLight`：irradiance = intensity × color（按通道）。
-        // 旧模型只有一个标量亮度，这里用 `ambient_color`（默认白）。
-        const math::Vec3 amb = three_ambient_light(
-            base_color, material_.metallic,
-            math::Vec3{lighting_.ambient_color.x * lighting_.ambient,
-                       lighting_.ambient_color.y * lighting_.ambient,
-                       lighting_.ambient_color.z * lighting_.ambient});
-        lit.x += amb.x;
-        lit.y += amb.y;
-        lit.z += amb.z;
-      }
-      // 自发光：three 的 `outgoingLight = ... + totalEmissiveRadiance`，加在 saturate
-      // **之前**（这样超过 1 的部分能被色调映射滚降，而不是被截平）。
-      if (material_.emission > 0.0f) {
-        if (material_.emission_unlit) lit = math::Vec3{0.0f, 0.0f, 0.0f};
-        const math::Vec3 emissive =
-            material_.emissive_color_set ? material_.emissive_color : base_color;
-        lit.x += emissive.x * material_.emission;
-        lit.y += emissive.y * material_.emission;
-        lit.z += emissive.z * material_.emission;
-      }
-      const auto sat = [](float v) noexcept { return v < 0.0f ? 0.0f : v; };
-      return math::Vec3{sat(lit.x) * lighting_.exposure, sat(lit.y) * lighting_.exposure,
-                        sat(lit.z) * lighting_.exposure};
+                                 math::Vec3 world) -> math::Vec3 {
+    ShadeInput input{};
+    input.normal = normal;
+    input.base_color = base_color;
+    input.view_dir = view_dir;
+    input.world_position = world;
+    input.metallic = material_.metallic;
+    input.roughness = material_.roughness;
+    input.key_light = key_light_;
+    // 额外灯光：**必须逐像素重算**。
+    //
+    // 点光/聚光的方向与衰减都依赖表面位置，缓存只能存平行光那部分。
+    // 所以这里就地算一遍（最多 `kMaxExtraLights` 个，开销可接受），
+    // 而不用 `extra_light_samples_` 缓存——那个缓存只在“全是平行光”时有效，
+    // 而多一种分支就多一次“两条腿两个算法”的机会。
+    extra_light_scratch_.clear();
+    for (std::size_t i = 0; i < lighting_.extra_lights.size(); ++i) {
+      const Light& light = lighting_.extra_lights[i];
+      if (light.intensity <= 0.0f) continue;
+      const int kind = light.kind == LightKind::Directional
+                           ? 0
+                           : (light.kind == LightKind::Point ? 1 : 2);
+      extra_light_scratch_.push_back(pbr_sample_light(kind, light.direction, light.position,
+                                                      light.color, light.intensity,
+                                                      light.radius, light.spot_inner_degrees,
+                                                      light.spot_outer_degrees, world));
     }
-    return shade_surface(normal, base_color, view_dir, lighting_, material_.metallic,
-                         material_.roughness, material_.specular, material_.emission,
-                         material_.specular_tint_set ? material_.specular_tint
-                                                     : math::Vec3{1.0f, 1.0f, 1.0f},
-                         world,
-                         material_.emissive_color_set ? material_.emissive_color : base_color,
-                         material_.emission_unlit);
+    input.extra_lights = extra_light_scratch_.data();
+    input.extra_light_count = static_cast<int>(extra_light_scratch_.size());
+    input.ambient_irradiance =
+        math::Vec3{lighting_.ambient_color.x * lighting_.ambient,
+                   lighting_.ambient_color.y * lighting_.ambient,
+                   lighting_.ambient_color.z * lighting_.ambient};
+    // IBL：方向探针（环境反射/环境光照的统一形态）。
+    input.ibl_dirs = ibl_dirs_.data();
+    input.ibl_colors = ibl_colors_.data();
+    input.ibl_count = ibl_count_;
+    input.ibl_strength = lighting_.ibl_strength;
+    // 自发光：`emission_unlit` 时把受光项整个丢掉（只在它自己发光）。
+    if (material_.emission > 0.0f) {
+      const math::Vec3 tint = material_.emissive_color_set ? material_.emissive_color : base_color;
+      input.emissive = math::Vec3{tint.x * material_.emission, tint.y * material_.emission,
+                                  tint.z * material_.emission};
+      if (material_.emission_unlit) {
+        // 纯发光体：不受光照，只留自发光。等价于把别的输入都置零。
+        input.key_light = PbrLight{};
+        input.ambient_irradiance = math::Vec3{0.0f, 0.0f, 0.0f};
+        input.ibl_strength = 0.0f;
+      }
+    }
+    input.exposure = lighting_.exposure;
+    return pbr_shade(input);
   }
 
  private:
@@ -1717,6 +1306,23 @@ class SoftwareScene final : public Scene3D {
   math::Color clear_color_{0, 0, 0, 255};
   /// 是否已经开始画东西（画过就不允许再清，否则会把画面抹掉）。
   bool clear_color_locked_{false};
+  /// 主光的**已折算**形式（`set_lighting` 时算一次，逐像素复用）。
+  ///
+  /// 为何要缓存：`pbr_sample_light` 里有除法和开方，而它在**每个像素**都会被用到。
+  /// 主光是平行光时这些量整帧不变，缓存下来省掉的就是每像素两次除法。
+  PbrLight key_light_{};
+  /// 额外灯光的**逐像素临时区**（`shade_pixel` 内填、随即消费）。
+  ///
+  /// 为何用成员而不是局部 `std::vector`：着色是**逐像素**调用的，
+  /// 局部容器会每像素分配一次（百万级像素 = 百万次 malloc）。
+  /// 用成员并 `clear()`（保留 capacity）就只分配一次。
+  /// 它是 `mutable` 吗？不是——`shade_pixel` 现在不是 `const` 成员，
+  /// 因为这个缓冲区本身是“每像素的暂存”，语义上是可变的。
+  std::vector<PbrLight> extra_light_scratch_{};
+  /// IBL 方向探针的缓存（与 `Lighting::env_probes` 同形，但已转成内核要的数组）。
+  std::array<math::Vec3, 8> ibl_dirs_{};
+  std::array<math::Vec3, 8> ibl_colors_{};
+  int ibl_count_{0};
   Canvas canvas_;
   std::vector<float> depth_{};
   math::Mat4 view_{math::Mat4::identity()};
@@ -2027,3 +1633,6 @@ auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> 
 }
 
 }  // namespace st::raster
+
+
+

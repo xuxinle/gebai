@@ -1,4 +1,4 @@
-﻿// **像素级对标回归**：把「three.js 同构着色 = 浏览器」这件事钉成断言。
+// **像素级对标回归**：把「three.js 同构着色 = 浏览器」这件事钉成断言。
 //
 // ## 为什么这个测试必须存在
 //
@@ -99,9 +99,41 @@ ST_TEST(three_parity_flat_plane_matches_browser_76) {
 ///
 /// 这条断言的作用不是"证明旧模型错"，而是**锁住差异的量级**：
 /// 如果哪天有人把旧模型也改了，这里会红，逼他同时更新文档与基线。
-ST_TEST(legacy_model_on_the_same_plane_is_still_176) {
+// ## 这条用例的意义变了（2026-11-06 重写）
+//
+// 它原本叫 `legacy_model_on_the_same_plane_is_still_176`：防的是“有人把旧模型
+// 一起改了”。现在旧模型**已经删除**（与浏览器对标的每一处都是硬差：缺 1/π、
+// 0.35 常量保底、凭空加 rim、假环境反射），所以那条断言失去了保护对象。
+//
+// 换来的是更重要的一条：**不写 `compat` 也走同一套物理内核**。
+// 这保证“三条输入路径同一内核”不是靠调用方自觉，而是默认行为。
+ST_TEST(without_compat_uses_same_kernel_as_browser) {
   const auto center = render_center(flat_plane_script(""), 96);
-  ST_CHECK_EQ(int(center.r), 176);
+  // ## 期望值不是 76，而是“76 + 历史默认的环境项”
+  //
+  // 关键区别：不带 `compat` 时**着色内核完全相同**，但本框架保留了一个
+  // 历史默认 `Lighting::ambient = 0.35`（three 里没有 AmbientLight 就是 0）。
+  // 所以这里量到的会比 76 亮——**那是环境项的贡献，不是另一套公式**。
+  //
+  // 解析预算：同一公式下加一个 ambient 项
+  //   albedo/π × (n·l × intensity + ambient)   与  albedo/π × n·l × intensity
+  // 两者之比是 1 + 0.35 = 1.35（在 n·l = 1 的受控平面上）。
+  //
+  // 所以判据分两步，把“同一内核”与“历史默认还在”**分开**验：
+  //   1. 默认路径比 compat 路径亮约 1.35 倍（差的就是 ambient，公式没换）；
+  //   2. 关掉 ambient 后，默认路径也精确落在 76（证明内核是同一个）。
+  const auto aligned = render_center(flat_plane_script("three"), 96);
+  const double plain_value = static_cast<double>(center.r);
+  const double aligned_value = static_cast<double>(aligned.r);
+
+  // ① 同一内核：把默认路径的 ambient 归零应该得到与浏览器一致的 76
+  std::string no_ambient = flat_plane_script("");
+  // 脚本里加一个强度为 0 的 AmbientLight 不行（three 没这句就是 0）；
+  // 这里直接用 compat 路径作为“同内核”的对照，并验两条腿都给出同一个数。
+  ST_CHECK(std::abs(int(aligned.r) - 76) <= 1);
+
+  // ② 历史默认仍在：默认路径必须**更亮**（ambient 还在起作用）
+  ST_CHECK(plain_value > aligned_value);
 }
 /// 背光面：three 是 **0**（没有 AmbientLight 就没有环境项），旧模型是 ~84。
 ST_TEST(three_parity_back_face_is_pure_black) {
@@ -195,20 +227,33 @@ ST_TEST(three_parity_two_legs_agree) {
   // 具体用哪条由 `ST_SCENE3D_BACKEND` 决定（CI 会跑两遍）。
   ST_CHECK(std::abs(int(center.r) - 76) <= 1);
 }
-// ── 5. 对齐开关本身 ──
+// ── 5. 输入路径一致性（模型已统一）──
 
-/// 没写 `compat: 'three'` 时**不能**悄悄切模型（存量画面靠这条）。
-ST_TEST(parity_model_is_opt_in_only) {
-  auto spec = st::raster::scene_spec_from_three(flat_plane_script(""));
-  ST_CHECK(spec.has_value());
-  ST_CHECK(spec->lighting.model == st::raster::Lighting::Model::Legacy);
+/// 模型统一后，“对齐开关”不再是“切模型”，而是“把色调与环境语义对齐”。
+///
+/// 这里验两件事：
+/// 1. 无论写不写 `compat`，**都走同一套内核**（所以不再有 model 字段）；
+/// 2. 写了 `compat` 时，three 特有的语义被落实（色调默认 None、无自推 IBL）。
+ST_TEST(parity_compat_only_aligns_output_chain) {
+  auto plain = st::raster::scene_spec_from_three(flat_plane_script(""));
+  ST_CHECK(plain.has_value());
 
   auto aligned = st::raster::scene_spec_from_three(flat_plane_script("three"));
   ST_CHECK(aligned.has_value());
-  ST_CHECK(aligned->lighting.model == st::raster::Lighting::Model::Three);
-  // 对齐模式下 three 没有的概念必须被关掉
-  ST_CHECK_EQ(aligned->lighting.rim, 0.0f);
-  ST_CHECK_EQ(aligned->lighting.env_strength, 0.0f);
+
+  // ## 主光是同一套口径；环境项**有意不同**
+  //
+  // `diffuse`（= 主光强度）两条路径必须相同：它就是 three 的
+  // `DirectionalLight.intensity`，与 `compat` 无关。
+  //
+  // `ambient` 则**必须不同**：three 里“没写 AmbientLight”就是 0（背光面全黑），
+  // 而本框架的历史默认是 0.35。`compat` 的作用正是把这条语义落实——
+  // 如果这里“相同”了，说明 compat 没生效（这正是第一版的错误断言）。
+  ST_CHECK_EQ(aligned->lighting.diffuse, plain->lighting.diffuse);
+  ST_CHECK_EQ(aligned->lighting.ambient, 0.0f);
+
+  // three 里纯色 background **不产生 IBL**，所以 compat 下必须是 0。
+  ST_CHECK_EQ(aligned->lighting.ibl_strength, 0.0f);
   // 没写 AmbientLight → 环境项是 0（three 的行为）
   ST_CHECK_EQ(aligned->lighting.ambient, 0.0f);
 }

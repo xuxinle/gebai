@@ -247,15 +247,17 @@ auto serialize_scene(const SceneSpec& spec) -> Json {
   {
     Json lighting = Json::object();
     lighting["light_from"] = vec3_json(spec.lighting.light_from);
+    if (spec.lighting.ibl_strength != defaults.lighting.ibl_strength) {
+      lighting["ibl_strength"] = number_json(spec.lighting.ibl_strength);
+    }
     if (spec.lighting.ambient != defaults.lighting.ambient) {
       lighting["ambient"] = number_json(spec.lighting.ambient);
     }
     if (spec.lighting.diffuse != defaults.lighting.diffuse) {
       lighting["diffuse"] = number_json(spec.lighting.diffuse);
     }
-    if (spec.lighting.rim != defaults.lighting.rim) {
-      lighting["rim"] = number_json(spec.lighting.rim);
-    }
+    // `rim` 已删除（2026-11-06）：边缘光是物理内核里 IBL 在掠射角的自然结果，
+    // 不是一个可序列化的参数。旧文件里的 `rim` 读完就被忽略。
     if (spec.lighting.exposure != defaults.lighting.exposure) {
       lighting["exposure"] = number_json(spec.lighting.exposure);
     }

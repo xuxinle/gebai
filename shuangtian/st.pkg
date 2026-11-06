@@ -834,6 +834,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "把 bpy 脚本产出的物体几何导出成 JSON 资产（供 three.js 脚本组装）——「bpy 做资产、js 组装」的资产端"
     },
+    "tone_map_probe": {
+      "kind": "executable",
+      "sources": ["tools/tone_map_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "AgX / ACES 在标准亮度上的输出：用来判断 bpy 对标时的背景偏差是色调映射实现问题还是本来观感（真 Blender 用 3D LUT 的 AgX，本框架是解析拟合）"
+    },
     "align_render": {
       "kind": "executable",
       "sources": ["tools/align_render.cpp"],

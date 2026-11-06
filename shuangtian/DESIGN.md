@@ -2063,10 +2063,52 @@ ShaderChunk）+ `ToneMap::AcesThree`（three 的完整 ACESFilmic）+ `Lighting:
 **已知残余**（写进文档而不是掩盖）：轮廓边缘（采样）、`geometryRoughness`（屏幕空间
 导数取 0）、`envMap`/PMREM（无管线）、阴影（PCF vs 平面投影）、背景 8bit 中转的 ±1 级量化。
 
-**回归**：`tests/raster_three_parity_test.cpp`（7 用例）把**浏览器实测值**钉成断言
-（76 / 106 / 141），并锁住“Legacy 仍是 176”防止有人把旧模型一起改了。
-**接口**：`include/st/raster/three_parity.hpp`。**工具**：`tools/align_render.cpp`
+**回归**：`tests/raster_three_parity_test.cpp` 把**浏览器实测值**钉成断言
+（76 / 106 / 141）。
+**接口**：`include/st/raster/pbr.hpp`（见 §4.2.18）。**工具**：`tools/align_render.cpp`
 （`st build align_render`，可切算子与光照参数，用于消融）。
+
+#### 4.2.18 着色内核统一 + bpy 适配（2026-11-06）
+
+**需求**：“在保证 threejs 像素级对齐的前提下适配 bpy；中间适配层很难统一可以
+另起炉灶，最底层的渲染要统一且全面，该补就补；保持代码清洁。”
+
+**做了什么**：把为对标而建的 `three_parity` 提升为**唯一内核**并改名 `pbr`，
+删掉旧模型，然后把 bpy 接上来。完整数据见 `docs/render_parity.md` §十一。
+
+| 项 | 结果 |
+|---|---|
+| `three_parity` → `pbr` | 三条输入路径（three 脚本 / bpy 脚本 / JSON 剧本）共用一个 `pbr_shade` |
+| 删 Legacy | `shade_terms_at` / `shade_surface` / `ggx_*` / `Lighting::Model` / GPU 分支 / `rim` 字段——约 500 行 |
+| 补三种灯光类型 | `PbrLight` 统一平行/点/聚，新增灯光类型**不改 BRDF** |
+| 补多盏灯 | `ShadeInput::extra_lights`；bpy 场景常有 key/fill/rim 三盏 |
+| 补 IBL | 方向探针 + split-sum 解析近似；`make_ibl_probes` 归一化只做一次 |
+| 改名 | `env_*` → `ibl_*`（JSON 新名优先、旧名兼容）；9 个资产已迁移 |
+| 裁云 `light_rim` | 重接成一盏背后补光（摄影里的 rim light），不静默失效 |
+| bpy 重标 | `kSunEnergyToIrradiance = 1.0`（按量纲，不拟合观感） |
+
+**关键数字**（`bpy_watch.py` 对比真 Blender 参照图）：
+
+| | 主体均值 | 整图 | 暗部 |
+|---|---|---|---|
+| 真 Blender | 78.1 | 75.7 | 6.7% |
+| 本框架（ACES） | **80.1** | 82.6 | 2.3% |
+| 旧式（单灯 + 0.769π） | 55.2 | 60.3 | 98.9% |
+
+**途中抓到的真缺陷**：① GPU 腿光颜色没地方放（误用 `g_light.rgb`，输出
+`rgb(0,0,76)`）；② 软件腿自己合成天/地探针而 GPU 腿没有（两腿差一整层环境光）；
+③ bpy 的 `world` 只喂了 IBL 没喂背景色（背景占画面 80%，差 11 级）。
+
+**一条刻意不做的事**：`ToneMap::Agx` 偏亮（低值区 +36~73 级）是**既存缺陷**，
+已登记 `BACKLOG.md` P1。**没有**用 bpy 的能量系数去补偿它——否则 AgX 修好后
+这边又会偏暗，两个错误互相抵消，比单个错误更难查。
+
+**测试判据的改动原则**：多个用例原本钉绝对亮度（如 `c.g > 150`）。换内核与
+补多灯后这些阈值集体误报，而它们想验的是**定性事实**（谁挡住谁、阴影有没生效）。
+现在改成相对判据（比地面亮、比另一个通道亮），对着色模型的亮度体系**免疫**。
+
+**接口**：`include/st/raster/pbr.hpp`、`src/raster/scene3d.cpp`（IBL 归一化）。
+**工具**：`tools/tone_map_probe.cpp`（色调映射取点）、`tools/align_bench_probe.cpp`。
 
 ### 4.3 text
 ```cpp

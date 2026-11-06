@@ -88,8 +88,9 @@ auto main(int argc, char** argv) -> int {
 
   if (ov_ambient >= 0.0f) spec->lighting.ambient = ov_ambient;
   if (ov_diffuse >= 0.0f) spec->lighting.diffuse = ov_diffuse;
-  if (ov_rim >= 0.0f) spec->lighting.rim = ov_rim;
-  if (ov_env >= 0.0f) spec->lighting.env_strength = ov_env;
+  // `ov_rim` 保留参数位（历史的消融脚本还在传），但内核已无边缘光——忽略。
+  (void)ov_rim;
+  if (ov_env >= 0.0f) spec->lighting.ibl_strength = ov_env;
 
   st::raster::Canvas canvas{width, height, 1.0f};
   const auto background = st::math::Color::rgba(static_cast<std::uint8_t>(bg_r),
@@ -114,9 +115,8 @@ auto main(int argc, char** argv) -> int {
   std::printf("已出图 %s  center=rgb(%d,%d,%d) corner=rgb(%d,%d,%d)\n", out_path.c_str(),
               int(center.r), int(center.g), int(center.b), int(corner.r), int(corner.g),
               int(corner.b));
-  std::printf("  tone_map=%d ambient=%.3f diffuse=%.3f rim=%.3f env_strength=%.3f\n",
+  std::printf("  tone_map=%d ambient=%.3f diffuse=%.3f ibl_strength=%.3f\n",
               int(spec->lighting.tone_map), double(spec->lighting.ambient),
-              double(spec->lighting.diffuse), double(spec->lighting.rim),
-              double(spec->lighting.env_strength));
+              double(spec->lighting.diffuse), double(spec->lighting.ibl_strength));
   return 0;
 }

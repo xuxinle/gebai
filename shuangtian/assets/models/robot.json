@@ -20,19 +20,18 @@
     ],
     "ambient": 0.46,
     "diffuse": 0.8,
-    "rim": 0.5,
     "exposure": 1.25,
-    "env_sky": [
+    "ibl_sky": [
       0.54,
       0.63,
       0.82
     ],
-    "env_ground": [
+    "ibl_ground": [
       0.14,
       0.14,
       0.18
     ],
-    "env_strength": 1.0
+    "ibl_strength": 1.0
   },
   "shadow": {
     "strength": 0.0

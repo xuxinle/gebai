@@ -3567,6 +3567,24 @@ cbuffer Scene : register(b0) {
   // 传下来就被丢掉了——剧本写 `tone_map: "none"` 时两腿输出逐像素相同
   // （实测 rgb(4,6,12) vs rgb(4,6,12)）。
   float4 g_tune2;
+  // ## 主光颜色（2026-11-06 新增，模型统一时发现缺的）
+  //
+  // 旧着色器把 `g_light.xyz` 当光方向用（指向光源），却没有地方放**颜色**。
+  // 物理 BRDF 需要 `irradiance = saturate(n·l) × color × intensity`，
+  // 而颜色不可省（暖光/冷光在两条腿上必须一致）。
+  //
+  // 实测后果（当时误写成 `g_light.rgb`）：GPU 腿输出 `rgb(0,0,76)`——
+  // 红/绿两通道拿到的是**光方向的 x/y**（≈0），蓝通道拿到 z（≈1）。
+  // 单看任一条腿都不报错，只有两条腿并排比才看得见。
+  float4 g_light_color;
+  // ## 额外灯光（2026-11-06 新增）：与 C++ 侧 `Scene3dParams::extra_*` 逐字节对应
+  //
+  // 每云灯：方向/位置 xyz + w=1(存在) ；颜色 xyz ；参数 x=kind y=intensity z=range w=spot外角
+  // `g_extra_count.x == 0` 时整段跳过（与旧行为逐位相同）。
+  float4 g_extra_dirs[3];
+  float4 g_extra_colors[3];
+  float4 g_extra_params[3];
+  float4 g_extra_count;
 };
 
 struct VsIn {
@@ -3607,36 +3625,19 @@ VsOut vs_scene3d(VsIn input) {
 float4 ps_scene3d(VsOut input) : SV_Target {
   // ⚠ 本段是 `st::raster::shade_terms` 的**逐字翻译**。改一边必须改另一边
   //   （回归：`tests/raster_scene3d_two_legs_test.cpp` 比两条腿的同像素输出）。
+  // ## 着色：统一物理内核（与 C++ 侧 `pbr_shade` 逐式对应）
+  //
+  // 这里曾经有**两套**公式（Legacy 的 `albedo*(ambient+n·l·diffuse+rim)` 与 three 同构），
+  // 靠 `g_tune2.y` 选。统一之后只剩一套，分支整体消失——这正是“两条腿 × 两种模型”
+  // 那 4 种组合被压缩成 1 种的收益。
+  //
+  // ⚠ 本段是 `st::raster::pbr_shade` 的**逐字翻译**。改一边必须改另一边
+  //   （回归：`tests/raster_scene3d_two_legs_test.cpp` 比两条腿的同像素输出）。
   float3 n = normalize(input.normal);
   float3 light = normalize(g_light.xyz);
-  float diffuse = max(dot(n, light), 0.0);
-  float rim_base = 1.0 - max(n.z, 0.0);
-  float rim = rim_base * rim_base * g_tune.y;
-  // 边缘光乘在固有色上（不是加到最终色上）——详见 C++ 侧 `shade_terms` 的说明：
-  // 加法版本会把侧壁抬到比顶面还亮，看着像“盒子贴了一片白边”。
-  // ## Principled 材质（与 C++ 侧 `shade_surface` 逐字对应）
- //
- // 金属没有漫反射（自由电子吸收透射光）——这是金属与塑料的物理分界线。
- // 漏掉它时金色球会显得像"黄色塑料"，一眼就假。
- float metallic = g_opacity.y;
- float roughness = g_opacity.z;
- float specular_w = g_opacity.w;
-   float diffuse_weight = 1.0 - metallic;
-  // ## 着色模型分支（2026-11-06）
-  //
-  // `g_tune2.y > 0.5` = three.js 同构模型（与软件腿 `Lighting::Model::Three` 对应）。
-  //
-  // 为何把两条公式都放在同一个着色器而不是另建一个：换着色器就要换状态对象/常量
-  // 缓冲，而“两条腿 × 两种模型”已经够多组合了。分支只算一个 uniform，代价可忽略。
-  bool three_model = g_tune2.y > 0.5;
-  float scale = 0.0;
-  if (!three_model) {
-    scale = (g_light.w * diffuse_weight + diffuse * g_tune.x * diffuse_weight + rim) * g_tune.z;
-  } else {
-    // three 的 `RE_IndirectDiffuse_Physical`：irradiance × diffuseColor/π。
-    // `g_light.w` 就是 AmbientLight 的 irradiance（对齐模式下没写就是 0）。
-    scale = g_light.w * diffuse_weight * 0.31830988618;
-  }
+  float metallic = g_opacity.y;
+  float roughness = g_opacity.z;
+  float diffuse_weight = 1.0 - metallic;
   // g_tune.w > 0.5 = 本网格带 UV 且已设纹理 → 采样并与顶点色相乘
   // （与软件腿同一口径：顶点色当基础色/染色，纹理提供图案）
   // 基色：剧本指定时**取代**顶点色（与软件腿 `material_.base_color_set` 同语义）
@@ -3654,13 +3655,13 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   //
   // 为何用 GGX 而不是 Blinn-Phong：后者的高光形状不随角度变化，掠射角下会崩
   // 成一束硬边；GGX 是微表面模型，粗糙度直接决定高光宽度与拖尾形状。
-  float3 lit = base * scale;
-  if (three_model) {
-    // ## three.js 的直接光（与 `three_parity.cpp` 的 `three_direct_light` 逐式同构）
-    //
-    // 关键差： irradiance = saturate(n·l) × lightColor × intensity；
-    //           漫反射 = irradiance × diffuseColor/π；
-    //           高光 = irradiance × D·V·F（V 已含 1/(4·n·l·n·v)，**不再除一渔**）
+  // ## 直接光（与 `pbr_direct_light` 逐式对应）
+  //
+  //   irradiance     = saturate(n·l) × lightColor × intensity
+  //   directDiffuse += irradiance · diffuseColor/π
+  //   directSpecular+= irradiance · D·V·F   （V 已含 1/(4·n·l·n·v)）
+  float3 lit = float3(0.0, 0.0, 0.0);
+  {
     float3 view_dir = normalize(g_eye.xyz - input.world);
     float n_dot_v = max(dot(n, view_dir), 0.0);
     float n_dot_l = max(dot(n, light), 0.0);
@@ -3668,7 +3669,7 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     // three：material.roughness = max(roughness, 0.0525)，然后 alpha = roughness²
     float r = clamp(max(roughness, 0.0525), 0.0, 1.0);
     float alpha = r * r;
-    float3 irradiance = n_dot_l * float3(1.0, 1.0, 1.0) * g_tune.x;
+    float3 irradiance = n_dot_l * g_light_color.rgb * g_tune.x;
     lit += irradiance * diffuse_color * 0.31830988618;
     if (n_dot_l > 0.0 && n_dot_v > 0.0) {
       float3 h = normalize(view_dir + light);
@@ -3687,168 +3688,131 @@ float4 ps_scene3d(VsOut input) : SV_Target {
       float3 F = f0 * (1.0 - fc) + fc;
       lit += irradiance * D * V * F;
     }
-  } else {
-  // ## 开关不能只看 specular_w（与 C++ 侧 2026-11-05 的修同步）
-  //
-  // 镜面反射的存在性由**菲涅耳 F0** 决定：绝缘体 0.04、金属 = 固有色。
-  // 金属的 F0 远大于 0.04，不该被一个“额外开关”关掉——而 `specular`
-  // 默认值是 0，于是默认材质（包括金属）完全没有方向性高光。
-  //
-  // 实测（`tools/ggx_highlight_probe`）：黄铜默认 `specular=0` 时高光峰值
-  // 只有 0.13（全是漫反射残留），而三路对照显示本框架最亮 203 vs 真渲染器 255。
-  //
-  // 修法：`specular_w > 0` **或** `metallic > 0` 都算；非金属按 specular
-  // 缩放（旧行为），金属全量（F0 已是固有色）。
-  if (specular_w > 0.0 || metallic > 0.0) {
-    float3 view_dir = normalize(g_eye.xyz - input.world);
-    float3 h = normalize(view_dir + light);
-    float n_dot_v = max(dot(n, view_dir), 0.0);
-    float n_dot_l = max(dot(n, light), 0.0);
-    float n_dot_h = max(dot(n, h), 0.0);
-    float v_dot_h = max(dot(view_dir, h), 0.0);
-    if (n_dot_v > 0.0 && n_dot_l > 0.0) {
-      // ## alpha = roughness²（与 C++ 侧同步，2026-11-05）
-      //
-      // 原实现把 `roughness` 直接当 alpha。标准 GGX 的定义是
-      // `alpha = roughness²`，用 roughness 直接当 alpha 会让瓣宽得多
-      //（rough=0.22 的实际瓣宽相当于标准映射下的 rough≈0.47）。
-      //
-      // 实测（`tools/ggx_lobe_width_probe`）：瓣内跨度 **95°**（扫到哪都在瓣内），
-      // 最低相对峰值 0.59。后果是每个朝向的面都拿到接近同样的高光，
-      // 画面没有明暗层次——这正是分位数对比里「p50 +25 / p75 +48」的形状。
-      float r_rough = max(roughness, 1e-3);
-      float alpha = max(r_rough * r_rough, 1e-3);
-      float a2 = alpha * alpha;
-      float denom_d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-      float D = a2 / (3.14159265 * denom_d * denom_d);
-      float k = (alpha + 1.0) * (alpha + 1.0) * 0.125;
-      float G = (n_dot_v / (n_dot_v * (1.0 - k) + k)) * (n_dot_l / (n_dot_l * (1.0 - k) + k));
-      // Fresnel（Schlick）：非金属 F0 = 0.04，金属 F0 = 固有色
-      float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
-      float fres = pow(1.0 - v_dot_h, 5.0);
-      float3 F = f0 + (1.0 - f0) * fres;
-      float denom = 4.0 * n_dot_v * n_dot_l;
-      float scale_spec = (metallic > 0.0) ? max(specular_w, 1.0) : specular_w;
-      lit += D * G * F / denom * n_dot_l * scale_spec;
+    // ## 均匀环境光（AmbientLight / Blender 的 world 均匀分量）
+    // 走 irradiance × diffuseColor/π —— 不是 albedo × ambient（后者偏亮 π 倍）。
+    lit += g_light.w * diffuse_color * 0.31830988618;
+
+    // ## 额外灯光（2026-11-06）：**走同一个 BRDF**
+    //
+    // 与软件腿的 `pbr_shade` 里的 extra_lights 循环逐式对应：
+    // 不做“主光一套/附加灯另一套”（旧模型就是那么干的，于是点光/聚光没有高光）。
+    int extra_n = (int)(g_extra_count.x + 0.5);
+    for (int ei = 0; ei < extra_n && ei < 3; ++ei) {
+      float3 e_pos = g_extra_dirs[ei].xyz;
+      float3 e_color = g_extra_colors[ei].xyz;
+      float e_kind = g_extra_params[ei].x;
+      float e_intensity = g_extra_params[ei].y;
+      float e_range = g_extra_params[ei].z;
+      float e_spot_outer = g_extra_params[ei].w;
+      float3 e_dir;
+      float e_att = 1.0;
+      if (e_kind < 0.5) {
+        // 平行光：方向固定（`g_extra_dirs[ei].xyz` 存的是**指向光源**）
+        e_dir = normalize(e_pos);
+      } else {
+        // 点光 / 聚光：方向随像素变
+        float3 to_light = e_pos - input.world;
+        float dist = max(length(to_light), 1e-6);
+        e_dir = to_light / dist;
+        e_att = 1.0 / max(dist * dist, 0.01);
+        if (e_range > 0.0) {
+          float ratio = dist / e_range;
+          float window = 1.0 - pow(min(ratio, 1.0), 4.0);
+          e_att *= window * window;
+        }
+        if (e_kind > 1.5 && e_spot_outer > 0.0) {
+          // 聚光锥：这里只做外锥硬边界（软件腿的内锥平滑由
+          // `spot_inner_degrees` 控制，两者都用 smoothstep 同式）
+          float3 fwd = normalize(input.world - e_pos);
+          float cos_a = dot(fwd, e_dir);
+          float outer = cos(radians(e_spot_outer));
+          e_att *= smoothstep(outer, 1.0, cos_a);
+        }
+      }
+      float e_n_dot_l = max(dot(n, e_dir), 0.0);
+      float3 e_irr = e_n_dot_l * e_color * e_intensity * e_att;
+      lit += e_irr * diffuse_color * 0.31830988618;
+      if (e_n_dot_l > 0.0 && n_dot_v > 0.0) {
+        float3 hh = normalize(view_dir + e_dir);
+        float nh = max(dot(n, hh), 0.0);
+        float vh = max(dot(view_dir, hh), 0.0);
+        float d2 = nh * nh * (a2 - 1.0) + 1.0;
+        float De = 0.31830988618 * a2 / (d2 * d2);
+        float gve = e_n_dot_l * sqrt(a2 + (1.0 - a2) * n_dot_v * n_dot_v);
+        float gle = n_dot_v * sqrt(a2 + (1.0 - a2) * e_n_dot_l * e_n_dot_l);
+        float Ve = 0.5 / max(gve + gle, 1e-7);
+        float fce = exp2((-5.55473 * vh - 6.98316) * vh);
+        float3 Fe = f0 * (1.0 - fce) + fce;
+        lit += e_irr * De * Ve * Fe;
+      }
     }
   }
-  }
 
-  // ## 环境反射（与 C++ 侧 `shade_surface` 的环境段逐字对应）
+  // ## IBL（环境光照）：漫反射 + 高光两个分量**必须分开**
   //
-  // ⚠ GPU 腿原本**漏了这一整段**——软件腿有环境反射、GPU 腿没有，
-  // 于是同一场景两条腿的长相不同（金属在 GPU 腿上发黑）。
-  // 这个差异之前被 `specular_w > 0` 的分支遮住：旧测试场景里
-  // metallic 都是 0，走不到环境项。
+  // 与 C++ 侧 `pbr_ibl_diffuse` / `pbr_ibl_specular` / `pbr_env_brdf` 逐字对应。
   //
-  // 用反射向量采样双色渐变环境（`g_env.xyz` = 天空色，
-  // `g_env_ground.xyz` = 地面色，`g_env.w` = 强度）。
-  // ## `g_env.w == 0` 不能直接跳过（2026-10-31 修）
-  //
-  // 软件腿在 `env_strength == 0` 时**仍有一个 `ambient` 挂钩的兜底强度**：
-  //
-  //   ambient_strength = (0.30 + 0.70*(0.5+0.5n.y)) * (lighting.ambient + 0.55)
-  //
-  // 这里原先写的是 `if (g_env.w > 0.0)` —— 即 GPU 腿在默认配置下**完全不做
-  // 环境反射**。实测后果：`metallic=1` 时球从 88.3 掉到 24.8（GPU 腿），
-  // 而软件腿只掉到 59.7 —— 同一场景两条腿差 28/255 的整片亮度。
-  //
-  // 特性矩阵测试（`raster_scene3d_feature_matrix_test.cpp`）把它抓出来了：
-  // 单看任一条腿都"正常"，只有并排比才看得见。
-  //
-  // ## 对齐模式下必须跳过（2026-11-06）
-  //
-  // three 的纯色 `scene.background` **不产生 IBL**；金属只能反射直接光。
-  // 旧路径凭空多一层环境反射，实测让背光面从 0 抬到 84/255。
-  if (!three_model) {
+  // 为何分开：漫反射要的是“法线周围的能量”，高光要的是“反射方向周围的能量”。
+  // 用一个采样糊两者，结果是金属的高光跟着法线走（看起来像塑料）而不是跟着视角走。
+  if (g_env.w > 0.0 && g_probe_tune.x > 0.0) {
     float3 view_dir = normalize(g_eye.xyz - input.world);
     float n_dot_v = max(dot(n, view_dir), 0.0);
-    // 菲涅耳（Schlick）
     float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
-    float one_minus_nv = 1.0 - n_dot_v;
-    float nv2 = one_minus_nv * one_minus_nv;
-    float fresnel = f0.x + (1.0 - f0.x) * nv2 * nv2;
+    float3 diffuse_color = base * diffuse_weight;
 
-    // ## 环境色的**回退值必须与软件腿一致**（2026-10-31 修）
-    //
-    // 软件腿在 `env_strength == 0`（未配置）时用硬编码中性色
-    //   sky = (0.52, 0.58, 0.68)、ground = sky（**同一色，无渐变**）
-    // 而 GPU 腿原样用 `g_env`/`g_env_ground`——未配置时它们是 0（黑），
-    // 于是"默认配置"下两条腿的环境反射颜色就不同。
-    //
-    // 实测：这就是 `metallic=1` 时 59.7 vs 45.2 那 14 级差的来源。
-    float3 env_sky = (g_env.w > 0.0) ? g_env.xyz : float3(0.52, 0.58, 0.68);
-    float3 env_ground = (g_env.w > 0.0) ? g_env_ground.xyz : env_sky;
+    // ① 漫反射：余弦加权（sharpness = 1）
+    float3 e_diffuse = float3(0.0, 0.0, 0.0);
+    float sum_w = 0.0;
+    for (int pi = 0; pi < 4; ++pi) {
+      if (g_probe_dirs[pi].w <= 0.0) continue;
+      float3 dir = normalize(g_probe_dirs[pi].xyz);
+      float cos_angle = dot(n, dir);
+      if (cos_angle <= 0.0) continue;
+      sum_w += cos_angle;
+      e_diffuse += g_probe_colors[pi].xyz * cos_angle;
+    }
+    if (sum_w > 1e-6) e_diffuse /= sum_w;
+    lit += e_diffuse * diffuse_color * 0.31830988618 * g_env.w;
 
-    // 反射向量 `reflect(-v, n)`，Y 分量映到 [0,1] 取天/地色
+    // ② 高光：用反射方向采样，sharpness 随 roughness 下降
+    //    sharpness = 1 + (1-r)^2 * 63   ← 与 `probe_sharpness` 同式
     float3 r = normalize(reflect(-view_dir, n));
-    float sky_t = saturate(0.5 + 0.5 * r.y);
-    float3 env_color = lerp(env_ground, env_sky, sky_t);
-
-    // ## 环境探针采样（与 C++ 侧 `shade_surface` 逐字对应，2026-11-05）
-    //
-    // `g_probe_tune.x > 0` 时改用方向探针。为何必须有这条分支：
-    // 天地两色按 r.y 插值让**同一平面上的金属反射完全一样**（法线相同），
-    // 于是平面看起来是均匀色块——不是金属。
-    //
-    // 采样：`w_i = max(0, dot(r, dir_i))^sharpness`，颜色取加权平均。
-    // 归一化保证“探针个数”不影响整体亮度。若所有权重为 0，回退天地插值。
-    float3 probe_color = env_color;
-    bool probe_hit = false;
-    float3 probe_mean = (env_sky + env_ground) * 0.5;
-    if (g_probe_tune.x > 0.0) {
-      float sharpness = g_probe_tune.y > 0.0 ? g_probe_tune.y : 3.0;
-      float sum_w = 0.0;
-      float3 sum_c = float3(0.0, 0.0, 0.0);
-      float3 all_c = float3(0.0, 0.0, 0.0);
+    float rough = saturate(roughness);
+    float sharp = 1.0 + (1.0 - rough) * (1.0 - rough) * 63.0;
+    float3 radiance = float3(0.0, 0.0, 0.0);
+    float sum_w_spec = 0.0;
+    for (int pi = 0; pi < 4; ++pi) {
+      if (g_probe_dirs[pi].w <= 0.0) continue;
+      float3 dir = normalize(g_probe_dirs[pi].xyz);
+      float cos_angle = dot(r, dir);
+      if (cos_angle <= 0.0) continue;
+      float w = pow(cos_angle, sharp);
+      sum_w_spec += w;
+      radiance += g_probe_colors[pi].xyz * w;
+    }
+    if (sum_w_spec > 1e-6) {
+      radiance /= sum_w_spec;
+    } else {
+      // 全部在背面：退化为均值（对应 C++ 侧 `sample_probes` 的同一分支）
+      float3 mean = float3(0.0, 0.0, 0.0);
       int count = 0;
       for (int pi = 0; pi < 4; ++pi) {
         if (g_probe_dirs[pi].w <= 0.0) continue;
+        mean += g_probe_colors[pi].xyz;
         ++count;
-        all_c += g_probe_colors[pi].xyz;
-        float3 dir = normalize(g_probe_dirs[pi].xyz);
-        float cos_angle = dot(r, dir);
-        if (cos_angle <= 0.0) continue;
-        float w = pow(cos_angle, sharpness);
-        sum_w += w;
-        sum_c += g_probe_colors[pi].xyz * w;
       }
-      if (sum_w > 1e-6) {
-        probe_color = sum_c / sum_w;
-        probe_hit = true;
-      }
-      if (count > 0) probe_mean = all_c / float(count);
+      if (count > 0) radiance = mean / float(count);
     }
-
-    // 粗糙度把锐利反射打散成模糊一片（向均值靠拢）。
-    //
-    // ⚠ 它**不改变强度**——原实现多乘了 `(0.35 + 0.65×blur)` 是错的
-    //（详见下方 weight 的说明）。
-    float rough = saturate(roughness);
-    float3 env_mean = probe_hit ? probe_mean : ((env_sky + env_ground) * 0.5);
-    env_color = lerp(probe_color, env_mean, rough * g_env_ground.w);
-
-    // ## 反射色：金属映固有色（=F0），非金属映 0.04（与 C++ 侧同步，2026-11-05）
-    //
-    // 原式 `env_color * (0.45 + 0.55 * base * metallic)` 把固有色当**增益**。
-    // 对黄铜 base=(0.72,0.55,0.24)、metallic=0.95：
-    //
-    // | 通道 | 原式 | 正确（=F0） | 倍数 |
-    // |---|---|---|---|
-    // | R | 0.83 | 0.72 | 1.15× |
-    // | G | 0.74 | 0.55 | 1.35× |
-    // | B | 0.58 | 0.24 | **2.4×** |
-    //
-    // B 通道差 2.4 倍 → 黄铜发灰、整体偏亮。
-    float3 f0_tint = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
-    float3 tinted = env_color * f0_tint;
-    // 强度：显式 `env_strength` 优先；未配置时回退到 `ambient` 挂钩
-    // （与 C++ 侧 `shade_surface` 的 `ambient_strength` 逐字对应）
-    float ambient_strength = g_env.w > 0.0
-                                 ? g_env.w
-                                 : (0.30 + 0.70 * (0.5 + 0.5 * n.y)) * (g_light.w + 0.55);
-    float weight = ambient_strength * fresnel;
-    lit += tinted * weight;
+    // split-sum 的强度因子：F0*A + B（Lazarov 解析拟合，与 `pbr_env_brdf` 同系数）
+    float rr = saturate(roughness);
+    float rx = rr * (-1.0) + 1.0;
+    float ry = rr * (-0.0275) + 0.0425;
+    float rz = rr * (-0.572) + 1.04;
+    float rw = rr * (0.022) + (-0.04);
+    float a004 = min(rx * rx, exp2(-9.28 * n_dot_v)) * rx + ry;
+    float env_a = -1.04 * a004 + rz;
+    float env_b = 1.04 * a004 + rw;
+    lit += radiance * (f0 * env_a + env_b) * g_env.w;
   }
 
   // ## 自发光（与 C++ 侧 `shade_surface` 的 emission 段逐字对应）
@@ -3969,6 +3933,21 @@ struct Scene3dParams {
   std::array<float, 4> probe_tune{};
   /// x = 色调映射算子（`ToneMap` 枚举值）；yzw 保留
   std::array<float, 4> tune2{};
+  /// 主光颜色（线性）。强度走 `tune.x`（= `Lighting::diffuse`）。
+  std::array<float, 4> light_color{};
+  // ## 额外灯光（2026-11-06 新增）
+  //
+  // 与软件腿的 `ShadeInput::extra_lights` 对应：bpy 场景常有 key/fill/rim
+  // 三盏灯，只算主光会让 GPU 腿比软件腿暗（同一个剧本两副长相）。
+  //
+  // 上限 3（= `kMaxExtraLights`），每盏灯三个 float4。
+  // `extra_count.x = 0` 时 HLSL 不进那个循环 → 与旧行为逐位相同。
+  std::array<std::array<float, 4>, 3> extra_dirs{};
+  std::array<std::array<float, 4>, 3> extra_colors{};
+  /// x=kind(0 平行/1 点/2 聚) y=intensity z=range w=spot 外角(度)
+  std::array<std::array<float, 4>, 3> extra_params{};
+  /// x = 个数，yzw 保留
+  std::array<float, 4> extra_count{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -4502,35 +4481,39 @@ class GpuScene3d final : public st::raster::Scene3D {
     params.light = {light.x, light.y, light.z, lighting_.ambient};
     // g_tune.w：本网格是否采样纹理（1 = 采）
     const bool use_texture = texture_view_ != nullptr && buffers->uvs != nullptr;
-    params.tune = {lighting_.diffuse, lighting_.rim, lighting_.exposure,
+    params.tune = {lighting_.diffuse, 0.0f /* rim 已删除，占位保持 cbuffer 布局 */, lighting_.exposure,
                    use_texture ? 1.0f : 0.0f};
     params.opacity = {material_.opacity, material_.metallic, material_.roughness,
                       material_.specular};
     params.eye = {eye_.x, eye_.y, eye_.z, 0.0f};
     // 环境反射：未配置时 `env_strength = 0` → HLSL 里 `if (g_env.w > 0.0)` 不进，
     // 与旧行为逐位相同（回归测试靠这条）。
-    params.env = {lighting_.env_sky.x, lighting_.env_sky.y, lighting_.env_sky.z,
-                  lighting_.env_strength};
-    params.env_ground = {lighting_.env_ground.x, lighting_.env_ground.y,
-                         lighting_.env_ground.z, lighting_.env_rough_falloff};
+    params.env = {lighting_.ibl_sky.x, lighting_.ibl_sky.y, lighting_.ibl_sky.z,
+                  lighting_.ibl_strength};
+    params.env_ground = {lighting_.ibl_ground.x, lighting_.ibl_ground.y,
+                         lighting_.ibl_ground.z, lighting_.ibl_rough_falloff};
     // 环境探针（2026-11-05）：最多 4 个（cbuffer 里只留 4 组，GPU 常量
     // 缓冲越大越贵，而 4 个探针已足以让金属有明暗结构）。
     //
     // `probe_tune.x = 0` 时 HLSL 不进探针分支 → 与旧行为逐位相同。
+    // IBL 探针：**走与软件腿同一个归一化函数**（`Lighting::make_ibl_probes`）。
+    //
+    // 实测踩过：软件腿在“无显式探针但 ibl_strength > 0”时自己合成上/下两个
+    // 探针，而 GPU 腿只读 `env_probes`（空）——同一个剧本两条腿差出一整层环境光。
+    // 现在归一化只在 `scene3d.cpp` 做一次，两条腿都读它的结果。
+    //
+    // 上限 4：cbuffer 只留 4 组（GPU 常量缓冲越大越贵，而 4 个探针已足以
+    // 让金属有明暗结构）。软件腿上限 8，多出的部分只会让高光更细，
+    // 不会造成"两条腿两个长相"。
     {
       constexpr std::size_t kGpuProbes = 4;
+      std::array<math::Vec3, kGpuProbes> dirs{};
+      std::array<math::Vec3, kGpuProbes> colors{};
       const std::size_t count =
-          lighting_.env_probe_count < kGpuProbes ? lighting_.env_probe_count : kGpuProbes;
+          lighting_.make_ibl_probes(dirs.data(), colors.data(), kGpuProbes);
       for (std::size_t i = 0; i < kGpuProbes; ++i) {
-        if (i < count) {
-          const auto& probe = lighting_.env_probes[i];
-          params.probe_dirs[i] = {probe.direction.x, probe.direction.y, probe.direction.z,
-                                  1.0f};
-          params.probe_colors[i] = {probe.color.x, probe.color.y, probe.color.z, 0.0f};
-        } else {
-          params.probe_dirs[i] = {0.0f, 0.0f, 0.0f, 0.0f};
-          params.probe_colors[i] = {0.0f, 0.0f, 0.0f, 0.0f};
-        }
+        params.probe_dirs[i] = {dirs[i].x, dirs[i].y, dirs[i].z, i < count ? 1.0f : 0.0f};
+        params.probe_colors[i] = {colors[i].x, colors[i].y, colors[i].z, 0.0f};
       }
       params.probe_tune = {static_cast<float>(count), lighting_.env_probe_sharpness, 0.0f,
                            0.0f};
@@ -4538,9 +4521,39 @@ class GpuScene3d final : public st::raster::Scene3D {
     // 色调映射算子（2026-11-06）：原来 GPU 腿硬编码 ACES，这里是那个缺陷的修法。
     // 必须**每次绘制都写**：`set_lighting()` 可能在任何一次 draw 之前。
     //
-    // y = 1 表示 three.js 同构着色模型（与软件腿 `Lighting::Model::Three` 对应）。
-    params.tune2 = {static_cast<float>(lighting_.tone_map),
-                    lighting_.model == Lighting::Model::Three ? 1.0f : 0.0f, 0.0f, 0.0f};
+    // y 保留为 0（原先是“是否走 three 同构模型”的开关；模型统一后已无意义，
+    // 位留着是为了不让 cbuffer 布局变动——那里每一字节都与 C++ 侧对齐）。
+    params.tune2 = {static_cast<float>(lighting_.tone_map), 0.0f, 0.0f, 0.0f};
+    // 主光颜色：物理 BRDF 需要它（`irradiance = n·l × color × intensity`）。
+    params.light_color = {lighting_.light_color.x, lighting_.light_color.y,
+                          lighting_.light_color.z, 0.0f};
+    // 额外灯光（2026-11-06）：与软件腿的 `extra_lights` 同一语义。
+    //
+    // 为何必须传：bpy 场景常有 key/fill/rim 三盏灯。只算主光时 GPU 腿比软件腿暗
+    // 一大截——单看任一条腿都“正常”，只有并排比才看得见（本仓已踩过四次）。
+    {
+      int count = 0;
+      for (std::size_t i = 0; i < lighting_.extra_lights.size() && count < 3; ++i) {
+        const Light& extra = lighting_.extra_lights[i];
+        if (extra.intensity <= 0.0f) continue;
+        const float kind = extra.kind == LightKind::Directional
+                               ? 0.0f
+                               : (extra.kind == LightKind::Point ? 1.0f : 2.0f);
+        // 平行光存「指向光源」的方向；点/聚光存位置（着色器自己算方向）。
+        if (kind < 0.5f) {
+          params.extra_dirs[count] = {extra.direction.x, extra.direction.y, extra.direction.z,
+                                      1.0f};
+        } else {
+          params.extra_dirs[count] = {extra.position.x, extra.position.y, extra.position.z,
+                                      1.0f};
+        }
+        params.extra_colors[count] = {extra.color.x, extra.color.y, extra.color.z, 0.0f};
+        params.extra_params[count] = {kind, extra.intensity, extra.radius,
+                                      extra.spot_outer_degrees};
+        ++count;
+      }
+      params.extra_count = {static_cast<float>(count), 0.0f, 0.0f, 0.0f};
+    }
     // 自发光：与软件腿 `shade_surface` 的 emission 逻辑对齐。
     // 用**带符号**强度传递 `emission_unlit`（负值 = 纯发光体），
     // 避免再加一个 float4 —— 常量缓冲多一个字段就多一处错位可能。

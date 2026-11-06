@@ -197,9 +197,14 @@ ST_TEST(scene3d_transparent_shows_the_far_surface_through_the_near_one) {
   //     所以它在编码值上混（标准做法；要得到线性混合需用 sRGB 目标格式）。
   // 两者都对，只是不在同一个空间。所以判据只能钉“**绿透出来了**”这种定性事实，
   // 不能钉具体字节——否则会退化成“只能在一条腿上跑”的测试。
-  ST_CHECK(c.r > 60);              // 红：确实被画了
-  ST_CHECK(static_cast<int>(c.g) > 60);   // 绿：透过红看得见
-  // 若透明完全不生效（红盖住绿），绿会接近 0；若完全不透明，红会占主导
+  // ## 判据只用定性事实（这条测试自己的注释已经写明为什么）
+  //
+  // 绝对阈值（原 `> 60`）在本轮遇到两次假阴性：先是换物理内核、后是补上
+  // 多灯光支持，每次亮度基座都动，而“红画了、绿透出来了”这件事并没有变。
+  // 钉字节等于把**着色模型的亮度体系**也一起钉死了。
+  ST_CHECK(static_cast<int>(c.r) > 0);            // 红：确实被画了
+  ST_CHECK(static_cast<int>(c.g) > 0);            // 绿：透过红看得见
+  // 若透明完全不生效（红盖住绿），绿会接近 0：
   ST_CHECK(static_cast<int>(c.g) > static_cast<int>(c.r) / 2);
 }
 
@@ -231,9 +236,17 @@ ST_TEST(scene3d_opacity_zero_erases_the_near_surface) {
                                      static_cast<float>(kH)});
   (*scene)->flush();
     const Color c = center_pixel(canvas);
-  // opacity=0 → 红色不应贡献；中心应仍是绿色（绿 220 主导）
-  ST_CHECK(static_cast<int>(c.g) > 150);
-  ST_CHECK(static_cast<int>(c.r) < 100);
+  // ## 判据改成“绿比红亮”，不再钉绝对亮度（模型统一后重标）
+  //
+  // 原来这里是 `c.g > 150`。那个 150 是**旧模型（缺 1/π + 0.35 常量保底）**
+  // 下的亮度。换成物理内核后，同一个 0.28/0.86/0.35 的面只有 **116**——
+  // 不是退化，是“不再凭空多亮一倍”。
+  //
+  // 但这个用例想验的是**谁挡住谁**，跟绝对亮度无关：绿面在后面、红面 opacity=0
+  // 因此不贡献，中心必然偏绿。所以改成相对判据——
+  // 它对着色模型的亮度体系**免疫**，不会再因为换内核而误报。
+  ST_CHECK(static_cast<int>(c.g) > static_cast<int>(c.r));
+  ST_CHECK(static_cast<int>(c.g) > 0);     // 绿面真的被画了（不再钉具体亮度）
 }
 
 ST_TEST(scene3d_opaque_material_still_hides_what_is_behind) {
@@ -259,6 +272,9 @@ ST_TEST(scene3d_opaque_material_still_hides_what_is_behind) {
                                      static_cast<float>(kH)});
   (*scene)->flush();
   const Color c = center_pixel(canvas);
-  ST_CHECK(c.r > 150);                        // 近处红色是主导
-  ST_CHECK(static_cast<int>(c.g) < 100);      // 绿色被挡住，几乎看不到
+  // 同上：判据是“近处红面挡住后面绿面”，用相对关系而不是绝对亮度。
+  // 旧值 `c.r > 150` 是旧模型的亮度体系（物理内核下同一个面是 122）。
+  ST_CHECK(c.r > c.g);
+  ST_CHECK(static_cast<int>(c.r) > 0);       // 红面真的被画了（不钉亮度）
+  ST_CHECK(static_cast<int>(c.g) < static_cast<int>(c.r) / 2);   // 绿被挡住
 }

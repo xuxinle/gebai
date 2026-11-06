@@ -20,7 +20,6 @@
     ],
     "ambient": 0.42,
     "diffuse": 0.75,
-    "rim": 0.38,
     "exposure": 1.25
   },
   "shadow": {

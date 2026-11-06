@@ -54,6 +54,19 @@ _mathutils.Vector = Vector
 _mathutils.Matrix = Matrix
 _mathutils.Euler = Euler
 _mathutils.Quaternion = Quaternion
+class _World:
+    """世界背景（只实现环境反射需要的最小面）。"""
+
+    def __init__(self, name='World'):
+        self.name = name
+        # 与 Blender 默认世界灰一致（0.05 中性灰）
+        self.background_color = (0.05, 0.05, 0.05)
+        self.use_nodes = False
+
+    def __repr__(self):
+        return 'World(%r)' % (self.name,)
+
+
 
 
 # ---- bpy.data ----
@@ -66,6 +79,12 @@ class _Data:
         self.materials = _Collection(Material)
         self.cameras = _Collection(Camera)
         self.lights = _Collection(Light)
+        # `bpy.data.worlds`：Blender 里 `bpy.data.worlds.new('World')` 是标准写法
+        # （参照脚本 `tools/blender_reference.py:336` 就是这么建世界的）。
+        # 缺它会让“参数与参照同构”这件事做不到——实测报
+        # `AttributeError: no such attribute`，于是对标里混进了一条**参数差**
+        # 而不是渲染差（背景占画面 80%，一差就是十几级）。
+        self.worlds = _Collection(_World)
 
     def reset(self):
         """清空场景（新脚本开始前调）。
@@ -109,17 +128,6 @@ _context.scene.name = 'Scene'
 # 真实行为意图一致。
 
 
-class _World:
-    """世界背景（只实现环境反射需要的最小面）。"""
-
-    def __init__(self, name='World'):
-        self.name = name
-        # 与 Blender 默认世界灰一致（0.05 中性灰）
-        self.background_color = (0.05, 0.05, 0.05)
-        self.use_nodes = False
-
-    def __repr__(self):
-        return 'World(%r)' % (self.name,)
 
 
 _context.scene.world = _World()

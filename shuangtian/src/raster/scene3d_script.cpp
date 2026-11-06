@@ -182,7 +182,6 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
   lit.light_from = *key_dir;
   lit.ambient = static_cast<float>(json_get_double(*node, "ambient", lit.ambient));
   lit.diffuse = static_cast<float>(json_get_double(*node, "diffuse", lit.diffuse));
-  lit.rim = static_cast<float>(json_get_double(*node, "rim", lit.rim));
   lit.exposure = static_cast<float>(json_get_double(*node, "exposure", lit.exposure));
   // ## 环境反射（IBL）：金属"不发黑"的原因
   //
@@ -190,23 +189,44 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
   // 于是剧本文件根本调不到，金属只能呈现"深色塑料"。
   // 实测症状：做相机时机身用深色 + metallic 0.85，渲出来是一块黑，
   // 因为金属没有漫反射、又没有环境可反射。
-  if (const Json* sky = json_find(*node, "env_sky"); sky != nullptr) {
-    const auto c = read_color(*node, "env_sky", math::Color{107, 133, 196, 255}, "lighting");
+  // ## 键名兼容（2026-11-06 改名）
+  //
+  // 结构体字段从 `env_*` 改成了 `ibl_*`（语义从“假环境反射”变成“真 IBL”），
+  // 但**剧本里的 JSON 键名两个都收**：存量剧本（`assets/models` 里 9 个资产）
+  // 写的是 `env_sky`/`env_strength`，不能因为内部改名就让它们静默失效。
+  //
+  // 优先级：新名 > 旧名。两个都写时不报错（新名赢），因为这类“两边都改一半”
+  // 的情形在批量迁移时必然出现，静默打架比报错更安全。
+  const auto pick = [&](const char* new_key, const char* old_key) -> const Json* {
+    if (const Json* found = json_find(*node, new_key); found != nullptr) return found;
+    return json_find(*node, old_key);
+  };
+  if (const Json* sky = pick("ibl_sky", "env_sky"); sky != nullptr) {
+    const bool is_new = json_find(*node, "ibl_sky") != nullptr;
+    const auto c = read_color(*node, is_new ? "ibl_sky" : "env_sky",
+                              math::Color{107, 133, 196, 255}, "lighting");
     if (!c) return st::forward_error(c.error());
-    lit.env_sky = math::Vec3{static_cast<float>(c->r) / 255.0f,
+    lit.ibl_sky = math::Vec3{static_cast<float>(c->r) / 255.0f,
                              static_cast<float>(c->g) / 255.0f,
                              static_cast<float>(c->b) / 255.0f};
   }
-  if (const Json* ground = json_find(*node, "env_ground"); ground != nullptr) {
-    const auto c = read_color(*node, "env_ground", math::Color{26, 26, 33, 255}, "lighting");
+  if (const Json* ground = pick("ibl_ground", "env_ground"); ground != nullptr) {
+    const bool is_new = json_find(*node, "ibl_ground") != nullptr;
+    const auto c = read_color(*node, is_new ? "ibl_ground" : "env_ground",
+                              math::Color{26, 26, 33, 255}, "lighting");
     if (!c) return st::forward_error(c.error());
-    lit.env_ground = math::Vec3{static_cast<float>(c->r) / 255.0f,
+    lit.ibl_ground = math::Vec3{static_cast<float>(c->r) / 255.0f,
                                 static_cast<float>(c->g) / 255.0f,
                                 static_cast<float>(c->b) / 255.0f};
   }
-  lit.env_strength = static_cast<float>(json_get_double(*node, "env_strength", lit.env_strength));
-  lit.env_rough_falloff =
-      static_cast<float>(json_get_double(*node, "env_rough_falloff", lit.env_rough_falloff));
+  lit.ibl_strength = static_cast<float>(json_get_double(
+      *node, pick("ibl_strength", "env_strength") != nullptr ? "ibl_strength" : "env_strength",
+      lit.ibl_strength));
+  lit.ibl_rough_falloff = static_cast<float>(json_get_double(
+      *node,
+      pick("ibl_rough_falloff", "env_rough_falloff") != nullptr ? "ibl_rough_falloff"
+                                                               : "env_rough_falloff",
+      lit.ibl_rough_falloff));
 
   const std::string tone = json_get_string(*node, "tone_map", "aces");
   if (tone == "none") {
@@ -1584,8 +1604,8 @@ auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
   // | 0.90 | 72 | 94 | 102.6 |
   //
   // 0.45 最优（且 p50 67 与参照的 67 **完全一致**）。
-  if (spec.lighting.env_strength <= 0.0f) {
-    spec.lighting.env_strength = 0.45f;
+  if (spec.lighting.ibl_strength <= 0.0f) {
+    spec.lighting.ibl_strength = 0.45f;
   }
   // ## 色调映射：bpy 场景跟 Blender 的默认（AgX）
   //
@@ -1623,23 +1643,14 @@ auto scene_spec_from_three(std::string_view script, std::string_view script_name
   SceneSpec spec{};
   spec.camera = three_scene->camera;
   spec.lighting = three_scene->lighting;
-  // ## 对齐模式（2026-11-06）
+  // ## 着色模型已统一（2026-11-06）
   //
-  // 脚本显式声明时（`globalThis.renderer = { compat: 'three' }` 或
-  // `scene.compat = 'three'`），切到与 three.js 逐式同构的着色模型；
-  // 否则**保持存量行为**（本框架原模型 + ACES）。
+  // 这里曾经要按 `compat: 'three'` 切换 `Lighting::Model`。现在内核只有一套
+  // 物理 BRDF，**不需要切了**——three 脚本与 bpy 脚本走的是同一个 `pbr_shade`。
   //
-  // 为何用“显式声明”而不是直接改默认：同构模型要去掉常量环境保底与边缘光，
-  // 这会让存量画面的暗部真的变黑。保守取舍与项目一贯的
-  // 「新能力默认不改变既有外观」一致；而一旦声明了，连色调映射也跟着切
-  // （否则只对齐着色、不对齐输出链，仍然对不上）。
-  if (three_scene->three_parity) {
-    spec.lighting.model = Lighting::Model::Three;
-    spec.lighting.rim = 0.0f;   // three 没有“边缘光”这个概念
-    // 色调映射由 `ThreeRuntime` 从脚本的 `renderer.toneMapping` 读出（含
-    // NoToneMapping → None、ACESFilmic → AcesThree 的精确映射）；
-    // 脚本根本没设时保持 three 的默认（None，而不是本框架的 ACES）。
-  }
+  // `compat` 声明仍然有用（但不是为了切模型）：它告诉 `ThreeRuntime` 把
+  // 色调映射默认值与 three 对齐（NoToneMapping），并关掉从 `background`
+  // 推导环境反射那条老路（改由 IBL 显式表达）。
   // ## 色调映射：保持本框架原默认（ACES）
   //
   // 虽然 three.js 的 `renderer.toneMapping` 默认是 None，但本函数已有
@@ -2076,13 +2087,19 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     // 线性 0.05 × 255 = **12.75**。截断得 12 → 12/255 = 0.04706 → rgb(**61**)；
     // 四舍五入得 13 → 13/255 = 0.05098 → rgb(**64**)。浏览器是 **63**
     // （它的 `Color` 分量是浮点 0.05，不经过 8bit 中转）。
+    // ## 背景：脚本自己声明了就用它的（“场景的底色归场景”）
     //
-    // 所以 8bit 中转本身就带 ±0.5 级误差：0.05 落在两个台阶中间。这里取
-    // 四舍五入（误差最小），并把这个量级写进文档（见 `docs/render_alignment.md`）。
+    // 着色模型统一后这个判据不再依赖 `Lighting::Model`：只要脚本显式设了
+    // `scene.background`（`background_set`），就用它；没设则用调用方传的。
     //
-    // 旧模型**不改**：存量场景靠调用方传入的背景色控制底色。
+    // ## 为何不能直接传浮点线性值（背景会差 1 级）
+    //
+    // `begin_frame` 的参数是“0~255 表示的**线性值**”，只有 256 个台阶；
+    // 而 `Color(0.05,…)` 是浮点：0.05 与 13/255 = 0.05098 不是同一个数，
+    // 编码后分别得 rgb(63) 与 rgb(64)。实测就是这个 1 级差，取四舍五入
+    // （误差最小），并把量级写进文档（见 `docs/render_parity.md`）。
     const math::Color frame_background =
-        (spec.lighting.model == Lighting::Model::Three && script_scene->background_set)
+        script_scene->background_set
             ? math::Color::rgba(
                   static_cast<std::uint8_t>(std::lround(
                       std::clamp(script_scene->background_linear.x * 255.0f, 0.0f, 255.0f))),
@@ -2108,7 +2125,7 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     //
     // | 设置 | 看起来应该生效 | 实际 |
     // |---|---|---|
-    // | `lighting.env_strength` | 金属有环境反射 | 无效（仍为 0） |
+    // | `lighting.ibl_strength` | 金属有环境反射 | 无效（仍为 0） |
     // | `lighting.tone_map` | 按来源选 AgX | 无效（仍为 ACES） |
     // | `lighting.ambient/diffuse` | 能调 | 无效 |
     //
