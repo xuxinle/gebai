@@ -352,3 +352,71 @@ ST_TEST(table_lane_band_reserves_width_for_the_first_column) {
   ST_CHECK_NEAR(table.header_cell_rect(0U).x, 34.0f, 0.01f);
   ST_CHECK_NEAR(table.cell_rect(0U, 1U).x, 400.0f - 120.0f, 0.5f);
 }
+
+ST_TEST(table_narrow_container_shrinks_fixed_columns_by_priority) {
+  // 窄容器：固定列要按 `shrink` 优先级**让位**，而不是把主列压到最小宽。
+  //
+  // 旧行为：固定列只拉伸不压缩 —— 380px 宽的日志表里，作者110+日期130+哈希76
+  // 把宽度全吃光，主列（提交信息）被压到 72px 以下，文字全成省略号，
+  // 而三个背景信息列一字不少（用户报的“日志看不到提交信息”）。
+  st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::RenderContext context{theme, nullptr, 0.0};
+  st::ui::Table table;
+  table.set_columns({
+      {.name = "subject", .width = 0.0f},
+      {.name = "author", .width = 110.0f, .min_width = 76.0f, .shrink = 3},
+      {.name = "date", .width = 130.0f, .min_width = 96.0f, .shrink = 1},
+      {.name = "hash", .width = 76.0f, .min_width = 62.0f, .shrink = 2},
+  });
+  table.add_row({"subject text", "E2E", "2026-11-06 15:04", "a92b1c2"});
+
+  // ① 宽容器：不压缩（固定列拿满声明宽，主列拿剩下的）
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 900.0f, 200.0f});
+  ST_CHECK_NEAR(table.column_width(1U), 110.0f, 0.01f);
+  ST_CHECK_NEAR(table.column_width(2U), 130.0f, 0.01f);
+  ST_CHECK_NEAR(table.column_width(3U), 76.0f, 0.01f);
+  ST_CHECK_NEAR(table.column_width(0U), 900.0f - 316.0f, 0.5f);
+  ST_CHECK_NEAR(table.max_scroll(), 0.0f, 0.01f);   // 装得下：不滚
+
+  // ② 380px（刚装不下）：先压日期（shrink=1），额度全部从它出
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 380.0f, 200.0f});
+  // deficit = 316 + 72 - 380 = 8 ⇒ 日期 130 → 122
+  ST_CHECK_NEAR(table.column_width(2U), 122.0f, 0.5f);
+  ST_CHECK_NEAR(table.column_width(3U), 76.0f, 0.5f);
+  ST_CHECK_NEAR(table.column_width(1U), 110.0f, 0.5f);
+  ST_CHECK_NEAR(table.column_width(0U), st::ui::Table::kMinColumnWidth, 0.5f);
+  ST_CHECK_NEAR(table.max_scroll(), 0.0f, 0.01f);   // 压完装得下：不滚
+
+  // ③ 340px：日期到下限后继续压哈希，作者仍不动
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 340.0f, 200.0f});
+  // deficit = 388 - 340 = 48 ⇒ 日期让 34（到 96），哈希再让 14（到 62）
+  ST_CHECK_NEAR(table.column_width(2U), 96.0f, 0.5f);
+  ST_CHECK_NEAR(table.column_width(3U), 62.0f, 0.5f);
+  ST_CHECK_NEAR(table.column_width(1U), 110.0f, 0.5f);   // 作者未动（优先级最后）
+  ST_CHECK_NEAR(table.max_scroll(), 0.0f, 0.01f);
+
+  // ④ 300px：三个固定列全让到限，仍装不下 ⇒ 主列保持最小宽，触发横向滚动
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 300.0f, 200.0f});
+  ST_CHECK_NEAR(table.column_width(0U), st::ui::Table::kMinColumnWidth, 0.5f);
+  ST_CHECK_NEAR(table.column_width(2U), 96.0f, 0.5f);
+  ST_CHECK_NEAR(table.column_width(3U), 62.0f, 0.5f);
+  ST_CHECK_NEAR(table.column_width(1U), 76.0f, 0.5f);    // 最后才轮到作者，且到下限
+  ST_CHECK(table.max_scroll() > 0.0f);
+}
+
+ST_TEST(table_columns_without_min_width_never_shrink) {
+  // 没声明 `min_width` 的固定列**不参与压缩**（默认零影响）。
+  //
+  // 这一条是“别把老表的列宽悄悄改掉”的护栏：给 `TableColumn` 加字段很容易
+  // 顺手把“固定宽”改成“可压缩”，而存量表格靠固定宽对齐。
+  st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::RenderContext context{theme, nullptr, 0.0};
+  st::ui::Table table;
+  table.set_columns({{.name = "a", .width = 0.0f}, {.name = "b", .width = 200.0f}});
+  table.add_row({"x", "y"});
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 260.0f, 120.0f});
+  ST_CHECK_NEAR(table.column_width(1U), 200.0f, 0.01f);
+  // 自适应列拿到最小宽（72），总宽 272 > 260 ⇒ 横向滚动（这是原有行为，不是压缩）
+  ST_CHECK_NEAR(table.column_width(0U), st::ui::Table::kMinColumnWidth, 0.01f);
+  ST_CHECK_NEAR(table.max_scroll(), 12.0f, 0.5f);
+}

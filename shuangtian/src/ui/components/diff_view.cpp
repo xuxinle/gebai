@@ -97,6 +97,45 @@ void DiffView::set_full_texts(std::string old_full, std::string new_full, std::s
   mark_layout_dirty();
 }
 
+void DiffView::commit_side_edit(bool new_side, std::string_view logical) {
+  // **编辑闭环的同帧入口**：把用户刚敲的文本写进快照并立即重算差异。
+  //
+  // 为何需要它（2026-11-06）：编辑回调（`on_text_edit`）交给宿主的是“当前逻辑文本”，
+  // 宿主写进自己的成员后靠 `State` 触发**下一次重组**才 `set_full_texts`。那段窗口里
+  // 快照比编辑器旧一步——界面于是会有一帧“差异没跟着变”。把重算收在这里，
+  // “改了就重算”是**同一次调用内**完成的。
+  //
+  // ⚠ **不重推文本**：调用方（编辑器自己）刚改完，此时再 `push_to_editors()` 会
+  // 把重建出的显示行（带对齐填充）写回去，光标会被夹到另一行（正是那条老缺陷的形态）。
+  // 所以这里只做：快照 → 差异 → 重建 → 装饰/配置，**跳过文本推送**。
+  if (!full_file_) return;   // 差异块模式没有“两端全文”可改（右栏也编辑不了）
+  std::string updated(logical);
+  if (new_side ? full_new_ == updated : full_old_ == updated) return;
+  if (new_side) {
+    full_new_ = std::move(updated);
+  } else {
+    full_old_ = std::move(updated);
+  }
+  diff_ = text::make_file_diff(full_old_, full_new_);
+  diff_.old_path = full_path_;
+  diff_.new_path = full_path_;
+  if (diff_.hunks.empty()) {
+    current_hunk_ = kNoHunk;
+  } else if (current_hunk_ == kNoHunk || current_hunk_ >= diff_.hunks.size()) {
+    current_hunk_ = 0;
+  }
+  rebuild();
+  // 只刷新装饰与配置面（不推文本，见上面的警告）。
+  if (left_ != nullptr) left_->set_line_decorations(old_side_.marks);
+  if (right_ != nullptr) {
+    right_->set_line_decorations(layout_ == DiffLayout::SideBySide
+                                     ? new_side_.marks
+                                     : std::vector<CodeEditor::LineDecoration>{});
+  }
+  apply_editor_config();
+  mark_layout_dirty();
+}
+
 void DiffView::clear() {
   diff_ = text::FileDiff{};
   current_hunk_ = kNoHunk;
@@ -554,9 +593,15 @@ void DiffView::apply_editor_config() {
     left_->on_scroll = [this](float, float) { sync_scroll_from(*left_); };
     // 左栏也可写时（空白文本对比：两侧都是用户自己的内容）同样把“变了”交给宿主。
     // 传**逻辑文本**：对齐填充行不是内容，带出去会把整篇当成改动。
+    //
+    // 两件事同时做，顺序不能反：
+    //   ① `commit_side_edit` 就地写快照 + 重算（同帧闭环，差异不再“慢一帧”）；
+    //   ② 再通知宿主（宿主往往还要做别的事：标脏、同步 LSP…）。
     if (left_writable) {
       left_->on_change = [this](std::string_view /*text*/) {
-        if (on_left_text_edit) on_left_text_edit(logical_text(false));
+        const std::string logical = logical_text(false);
+        commit_side_edit(false, logical);
+        if (on_left_text_edit) on_left_text_edit(logical);
       };
     } else {
       left_->on_change = nullptr;
@@ -581,7 +626,9 @@ void DiffView::apply_editor_config() {
     //（实测：自动对比一次之后 +39 −283，画面上一片红——那正是这个坑）。
     if (!read_only_ && side_by_side) {
       right_->on_change = [this](std::string_view /*text*/) {
-        if (on_text_edit) on_text_edit(logical_text(true));
+        const std::string logical = logical_text(true);
+        commit_side_edit(true, logical);
+        if (on_text_edit) on_text_edit(logical);
       };
     } else {
       right_->on_change = nullptr;

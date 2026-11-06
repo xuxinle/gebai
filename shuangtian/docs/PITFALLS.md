@@ -251,6 +251,7 @@
 | **“点活动栏 = 打开”是错的** | 面板默认就是开的，点一下是**收起**。判断可见性要看状态（`#bottom-split` 的 `second_hidden`），否则探针会自己制造“功能坏了”的假象 | `tools/gbcode_terminal_scroll_e2e.py` 文件头 |
 | **每帧调的“配置面”接口一律不能碰内容**〔组件 API 设计〕 | 声明式宿主每帧都把当前状态“设一遍”（`set_read_only` / `set_both_sides_editable` / `set_show_line_numbers`…），而内容快照是**上一轮重算**的结果，区间内用户刚敲的字比它新一步。配置接口顺手推文本 = 每帧回滚一次 —— 现象是“**在行尾每输一个字，光标退回一格**”（实测：编辑器 `abc1`/光标 4 → 快照 `abc` 覆盖后夹到 3）。拆成两个面：`apply_editor_config`（只改配置）与 `push_to_editors`（重建才调） | `DESIGN.md` §4.2.11.5.1；`diff_view.cpp` 的 `apply_editor_config`；逆向验证：`diff_view_config_calls_do_not_roll_back_editor_text` |
 | **`arrange` 里不要无条件推内容**〔布局期副作用〕 | `arrange` 每帧都跑（只要布局脏/重排），在里面 `push`/`set_text` 等于把布局帧当成内容帧——同上一条的回滚效果。只在**刚造出子元素时**推一次（`left_created \|\| right_created`） | `diff_view.cpp` 的 `arrange` |
+| **“编辑 → 重算”不要只靠下一次重组**〔数据回流〕 | 回调只通知宿主、靠 `State` 触发重组才落地，中间会有一帧“派生量没跟着变”（差异/高亮/统计都会）。正确做法是回调里**先就地闭环**（组件自己的 `commit_side_edit`），再通知宿主。因为两者顺序不能反：先通知的话宿主可能在同一帧又读一次旧值 | `diff_view.cpp` 的 `apply_editor_config`；DESIGN §4.2.11.5.1 |
 
 ## 场景 8：画自绘组件 / 写光栅管线
 

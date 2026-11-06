@@ -556,11 +556,20 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       // 压在提交信息首字上（“提交线和信息贴太紧”的那个现象）。现在框架的 `Table`
       // 会把这块宽度真的让出来（见 `Table::lane_inset`），这里只调宽。
       table.set_lane_column_width(34.0f);
+      // 窄栏压缩优先级：先把哈希/日期让出去，再是作者；提交信息（主列）最后。
+      //
+      // 为何要显式声明：右栏把日志挤到 380px 宽时，110+130+76 = 316px 全被这三列
+      // 占满，主列只剩十几字（实测：提交信息全变成省略号，而日期/哈希一字不少）。
+      // 下限取“还看得懂”的宽度：日期 96（`2026-11-06 15:04` 约 106，再窄就不如省略）、
+      // 哈希 62（短哈希 7 位 + 一点余量）、作者 76（中文作者三四字）。
       table.set_columns({
           {.name = "提交信息", .width = 0.0f},
-          {.name = "作者", .width = 110.0f},
-          {.name = "日期", .width = 130.0f},
-          {.name = "哈希", .width = 76.0f},
+          {.name = "作者", .width = 110.0f, .align = TextAlign::Start, .min_width = 76.0f,
+           .shrink = 3},
+          {.name = "日期", .width = 130.0f, .align = TextAlign::Start, .min_width = 96.0f,
+           .shrink = 1},
+          {.name = "哈希", .width = 76.0f, .align = TextAlign::Start, .min_width = 62.0f,
+           .shrink = 2},
       });
       // 列色调：提交信息主色（用户在看的东西）、其余弱化（背景信息）。
       // 不这样做就只能全表一个颜色，靠列位置猜重点。

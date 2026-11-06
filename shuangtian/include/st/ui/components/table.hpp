@@ -22,10 +22,26 @@
 namespace st::ui {
 
 /// 列定义（`width <= 0` 表示自适应：按容器剩余宽度均分，并夹取到 `Table::kMinColumnWidth`）。
+///
+/// 窄容器下的压缩策略（`min_width` / `shrink`）只在"固定列加起来装不下"时生效：
+/// 按 `shrink` **从小到大**依次让位，每列最多让到 `min_width`。
 struct TableColumn {
   std::string name{};
   float width{0.0f};
   TextAlign align{TextAlign::Start};
+  /// 固定列可被压到的下限（px）；`0` = 不参与压缩（保持 `width`）。
+  ///
+  /// 为何需要它：原先固定列**只拉伸不压缩**，于是窄容器里宽度全被固定列吃光，
+  /// 主列（自适应那一列）被压到最小宽——实测 Git 日志表在 380px 宽时，
+  /// 提交信息只剩十几字、日期被截成 `2026-11-06 ...`，而那些"背景信息列"
+  /// 一点也没让位。
+  float min_width{0.0f};
+  /// 压缩优先级：**数值越小越先被压缩**（同值按列序），`0` = 最后才压。
+  ///
+  /// 为何不写成"等比缩"：等比缩会把主列（提交信息）与背景列（作者/日期）
+  /// 一起削，而用户真正要看的是主列。显式优先级让"谁该让"成为调用方的决定，
+  /// 不必在组件里猜。
+  int shrink{0};
 };
 
 /// 数据表格：列定义 + 行数据，表头/斑马纹/hover/横向滚动全部自绘，无子节点。
@@ -116,6 +132,8 @@ class Table : public Element {
   [[nodiscard]] auto cell_rect(std::size_t row, std::size_t column) const noexcept -> math::Rect;
   [[nodiscard]] auto header_cell_rect(std::size_t column) const noexcept -> math::Rect;
   [[nodiscard]] auto column_width(std::size_t column) const noexcept -> float;
+  /// 各列**实际**宽度（`arrange` 后有效；逗号分隔，供控制通道/测试断言）。
+  [[nodiscard]] auto column_widths_text() const -> std::string;
   /// 列内容总宽（不含容器裁剪）。
   [[nodiscard]] auto total_width() const noexcept -> float { return total_width_; }
 
@@ -130,6 +148,8 @@ class Table : public Element {
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
+  /// 只读属性（`column_widths` / `lane_inset`）：它们是**布局结果**，写回去没有意义。
+  [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
   [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)

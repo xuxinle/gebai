@@ -136,6 +136,19 @@ def main():
         check(client.count("#log-refresh") == 1, "日志栏只有 1 个刷新钮")
         check(client.count("#git-log-head-refresh") == 0, "标题行不再有第二个刷新钮")
 
+        # —— 窄栏压缩：右栏挤压后的实际列宽 ——
+        #
+        # 量的是**布局结果**（`column_widths`）而不是目测截图：截图只能看出“被截了”，
+        # 看不出哪一列让了位。
+        log_table = client.props("git-log-table")
+        widths = [float(v) for v in (log_table.get("column_widths") or "").split(",") if v]
+        print(f"  [log] column_widths={widths} lane_inset={log_table.get('lane_inset')}")
+        check(len(widths) == 4, f"能读到 4 个实际列宽（{widths}）")
+        if len(widths) == 4:
+            check(widths[0] >= 72.0, f"提交信息列不少于最小宽（{widths[0]:.0f}）")
+            check(widths[3] >= 61.0, f"哈希列未低于下限（{widths[3]:.0f}）")
+            check(widths[2] >= 95.0, f"日期列未低于下限（{widths[2]:.0f}）")
+
         # 选中那笔长信息的提交：表格没有 `click_row` 动作，用真实鼠标点该行（
         # 表头 36 + 行高 24 × 行号 + 行中）。
         table_node = client.ok("find", {"selector": "#git-log-table"})

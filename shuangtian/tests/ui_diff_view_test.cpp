@@ -415,3 +415,47 @@ ST_TEST(diff_view_rebuild_keeps_cursor_at_end_of_line) {
   ST_CHECK_EQ(left->cursor_index(), 4U);   // 再跑一次配置面调用，仍不回退
 }
 
+ST_TEST(diff_view_edit_commits_snapshot_in_the_same_call) {
+  // **同帧闭环**：一次编辑之后，差异必须**当场**就是新的。
+  //
+  // 为何要钉这个：旧路径是「编辑器 on_change → 宿主写成员 + 置 State → 下一次重组
+  // 才 set_full_texts」，于是界面有一帧“差异没跟着变”（打字快时看得见）。
+  // 现在 `commit_side_edit` 在同一次 on_change 里写完快照并重建。
+  Fixture fx;
+  fx.view.set_full_texts("one\ntwo", "one\ntwo", {}, /*keep_numbers=*/true);
+  fx.view.set_both_sides_editable(true);
+  fx.view.set_read_only(false);
+  fx.layout();
+  st::ui::CodeEditor* right = fx.view.right_editor();
+  ST_REQUIRE(right != nullptr);
+  ST_CHECK_EQ(fx.property("hunks"), std::string("0"));   // 两侧相同
+
+  // 在右栏未行尾追加一个字符 —— 中间不调任何宿主入口。
+  right->set_cursor_index(right->text().size());
+  right->insert_text("Z");
+
+  // 不 layout、不 set_full_texts：差异已经应当是新的。
+  ST_CHECK_EQ(fx.property("hunks"), std::string("1"));
+  ST_CHECK(fx.property("summary").find("+1") != std::string::npos);
+  // 快照也真的换了（否则下一次宿主 set_full_texts 会当成“变了”再重建一次）。
+  ST_CHECK(fx.property("logical_right").find('Z') != std::string::npos);
+  // 光标还在刚打的字后面（闭环里不能重推文本）。
+  ST_CHECK_EQ(right->cursor_index(), 8U);
+}
+
+ST_TEST(diff_view_edit_commit_keeps_other_side_untouched) {
+  // 右栏编辑只改右侧快照，左栏内容不变（否则“左 = 基线”的语义就没了）。
+  Fixture fx;
+  fx.view.set_full_texts("base", "base", {}, /*keep_numbers=*/true);
+  fx.view.set_both_sides_editable(true);
+  fx.view.set_read_only(false);
+  fx.layout();
+  st::ui::CodeEditor* right = fx.view.right_editor();
+  st::ui::CodeEditor* left = fx.view.left_editor();
+  ST_REQUIRE(right != nullptr && left != nullptr);
+  right->set_cursor_index(right->text().size());
+  right->insert_text("X");
+  ST_CHECK_EQ(left->text(), std::string("base"));
+  ST_CHECK(fx.property("logical_left") == "base");
+}
+

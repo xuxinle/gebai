@@ -5,6 +5,7 @@
 #include <format>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
@@ -276,12 +277,55 @@ void Table::recompute_columns(float available) {
     }
   }
 
+  // —— 窄容器下先压固定列（按 `shrink` 从小到大，每列不低过 `min_width`）——
+  //
+  // 为何要先算这一步：下面两种情形（全固定 / 混合）都假设“固定列拿满自己声明
+  // 的宽”。不先压，装不下时只能触发横向滚动，而主列同时被压到最小宽——
+  // 用户看到的是“背景信息（作者/日期）完整、真正要看的主列被截成省略号”。
+  //
+  // 让位量只算到“自适应列能拿到 `kMinColumnWidth`”为止：再压就会连主列一起削，
+  // 那不如直接横向滚动（内容完整、只是要推一下）。
+  std::vector<float> fixed_widths(columns_.size(), 0.0f);
+  for (std::size_t index = 0; index < columns_.size(); ++index) {
+    fixed_widths[index] = columns_[index].width > 0.0f ? columns_[index].width : 0.0f;
+  }
+  if (auto_count > 0) {
+    const float auto_floor = kMinColumnWidth * static_cast<float>(auto_count);
+    float deficit = fixed_total + auto_floor - content_visible;
+    if (deficit > 0.0f) {
+      // 压缩顺序：`shrink` 升序（>0 的先前），同优先级按列序；`shrink == 0` 最后。
+      std::vector<std::size_t> order;
+      order.reserve(columns_.size());
+      for (std::size_t index = 0; index < columns_.size(); ++index) {
+        if (columns_[index].width > 0.0f && columns_[index].min_width > 0.0f) {
+          order.push_back(index);
+        }
+      }
+      std::ranges::stable_sort(order, [&](std::size_t a, std::size_t b) {
+        const int rank_a = columns_[a].shrink > 0 ? columns_[a].shrink : 1'000'000;
+        const int rank_b = columns_[b].shrink > 0 ? columns_[b].shrink : 1'000'000;
+        return rank_a < rank_b;
+      });
+      for (const std::size_t index : order) {
+        if (deficit <= 0.0f) break;
+        const float floor_width = std::max(columns_[index].min_width, 0.0f);
+        const float room = std::max(0.0f, fixed_widths[index] - floor_width);
+        const float take = std::min(room, deficit);
+        fixed_widths[index] -= take;
+        deficit -= take;
+      }
+      // 重新统计（后续分支仍用 `fixed_total`）。
+      fixed_total = 0.0f;
+      for (std::size_t index = 0; index < columns_.size(); ++index) fixed_total += fixed_widths[index];
+    }
+  }
+
   if (auto_count == 0) {
     // 全部为固定宽：不足以填满时按比例拉伸；超出则保持（触发横向滚动）。
     if (fixed_total <= 0.0f) return;
     const float scale = content_visible > fixed_total ? content_visible / fixed_total : 1.0f;
     for (std::size_t index = 0; index < columns_.size(); ++index) {
-      column_widths_[index] = columns_[index].width * scale;
+      column_widths_[index] = fixed_widths[index] * scale;
     }
     total_width_ = fixed_total * scale;
     return;
@@ -291,7 +335,7 @@ void Table::recompute_columns(float available) {
   float auto_width = (content_visible - fixed_total) / auto_columns;
   if (auto_width < kMinColumnWidth) auto_width = kMinColumnWidth;
   for (std::size_t index = 0; index < columns_.size(); ++index) {
-    column_widths_[index] = columns_[index].width > 0.0f ? columns_[index].width : auto_width;
+    column_widths_[index] = columns_[index].width > 0.0f ? fixed_widths[index] : auto_width;
   }
   total_width_ = fixed_total + auto_width * auto_columns;
   if (total_width_ < content_visible) {
@@ -305,6 +349,15 @@ void Table::recompute_columns(float available) {
 
 auto Table::column_width(std::size_t column) const noexcept -> float {
   return column < column_widths_.size() ? column_widths_[column] : 0.0f;
+}
+
+auto Table::column_widths_text() const -> std::string {
+  std::string out;
+  for (std::size_t index = 0; index < column_widths_.size(); ++index) {
+    if (index > 0) out.push_back(',');
+    out.append(std::format("{}", column_widths_[index]));
+  }
+  return out;
 }
 
 auto Table::column_x(std::size_t column) const noexcept -> float {
@@ -618,6 +671,10 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
     return out;
   }
   if (name == "rows") return std::format("{}", rows_.size());
+  // 实际列宽（`arrange` 后有效）：自动化验证“窄容器里到底谁让位了”靠它——
+  // 只看截图只能看到“被截了”，看不出是哪一列被压。
+  if (name == "column_widths") return column_widths_text();
+  if (name == "lane_inset") return std::format("{}", lane_inset());
   if (name == "row_height") return std::format("{}", row_height_);
   if (name == "zebra") return std::string(zebra_ ? kFlagTrue : "false");
   if (name == "scroll") return std::format("{}", scroll_offset_);
@@ -692,6 +749,11 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
 auto Table::property_names() const -> std::vector<std::string_view> {
   return {"columns", "rows", "row_height", "zebra", "scroll", "max_scroll",
           "selected_row", "value", "first_visible", "visible_rows"};
+}
+
+/// 只读属性（不进 `property_names()`：那张表是“可读写”契约，`get` 在两处都查）。
+auto Table::readonly_property_names() const -> std::vector<std::string_view> {
+  return {"column_widths", "lane_inset"};
 }
 
 auto Table::invoke_action(std::string_view action, std::string_view argument) -> bool {

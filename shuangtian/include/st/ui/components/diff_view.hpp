@@ -161,8 +161,19 @@ class DiffView : public Element {
   /// 两侧都是用户自己的内容——两边都得能改、且各自要知道是谁变了。
   std::function<void(std::string_view)> on_left_text_edit{};
 
-  /// 让**两侧都可编辑**（空白对比用；文件差异不要用它——左栏是基线）。
+  /// 把一次编辑**当场**写进快照并重算差异（`new_side`：右栏=true）。
   ///
+  /// 与 `on_text_edit` 的关系：那个是“通知宿主（还要靠重组才落地）”，这个是
+  /// “就地闭环”。两者可同时装——本函数快照相等会早退，宿主随后的 `set_full_texts`
+  /// 也就什么都不做。
+  ///
+  /// 仅在整文件模式（`set_full_texts`）下有效：差异块模式的“新旧”来自宿主给的
+  /// `FileDiff`，不是两段可编辑的全文。
+  ///
+  /// ⚠ **不重推文本**（见实现处的说明）：调用方就是刚改完的编辑器，再推会把光标夹走。
+  void commit_side_edit(bool new_side, std::string_view logical);
+
+  /// 让**两侧都可编辑**（空白对比用；文件差异不要用它——左栏是基线）。
   /// 与 `set_read_only(false)` 的区别：那个只开右栏（刻意），这个是“两份都是我的”。
   ///
   /// ⚠ 只改配置（`apply_editor_config`），**不推文本**：宿主每帧都调它，
