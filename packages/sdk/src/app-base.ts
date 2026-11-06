@@ -8,15 +8,27 @@
  * 非层级文档（WebView srcdoc/about:blank、file: 等无站点基准）回落根部署（空基准）。
  */
 
-/** 末段属于「页面文件」的名字：应用只在这两种路径上呈现，其余末段视为挂载根本身。 */
+/** 末段属于「页面文件」的名字：应用只在这几种路径上呈现，其余末段视为挂载根本身。 */
 const PAGE_SEGMENTS = new Set(["", "files", "index.html"])
+
+/**
+ * 末段是否是一个**页面文件**（而不是挂载目录）。
+ *
+ * 为何要单独判 `.html`：服务端除了 `/` 与 `/files` 两个「美化路径」，静态兜底还会直接以
+ * `/files.html`（以及构建期其它入口页）提供同一页面——这是用户实际会落在的 URL（收藏、
+ * 外部链接、直接敲文件名）。如果只认固定几个名字，`/files.html` 的末段就会被当成**挂载根**，
+ * 整个页面的请求变成 `/files.html/api/v1/…` 而全部 404（页面上表现为“一直转圈 + 满屏 404”）。
+ */
+function isPageFile(seg: string): boolean {
+  return PAGE_SEGMENTS.has(seg) || /\.html?$/i.test(seg)
+}
 
 /** 从页面 pathname 推出应用基准：""（根部署）或 "/gebai"（子路径部署，无尾斜杠）。 */
 export function resolveAppBase(pathname: string): string {
   if (!pathname.startsWith("/")) return ""
   const cut = pathname.lastIndexOf("/")
   const seg = pathname.slice(cut + 1)
-  if (PAGE_SEGMENTS.has(seg)) return cut === 0 ? "" : pathname.slice(0, cut).replace(/\/+$/, "")
+  if (isPageFile(seg)) return cut === 0 ? "" : pathname.slice(0, cut).replace(/\/+$/, "")
   // 末段不是页面文件：整个 pathname 即挂载根（`/gebai` 这类不带尾斜杠的访问形式）
   return pathname.replace(/\/+$/, "")
 }
