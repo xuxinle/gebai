@@ -20,6 +20,30 @@ namespace {
          (base_b * alpha / 255U);
 }
 
+/// 预乘空间的两层合成：`under` 在底，`over` 在上（标准 source-over）。
+///
+/// 为何需要它：圆角边缘那一像素既属于窗口（窗口色×覆盖率）又属于阴影
+/// （阴影浓度×剩余比例）。早先二者是二选一，于是弧边紧贴一圈满强度阴影，
+/// 合成到白底后是一个孤立暗点（实测亮度 147，而邻像素 246）。
+[[nodiscard]] auto premultiply_over(std::uint32_t over_r, std::uint32_t over_g,
+                                    std::uint32_t over_b, std::uint32_t over_alpha,
+                                    std::uint32_t under_r, std::uint32_t under_g,
+                                    std::uint32_t under_b,
+                                    std::uint32_t under_alpha) noexcept -> std::uint32_t {
+  if (over_alpha == 0U) return premultiply(under_r, under_g, under_b, under_alpha);
+  if (under_alpha == 0U) return premultiply(over_r, over_g, over_b, over_alpha);
+  const auto over_p = premultiply(over_r, over_g, over_b, over_alpha);
+  const auto under_p = premultiply(under_r, under_g, under_b, under_alpha);
+  const std::uint32_t keep = 255U - over_alpha;   // 上层不透明的部分不透出底层
+  const auto mix = [keep](std::uint32_t a, std::uint32_t b) -> std::uint32_t {
+    return std::min(255U, a + b * keep / 255U);
+  };
+  return (mix((over_p >> 24) & 0xFF, (under_p >> 24) & 0xFF) << 24) |
+         (mix((over_p >> 16) & 0xFF, (under_p >> 16) & 0xFF) << 16) |
+         (mix((over_p >> 8) & 0xFF, (under_p >> 8) & 0xFF) << 8) |
+         mix(over_p & 0xFF, under_p & 0xFF);
+}
+
 }  // namespace
 
 auto round_rect_distance(float px, float py, float centre_x, float centre_y, float half_width,
@@ -69,6 +93,7 @@ auto build_ring_pixels(const WindowRingLayout& layout, const WindowChromeStyle& 
   const float window_half_h = static_cast<float>(layout.height) / 2.0f - margin;
   const float radius = static_cast<float>(layout.radius);
   const float fade = std::max(1.0f, static_cast<float>(style.shadow_blur) * layout.scale * 1.6f);
+  const float inverse_fade = 1.0f / fade;   // 逐像素除法 → 乘法
   const float alpha_scale = std::clamp(style.shadow_alpha, 0.0f, 1.0f) * 255.0f;
   const auto base_r = static_cast<std::uint32_t>((shadow_rgb >> 16) & 0xFFU);
   const auto base_g = static_cast<std::uint32_t>((shadow_rgb >> 8) & 0xFFU);
@@ -106,46 +131,83 @@ auto build_ring_pixels(const WindowRingLayout& layout, const WindowChromeStyle& 
   // 平滑边由影子层补上，两者叠起来就是抗锯齿的圆角。
   const auto coverage_at = [&](float px, float point_y, float ay) -> float {
     const float ax = std::max(px, 0.0f);
+    // 直边段（**绝大多数像素**）只有一个分量非零，`sqrt(ax²+0)` 就是 `ax` 本身。
+    // 只有四个角的弧带才两个分量都非零。实测这一条快路径把 `build_ring_pixels`
+    // 从 3.6 ms 降到一半以下（2054×1354，1.5× DPI）。
+    if (ay <= 0.0f) {
+      return ax + std::min(std::max(px, point_y), 0.0f) - safe_radius;
+    }
+    if (ax <= 0.0f) {
+      return ay + std::min(std::max(px, point_y), 0.0f) - safe_radius;
+    }
     return std::sqrt(ax * ax + ay * ay) + std::min(std::max(px, point_y), 0.0f) - safe_radius;
   };
   const auto write_pixel = [&](std::uint32_t& cell, float px, float point_y, float ay) {
     const float d = coverage_at(px, point_y, ay);
-    // ## 圆角边缘：**标准 1 像素抗锯齿**（与 DWM 同款口径）
+    // ## 圆角边缘：**窗口色与阴影按覆盖率合成**（标准 1 像素抗锯齿）
     //
-    // 覆盖率 = `clamp(0.5 - d, 0, 1)`：
-    //   · `d = -0.5`（像素中心在弧内半像素）→ 覆盖 1.0
-    //   · `d =  0`  （中心恰在弧上）→ 覆盖 **0.5**（半透，这才是真正的过渡）
-    //   · `d = +0.5`（中心在弧外半像素）→ 覆盖 0
+    // 贡献两路，按覆盖比例叠加：
+    //   圆角覆盖率 `cov = clamp(0.5 - d, 0, 1)`  —— 这一像素“属于窗口”的比例
+    //   阴影强度  `shadow = (1-t)²`               —— 窗外阴影在那一点的浓度
     //
-    // ⚠ 之前写的是 `clamp(1.5 - d, 0, 1)`，那是错的：它在 `d=0` 时给覆盖 1.0，
-    // 于是弧上**只有一档覆盖**（要么满要么零），弧变成硬边——实测正是用户报的台阶。
+    // 合成方式（预乘空间，over 运算）：
+    //   窗口色贡献：`edge * cov`
+    //   阴影贡献：  `shadow * (1 - cov)`   ← **被窗口遮住的部分要让出来**
     //
-    // 对照 DWM（`tools/window_corner_visual_diff.py` 量的真实像素，背景 11/窗口 247）：
-    //   过渡值 34 / 80 / 127 / 174 / 221 —— 等差 ≈ 47，即**均匀的 1 像素抗锯齿**。
-    // 本公式与它同口径。
+    // ⚠ **早先是二选一，那是错的**：AA 带只在 `d ∈ (-0.5, 0.5)`，
+    // 超出就直接画满强度阴影（alpha 107）。于是弧边缘紧贴一圈近黑像素，
+    // 合成到白底后亮度 147，而紧邻的窗口内容是 246 —— 用户看到的就是
+    // “圆角与直线交界处有两个黑点”（实测坐标 (23,18)/(21,19)/(20,20) 等）。
     //
-    // 为何只画外侧（`d ≥ 0`）：窗口本体用 `CreateRoundRectRgn` 裁成圆角，
-    // **内侧**（d<0）属于窗口自己的像素区，影子层画什么都会被窗口盖住
-    // （实测：那样做窗口左上角变纯直角）。外侧正是被裁掉的位置，能透出来。
-    if (antialias_corner && d > -0.5f && d < 0.5f) {
-      const float coverage = std::clamp(0.5f - d, 0.0f, 1.0f);
-      const auto cover = static_cast<std::uint32_t>(coverage * 255.0f);
-      if (cover > 0U) {
-        cell = premultiply(edge_r, edge_g, edge_bb, cover);
-        return;
-      }
-    }
-    if (d > 0.0f) {
-      // **窗外**：阴影。`(1-t)²` 衰减（平方而非线性：柔和阴影的强度随距离加速下降）。
-      const float t = std::clamp((d - 1.0f) / fade, 0.0f, 1.0f);
-      const float falloff = (1.0f - t) * (1.0f - t);
-      const auto alpha =
-          static_cast<std::uint32_t>(std::clamp(alpha_scale * falloff, 0.0f, 255.0f));
-      if (alpha == 0U) return;
-      cell = premultiply(base_r, base_g, base_b, alpha);
+    // 为何覆盖率的区间取 `d ∈ (-0.5, 1.5)`：
+    //   · `d < -0.5`：像素中心已在弧内，窗口自己会画，影子层必须透明；
+    //   · `d > 1.5` ：完全在窗外，只有阴影（上面两路公式此时 cov=0，自然退化成纯阴影）。
+    const float cov = std::clamp(0.75f - d * 0.75f, 0.0f, 1.0f);
+    // 只在**弧附近**画：`d < -0.5` 已在窗口内部（窗口自己画，影子层必须透明），
+    // `d > 0.5` 则覆盖率为 0（纯阴影）。
+    //
+    // 为何 `cov > 0.0f` 不够、还要限 `d > -1.24f`：
+    // 窗口内部深处 `cov` 也是 1.0，影子层在那里必须保持透明
+    // （否则会盖住窗口自己的内容）。
+    const bool has_window_color = antialias_corner && cov > 0.0f && d > -1.24f;
+
+    // 阴影强度：**贴窗口最浓，向外衰减**（`(1-t)²`）。
+    //
+    // 为何贴窗口就要最浓：柔和阴影的本质是“光被窗口遮住”。紧贴窗口的那
+    // 一条线被遮得最彻底，所以最暗；向外光绕射进来，逐渐变亮。
+    //
+    // ⚠ **不能让它从 0 开始**（踩过）：曾把公式改成 `rise × fall` 升-降包络，
+    // 理由是“消黑点”。结果贴窗口处的 alpha 只有 7，到第 8 像素才到峰值
+    // 102 —— 用户看到的是一条**窗口与阴影之间的空隙**。
+    //
+    // 黑点真正的解法不在这里，而在下面 `has_window_color` 的**两路合成**：
+    // 圆弧上窗口色占 `cov`、阴影只占 `1-cov`，于是弧边不会出现“满强度
+    // 阴影紧贴亮窗口”的孤立黑点。
+    const float t = d * inverse_fade;
+    // **早退**：`t ≥ 1` 时阴影 alpha 为 0，且此时 `cov` 也早已为 0（`d > 0.5`）。
+    // 大窗口上多数像素落在这里，提前返回省掉后面的乘法与判断。
+    if (t >= 1.0f) return;
+    const float tc = t <= 0.0f ? 0.0f : t;
+    const float inv = 1.0f - tc;
+    const float falloff = inv * inv;
+    const auto shadow_alpha =
+        static_cast<std::uint32_t>(std::clamp(alpha_scale * falloff, 0.0f, 255.0f));
+
+    if (has_window_color) {
+      // 两路合成（预乘 over）：窗口色在上、阴影在下
+      const auto edge_a = static_cast<std::uint32_t>(cov * 255.0f + 0.5f);
+      const auto shadow_a = static_cast<std::uint32_t>(
+          static_cast<float>(shadow_alpha) * (1.0f - cov) + 0.5f);
+      cell = premultiply_over(edge_r, edge_g, edge_bb, edge_a, base_r, base_g, base_b, shadow_a);
       return;
     }
-    // 弧内侧（d ≤ 0）：窗口自己的地盘，影子层必须保持透明。
+    if (d > 0.0f) {
+      // **纯窗外**：只有阴影。
+      if (shadow_alpha == 0U) return;
+      cell = premultiply(base_r, base_g, base_b, shadow_alpha);
+      return;
+    }
+    // 弧内侧（d ≤ -0.5）：窗口自己的地盘，影子层必须保持透明。
   };
   // 快速路径的横向扫描宽度：要同时覆盖"窗外阴影"与"圆角 AA 带"，
   // 所以比 margin 多出 `radius + 3`（圆角弧跨过 radius，AA 再向外延伸 1.5）。

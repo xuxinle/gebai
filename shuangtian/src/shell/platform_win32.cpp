@@ -763,14 +763,23 @@ class Win32Backend final : public Backend {
     //   也就是把圆角彻底弄没了——比台阶更糟。
     const int radius = corner_radius_physical(geometry, chrome_style_);
     // **DWM 在画圆角时不要自绘裁剪**：两边同时裁会把角裁两次（角被啃掉一块）。
-    // 而且 `SetWindowRgn` 的一位区域本身就是圆角台阶的根源——它是被替换掉的那个东西。
     if (dwm_rounds_corners_) {
       if (applied_corner_radius_ != 0) {
         applied_corner_radius_ = 0;
+        applied_region_width_ = 0;
+        applied_region_height_ = 0;
         ::SetWindowRgn(window_, nullptr, TRUE);   // 撒掉可能存在的旧裁剪
       }
-    } else if (radius != applied_corner_radius_) {
+    } else if (radius != applied_corner_radius_ ||
+               geometry.client_width != applied_region_width_ ||
+               geometry.client_height != applied_region_height_) {
+      // ⚠ **裁剪区必须跟尺寸一起重算**（踩过）：
+      // `CreateRoundRectRgn` 的边界是 `client_width/height`，只判半径会让
+      // 拖动缩放时区域停在旧尺寸。表现：拖动中圆角消失、变直角，
+      // 且四角的透明区与窗口不同步（斜向拖动时特别明显）。
       applied_corner_radius_ = radius;
+      applied_region_width_ = geometry.client_width;
+      applied_region_height_ = geometry.client_height;
       if (radius <= 0) {
         ::SetWindowRgn(window_, nullptr, TRUE);   // 直角：把裁剪区整个撒销
       } else {
@@ -909,6 +918,8 @@ class Win32Backend final : public Backend {
     shadow_cleared_for_ = 0;
     chrome_signature_ = 0;
     applied_corner_radius_ = 0;
+    applied_region_width_ = 0;
+    applied_region_height_ = 0;
   }
 
   /// 按**当前客户区**分配绘制面（收缩后可在调整尺寸/最大化前后复用）。
@@ -1546,8 +1557,23 @@ class Win32Backend final : public Backend {
     const float s = scale_ > 0.0f ? scale_ : 1.0f;
     const auto client_w = static_cast<int>(std::lround(target_w * s));
     const auto client_h = static_cast<int>(std::lround(target_h * s));
-    if (!::SetWindowPos(window_, nullptr, 0, 0, client_w, client_h,
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+
+    // **居中摆放，四周给阴影留余量**。
+    //
+    // 为何不能 `SWP_NOMOVE`（旧写法）：启动时窗口停在 (0,0)，而影子层还要向
+    // 外扩 `shadow_margin`——于是**左、上两侧的阴影整个落在屏幕外**。
+    // 用户看到的现象就是“阴影没有”（实测：启动后影子层在 (-27,-27)，
+    // 左侧与上侧不可见；拖动窗口离开边缘后周围才有余量，阴影就出现了）。
+    //
+    // 工作区本身已排除了任务栏/屏幕边缘，所以居中后四边都有余量。
+    RECT work_rect{};
+    ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_rect, 0);
+    const int work_w = work_rect.right - work_rect.left;
+    const int work_h = work_rect.bottom - work_rect.top;
+    const int x = work_rect.left + std::max(0, (work_w - client_w) / 2);
+    const int y = work_rect.top + std::max(0, (work_h - client_h) / 2);
+    if (!::SetWindowPos(window_, nullptr, x, y, client_w, client_h,
+                        SWP_NOZORDER | SWP_NOACTIVATE)) {
       return unexpected(ErrorCode::Invalid, "SetWindowPos 失败");
     }
     // 改完必须重同步缓冲（与 WM_SIZE 同一条路径）。
@@ -2563,14 +2589,19 @@ class Win32Backend final : public Backend {
           logical_height_exact_ = static_cast<float>(client.bottom) / scale_;
           logical_width_ = std::max(1, static_cast<int>(std::lround(logical_width_exact_)));
           logical_height_ = std::max(1, static_cast<int>(std::lround(logical_height_exact_)));
-          // **立即重绘一帧**（而不是等应用主循环）——拖动期间主循环被系统模态循环
-          // 堵住，这里是唯一的执行机会。见 `repaint_for_resize()` 的说明。
+          // **先跟窗框，再重绘**。
+          //
+          // 顺序很重要（用户实测："缩放拖动时边框慢半拍"）：
+          // `repaint_for_resize()` 会把新尺寸的画面**立即上屏**，而影子层与圆角
+          // 裁剪区是**独立于主窗的**：裁剪区是系统区域，影子层是另一个分层窗口。
+          // 若先上屏再改它们，就会出现"内容已经是新尺寸、阴影还是旧一圈"的
+          // 一帧——拖动时每步都重建，看到的就是持续的慢半拍。
+          //
+          // 位置拖动不受影响，因为那时几何没变，`update_window_chrome()` 几乎
+          // 是空转（签名命中、区域也未变）——这正是"移窗不明显、缩放很明显"的原因。
+          update_window_chrome();
           repaint_for_resize();
         }
-        // 窗框跟随尺寸：圆角裁剪区与影子层都依赖客户区尺寸，必须在这里跟上。
-        // **放在 `repaint_for_resize` 之后**：影窗要读主窗的最新矩形，先重绘再定位
-        // 会让影子晚一帧到位（拖动时能看到阴影拖后一行）。
-        update_window_chrome();
         return 0;
       }
 
@@ -2906,6 +2937,13 @@ class Win32Backend final : public Backend {
   /// 已经应用过的圆角半径（`0` = 直角）。用它判断要不要再调 `SetWindowRgn`
   /// （该 API 会让窗口重算区域并触发重绘，没必要每次都调）。
   int applied_corner_radius_{0};
+  /// 已应用的裁剪区宽高。
+  ///
+  /// 为何要跟半径一起记：`CreateRoundRectRgn` 的边界就是客户区尺寸，
+  /// **只判半径会让拖动缩放时区域停在旧尺寸** —— 表现是拖动中圆角消失变直角、
+  /// 且四角透明区与窗口不同步（斜向拖动尤其明显）。
+  int applied_region_width_{0};
+  int applied_region_height_{0};
   /// 窗口**本体底色**（`0xRRGGBB`），只用于圆角边缘的抗锯齿。
   std::uint32_t chrome_edge_rgb_{0xF7F7FAU};
   /// 圆角是不是由 **DWM** 在画（`DWMWCP_ROUND`）。
