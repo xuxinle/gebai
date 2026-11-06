@@ -15,7 +15,7 @@ import type {
 } from "./types"
 import type { TaskService } from "./task-types"
 
-export type { TaskNotifyChannel, TaskNotifyInput, Task, TaskCreateInput, TaskUpdateInput, TaskService, TaskKind, TaskRunner, TaskQueueView, TaskRunHandle, TaskFileEntry } from "./task-types"
+export type { TaskNotifyChannel, TaskNotifyInput, Task, TaskCreateInput, TaskUpdateInput, TaskService, TaskKind, TaskRunner, TaskQueueView, TaskRunHandle, TaskFileEntry, IdleWindow } from "./task-types"
 
 export interface ToolResult {
   output: string

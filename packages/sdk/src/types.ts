@@ -1,3 +1,5 @@
+import type { IdleWindow } from "./task-types"
+
 export interface AttachmentRef {
   path: string
   mime: string
@@ -342,6 +344,8 @@ export interface UserTodo {
   done: boolean
   /** 是否闲时自动执行（开启后由服务端空闲时自动执行；执行一次即终，失败时服务端关闭本开关）。 */
   idle: boolean
+  /** 闲时执行时间段（开启闲时时生效；缺省=不限时段）。服务端会把它同步到绑定的闲时任务。 */
+  idleWindow?: IdleWindow
   createdAt: number
   updatedAt: number
   /** 绑定的闲时任务 id（开启闲时自动执行时生成，关闭即删除）。 */

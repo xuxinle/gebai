@@ -33,7 +33,7 @@ export function registerTodoRoutes(rc: RouteCtx): void {
     const user = await userOf(c)
     try {
       const body = await c.req.json()
-      return c.json(await d.todos.add(user.id, { text: body?.text, idle: body?.idle === true }), 201)
+      return c.json(await d.todos.add(user.id, { text: body?.text, idle: body?.idle === true, idleWindow: body?.idleWindow }), 201)
     } catch (err) {
       return c.json({ error: String((err as Error).message || err) }, 400)
     }

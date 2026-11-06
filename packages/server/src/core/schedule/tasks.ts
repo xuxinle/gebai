@@ -19,6 +19,7 @@ import { dirname, join, relative, resolve as pathResolve, sep } from "node:path"
 import { mkdir, readFile as readFileFs, readdir, rename, rm, stat, writeFile as writeFileFs } from "node:fs/promises"
 import type {
   AgentEvent,
+  IdleWindow,
   Task,
   TaskCreateInput,
   TaskFileEntry,
@@ -47,6 +48,7 @@ import type { EventBus } from "../base/event-bus"
 import type { NotifyDeps, TaskMessageNotification } from "./notify"
 import { validateNotifyChannel, sendTaskNotification, sendTaskMessage, normalizeAtList, isFeishuChatId, NOTIFY_TEXT_MAX } from "./notify"
 import { isOneShotSchedule, parseSchedule } from "./expr"
+import { describeIdleWindow, isInIdleWindow, nextIdleWindowStart, normalizeIdleWindow } from "./idle-window"
 import { TASK_RUNS_KEEP, importTaskRuns, listTaskRuns, trimTaskRuns, writeTaskRun } from "./task-runs"
 import { mutateJsonList, writeJsonListAtomic } from "../support/json-store"
 import { sessionPath, walkDir } from "../base/paths"
@@ -159,6 +161,8 @@ export class TaskManager {
   private maxConcurrent: number
   /** 本实例是否在跑调度（闸门读 deps，看门狗接管/退让即时生效）。 */
   private schedulerActive: () => boolean
+  /** 用户默认闲时时间段（用户级偏好；未显式指定 idleWindow 的新闲时任务继承它）。 */
+  private defaultIdleWindow: ((user: string) => Promise<IdleWindow | undefined>) | undefined
 
   constructor(private deps: TaskManagerDeps) {
     this.engine = deps.engine
@@ -182,6 +186,14 @@ export class TaskManager {
   /** 注入闲时任务排队顺序（待办联动：用户级待办按清单序执行）。 */
   setIdleOrder(fn: (user: string) => string[] | undefined): void {
     this.deps.idleOrder = fn
+  }
+
+  /**
+   * 注入用户默认闲时时间段（用户级偏好）：**只影响新建**且未显式指定 idleWindow 的闲时任务。
+   * 已有任务不回流——用户改了默认值不应默默改变既有任务的执行时机（那是另一件事，要显式改）。
+   */
+  setDefaultIdleWindow(fn: (user: string) => Promise<IdleWindow | undefined>): void {
+    this.defaultIdleWindow = fn
   }
 
   /** 用户级任务存储文件（users/{user}/tasks.json，随用户目录生命周期，与会话删除/过期解耦）。 */
@@ -346,6 +358,19 @@ export class TaskManager {
         entry.env = undefined
       }
     }
+    // 闲时执行时间段：外部编辑损坏 → 整段丢弃（回到不限时段）而不是拒载任务；
+    // 非闲时任务身上的残留时段同样清除（改类别后的旧字段，否则会在 UI 里误导）
+    if (entry.idleWindow !== undefined) {
+      if (kind !== "idle") entry.idleWindow = undefined
+      else {
+        try {
+          entry.idleWindow = normalizeIdleWindow(entry.idleWindow)
+        } catch {
+          entry.idleWindow = undefined
+          entry.lastError = `${entry.lastError ? `${entry.lastError}；` : ""}idleWindow 非法：启动加载时已清除（回到不限时段）`
+        }
+      }
+    }
     // 执行记录不属任务定义（存于 `task-runs/{taskId}/{时间}.json`）：剥离旧数据的 `runs` 字段——
     // 它仅在启动迁移时由 loadUser 从磁盘原文读取，不会经归一化流入内存态与落盘
     if ("runs" in entry) delete (entry as { runs?: unknown }).runs
@@ -453,6 +478,16 @@ export class TaskManager {
       if (isOneShotSchedule(schedule) && parsed.next(now) <= now) throw new Error("@at 时间已过去（一次性任务请指定未来时间）")
       entry.nextRunAt = parsed.next(now)
     }
+    // 闲时执行时间段：只有闲时任务有意义（其他类别没有「何时算闲时」这个问题）。
+    // 未显式指定时继承用户默认时段（在用户级偏好里设一次，覆盖之后所有新闲时任务）。
+    if (kind === "idle") {
+      const explicit = input.idleWindow !== undefined ? normalizeIdleWindow(input.idleWindow) : undefined
+      const inherited = explicit ? undefined : await this.defaultIdleWindow?.(user).catch(() => undefined)
+      const window = explicit ?? inherited
+      if (window) entry.idleWindow = window
+    } else if (input.idleWindow !== undefined) {
+      throw new Error("只有闲时任务（kind=idle）可以设置执行时间段（idleWindow）")
+    }
     if (input.runner === "prompt") {
       const target = this.validateTarget(input.target)
       entry.target = target
@@ -488,6 +523,11 @@ export class TaskManager {
     }
     if (patch.timezone !== undefined) entry.timezone = patch.timezone ? String(patch.timezone).trim() : undefined
     if (patch.misfire !== undefined) entry.misfire = patch.misfire === "run" ? "run" : "skip"
+    if (patch.idleWindow !== undefined) {
+      if (entry.kind !== "idle") throw new Error("只有闲时任务（kind=idle）可以设置执行时间段（idleWindow）")
+      // null = 清除（回到不限时段）
+      entry.idleWindow = patch.idleWindow === null ? undefined : normalizeIdleWindow(patch.idleWindow)
+    }
     // 闲时任务无触发时刻：nextRunAt 不参与调度（单次执行即终，由 enabled 表达可执行性）
     if (entry.kind === "idle") entry.nextRunAt = undefined
     if (patch.target !== undefined || patch.sessionId !== undefined || patch.runner !== undefined) {
@@ -753,7 +793,11 @@ export class TaskManager {
       idles.sort((a, b) => rank(a) - rank(b) || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
       // 已入队的闲时条目保持既有相对序（enqueuedAt 依次递增，排序稳定）
       let offset = 0
-      for (const e of idles) await this.pushQueueItem(e, "idle", now + offset++)
+      for (const e of idles) {
+        // 逐任务判执行时间段：不同闲时任务可以有不同时段（如「夜间」与「仅周末」）
+        if (this.idleWindowBlock(e, now)) continue
+        await this.pushQueueItem(e, "idle", now + offset++)
+      }
     }
   }
 
@@ -835,7 +879,13 @@ export class TaskManager {
     return n
   }
 
-  /** 闲时任务可执行判定：队列中无定时/普通条目、其任务无运行中、当前无闲时任务在跑、该用户无运行中的会话。 */
+  /**
+   * 闲时任务可执行判定：队列中无定时/普通条目、其任务无运行中、当前无闲时任务在跑、
+   * 该用户无运行中的会话。
+   *
+   * 注意：这里**不判执行时间段**——时间段是"哪些任务可进场"的属性（不同任务可以有
+   * 不同时段），放在 `enqueueIdle` 逐任务判。本方法只回答"这个用户现在整体上是不闲的"。
+   */
   private idleEligible(user: string): boolean {
     for (const q of this.queue) if (q.user === user && q.kind !== "idle") return false
     for (const e of this.entries.values()) {
@@ -846,10 +896,23 @@ export class TaskManager {
     return true
   }
 
+  /**
+   * 单个闲时任务的启动前判定：是否落在它自己的执行时间段内（未设时段 = 不限）。
+   * 返回 `undefined` 表示可跑；否则返回等待原因（写入队视图，用户能看到「为什么没跑」）。
+   */
+  private idleWindowBlock(entry: Task, now: number): string | undefined {
+    if (entry.kind !== "idle" || !entry.idleWindow) return undefined
+    if (isInIdleWindow(entry.idleWindow, now)) return undefined
+    const next = nextIdleWindowStart(entry.idleWindow, now)
+    const when = next ? new Date(next).toLocaleString("zh-CN") : "（无法算出下次时段，请检查时段设置）"
+    return `不在闲时执行时间段（${describeIdleWindow(entry.idleWindow)}），下次 ${when}`
+  }
+
   /** 队列视图（额度、运行中、排队顺序）。 */
   queueView(user: string): TaskQueueView {
+    const now = this.now()
     const items = this.queueOf(user)
-    const entries: TaskQueueEntry[] = items.map((it, i) => {
+    const queueEntries: TaskQueueEntry[] = items.map((it, i) => {
       const e = this.entries.get(it.taskId)
       return {
         taskId: it.taskId,
@@ -878,7 +941,42 @@ export class TaskManager {
         startedAt: e.startedAt ?? 0,
       })
     }
-    return { user, limit: this.maxConcurrent, running, entries, busy: items.some((it) => it.kind !== "idle") || running.some((r) => r.kind !== "idle") }
+    return {
+      user,
+      limit: this.maxConcurrent,
+      running,
+      entries: queueEntries,
+      busy: items.some((it) => it.kind !== "idle") || running.some((r) => r.kind !== "idle"),
+      idle: this.idleStatus(user, now),
+    }
+  }
+
+  /**
+   * 闲时通道现状（后端算好给前端直接展示——前端不自算「为什么没跑」）：
+   * 用户现在整体是否空闲、以及每个已开启时段限制的闲时任务何时能跑。
+   */
+  private idleStatus(user: string, now: number): TaskQueueView["idle"] {
+    const idles = [...this.entries.values()].filter((e) => e.user === user && e.kind === "idle" && e.enabled)
+    const pending = idles.filter((e) => e.state === "idle")
+    const blocked = pending
+      .map((e) => ({ taskId: e.id, name: e.name, reason: this.idleWindowBlock(e, now) }))
+      .filter((x): x is { taskId: string; name: string | undefined; reason: string } => !!x.reason)
+    // 「何时能跑」：所有被时段拦下的任务里最早的那个进入时间（已是可跑则不报）
+    let nextOpenAt: number | undefined
+    for (const e of pending) {
+      if (!this.idleWindowBlock(e, now)) {
+        nextOpenAt = now
+        break
+      }
+      const next = nextIdleWindowStart(e.idleWindow, now)
+      if (next !== undefined && next !== null && (nextOpenAt === undefined || next < nextOpenAt)) nextOpenAt = next
+    }
+    return {
+      enabled: idles.length > 0,
+      eligible: this.idleEligible(user),
+      nextOpenAt,
+      blocked,
+    }
   }
 
   /** 任务的目标会话（队列视图展示用）。 */
@@ -942,7 +1040,21 @@ export class TaskManager {
       this.dropQueueItem(item.taskId)
       return "dropped"
     }
-    if (entry.kind === "idle" && !this.idleEligible(entry.user)) return "deferred"
+    if (entry.kind === "idle") {
+      if (!this.idleEligible(entry.user)) return "deferred"
+      // 执行时间段**只约束自动调度进场**（source=idle）：任务可能在队列里等过了时段边界
+      // （比如 06:00 已过），启动前再判一次。
+      // 手动执行（source=manual/todo）不判：用户点「执行」是明确意图，与「自动调度」不是一回事；
+      // 要是不放行，用户就会看到「点了执行却不动」这种无法自行解决的状态。
+      if (item.source === "idle") {
+        const blocked = this.idleWindowBlock(entry, this.now())
+        if (blocked) {
+          item.waiting = blocked
+          return "deferred"
+        }
+      }
+      item.waiting = undefined
+    }
     const manual = item.source === "manual" || item.source === "todo"
     const startedAt = this.now()
     let sessionId: string | undefined

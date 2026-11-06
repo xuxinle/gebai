@@ -18,6 +18,8 @@ import { randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { join, relative, sep } from "node:path"
 import type { Task, TaskRunRecord } from "@gebai/sdk"
+import type { IdleWindow } from "@gebai/sdk"
+import { normalizeIdleWindow } from "./idle-window"
 import { walkDir } from "../base/paths"
 import { mutateJsonList } from "../support/json-store"
 import type { SessionStore } from "../session/store"
@@ -48,6 +50,8 @@ export interface UserTodo {
   done: boolean
   /** 是否闲时自动执行（开启后由服务端空闲时自动执行）。 */
   idle: boolean
+  /** 闲时执行时间段（开启闲时时生效；缺省=不限时段）。与绑定任务的 `idleWindow` 保持同步。 */
+  idleWindow?: IdleWindow
   createdAt: number
   updatedAt: number
   /** 绑定的闲时任务 id（开启闲时自动执行时生成，关闭即删除）。 */
@@ -71,6 +75,8 @@ export interface UserTodoCreateInput {
   text: string
   /** 是否闲时自动执行（缺省 false）。 */
   idle?: boolean
+  /** 闲时执行时间段（仅 idle=true 时生效）。 */
+  idleWindow?: IdleWindow
 }
 
 /** 更新输入（字段缺省即不改动）。 */
@@ -78,6 +84,8 @@ export interface UserTodoUpdateInput {
   text?: string
   done?: boolean
   idle?: boolean
+  /** 传 null 清除（回到不限时段）；不传则不改动。 */
+  idleWindow?: IdleWindow | null
 }
 
 /** 手动执行结果（入队形态）。 */
@@ -102,6 +110,15 @@ export interface UserTodoManagerDeps {
   tasks?: TaskManager
   /** 可注入时钟（测试用），默认 Date.now。 */
   now?: () => number
+}
+
+/** 宽松归一（加载/落盘路径用）：非法值返回 undefined（清除），不抛错。 */
+function safeIdleWindow(raw: unknown): IdleWindow | undefined {
+  try {
+    return normalizeIdleWindow(raw)
+  } catch {
+    return undefined
+  }
 }
 
 /** 取待办摘要（任务名/会话标题用）：首行 + 截断。 */
@@ -199,6 +216,8 @@ export class UserTodoManager {
       ...(typeof e.idleRunAt === "number" ? { idleRunAt: e.idleRunAt } : {}),
       ...(typeof e.idleSessionId === "string" ? { idleSessionId: e.idleSessionId } : {}),
       ...(typeof e.idleResult === "string" ? { idleResult: e.idleResult } : {}),
+      // 闲时执行时间段：外部编辑损坏 → 清除（回到不限时段），不拒载整条待办
+      ...(e.idleWindow !== undefined ? { idleWindow: safeIdleWindow(e.idleWindow) } : {}),
     }
   }
 
@@ -224,6 +243,7 @@ export class UserTodoManager {
     const text = this.normalizeText(input?.text)
     const now = this.now()
     const idle = input?.idle === true
+    const idleWindow = input?.idleWindow !== undefined ? normalizeIdleWindow(input.idleWindow) : undefined
     const entry: UserTodo = {
       id: randomUUID().replace(/-/g, ""),
       user,
@@ -233,6 +253,7 @@ export class UserTodoManager {
       createdAt: now,
       updatedAt: now,
       ...(idle ? { idleState: "pending" as const, idleAttempts: 0 } : {}),
+      ...(idle && idleWindow ? { idleWindow } : {}),
     }
     // 条数上限以**磁盘真值**判定（多实例并存时本进程镜像可能偏少）
     await this.persist(user, (disk) => {
@@ -267,6 +288,10 @@ export class UserTodoManager {
           next.idleState = undefined
           next.idleError = undefined
         }
+      }
+      if (patch?.idleWindow !== undefined) {
+        // null = 清除（回到不限时段）；非法值直接抛错（用户正在改，应该知道写错了）
+        next.idleWindow = patch.idleWindow === null ? undefined : normalizeIdleWindow(patch.idleWindow)
       }
       next.updatedAt = updatedAt
       return next
@@ -428,7 +453,7 @@ export class UserTodoManager {
     await this.ensureIdleTask(todo)
   }
 
-  /** 确保待办有可用的绑定闲时任务（惰性创建；文本/启用状态与待办同步），返回任务 id。 */
+  /** 确保待办有可用的绑定闲时任务（惰性创建；文本/启用状态/执行时间段与待办同步），返回任务 id。 */
   private async ensureIdleTask(todo: UserTodo): Promise<string | undefined> {
     const tasks = this.tasks
     if (!tasks) return undefined
@@ -436,11 +461,15 @@ export class UserTodoManager {
     if (todo.idleTaskId) {
       const existing = await tasks.get(todo.user, todo.idleTaskId)
       if (existing) {
-        const patch: { prompt?: string; enabled?: boolean; timeoutMs?: number } = {}
+        const patch: { prompt?: string; enabled?: boolean; timeoutMs?: number; idleWindow?: IdleWindow | null } = {}
         if (existing.prompt !== todo.text) patch.prompt = todo.text
         if (!existing.enabled) patch.enabled = true
         // 超时统一为待办闲时缺省（3 小时）：旧任务在重新开启时校正
         if (existing.timeoutMs !== TODO_IDLE_TIMEOUT_MS) patch.timeoutMs = TODO_IDLE_TIMEOUT_MS
+        // 执行时间段单向同步（待办是真值源）：待办取消时段就传递 null 清掉任务上的旧时段
+        const want = todo.idleWindow
+        const have = existing.idleWindow
+        if (JSON.stringify(want ?? null) !== JSON.stringify(have ?? null)) patch.idleWindow = want ?? null
         if (Object.keys(patch).length) await tasks.update(todo.user, existing.id, patch).catch(() => {})
         return existing.id
       }
@@ -453,6 +482,7 @@ export class UserTodoManager {
       target: "ephemeral",
       todoId: todo.id,
       timeoutMs: TODO_IDLE_TIMEOUT_MS,
+      ...(todo.idleWindow ? { idleWindow: todo.idleWindow } : {}),
       enabled: true,
     })
     await this.persist(todo.user, (disk) => disk.map((e) => (e.id === todo.id ? { ...e, idleTaskId: created.id } : e)))

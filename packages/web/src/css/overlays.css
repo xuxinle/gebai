@@ -1043,6 +1043,38 @@
 .tasks-form input, .tasks-form select, .tasks-form textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .tasks-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
 .tasks-check input { width: auto; }
+/* 闲时执行时间段控件组（任务面板表单 / 待办弹窗 / 偏好设置三处共用，见 idle-window-ui.ts） */
+.tasks-idlewin { display: flex; flex-direction: column; gap: 6px; }
+.tasks-idlewin-toggle { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); cursor: pointer; }
+.tasks-idlewin-toggle input { width: auto; }
+.tasks-idlewin-detail { display: flex; flex-direction: column; gap: 6px; }
+.tasks-idlewin-detail[hidden] { display: none; }
+.tasks-idlewin-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tasks-idlewin-sep { font-size: 12px; color: var(--text-muted); }
+.tasks-idlewin-time { width: 76px !important; text-align: center; font-family: var(--font-mono); }
+.tasks-idlewin-tz { font-size: 12px; }
+.tasks-idlewin-days { display: flex; gap: 4px; flex-wrap: wrap; }
+.tasks-idlewin-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.tasks-idlewin-day input { width: auto; display: none; }
+.tasks-idlewin-day:has(input:checked) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.tasks-idlewin-desc { font-size: 12px; color: var(--text-muted); }
+.tasks-idlewin-desc.bad { color: var(--danger); }
+.tasks-idlewin.compact .tasks-idlewin-time { width: 64px !important; }
+/* 待办弹窗里的时段对话框：比默认确认卡宽一点（星期排得下） */
+.idlewin-card { width: min(460px, 92vw); }
+.idlewin-err { min-height: 16px; font-size: 12px; color: var(--danger); }
+/* 本卡里的「保存」不是危险操作：confirm-ok 默认是危险红（删东西用），放在这里会让人以为点下去要摧毁什么。用主色。 */
+.idlewin-card .confirm-actions .confirm-ok { background: var(--accent); border-color: var(--accent); color: #fff; }
 .tasks-form-actions { display: flex; gap: 8px; margin-top: 4px; }
 @media (max-width: 640px) {
   .tasks-form-grid { grid-template-columns: minmax(0, 1fr); }

@@ -42,6 +42,7 @@ import {
   type KindFilter,
   type TaskFormValues,
 } from "./tasks-core"
+import { createIdleWindowFields, type IdleWindowFields } from "./idle-window-ui"
 
 /** 面板打开期间兜底轮询间隔（事件为主，轮询只防漏）。 */
 const POLL_MS = 15_000
@@ -319,6 +320,8 @@ interface EditorRefs {
   schedule: HTMLInputElement
   timezone: HTMLInputElement
   misfire: HTMLSelectElement
+  /** 闲时时间段控件组（get() 读当前表单值）。 */
+  idleWindow: IdleWindowFields
   script: HTMLTextAreaElement
   prompt: HTMLTextAreaElement
   target: HTMLSelectElement
@@ -389,6 +392,7 @@ function collectForm(r: EditorRefs): TaskFormValues {
     schedule: r.schedule.value,
     timezone: r.timezone.value,
     misfire: r.misfire.value as TaskFormValues["misfire"],
+    idleWindow: r.idleWindow.get(),
     script: r.script.value,
     prompt: r.prompt.value,
     target: r.target.value as TaskFormValues["target"],
@@ -450,6 +454,13 @@ function buildEditor(): HTMLElement {
   )
   refs.fields.misfire = field("停机补跑", refs.misfire)
 
+  // 闲时执行时间段（仅 kind=idle）：用一组控件而非手写文本——时段是最容易写错的东西
+  // （跨零点、星期归属、时区），表单控件把错拦在提交前，后端再做一次权威校验。
+  const idleBox = createIdleWindowFields(base.idleWindow)
+  refs.idleWindow = idleBox
+  // 提示是纯文本节点（不渲染 Markdown）：用「」而不是星号强调，否则星号会原样露出来
+  refs.fields.idleWindow = field("闲时执行时间段", idleBox.root, "只在这个时间段内才跑（队列空闲且落在时段内）；用来把吃算力/耗 token 的活排到夜间或周末（谷价 token）。开始>结束 = 跨零点（22:00–06:00 即当晚到次日凌晨）；星期指时段的「开始那天」，跨零点的凌晨算前一天那一场")
+
   refs.script = textArea(base.script, 4, "bash run.sh（相对路径基于任务资源目录）")
   refs.fields.script = field("脚本命令", refs.script)
   refs.prompt = textArea(base.prompt, 5, "要交给 Agent 完成的提示词")
@@ -504,6 +515,7 @@ function buildEditor(): HTMLElement {
     refs.fields.schedule.hidden = kind !== "scheduled"
     refs.fields.timezone.hidden = kind !== "scheduled"
     refs.fields.misfire.hidden = kind !== "scheduled"
+    refs.fields.idleWindow.hidden = kind !== "idle"
     refs.fields.script.hidden = runner !== "script"
     refs.fields.prompt.hidden = runner !== "prompt"
     refs.fields.target.hidden = runner !== "prompt"
@@ -517,7 +529,7 @@ function buildEditor(): HTMLElement {
   refs.target.addEventListener("change", syncVisible)
 
   const grid = el("div", "tasks-form-grid")
-  for (const key of ["kind", "runner", "name", "schedule", "timezone", "misfire", "target", "sessionId", "agents", "timeoutMs", "maxConsecutiveErrors", "notifyOn"]) {
+  for (const key of ["kind", "runner", "name", "schedule", "timezone", "misfire", "idleWindow", "target", "sessionId", "agents", "timeoutMs", "maxConsecutiveErrors", "notifyOn"]) {
     grid.appendChild(refs.fields[key])
   }
   const wide = el("div", "tasks-form-wide")

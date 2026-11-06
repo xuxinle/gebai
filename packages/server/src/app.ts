@@ -24,6 +24,7 @@ import { registerSessionFileRoutes } from "./routes/session-files"
 import { registerToolRoutes } from "./routes/tools"
 import { registerTaskRoutes } from "./routes/tasks"
 import { registerTodoRoutes } from "./routes/todos"
+import { registerPrefsRoutes } from "./routes/prefs"
 import { registerFeedbackRoutes, registerWebhookRoutes } from "./routes/misc"
 import { registerDocsRoutes } from "./routes/docs"
 import { registerStaticRoutes } from "./routes/static"
@@ -52,6 +53,8 @@ export interface AppDeps {
   tasks?: import("./core/schedule/tasks").TaskManager | null
   /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时不启动，为 null——REST 返回 503）。 */
   todos?: import("./core/schedule/todos").UserTodoManager | null
+  /** 用户级偏好（users/{user}/prefs.json：默认闲时时段等，**后端为真值**）。 */
+  prefs?: import("./core/schedule/prefs").UserPrefsManager
   /** 外部身份验证器（GEBAI_EXTERNAL_AUTH_* 配置；未配置为 null）。 */
   externalAuth: ExternalAuthProvider | null
   /**
@@ -229,6 +232,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerToolRoutes(rc)
   registerTaskRoutes(rc)
   registerTodoRoutes(rc)
+  registerPrefsRoutes(rc)
   registerFeedbackRoutes(rc)
   registerWebhookRoutes(rc)
   // 文件工作台（DESIGN「文件工作台」）：根清单 / 文件操作 / Git。注册在 static 之前——

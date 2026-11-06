@@ -24,7 +24,8 @@ import type {
   WsSnapshot,
   RuntimeSessionInfo,
 } from "./types"
-import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskRunRecord, TaskUpdateInput } from "./task-types"
+import type { IdleWindow, Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskRunRecord, TaskUpdateInput } from "./task-types"
+import type { UserPrefs } from "./prefs-types"
 import { appPath, docLocation, resolveWsUrl } from "./app-base"
 import { requestHeaders } from "./auth-contract"
 
@@ -866,12 +867,14 @@ export class GebaiClient {
   listUserTodos(): Promise<UserTodo[]> {
     return this.get<UserTodo[]>("/api/v1/todos")
   }
-  /** 新增待办（idle=true 表示闲时自动执行：服务端空闲时按清单顺序执行一次；失败关闭该标记）。 */
-  createUserTodo(input: { text: string; idle?: boolean }): Promise<UserTodo> {
+  /** 新增待办（idle=true 表示闲时自动执行：服务端空闲时按清单顺序执行一次；失败关闭该标记）。
+   *  idleWindow 指定闲时执行时间段（缺省继承用户默认时段）。 */
+  createUserTodo(input: { text: string; idle?: boolean; idleWindow?: IdleWindow }): Promise<UserTodo> {
     return this.post<UserTodo>("/api/v1/todos", input)
   }
-  /** 修改待办（文本/完成/闲时标记；开启闲时即重置状态，下次队列空闲执行一次）。 */
-  updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean }): Promise<UserTodo> {
+  /** 修改待办（文本/完成/闲时标记/执行时间段；开启闲时即重置状态，下次队列空闲执行一次）。
+   *  `idleWindow: null` 清除时段（回到不限），不传则不改动。 */
+  updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean; idleWindow?: IdleWindow | null }): Promise<UserTodo> {
     return fetch(this.apiUrl(`/api/v1/todos/${id}`), {
       method: "PATCH",
       headers: this.headers(),
@@ -898,6 +901,23 @@ export class GebaiClient {
   /** 立即执行待办：**入队**跑一次（不新建会话、不占额外语义；返回队列位置供提示）。 */
   runUserTodo(id: string, opts?: { front?: boolean }): Promise<{ todo: UserTodo; queued: boolean; position?: number; reason?: string }> {
     return this.post<{ todo: UserTodo; queued: boolean; position?: number; reason?: string }>(`/api/v1/todos/${id}/run`, opts ?? {})
+  }
+
+  // ---- 用户级偏好（REST /api/v1/prefs；**后端为真值**，跨设备一致） ----
+  /** 读用户级偏好（默认闲时执行时间段等）。 */
+  getUserPrefs(): Promise<UserPrefs> {
+    return this.get<UserPrefs>("/api/v1/prefs")
+  }
+  /** 更新用户级偏好（浅合并；`idleWindow: null` 清除默认时段）。 */
+  updateUserPrefs(patch: { idleWindow?: IdleWindow | null }): Promise<UserPrefs> {
+    return fetch(this.apiUrl("/api/v1/prefs"), {
+      method: "PATCH",
+      headers: this.headers(),
+      body: JSON.stringify(patch),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+      return (await res.json()) as UserPrefs
+    })
   }
 
   // ---- 统一任务（定时/普通/闲时，REST /api/v1/tasks） ----

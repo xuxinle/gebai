@@ -8,6 +8,7 @@
  */
 export * from "./types"
 export * from "./task-types"
+export * from "./prefs-types"
 export * from "./agent-contract"
 export * from "./symbol-grammar"
 export * from "./file-language"

@@ -152,10 +152,10 @@ export async function readJsonList<T>(file: string, normalize: (raw: unknown) =>
   }
 }
 
-/** 现值是否含实际内容（本模块写入的都是 JSON 数组：空数组/空串/null 视为无内容，不作备份）。 */
+/** 现值是否含实际内容（本模块写入的都是 JSON：空容器/空串/null 视为无内容，不作备份）。 */
 function hasContent(raw: string): boolean {
   const s = raw.trim()
-  return s !== "" && s !== "[]" && s !== "null"
+  return s !== "" && s !== "[]" && s !== "{}" && s !== "null"
 }
 
 /** 临时文件名序号（同进程内并发写同一文件时避免 tmp 碰撞）。 */
@@ -194,6 +194,65 @@ export async function writeJsonListAtomic<T>(file: string, data: T[], opts: { ba
     await unlink(tmp).catch(() => {})
     throw err
   }
+}
+
+/** 原子写任意 JSON 值（临时文件写全 + rename 替换 + 备份；仅接受对象/数组）。
+ *  与 `writeJsonListAtomic` 共用同一条原子写与备份路径，只是不限定数组。 */
+async function writeJsonValueAtomic(file: string, data: unknown, opts: { backup?: boolean } = {}): Promise<void> {
+  await mkdir(dirname(file), { recursive: true })
+  const body = JSON.stringify(data, null, 2)
+  const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`
+  try {
+    await writeFile(tmp, body, "utf8")
+    if (opts.backup !== false) {
+      const cur = await readFile(file, "utf8").catch(() => null)
+      if (cur !== null && hasContent(cur) && cur !== body) await writeFile(`${file}.bak`, cur, "utf8").catch(() => {})
+    }
+    await renameWithRetry(tmp, file)
+  } catch (err) {
+    await unlink(tmp).catch(() => {})
+    throw err
+  }
+}
+
+/** 读磁盘上的 JSON 对象真值（缺文件/损坏/非对象 → 空对象）。 */
+export async function readJsonObject(file: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse((await readFile(file, "utf8")).replace(/^\uFEFF/, ""))
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 对象型 JSON 的 RMW（与 `mutateJsonList` 同一套保障：跨进程写锁 + 写前复核 + 原子写 + 滚动备份）。
+ * 用户级偏好（`users/{user}/prefs.json`）这类“一整份配置”的文件用它，别用列表版自己拆装。
+ */
+export async function mutateJsonObject<T extends object>(
+  file: string,
+  mutate: (disk: Record<string, unknown>) => T | Promise<T>,
+  opts: { retries?: number; backup?: boolean } & FileLockOptions = {},
+): Promise<T> {
+  const retries = opts.retries ?? JSON_RMW_RETRIES
+  return await withFileLock(
+    `${file}.lock`,
+    async () => {
+      for (let attempt = 0; attempt < retries; attempt++) {
+        const before = await statOrNull(file)
+        const disk = await readJsonObject(file)
+        const next = await mutate(disk)
+        if (JSON.stringify(disk) === JSON.stringify(next)) return next as T
+        // 写前复核：期间被非协作写者改动 → 重读重试，避免覆盖别人的新内容
+        const after = await statOrNull(file)
+        if (before && after && (before.mtimeMs !== after.mtimeMs || before.size !== after.size)) continue
+        await writeJsonValueAtomic(file, next, { backup: opts.backup })
+        return next as T
+      }
+      throw new Error(`并发写入冲突，已重试 ${retries} 次仍失败：${file}`)
+    },
+    opts,
+  )
 }
 
 /** RMW 参数。 */

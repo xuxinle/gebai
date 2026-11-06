@@ -1,6 +1,6 @@
 import type { ToolSchema } from "@gebai/sdk"
 import type { SubAgentDef, Tool } from "@gebai/sdk"
-import type { TaskNotifyChannel } from "@gebai/sdk"
+import type { IdleWindow, TaskNotifyChannel } from "@gebai/sdk"
 
 function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
   return { type: "object", properties, required }
@@ -15,6 +15,7 @@ export const systemPrompt =
   "1) kind=scheduled（定时任务）：按 schedule 表达式到期自动执行；\n" +
   "2) kind=manual（普通任务）：创建即入队（run_now，缺省 true）按顺序执行，也可随时 task_run 再次入队；\n" +
   "3) kind=idle（闲时任务）：仅在队列空闲（无排队/运行的定时与普通任务）且该用户没有运行中的会话时执行，同时只跑一个；**一次执行即终**——成功或失败/超时都停用，不自动重试（失败原因留在 lastError，重新启用即恢复），缺省单次执行超时 3 小时。\n" +
+  "   idle 可配 **idle_window 执行时间段**（{start,end,days?,timezone?}）：只在这个时段内才跑——把吃算力/耗 token 的活排到夜间或周末（谷价 token）。start>end 表示跨零点（22:00–06:00 是最常见的写法），start===end 视为全天，days 是窗口开始那天的星期（跨零点的凌晨算前一天那一场）。**用户提到「夜里跑」「周报周末发」「谷价时段」这类需求时就该设 idle_window**，不要只建个不限时段的闲时任务。\n" +
   "工具经本子Agent 命名空间暴露：task_add 创建、task_list 查看、task_update 修改、task_run 手动执行、task_cancel 取消/终止、task_remove 删除、task_files 任务资源文件、task_notify 主动推送通知。\n" +
   "执行体 runner 二选一（三类任务通用）：\n" +
   "- script（脚本运行）：shell 命令在**任务资源目录**（users/{用户}/tasks/{任务id}/）以用户环境执行，产物写在该目录跨次保留，结果写入任务历史并可选通知；\n" +
@@ -85,12 +86,51 @@ function parseEnv(raw: unknown): Record<string, string> | undefined {
 }
 
 /** env 参数 schema（add/update 共用）。 */
-function envParam(): Record<string, unknown> {
-  return {
+function envParam(): Record<string, unknown> {  return {
     type: "object",
     additionalProperties: { type: "string" },
     description:
       "任务级环境变量（可选，服务端持久化于任务定义，每次执行注入）：脚本型注进子进程环境、提示词型注入执行会话的任务 env（模型与子Agent 一并生效），优先级高于进程全局与会话环境；无人值守运行不依赖浏览器本地注入。敏感键名的值加密落盘（AES-256-GCM）、回显为掩码 `***`——**掩码原样回传即保留原值**（只改其它项时不要为敏感项填新值）；传空对象 {} 清除。",
+  }
+}
+
+/** 闲时执行时间段参数 schema（add/update 共用；update 可传 null 清除）。 */
+function idleWindowParam(forUpdate = false): Record<string, unknown> {
+  return {
+    type: ["object", "null"],
+    description:
+      "kind=idle：闲时执行时间段（可选，缺省=不限时段，队列空闲即执行）。把「什么时候算闲时」从「队列空闲即可」细化到「**同时**落在该时间段内」——用来把吃算力/耗 token 的活排到夜间或周末（谷价 token）。" +
+      "形如 {\"start\":\"22:00\",\"end\":\"06:00\",\"days\":[1,2,3,4,5]}：" +
+      "start>end 表示**跨零点**（22:00–06:00 即当今夜到次日凌晨，最常见的用法）；start===end 视为全天；" +
+      "days 为窗口**开始那天**的星期（0=周日，跨零点窗口的凌晨算前一天那一场；不传=每天）；timezone 缺省服务器本地时区。" +
+      (forUpdate ? "传 null（或 {}）清除，回到不限时段；不传则不改动。" : ""),
+    properties: {
+      start: { type: "string", description: "窗口开始 HH:MM" },
+      end: { type: "string", description: "窗口结束 HH:MM（小于 start 表示跨零点）" },
+      days: { type: "array", items: { type: "number" }, description: "允许的星期（0=周日），不传=每天" },
+      timezone: { type: "string", description: "IANA 时区（缺省服务器本地）" },
+    },
+    required: ["start", "end"],
+  }
+}
+
+/** 解析 idle_window 参数：{}/null 表示清除（仅 update 有意义）；非法交给服务端统一校验报错。 */
+function parseIdleWindow(raw: unknown, forUpdate = false): IdleWindow | null | undefined {
+  if (raw === undefined) return undefined
+  if (raw === null) return forUpdate ? null : undefined
+  if (typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw as object).length === 0) return forUpdate ? null : undefined
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("idle_window 须为 { start, end, days?, timezone? } 对象")
+  // 字段名归一（模型可能写成下划线/大写）：其余校验与归一化统一在服务端 normalizeIdleWindow
+  const w = raw as Record<string, unknown>
+  const pick = (...keys: string[]): unknown => {
+    for (const k of keys) if (w[k] !== undefined) return w[k]
+    return undefined
+  }
+  return {
+    start: String(pick("start", "from") ?? ""),
+    end: String(pick("end", "to") ?? ""),
+    ...(pick("days", "weekdays") !== undefined ? { days: pick("days", "weekdays") as number[] } : {}),
+    ...(pick("timezone", "tz") !== undefined ? { timezone: String(pick("timezone", "tz")) } : {}),
   }
 }
 
@@ -145,6 +185,7 @@ const add: Tool = {
       schedule: { type: "string", description: "kind=scheduled 执行表达式（5 段 cron / @every 30m / @daily / @at <时间>）" },
       timezone: { type: "string", description: "IANA 时区（如 Asia/Shanghai；缺省服务器本地时区）" },
       misfire: { enum: ["skip", "run"], description: "停机错过触发的补跑策略（缺省 skip）" },
+      idle_window: idleWindowParam(),
       script: { type: "string", description: "runner=script：shell 命令（在任务资源目录执行）" },
       prompt: { type: "string", description: "runner=prompt：触发 agent 运行的提示词" },
       target: { enum: ["ephemeral", "sticky", "session"], description: "runner=prompt 执行目标（缺省 ephemeral=每次新建会话；sticky=专用会话复用；session=绑定既有会话）" },
@@ -170,6 +211,7 @@ const add: Tool = {
       schedule: args.schedule != null ? String(args.schedule) : undefined,
       timezone: args.timezone != null ? String(args.timezone) : undefined,
       misfire: args.misfire != null ? (String(args.misfire) as "skip" | "run") : undefined,
+      idleWindow: parseIdleWindow(args.idle_window) ?? undefined,
       script: args.script != null ? String(args.script) : undefined,
       prompt: args.prompt != null ? String(args.prompt) : undefined,
       target: args.target != null ? (String(args.target) as "ephemeral" | "sticky" | "session") : undefined,
@@ -227,6 +269,7 @@ const update: Tool = {
       schedule: { type: "string", description: "新执行表达式（仅 kind=scheduled）" },
       timezone: { type: "string", description: "新时区（空串清除=用服务器本地时区）" },
       misfire: { enum: ["skip", "run"], description: "错过补跑策略" },
+      idle_window: idleWindowParam(true),
       target: { enum: ["ephemeral", "sticky", "session"], description: "执行目标" },
       session_id: { type: "string", description: "target=session 绑定的会话 id" },
       agents: { type: "array", description: "预载子Agent 名单（空数组清除）", items: { type: "string" } },
@@ -257,6 +300,8 @@ const update: Tool = {
       maxConsecutiveErrors: args.max_consecutive_errors != null ? Number(args.max_consecutive_errors) : undefined,
       notifyOn: args.notify_on != null ? (String(args.notify_on) as "auto" | "model") : undefined,
       notify: parseNotify(args.notify),
+      // task_update：idle_window 不传 = 不改动；传 null 或 {} = 清除（回到不限时段）
+      ...(args.idle_window !== undefined ? { idleWindow: parseIdleWindow(args.idle_window, true) } : {}),
     })
     if (!task) return { output: `任务不存在: ${args.id}` }
     return { output: `任务已更新:\n${taskLine(task)}` }

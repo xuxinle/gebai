@@ -20,6 +20,8 @@ import { autosize, syncSendButton } from "./composer"
 import { clampPos, defaultPos, dropTargetIndex, moveItem, parsePos, type PopPos } from "./todo-core"
 import { client, el, focusInput, input } from "./state"
 import { confirmDialog, toast } from "./ui"
+import { describeIdleWindow } from "./idle-window-core"
+import { askIdleWindow } from "./idle-window-ui"
 
 const POS_KEY = "gebai.ui.todo.pos"
 const OPEN_KEY = "gebai.ui.todo.open"
@@ -39,6 +41,9 @@ const ICON = {
   down: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12l7 7 7-7"/></svg>',
   /** 绘制的加号（新增待办提交按钮）。 */
   add: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>',
+  /** 时钟（执行时间段）。 */
+  schedule:
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
 } as const
 
 interface TodoPopRefs {
@@ -116,7 +121,7 @@ export function closeTodoPop(): void {
 
 /** 数据签名：id/文本/状态任一变化才重绘（定时同步不打断滚动与编辑）。 */
 function signature(): string {
-  return todos.map((t) => `${t.id}:${t.done ? 1 : 0}:${t.idle ? 1 : 0}:${t.idleState ?? ""}:${t.idleAttempts ?? 0}:${t.idleResult ?? ""}:${t.idleError ?? ""}:${t.text}`).join("|")
+  return todos.map((t) => `${t.id}:${t.done ? 1 : 0}:${t.idle ? 1 : 0}:${t.idleState ?? ""}:${t.idleAttempts ?? 0}:${t.idleResult ?? ""}:${t.idleError ?? ""}:${describeIdleWindow(t.idleWindow)}:${t.text}`).join("|")
 }
 
 async function refresh(force = false): Promise<void> {
@@ -226,6 +231,11 @@ function renderItem(t: UserTodo, index: number): HTMLElement {
   actions.append(upBtn, downBtn)
   actions.appendChild(actionBtn("run", "执行：加入任务队列按序执行一次（与定时/普通任务共用队列与额度）", false, () => void runTodo(t)))
   actions.appendChild(actionBtn("idle", t.idle ? "关闭闲时自动执行" : "开启闲时自动执行（队列空闲时按顺序自动执行）", t.idle, () => void setIdle(t, !t.idle)))
+  // 执行时间段：只在已开启闲时后才有意义（未开启时按钮置灰），点击即就地编辑
+  const winBtn = actionBtn("schedule", `执行时间段：${describeIdleWindow(t.idleWindow)}（点击修改）`, !!t.idleWindow, () => void editIdleWindow(t))
+  winBtn.disabled = !t.idle
+  if (!t.idle) winBtn.dataset.tip = "先开启闲时自动执行（⚡），再设执行时间段"
+  actions.appendChild(winBtn)
   actions.appendChild(actionBtn("fill", "填入输入框", false, () => fillFromTodo(t)))
   actions.appendChild(actionBtn("edit", "编辑内容（多行提示词）", false, () => startEdit(li, t)))
   actions.appendChild(actionBtn("del", "删除待办", false, () => void removeTodo(t)))
@@ -249,18 +259,37 @@ function actionBtn(kind: keyof typeof ICON, tip: string, active: boolean, onClic
   return b
 }
 
-/** 闲时/执行状态行（排队中/执行中/已完成摘要/失败原因）。 */
+/** 闲时/执行状态行（排队中/执行中/已完成摘要/失败原因 + 执行时段）。 */
 function idleMeta(t: UserTodo): HTMLElement | null {
   let text = ""
   if (t.idleState === "running") text = "⚡ 正在执行…（执行会话运行中，完成后自动回写结果）"
   else if (t.idleState === "failed") text = `⚡ 已停止闲时自动执行（失败不重试）：${t.idleError ?? "执行失败"}。重新开启 ⚡ 可继续，下次队列空闲时再执行`
   else if (t.done && t.idleResult) text = `⚡ 已完成：${t.idleResult}`
   else if (t.idleError) text = `⚡ 上次失败：${t.idleError}`
-  else if (t.idle && t.idleState === "pending") text = "⚡ 闲时自动执行：队列空闲且没有运行中的会话时按顺序执行"
+  else if (t.idle && t.idleState === "pending") {
+    // 时段说明由**后端**判定“现在到底在不在窗内”后给（本弹窗不自己去算时钟/时区）
+    text = t.idleWindow
+      ? `⚡ 闲时自动执行：仅在 ${describeIdleWindow(t.idleWindow)} 内执行（队列空闲且落在时段内时按顺序执行）`
+      : "⚡ 闲时自动执行：队列空闲且没有运行中的会话时按顺序执行（不限时段）"
+  }
   if (!text) return null
   const div = el("div", "todo-meta", text)
   div.title = text
   return div
+}
+
+/** 就地编辑待办的执行时间段（用与任务面板同一套控件与文案）。 */
+async function editIdleWindow(t: UserTodo): Promise<void> {
+  const next = await askIdleWindow(t.idleWindow)
+  if (next === undefined) return // 取消
+  try {
+    todos = await client.listUserTodos()
+    await client.updateUserTodo(t.id, { idleWindow: next })
+    await refresh(true)
+    toast(next ? `已设执行时间段：${describeIdleWindow(next)}` : "已取消执行时间段（不限时段）", "ok")
+  } catch (err) {
+    toast(`设置失败: ${(err as Error).message}`)
+  }
 }
 
 /* ---------- 浮层构建与拖动 ---------- */

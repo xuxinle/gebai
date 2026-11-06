@@ -23,7 +23,7 @@ function task(over: Partial<Task> = {}): Task {
 }
 
 function emptyQueue(): TaskQueueView {
-  return { user: "default", limit: 5, running: [], entries: [], busy: false }
+  return { user: "default", limit: 5, running: [], entries: [], busy: false, idle: { enabled: false, eligible: true, blocked: [] } }
 }
 
 /** 记录调用的服务替身（默认全部返回空结果，用例按需覆盖）。 */
@@ -214,6 +214,7 @@ describe("task sub-agent", () => {
               { taskId: "t3", user: "default", kind: "manual", runner: "prompt", name: "批量", source: "manual", priority: 999, enqueuedAt: 2, front: true, position: 1, waiting: "目标会话正在运行，等待中" },
             ],
             busy: true,
+            idle: { enabled: false, eligible: false, blocked: [] },
           }),
         }),
       )

@@ -3,6 +3,7 @@
  *  环境下直接断言，且渲染层只负责把这里的结果贴到元素上。 */
 import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskMisfire, TaskNotifyInput, TaskNotifyWhen, TaskQueueSource, TaskQueueState,
   TaskQueueView, TaskRunRecord, TaskRunner, TaskRunStatus, TaskTarget, TaskUpdateInput } from "@gebai/sdk"
+import { emptyIdleWindowForm, formFromIdleWindow, idleWindowFromForm, type IdleWindowForm } from "./idle-window-core"
 
 /** 列表筛选值（all=不筛选类别）。 */
 export type KindFilter = TaskKind | "all"
@@ -136,6 +137,8 @@ export interface TaskFormValues {
   schedule: string
   timezone: string
   misfire: "" | TaskMisfire
+  /** kind=idle：闲时执行时间段（开关+时刻+星期+时区；关闭 = 不限时段）。 */
+  idleWindow: IdleWindowForm
   script: string
   prompt: string
   target: TaskTarget
@@ -161,6 +164,7 @@ export function emptyForm(): TaskFormValues {
     schedule: "",
     timezone: "",
     misfire: "",
+    idleWindow: emptyIdleWindowForm(),
     script: "",
     prompt: "",
     target: "ephemeral",
@@ -186,6 +190,7 @@ export function formFromTask(t: Task): TaskFormValues {
     schedule: t.schedule ?? "",
     timezone: t.timezone ?? "",
     misfire: t.misfire ?? "",
+    idleWindow: formFromIdleWindow(t.idleWindow),
     script: t.script ?? "",
     prompt: t.prompt ?? "",
     target: t.target ?? "ephemeral",
@@ -276,6 +281,10 @@ export function validateForm(v: TaskFormValues): string | null {
     numOrUndefined(v.maxConsecutiveErrors, "连续失败阈值")
     parseNotifyLines(v.notifyText)
     parseEnvLines(v.envText)
+    if (v.kind === "idle") {
+      const w = idleWindowFromForm(v.idleWindow)
+      if (w.error) return w.error
+    }
   } catch (err) {
     return (err as Error).message
   }
@@ -296,6 +305,14 @@ export function formToCreateInput(v: TaskFormValues): TaskCreateInput {
     const tz = v.timezone.trim()
     if (tz) input.timezone = tz
     if (v.misfire) input.misfire = v.misfire
+  }
+  // 闲时时段：只有闲时任务带；关闭开关 = 不带（后端会继承用户默认时段/不限）
+  if (v.kind === "idle") {
+    const w = idleWindowFromForm(v.idleWindow)
+    if (w.error) throw new Error(w.error)
+    if (w.value) input.idleWindow = w.value
+  } else if (v.idleWindow.enabled) {
+    throw new Error("执行时间段只能给闲时任务设置（其他类别没有「何时算闲时」这个问题）")
   }
   if (v.runner === "script") input.script = v.script.trim()
   else {
@@ -334,6 +351,12 @@ export function formToUpdateInput(v: TaskFormValues): TaskUpdateInput {
     patch.timezone = v.timezone.trim()
     if (v.misfire) patch.misfire = v.misfire
   }
+  // 闲时时段：关闭开关传 null（清除），否则传具体时段（后端负责校验与归一）
+  if (v.kind === "idle") {
+    const w = idleWindowFromForm(v.idleWindow)
+    if (w.error) throw new Error(w.error)
+    patch.idleWindow = w.value
+  }
   if (v.runner === "script") {
     patch.script = v.script.trim()
   } else {
@@ -358,7 +381,16 @@ export function limitText(q: TaskQueueView): string {
   return `${q.running.length}/${q.limit}`
 }
 
-/** 闲时任务是否正在让路（队列里有定时/普通任务排队或运行）。 */
+/** 闲时任务是否正在让路（队列里有定时/普通任务排队或运行）+ 时段说明。
+ *  “现在是否在时段内”由**后端**判定（`q.idle`），前端只负责把结果说人话。 */
 export function idleBlockedText(q: TaskQueueView): string {
-  return q.busy ? "闲时任务让路中（有定时/普通任务待执行）" : "闲时任务可执行（队列空闲）"
+  if (q.busy) return "闲时任务让路中（有定时/普通任务待执行）"
+  const blocked = q.idle?.blocked ?? []
+  if (blocked.length) {
+    // 时段拦下时把「何时能跑」说清楚，否则用户只会看到“没动静”
+    const next = q.idle?.nextOpenAt
+    const when = next && next > Date.now() ? `，下次 ${new Date(next).toLocaleString("zh-CN")}` : ""
+    return `闲时任务等待执行时间段（${blocked.length} 项不在时段内${when}）`
+  }
+  return "闲时任务可执行（队列空闲且落在执行时间段内）"
 }

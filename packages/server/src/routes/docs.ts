@@ -56,6 +56,7 @@ const SUMMARIES: Record<string, Record<string, string>> = {
   "/api/v1/todos": { get: "用户级待办清单", post: "新增待办", patch: "清单级重排" },
   "/api/v1/todos/{id}": { patch: "更新待办", delete: "删除待办" },
   "/api/v1/todos/{id}/run": { post: "立即执行待办（入队执行一次）" },
+  "/api/v1/prefs": { get: "用户级偏好（默认闲时执行时间段等）", patch: "更新用户级偏好" },
   "/api/v1/oauth/feishu/callback": { get: "飞书用户授权回调（写回会话令牌）" },
   "/api/v1/roots": { get: "文件工作台根清单" },
   "/api/v1/roots/resolve": { post: "根解析（路径 → 所属根）" },

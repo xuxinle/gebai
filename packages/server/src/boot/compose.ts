@@ -36,6 +36,7 @@ import { xiangqiController } from "@gebai/agents"
 import { scheduleGC } from "../core/session/gc"
 import { TaskManager } from "../core/schedule/tasks"
 import { UserTodoManager } from "../core/schedule/todos"
+import { UserPrefsManager } from "../core/schedule/prefs"
 import { createPrimaryGate } from "../core/schedule/primary"
 import { isFeishuChatId, validateNotifyChannel } from "../core/schedule/notify"
 import { createApp, type AppDeps } from "../app"
@@ -239,6 +240,8 @@ export interface Composed {
   tasks: TaskManager | null
   /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时为 null）。 */
   todos: UserTodoManager | null
+  /** 用户级偏好（users/{user}/prefs.json）：默认闲时时段等，**后端为真值**。 */
+  prefs: UserPrefsManager
   gc: { stop: () => void } | null
   feishuBot: FeishuBot | null
   deps: AppDeps
@@ -1265,6 +1268,13 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 磁盘上其他条目抹掉；tick 才是会重复执行的部分）
     if (!runScheduler) tasks.stop()
   }
+  // 用户级偏好（users/{user}/prefs.json）：默认闲时时段等**影响服务端行为**的偏好。
+  // 后端为真值（前端只展示与修改它）——调度判定就发生在服务端，浏览器存一份服务端读不到。
+  const prefs = new UserPrefsManager(config.gebaiHome)
+  // 默认闲时时段注入调度器：新建闲时任务/待办未显式指定 idleWindow 时继承用户默认。
+  // 接在任务管理器上（而不是每个调用点自己 merge）：任务来源很多（task_add / REST / 待办绑定），
+  // 一处漏了就是“用户设了默认时段但某些任务不遵守”这种很难发现的行为不一致。
+  if (tasks) tasks.setDefaultIdleWindow(async (user) => (await prefs.get(user)).idleWindow)
   // 用户级待办（GEBAI_IDLE_TODO_ENABLED，默认 true）：待办清单是用户级资源（users/{user}/todos.json），
   // 与会话解耦；手动执行经统一任务队列入队，开启「闲时自动执行」的待办绑定一个闲时任务由任务调度器
   // 在队列空闲时串行执行。关闭时不启动（REST /api/v1/todos 返回 503「能力未启用」）。
@@ -1350,6 +1360,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     credentialSources,
     tasks,
     todos,
+    prefs,
     // 可用模型配置清单（启动时解析一次即定：清单来自进程环境，重启生效——与会话选择项的生命期一致）
     modelConfigs: () => modelConfigs,
     // 拟人模式运行态（未启用时 undefined → REST 端点 404）
@@ -1490,5 +1501,5 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     }
   }
 
-  return { config, store, registry, engine, subAgents, channels, auth, events, sandbox, webhooks, tasks, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients, launchXiangqi }
+  return { config, store, registry, engine, subAgents, channels, auth, events, sandbox, webhooks, tasks, todos, prefs, gc, feishuBot, deps, state, app, devReload, devReloadClients, launchXiangqi }
 }

@@ -53,8 +53,28 @@ export interface TaskNotifyResult {
   errors: string[]
 }
 
-/** 任务类别：scheduled=定时（按表达式触发）；manual=普通（入队即按顺序执行）；idle=闲时（队列空闲时执行一次，成功或失败/超时均停用，失败不重试）。 */
+/** 任务类别：scheduled=定时（按表达式触发）；manual=普通（入队即按顺序执行）；idle=闲时（队列空闲**且落在闲时时间段内**时执行一次，成功或失败/超时均停用，失败不重试）。 */
 export type TaskKind = "scheduled" | "manual" | "idle"
+
+/**
+ * 闲时执行时间段（kind=idle）：把「什么时候算闲时」从「队列空闲即可」细化到
+ * 「**同时**落在该时间段内」——闲时任务的意义就是利用便宜算力与谷价 token（夜间/周末）。
+ *
+ * - `start < end`：同日窗口；`start > end`：**跨零点**（如 22:00–06:00，最常见的用法）；
+ * - `start === end`：视为全天（无约束），避免填错导致任务永不执行；
+ * - `days` 指窗口**开始那天**的星期（跨零点窗口的凌晨部分属于前一天那一场）；空/缺省 = 每天；
+ * - `timezone` 缺省服务器本地时区（与 `Task.timezone` 同口径，IANA 名）。
+ */
+export interface IdleWindow {
+  /** 允许执行的星期（0=周日）。缺省 = 每天。 */
+  days?: number[]
+  /** 窗口开始 "HH:MM"。 */
+  start: string
+  /** 窗口结束 "HH:MM"（小于 start 表示跨零点）。 */
+  end: string
+  /** IANA 时区（缺省服务器本地）。 */
+  timezone?: string
+}
 /** 执行体：script=脚本（shell 在任务目录执行）；prompt=提示词（触发一次完整 Agent 会话）。 */
 export type TaskRunner = "script" | "prompt"
 /** prompt 型执行目标：ephemeral=新建会话（缺省）；sticky=专用会话跨次复用；session=绑定既有会话。 */
@@ -117,6 +137,17 @@ export interface TaskQueueView {
   entries: TaskQueueEntry[]
   /** 是否有待执行的定时/普通任务（闲时任务据此让路）。 */
   busy: boolean
+  /** 闲时通道现状（**后端算好**，前端直接展示，不自算「为何没跑」）。 */
+  idle: {
+    /** 该用户是否启用了闲时任务（没启用时前端不展示闲时说明）。 */
+    enabled: boolean
+    /** 用户现在整体是否空闲（队列无定时/普通任务、无任务在跑、无运行中会话）。 */
+    eligible: boolean
+    /** 已可跑 → 当前时刻；全被时段拦下 → 最早进入时刻；无闲时任务 → undefined。 */
+    nextOpenAt?: number
+    /** 被执行时间段拦下的任务及原因（每项一条人可读说明）。 */
+    blocked: Array<{ taskId: string; name?: string; reason: string }>
+  }
 }
 
 /** 任务（用户级资源，持久化于 users/{user}/tasks.json，与会话生命周期解耦）。 */
@@ -138,6 +169,8 @@ export interface Task {
   timezone?: string
   /** kind=scheduled：停机错过补跑策略（缺省 skip）。 */
   misfire?: TaskMisfire
+  /** kind=idle：只在这个时间段内执行（缺省=不限，队列空闲即执行）。 */
+  idleWindow?: IdleWindow
   /** runner=prompt 执行目标（缺省 ephemeral）。 */
   target?: TaskTarget
   /** target=session 绑定的会话（缺省=创建来源 originSessionId）。 */
@@ -194,6 +227,8 @@ export interface TaskCreateInput {
   schedule?: string
   timezone?: string
   misfire?: TaskMisfire
+  /** kind=idle：闲时执行时间段（缺省=不限时段，队列空闲即执行）。 */
+  idleWindow?: IdleWindow
   target?: TaskTarget
   sessionId?: string
   agents?: string[]
@@ -233,6 +268,8 @@ export interface TaskUpdateInput {
   notify?: TaskNotifyInput[]
   notifyOn?: TaskNotifyWhen
   maxConsecutiveErrors?: number
+  /** kind=idle：闲时执行时间段（传 null 清除，未提供不改动）。 */
+  idleWindow?: IdleWindow | null
 }
 
 /** 手动执行的入队结果。 */

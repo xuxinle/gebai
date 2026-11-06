@@ -8,6 +8,9 @@ import { isFilePopup, setFileDisplaySetting } from "./file-display"
 import { getFxPanelsSetting, setFxPanelsSetting } from "./fx-panels"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
+import type { IdleWindow } from "@gebai/sdk"
+import { describeIdleWindow, idleWindowFromForm } from "./idle-window-core"
+import { createIdleWindowFields } from "./idle-window-ui"
 
 /* ---------- 设置面板（环境变量 / 外观 / 用户 / 反馈；工具启停、子Agent 装载与 Webhook 管理经 API 使用） ---------- */
 
@@ -59,8 +62,68 @@ async function renderSettingsTab(tab: string) {
   }
   if (tab === "env") return void renderSettingsEnv()
   if (tab === "appearance") return void renderSettingsAppearance()
+  if (tab === "tasks") return void renderSettingsTasks()
   if (tab === "users") return void renderSettingsUsers()
   if (tab === "feedback") return void renderSettingsFeedback()
+}
+
+/**
+ * 任务偏好 tab：默认闲时执行时间段（**存服务端** users/{user}/prefs.json）。
+ *
+ * 为何不放浏览器本地：它直接决定服务端调度行为（新建闲时任务/待办继承哪个时段），
+ * 手机与桌面必须看到同一份；浏览器存一份服务端读不到。
+ */
+async function renderSettingsTasks(): Promise<void> {
+  const sec = settingsSection("默认闲时执行时间段")
+  sec.appendChild(
+    el(
+      "div",
+      "settings-row-desc",
+      "新建的闲时任务与待办在未单独指定时段时，继承这里的设置（已存在的任务不受影响——它们各自的时段已在任务上定型）。吃算力/耗 token 的活排到夜间或周末可省谷价 token。",
+    ),
+  )
+  const host = el("div", "settings-sub")
+  sec.appendChild(host)
+  settingsBody.appendChild(sec)
+
+  let current: IdleWindow | undefined
+  try {
+    current = (await client.getUserPrefs()).idleWindow
+  } catch (err) {
+    host.appendChild(el("div", "settings-row-desc", `偏好读取失败（旧服务端或未启用）：${(err as Error).message}`))
+    return
+  }
+  const fields = createIdleWindowFields(
+    current
+      ? { enabled: true, start: current.start, end: current.end, days: [...(current.days ?? [])], timezone: current.timezone ?? "" }
+      : { enabled: false, start: "22:00", end: "06:00", days: [], timezone: "" },
+  )
+  host.appendChild(fields.root)
+  const actions = el("div", "settings-form-actions")
+  const save = el("button", "mini-btn", "保存")
+  const reset = el("button", "mini-btn", "清除（不限时段）")
+  actions.append(save, reset)
+  host.appendChild(actions)
+
+  const submit = async (value: IdleWindow | null): Promise<void> => {
+    try {
+      await client.updateUserPrefs({ idleWindow: value })
+      toast(value ? `默认闲时时段已保存：${describeIdleWindow(value)}` : "已清除默认闲时时段（新建闲时任务不限时段）", "ok")
+    } catch (err) {
+      toast(`保存失败: ${(err as Error).message}`)
+    }
+  }
+  save.onclick = () => {
+    const form = fields.get()
+    if (!form.enabled) return void submit(null)
+    const parsed = idleWindowFromForm(form)
+    if (parsed.error) return toast(parsed.error)
+    void submit(parsed.value)
+  }
+  reset.onclick = () => {
+    fields.set({ enabled: false, start: "22:00", end: "06:00", days: [], timezone: "" })
+    void submit(null)
+  }
 }
 
 function settingsSection(title: string): HTMLElement {

@@ -69,6 +69,7 @@ describe("列表展示逻辑", () => {
       running: [],
       entries: [{ taskId: "a".repeat(32), user: "default", kind: "manual", runner: "prompt", source: "manual", priority: 1000, enqueuedAt: 1, position: 2 }],
       busy: false,
+      idle: { enabled: false, eligible: true, blocked: [] },
     }
     expect(stateLabel(mk({ state: "idle" }), queue)).toBe("空闲")
     expect(stateLabel(mk({ state: "running" }), queue)).toBe("运行中")
@@ -118,7 +119,7 @@ describe("列表展示逻辑", () => {
   })
 
   test("队列视图文案（额度与闲时让路）", () => {
-    const q: TaskQueueView = { user: "default", limit: 5, running: [{ taskId: "a", kind: "manual", runner: "prompt", startedAt: 1 }], entries: [], busy: true }
+    const q: TaskQueueView = { user: "default", limit: 5, running: [{ taskId: "a", kind: "manual", runner: "prompt", startedAt: 1 }], entries: [], busy: true, idle: { enabled: false, eligible: false, blocked: [] } }
     expect(limitText(q)).toBe("1/5")
     expect(idleBlockedText(q)).toContain("让路")
     expect(idleBlockedText({ ...q, busy: false })).toContain("队列空闲")

@@ -210,6 +210,34 @@ describe("待办清单 CRUD 与持久化", () => {
 })
 
 describe("闲时自动执行的绑定联动", () => {
+  test("待办的执行时间段会同步到绑定任务；取消即清掉（待办是真值源）", async () => {
+    const h = setup()
+    try {
+      // 直接带时间段创建：绑定任务上就应该有
+      const t = await h.todos.add("default", { text: "夜间活", idle: true, idleWindow: { start: "22:00", end: "06:00" } })
+      const boundId = entryOf(await h.todos.list("default"), t.id).idleTaskId!
+      expect((await h.tasks.get("default", boundId))?.idleWindow).toEqual({ start: "22:00", end: "06:00" })
+      // 改时段 → 同步下去
+      await h.todos.update("default", t.id, { idleWindow: { start: "23:30", end: "05:00", days: [1, 2] } })
+      expect((await h.tasks.get("default", boundId))?.idleWindow).toEqual({ days: [1, 2], start: "23:30", end: "05:00" })
+      // 清除时段（null）→ 绑定任务上也清掉（不留旧时段默默生效）
+      await h.todos.update("default", t.id, { idleWindow: null })
+      expect((await h.tasks.get("default", boundId))?.idleWindow).toBeUndefined()
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("非法时段直接报错（用户正在改，应立刻知道写错了）", async () => {
+    const h = setup()
+    try {
+      const t = await h.todos.add("default", { text: "x", idle: true })
+      await expect(h.todos.update("default", t.id, { idleWindow: { start: "25:00", end: "06:00" } })).rejects.toThrow(/start 非法/)
+    } finally {
+      await cleanup(h)
+    }
+  })
+
   test("开启闲时自动执行 → 创建绑定闲时任务（todoId/prompt 对应）；关闭 → 任务删除", async () => {
     const h = setup()
     try {
