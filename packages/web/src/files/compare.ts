@@ -171,10 +171,22 @@ export function pickEndpoint(title: string, refs: { branches: GitBranchInfo[]; t
   })
 }
 
+/** 比较视图接口：`revalidate` 供「标签页切回来」时向后端重验（见 main.ts 的 activate）。 */
 export interface CompareView {
   el: HTMLElement
   setState: (patch: Partial<CompareState>) => void
   refresh: () => Promise<void>
+  /**
+   * 静默重验：重新向后端拉一次差异，**只在真的变了时才重绘**。
+   *
+   * 为何需要：对比标签一旦建好就只持有上一次的差异结果，而文件是会被外部改的
+   * （编辑器保存、git 操作、`sh` 脚本、别的工具）——不重验就会一直展示已过期的列表，
+   * 用户会以为“改没生效”。切回标签是天然的刷新时机（用户又要看它了）。
+   *
+   * 为何不直接 `refresh()`：那会先清空列表并显示“比较中…”——每次切标签都闪一下，
+   * 滚动位置也丢；而绝大多数时候内容根本没变。
+   */
+  revalidate: () => Promise<void>
   state: () => CompareState
 }
 
@@ -202,6 +214,8 @@ export function createCompareView(hooks: CompareHooks, initial: CompareInit = {}
   let deletions = 0
   let mergeBaseOf: string | undefined
   let loading = false
+  /** 上次渲染的差异签名：静默重验时用来判断“真变了才重绘”（不清洗用户滚动位置）。 */
+  let lastSig = ""
 
   const fromBtn = h("button", { class: "fw-ref-btn" })
   const toBtn = h("button", { class: "fw-ref-btn" })
@@ -310,10 +324,13 @@ export function createCompareView(hooks: CompareHooks, initial: CompareInit = {}
     }
   }
 
-  async function refresh(): Promise<void> {
+  async function refresh(opts: { silent?: boolean } = {}): Promise<void> {
     if (loading) return
+    const silent = opts.silent === true
     loading = true
-    listHost.replaceChildren(h("div", { class: "fw-loading", text: "比较中…" }))
+    // 静默重验不显示“比较中…”：内容真变了会在拿到结果后直接重绘，
+    // 不变就什么都不做——切标签不该每次都闪一下加载态
+    if (!silent) listHost.replaceChildren(h("div", { class: "fw-loading" , text: "比较中…" }))
     try {
       const res = await hooks.api.gitCompare(hooks.root(), {
         from: state.from,
@@ -322,12 +339,18 @@ export function createCompareView(hooks: CompareHooks, initial: CompareInit = {}
         path: state.path || undefined,
         ignoreWhitespace: state.ignoreWhitespace,
       })
+      // 签名对比：静默模式下数据与上次一致就不重绘（保滞滚动位置、不产生闪烁与布局抖动）
+      const sig = diffSignature(res.files, res.additions, res.deletions, res.mergeBaseOf)
+      if (silent && sig === lastSig) return
       files = res.files
       additions = res.additions
       deletions = res.deletions
       mergeBaseOf = res.mergeBaseOf
+      lastSig = sig
       renderList()
     } catch (err) {
+      // 静默重验失败（网络抖/临时错误）：保留现有列表，不把用户眼前的内容换成错误页
+      if (silent) return
       listHost.replaceChildren(h("div", { class: "fw-error", text: `比较失败：${(err as Error).message}` }))
       summary.textContent = ""
     } finally {
@@ -470,7 +493,44 @@ export function createCompareView(hooks: CompareHooks, initial: CompareInit = {}
       syncControls()
       await refresh()
     },
+    revalidate: async () => {
+      // 引用（分支/HEAD）可能也变了：一并轻量刷新，但失败不阻断差异重验——
+      // 拿不到引用只影响端点标题显示，不该让“差异是否过期”这件事失败
+      try {
+        const res = await hooks.api.gitRefs(hooks.root(), 50)
+        refs = { branches: res.branches, tags: res.tags, recent: res.recent as RecentRef[], head: res.head }
+        syncControls()
+      } catch {
+        /* 引用读取失败：保持旧引用文案 */
+      }
+      await refresh({ silent: true })
+    },
   }
+}
+
+/**
+ * 差异结果签名：用于判断“重新拉到的数据与上次是否一致”。
+ *
+ * 为何用完整签名而不是只比文件名数：同名文件也可从 M 变 D、行数从 +3/-1 变 +7/-2——
+ * 只比数量会把真变更当成没变（那就会持续展示过期数据，而这正是要修的问题）。
+ */
+export function diffSignature(
+  files: Array<{ path: string; oldPath?: string; status?: string; additions?: number; deletions?: number }>,
+  additions: number,
+  deletions: number,
+  mergeBaseOf?: string,
+): string {
+  const rows = files.map((f) => `${f.status ?? ""}|${f.path}|${f.oldPath ?? ""}|${f.additions ?? 0}|${f.deletions ?? 0}`).join("\n")
+  return `${additionnsSafe(additions)}/${deletionsSafe(deletions)}/${mergeBaseOf ?? ""}/${rows}`
+}
+
+/** 数值归一（避免 undefined/NaN 参与拼接时产生假签名）。 */
+function additionnsSafe(n: number | undefined): number {
+  return Number.isFinite(n) ? Number(n) : 0
+}
+
+function deletionsSafe(n: number | undefined): number {
+  return Number.isFinite(n) ? Number(n) : 0
 }
 
 /** 从若干入口（日志右键 / 文件历史 / 分支右键）发起比较：返回可直接打开的差异标签规格。 */

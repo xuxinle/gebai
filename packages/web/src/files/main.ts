@@ -1734,6 +1734,17 @@ function activate(id: string): void {
   if (tab.id.startsWith("file:")) lastFileTabId = tabKey(tab.root, tab.path)
   for (const [tid, host] of viewHosts) host.classList.toggle("active", tid === id)
   restoreView(tab)
+  /**
+   * 对比标签页**每次切回都向后端重验**：
+   *
+   * 对比视图是个快照——建的时候拉一次差异，之后一直展示那份结果。但文件会被外部改
+   * （编辑器保存、git 操作、`sh` 脚本、别的工具），不重验就会持续展示过期列表，
+   * 用户会以为“改没生效”。切回标签是天然时机：用户又要看它了。
+   *
+   * 静默（不显“比较中…”、不一致才重绘）：绝大多数切回内容根本没变，
+   * 每次都闪一下加载态、丢掉滚动位置，比过期更难用。
+   */
+  compareTabs.get(id)?.view.revalidate().catch(() => {})
   // 行尾 blame 的本地偏好：编辑器就绪或 git 状态后到（启动期）时补上
   void autoBlame(tab)
   // Git 修改标记：切到哪个标签，diff 引擎就跟哪个 model（同一时间只一个）

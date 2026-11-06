@@ -117,6 +117,13 @@ export class MiniElement {
     this.childNodes.push(c)
     return c
   }
+  /** 批量替换子节点（比较视图等处大量使用）。 */
+  replaceChildren(...nodes: MiniElement[]): void {
+    for (const c of this.childNodes) c.parentNode = null
+    this.text = ""
+    this.childNodes = []
+    for (const n of nodes) this.appendChild(n)
+  }
   removeChild(c: MiniElement): void {
     const i = this.childNodes.indexOf(c)
     if (i >= 0) this.childNodes.splice(i, 1)
@@ -214,6 +221,22 @@ export class MiniElement {
   }
   setPointerCapture(): void {}
   releasePointerCapture(): void {}
+
+  /** 深拷贝节点（图标缓存会 clone 一份再插入：同一图标多处使用不能共享同一节点）。 */
+  cloneNode(deep = false): MiniElement {
+    const copy = new MiniElement(this.tagName.toLowerCase())
+    copy.attrs = new Map(this.attrs)
+    copy.dataset = { ...this.dataset }
+    copy.className = this.className
+    copy.textContent = this.text
+    copy.value = this.value
+    copy.checked = this.checked
+    copy.placeholder = this.placeholder
+    copy.rows = this.rows
+    copy.title = this.title
+    if (deep) for (const c of this.childNodes) copy.appendChild(c.cloneNode(true))
+    return copy
+  }
 }
 
 /** 样式对象最小实现。 */
