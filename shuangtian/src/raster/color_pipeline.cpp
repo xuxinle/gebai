@@ -56,6 +56,65 @@ constexpr float kSrgbGamma = 2.4f;
   return std::clamp(num / den, 0.0f, 1.0f);
 }
 
+/// three.js r160 的 `ACESFilmicToneMapping`（**逐式同构**）。
+///
+/// 原文（`third_party/three/three.cjs` 的 `tonemapping_pars_fragment`）：
+///
+/// ```glsl
+/// vec3 ACESFilmicToneMapping( vec3 color ) {
+///   color *= toneMappingExposure / 0.6;
+///   color = ACESInputMat * color;
+///   color = RRTAndODTFit( color );
+///   color = ACESOutputMat * color;
+///   return saturate( color );
+/// }
+/// ```
+///
+/// ## 为何不用 Narkowicz 近似
+///
+/// 两条曲线的差可以逐点量出来（同一线性输入，8bit 输出）：
+///
+/// | 线性 | Narkowicz | 本式 | 差 |
+/// |---|---|---|---|
+/// | 0.05 | 59 | 50 | +9 |
+/// | 0.159 | 132 | 118 | **+14** |
+/// | 0.30 | 177 | 165 | +12 |
+/// | 1.00 | 232 | 226 | +6 |
+///
+/// 所以「与浏览器对齐色调映射」**不可能**用近似式做到。
+///
+/// ## `color * exposure / 0.6` 里的 0.6 不能漏
+///
+/// 它是 ACES 的中灰定位（参考白不是 1.0）。漏掉它整幅系统性偏暗（线性域 1.67 倍）。
+[[nodiscard]] auto aces_three(math::Vec3 color, float exposure) noexcept -> math::Vec3 {
+  // 矩阵按 three 源码的**列主序**（mat3(vec3(col0), vec3(col1), vec3(col2))）。
+  constexpr float kIn[3][3] = {{0.59719f, 0.35458f, 0.04823f},
+                               {0.07600f, 0.90834f, 0.01566f},
+                               {0.02840f, 0.13383f, 0.83777f}};
+  constexpr float kOut[3][3] = {{1.60475f, -0.53108f, -0.07367f},
+                                {-0.10208f, 1.10813f, -0.00605f},
+                                {-0.00327f, -0.07276f, 1.07602f}};
+  const float gain = (exposure > 0.0f ? exposure : 0.0f) / 0.6f;
+  const float in[3] = {color.x * gain, color.y * gain, color.z * gain};
+  float mid[3]{};
+  for (int r = 0; r < 3; ++r) {
+    mid[r] = kIn[r][0] * in[0] + kIn[r][1] * in[1] + kIn[r][2] * in[2];
+  }
+  // RRTAndODTFit: a = v*(v+0.0245786)-0.000090537; b = v*(0.983729*v+0.4329510)+0.238081
+  for (int r = 0; r < 3; ++r) {
+    const float v = mid[r];
+    const float a = v * (v + 0.0245786f) - 0.000090537f;
+    const float b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
+    mid[r] = a / b;
+  }
+  float out[3]{};
+  for (int r = 0; r < 3; ++r) {
+    out[r] = kOut[r][0] * mid[0] + kOut[r][1] * mid[1] + kOut[r][2] * mid[2];
+  }
+  const auto sat = [](float v) noexcept { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
+  return math::Vec3{sat(out[0]), sat(out[1]), sat(out[2])};
+}
+
 /// Hable 的 Uncharted2 曲线（先抬曝光再映射，与原文一致）。
 [[nodiscard]] auto hable_curve(float x) noexcept -> float {
   constexpr float A = 0.15f;
@@ -122,6 +181,10 @@ auto tone_map_channel(float x, ToneMap op) noexcept -> float {
     // AgX 是**色彩空间变换**，不能逐色道算（见 `tone_map_agx`）。
     // 这里退化到 ACES 曲线——仅为了让单通道探索类调用有值可用；
     // 真正的 AgX 必须走 `tone_map()` 的三维入口。
+    return aces(x);
+  case ToneMap::AcesThree:
+    // 同理：ACESFilmic 含 input/output 色度矩阵，单通道无意义。
+    // 退化到 Narkowicz 仅供单变量探索（真值走 `tone_map()`）。
     return aces(x);
   }
   return std::clamp(x, 0.0f, 1.0f);
@@ -361,8 +424,12 @@ auto tone_map(math::Vec3 hdr, ToneMap op) noexcept -> math::Vec3 {
     return math::Vec3{std::clamp(hdr.x, 0.0f, 1.0f), std::clamp(hdr.y, 0.0f, 1.0f),
                       std::clamp(hdr.z, 0.0f, 1.0f)};
   }
-  // AgX 是**色彩空间变换**，不能逐色道做（见上面说明）——单独一条路。
+  // AgX / ACESFilmic 都是**三维色彩变换**，不能逐色道做——各走一条路。
   if (op == ToneMap::Agx) return tone_map_agx(hdr);
+  // 注意：`AcesThree` 需要曝光才能算（`color * exposure / 0.6`），
+  // 而本函数没有曝光参数，所以取“已经曝过光”的约定：由 `encode_pixel`
+  // 先把曝光乘进 hdr，这里传 exposure = 1.0（语义上已是曝后线性值）。
+  if (op == ToneMap::AcesThree) return aces_three(hdr, 1.0f);
   return math::Vec3{tone_map_channel(hdr.x, op), tone_map_channel(hdr.y, op),
                     tone_map_channel(hdr.z, op)};
 }

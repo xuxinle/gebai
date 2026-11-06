@@ -1623,16 +1623,32 @@ auto scene_spec_from_three(std::string_view script, std::string_view script_name
   SceneSpec spec{};
   spec.camera = three_scene->camera;
   spec.lighting = three_scene->lighting;
+  // ## 对齐模式（2026-11-06）
+  //
+  // 脚本显式声明时（`globalThis.renderer = { compat: 'three' }` 或
+  // `scene.compat = 'three'`），切到与 three.js 逐式同构的着色模型；
+  // 否则**保持存量行为**（本框架原模型 + ACES）。
+  //
+  // 为何用“显式声明”而不是直接改默认：同构模型要去掉常量环境保底与边缘光，
+  // 这会让存量画面的暗部真的变黑。保守取舍与项目一贯的
+  // 「新能力默认不改变既有外观」一致；而一旦声明了，连色调映射也跟着切
+  // （否则只对齐着色、不对齐输出链，仍然对不上）。
+  if (three_scene->three_parity) {
+    spec.lighting.model = Lighting::Model::Three;
+    spec.lighting.rim = 0.0f;   // three 没有“边缘光”这个概念
+    // 色调映射由 `ThreeRuntime` 从脚本的 `renderer.toneMapping` 读出（含
+    // NoToneMapping → None、ACESFilmic → AcesThree 的精确映射）；
+    // 脚本根本没设时保持 three 的默认（None，而不是本框架的 ACES）。
+  }
   // ## 色调映射：保持本框架原默认（ACES）
   //
   // 虽然 three.js 的 `renderer.toneMapping` 默认是 None，但本函数已有
   // 多处调用方（`threelab` 示例、多个探针、e2e），改默认会改变它们
   // 已出片的画面。
   //
-  // 需要与浏览器完全一致时，在 JSON 里写 `lighting.tone_map: "none"`
+  // 需要与浏览器完全一致时，脚本里写 `globalThis.renderer = { compat: 'three' }`
+  // （连带把算子按 three 语义对齐），或在 JSON 里写 `lighting.tone_map: "none"`
   // ——那是显式的、不会让存量场景静默改变。
-  //
-  // 这条取舍与项目一贯的「新能力默认不改变既有外观」一致。
   spec.three_script = std::string(script);
   spec.three_script_name = std::string(script_name);
   return spec;
@@ -2041,7 +2057,43 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     const Camera camera = spec.camera_override.has_value() ? *spec.camera_override
                                                            : script_scene->camera;
 
-    scene.begin_frame(background);
+    // ## 背景：对齐模式下用**场景自己的** `scene.background`
+    //
+    // three 的清屏色就是 `scene.background`（没有则黑）。而本函数收到的
+    // `background` 是调用方（导演/探针）传的，大多数默认是 13,13,13 一类。
+    // 对齐时它必须让位——否则“场景里写着 0.05 灰、画面底色却是别的东西”。
+    //
+    // ## `× 255` 是 `begin_frame` 的契约（不是冗余）
+    //
+    // `Surface::clear` / `Scene3D::begin_frame` 的参数是“**0~255 表示的线性值**”：
+    // 内部做 `clear_color.r / 255` 当线性分量，再走 `encode_pixel`。
+    // 所以线性 0.05 要写成 12.75（存量探针传的 13 就是这个意思）。
+    // 第一版传了**已编码**的值（encode_pixel 的结果），等于编码两次：
+    // 实测背景从期望 63 跑到 164。
+    //
+    // ## 为何要用 `lround` 而不是 `static_cast`（实测差 3 级）
+    //
+    // 线性 0.05 × 255 = **12.75**。截断得 12 → 12/255 = 0.04706 → rgb(**61**)；
+    // 四舍五入得 13 → 13/255 = 0.05098 → rgb(**64**)。浏览器是 **63**
+    // （它的 `Color` 分量是浮点 0.05，不经过 8bit 中转）。
+    //
+    // 所以 8bit 中转本身就带 ±0.5 级误差：0.05 落在两个台阶中间。这里取
+    // 四舍五入（误差最小），并把这个量级写进文档（见 `docs/render_alignment.md`）。
+    //
+    // 旧模型**不改**：存量场景靠调用方传入的背景色控制底色。
+    const math::Color frame_background =
+        (spec.lighting.model == Lighting::Model::Three && script_scene->background_set)
+            ? math::Color::rgba(
+                  static_cast<std::uint8_t>(std::lround(
+                      std::clamp(script_scene->background_linear.x * 255.0f, 0.0f, 255.0f))),
+                  static_cast<std::uint8_t>(std::lround(
+                      std::clamp(script_scene->background_linear.y * 255.0f, 0.0f, 255.0f))),
+                  static_cast<std::uint8_t>(std::lround(
+                      std::clamp(script_scene->background_linear.z * 255.0f, 0.0f, 255.0f))),
+                  255)
+            : background;
+
+    scene.begin_frame(frame_background);
     scene.set_camera(camera);
     // ## 光照：`spec.lighting` 优先，而不是`script_scene->lighting`
     //
@@ -2506,3 +2558,4 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
 }
 
 }  // namespace st::raster
+

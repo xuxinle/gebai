@@ -1037,6 +1037,39 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
 
   scene.three_revision = get_string(impl_->context, extracted_owned.get(), "revision");
 
+  // ── 对齐模式：`globalThis.renderer = { compat: 'three' }` / `scene.compat` ──
+  //
+  // ⚠ **必须在光照抽取之前**：光照段要看 `aligned` 才能把 three 的
+  // “没写 AmbientLight 就是 0”和“背景不产生 IBL”两条语义落实。
+  // 第一版把它写在函数末尾，于是光照段读到的还是旧默认值，结果背光面
+  // 仍然被抬到 87（期望 76，差的正好是那个 0.35 常量环境）。
+  bool aligned = false;
+  {
+    JsRef global_root{impl_->context, JS_GetGlobalObject(impl_->context)};
+    JsRef renderer{impl_->context,
+                   JS_GetPropertyStr(impl_->context, global_root.get(), "renderer")};
+    const auto compat_of = [&](JSValueConst owner) -> bool {
+      if (!JS_IsObject(owner)) return false;
+      JsRef flag{impl_->context, JS_GetPropertyStr(impl_->context, owner, "compat")};
+      if (!JS_IsString(flag.get())) return false;
+      const char* raw = JS_ToCString(impl_->context, flag.get());
+      if (raw == nullptr) return false;
+      const std::string text{raw};
+      JS_FreeCString(impl_->context, raw);
+      return text == "three";
+    };
+    aligned = compat_of(renderer.get()) || compat_of(scene_root.get());
+    if (aligned) {
+      scene.three_parity = true;
+      // three 没有“边缘光”；留着它会让轮廓一侧凭空亮 25%。
+      scene.lighting.rim = 0.0f;
+      // three 的纯色 `scene.background` **不产生 IBL**：环境反射必须关。
+      scene.lighting.env_strength = 0.0f;
+      scene.lighting.env_sky = math::Vec3{0.0f, 0.0f, 0.0f};
+      scene.lighting.env_ground = math::Vec3{0.0f, 0.0f, 0.0f};
+    }
+  }
+
   // ── 相机 ──
   {
     JsRef camera{impl_->context,
@@ -1114,6 +1147,7 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
     JS_ToUint32(impl_->context, &light_count, length_value.get());
 
     float ambient_from_light = 0.0f;
+    bool saw_ambient_light = false;
     int directional_index = 0;
     int extra_index = 0;
     for (std::uint32_t i = 0; i < light_count; ++i) {
@@ -1127,9 +1161,21 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       const math::Vec3 color = read_color(impl_->context, color_array.get());
 
       if (kind == "ambient") {
-        // 环境光没有方向：累加到 `Lighting::ambient`（三色的均值，保持与旧路径一致的标量语义）
-        ambient_from_light += intensity * (0.2126f * color.x + 0.7152f * color.y +
-                                           0.0722f * color.z);
+        // 环境光没有方向：累加到 `Lighting::ambient`（三色的均值，保持与旧路径一致的标量语义）。
+        //
+        // ⚠ 对齐模式（`Model::Three`）下不能只留标量：three 的 `AmbientLight`
+        // 是 `intensity × color` 的**逐通道** irradiance，冷/暖环境光在两边会长得不同。
+        // 所以同时把颜色**按亮度归一**地存进 `ambient_color`：
+        //   ambient      = intensity × luma(color)
+        //   ambient_color= color / luma(color)   ⇒ intensity × color 可重建
+        // 旧模型不看 `ambient_color`，所以对它零影响。
+        const float luma = 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
+        ambient_from_light += intensity * luma;
+        saw_ambient_light = true;
+        if (luma > 1e-6f) {
+          scene.lighting.ambient_color =
+              math::Vec3{color.x / luma, color.y / luma, color.z / luma};
+        }
         continue;
       }
       if (kind == "hemisphere") {
@@ -1158,6 +1204,9 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
         // 第一个平行光当主光（与本框架的 `light_from` 语义一致）
         scene.lighting.light_from = toward_light;
         scene.lighting.diffuse = intensity;
+        // 主光颜色：three 的 `Irradiance = dotNL × color × intensity`，
+        // 颜色必须单独带下去（旧模型只看亮度）。
+        scene.lighting.light_color = color;
         ++directional_index;
         continue;
       }
@@ -1193,6 +1242,15 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       ++extra_index;
     }
     if (ambient_from_light > 0.0f) scene.lighting.ambient = ambient_from_light;
+    // ## 没写 `AmbientLight` 时环境项必须是 **0**（对齐模式，2026-11-06）
+    //
+    // three 里环境光**只来自 `AmbientLight` / `HemisphereLight` 对象**；
+    // 不写就是 0（背光面全黑）。而 `Lighting::ambient` 的默认值是 0.35，
+    // 那是一层"无端的环境保底"——实测让背光面从 0 抬到 **84/255**，
+    // 也是文献里"本框架完全没有暗部"的根因。
+    //
+    // 旧模型不改（存量画面靠它），只在对齐模式下归零。
+    if (aligned && !saw_ambient_light) scene.lighting.ambient = 0.0f;
   }
 
   // ── 世界背景 → 环境反射 ──
@@ -1262,8 +1320,17 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
             scene.lighting.env_sky = linear;
             scene.lighting.env_ground =
                 math::Vec3{linear.x * 2.6f, linear.y * 2.6f, linear.z * 2.6f};
+            // 清屏色：three 就是拿 `scene.background` 当清屏色（线性值）。
+            scene.background_linear = linear;
+            scene.background_set = true;
             // 环境强度：与 bpy 路同值（0.45，分位数标定得出）
-            if (scene.lighting.env_strength <= 0.0f) scene.lighting.env_strength = 0.45f;
+            //
+            // ⚠ 对齐模式下**不推导**：three 的纯色 `scene.background` 不产生 IBL，
+            // 金属只能反射直接光。旧路径凭空多一层环境反射，实测让背光面从 0
+            // 抬到 84/255。
+            if (!aligned && scene.lighting.env_strength <= 0.0f) {
+              scene.lighting.env_strength = 0.45f;
+            }
           }
         }
       }
@@ -1590,23 +1657,53 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
     if (tone >= 0) {
       switch (tone) {
         case 0:   // THREE.NoToneMapping
-        case 1:   // THREE.LinearToneMapping
+          // three 的 NoToneMapping 是**真的什么都不做**（连 `saturate` 都不做，
+          // 那是输出编码里的 clamp）。所以这里必须映射到 `None`，
+          // 不能退到任何 S 曲线。
+          scene.lighting.tone_map = ToneMap::None;
+          break;
+        case 1:   // THREE.LinearToneMapping = saturate(exposure * color)
           scene.lighting.tone_map = ToneMap::None;
           break;
         case 2:   // THREE.ReinhardToneMapping
           scene.lighting.tone_map = ToneMap::Reinhard;
           break;
-        case 3:   // THREE.CineonToneMapping
+        case 3:   // THREE.CineonToneMapping（= OptimizedCineon，与 Hable 不同）
           scene.lighting.tone_map = ToneMap::Filmic;
           break;
         case 4:   // THREE.ACESFilmicToneMapping
-          scene.lighting.tone_map = ToneMap::Aces;
+          // ⚠ 必须用 `AcesThree`（逐式同构），不能用 `Aces`（Narkowicz 近似）。
+          // 两者在中间调差 12~14 级（见 `color_pipeline.hpp` 的表）。
+          scene.lighting.tone_map = ToneMap::AcesThree;
           break;
         default:  // 5/6 = AgXToneMapping，7 = NeutralToneMapping
           scene.lighting.tone_map = ToneMap::Agx;
           break;
       }
     }
+  }
+
+  // ── 对齐模式下的色调映射默认值 ──
+  //
+  // three 的默认是 `toneMapping = NoToneMapping`。对齐模式下若脚本没显式
+  // 设过，就按 three 的默认走（**而不是**本框架的 ACES）；显式设过的由上面
+  // 那段 `renderer.toneMapping` 映射处理（含 ACESFilmic → `AcesThree`）。
+  if (aligned) {
+    bool explicit_tone = false;
+    JsRef global_root{impl_->context, JS_GetGlobalObject(impl_->context)};
+    JsRef renderer{impl_->context,
+                   JS_GetPropertyStr(impl_->context, global_root.get(), "renderer")};
+    if (JS_IsObject(renderer.get())) {
+      JsRef tone{impl_->context,
+                 JS_GetPropertyStr(impl_->context, renderer.get(), "toneMapping")};
+      explicit_tone = !JS_IsUndefined(tone.get()) && !JS_IsNull(tone.get());
+    }
+    if (!explicit_tone) {
+      JsRef tone{impl_->context,
+                 JS_GetPropertyStr(impl_->context, scene_root.get(), "toneMapping")};
+      explicit_tone = !JS_IsUndefined(tone.get()) && !JS_IsNull(tone.get());
+    }
+    if (!explicit_tone) scene.lighting.tone_map = ToneMap::None;
   }
 
   return scene;

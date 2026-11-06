@@ -822,6 +822,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "把 bpy 脚本产出的物体几何导出成 JSON 资产（供 three.js 脚本组装）——「bpy 做资产、js 组装」的资产端"
     },
+    "align_render": {
+      "kind": "executable",
+      "sources": ["tools/align_render.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "像素级对标的霜天侧驱动：同一份 three.js 场景 → 本框架渲染，并显式覆盖 tone_map/背景，好与浏览器同一组参数严格对齐（align_bench_probe 的加强版：可切算子与背景）"
+    },
     "align_bench_probe": {
       "kind": "executable",
       "sources": ["tools/align_bench_probe.cpp", "src/python/mp_bridge.c",

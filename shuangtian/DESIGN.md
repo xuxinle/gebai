@@ -2005,6 +2005,69 @@ Shape+holes/InstancedMesh/AnimationMixer）20/20 可用；端到端（three.js �
 **接口**：`include/st/raster/three_runtime.hpp`、`include/st/raster/scene_report.hpp`。
 **文档**：`docs/three3d.md`。**工具**：`tools/three_check.cpp`（`st build three_check`）。
 
+#### 4.2.17 与浏览器**像素级对标**（2026-11-06）
+
+**需求**：“霜天渲染 three.js 要和浏览器渲染像素级对标”。这件事先被变成一个
+**可量的量**，再逐项归因，最后把结论钉成断言。完整实测见 `docs/render_parity.md`。
+
+**真值通道**（没有它就没有“像素级”）：无头 Chrome（`--disable-gpu` → SwiftShader
+CPU 光栅，确定性）+ 页面内 `THREE.WebGLRenderer.render()` + `gl.readPixels()` 读原始
+RGBA（**不经过**窗口合成/色彩管理/DPI 缩放）→ POST 回本地服务 → 写 PNG。
+实测 three r160 / WebGL 2.0 / 同进程两次取像素逐字节相同。
+
+**改造前的实测差**（同一场景、同相机、同算子）：
+
+| 判据 | 数值 |
+|---|---|
+| 受控平面（0.5 灰 + 单平行光 n·l=1） | 霜天 **176** vs 浏览器 **76** |
+| quad 场景主体逐像素平均差 | **60.08**/255（p50 45 / p90 126） |
+| 差 > 16 的像素占比 | **88.3%** |
+
+**归因**（逐项消融量出来的，不是推的）：
+
+| # | 项 | three.js | 改造前 | 影响 |
+|---|---|---|---|---|
+| ① | 漫反射归一化 | `albedo/π × irradiance` | `albedo × diffuse` | **+100/255**（主因） |
+| ② | 常量环境保底 | 无 `AmbientLight` 即 0 | `ambient = 0.35` 恒在 | 背光面 0 → **84** |
+| ③ | 边缘光 rim | 无此概念 | `rim = 0.25` 加算 | 轮廓 +25% |
+| ④ | 环境反射 | 纯色 background **不产生 IBL** | 从背景**推导**（`env_ground = sky×2.6`、强制 `env_strength = 0.45`） | 金属凭空多一层反射 |
+| ⑤ | ACES 曲线 | 完整 ACESFilmic（矩阵 + `/0.6`） | Narkowicz 近似 | 逐点 **6~14 级** |
+| ⑥⑦⑧ | G / F / `roughness` 下限 | `V_GGX_SmithCorrelated` / `exp2` 拟合 / `max(r,0.0525)` | Schlick-GGX / `(1-v·h)^5` / `1e-3` | 高光形状与掠射角 |
+| ⑨ | 采样 | `antialias:false` → 1 样本 | 软件腿 3× 超采样 + box 降采样 | 边缘像素不可能逐字节相同 |
+
+**关键判断**：扫遍 `tone_map × ambient × diffuse × env_strength`（100 组），
+最好只到平均差 **5.39**、仍有 **9.3%** 像素差 >8 —— 所以这不是“调参问题”，是**模型问题**。
+
+**做法**：新增 `st::raster::three_parity`（逐式对照 `third_party/three/three.cjs` 的
+ShaderChunk）+ `ToneMap::AcesThree`（three 的完整 ACESFilmic）+ `Lighting::Model{Legacy, Three}`。
+对齐模式**必须显式声明**（`globalThis.renderer = { compat: 'three' }`），默认仍是 Legacy
+——因为关掉 ①②③④ 会让存量画面“真的变黑”（物理正确但会变样）。
+
+**改造后的实测**：
+
+| 场景 | 主体平均差 | p50 | p90 | 差>8 |
+|---|---|---|---|---|
+| 受控平面 | **0**（逐字节相等 76 = 76） | 0 | 0 | 0% |
+| quad（1100×800，10 材质） | **0.49** | **0** | **0** | 1.6% |
+
+主体内部 p50 = p90 = 0（**逐字节相同**）；剩下的全部集中在轮廓软边（采样方式不同）。
+
+**途中抓到的三个真缺陷**：
+
+| 缺陷 | 症状 | 根因 |
+|---|---|---|
+| **D3D11 腿忽略 `tone_map`** | 剧本写 `none` 与 `agx` 输出逐像素相同 | 着色器里硬编码 ACES，且**先 `saturate` 再映射**（HDR 高光被截平） |
+| **清屏与实体用两个算子** | 背景系统性偏亮十几级（占画面 77%） | `begin_frame` 用默认 ACES 清屏，`set_lighting` 之后才换算子 |
+| **`clear_color` 契约理解错** | 背景 164 vs 期望 63 | 参数是“0~255 表示的**线性值**”，传了已编码的值 → 编码两次 |
+
+**已知残余**（写进文档而不是掩盖）：轮廓边缘（采样）、`geometryRoughness`（屏幕空间
+导数取 0）、`envMap`/PMREM（无管线）、阴影（PCF vs 平面投影）、背景 8bit 中转的 ±1 级量化。
+
+**回归**：`tests/raster_three_parity_test.cpp`（7 用例）把**浏览器实测值**钉成断言
+（76 / 106 / 141），并锁住“Legacy 仍是 176”防止有人把旧模型一起改了。
+**接口**：`include/st/raster/three_parity.hpp`。**工具**：`tools/align_render.cpp`
+（`st build align_render`，可切算子与光照参数，用于消融）。
+
 ### 4.3 text
 ```cpp
 namespace st::text {

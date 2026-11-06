@@ -333,8 +333,47 @@ float strength{0.0f};
 };
 
 struct Lighting {
+  /// **着色模型**（2026-11-06）。
+  ///
+  /// 两个模型共用一个 `Lighting` 结构，因为调用方（剧本/脚本/导演）改的是
+  /// 同一组参数（光方向、强度、颜色），只是**公式**不同。
+  enum class Model : std::uint8_t {
+    /// 本框架原模型：`albedo × (ambient + n·l·diffuse + rim)` + 近似 GGX。
+    ///
+    /// 它的优点是“怎么调都不会死黑”（常量保底 + 边缘光），代价是**永远不像
+    /// 物理渲染**：漫反射缺 1/π（偏亮 3.14 倍）、背光面不黑。
+    ///
+    /// 默认值。存量画面、已有出片、`scene3d_feature_matrix_test` 基线都靠它。
+    Legacy = 0,
+    /// **与 three.js r160 逐式同构**（见 `three_parity.hpp`）。
+    ///
+    /// 选它时：`ambient` 被当作 `AmbientLight` 的 irradiance（走 `/π`）、
+    /// `diffuse` 被当作 `DirectionalLight.intensity`、`rim` **完全不用**、
+    /// `env_*` **完全不用**（three 的纯色 background 不产生 IBL）。
+    ///
+    /// 实测（0.5 灰面 + 单平行光 n·l=1）：本模型输出 76，浏览器实测 76。
+    Three = 1,
+  };
+  Model model{Model::Legacy};
+
   /// 主光方向（世界空间，**指向光源**，不需要预先归一化）。
   math::Vec3 light_from{0.4f, 0.8f, 0.6f};
+  /// 主光颜色（线性白点）。
+  ///
+  /// ## 为何现在才补（2026-11-06）
+  ///
+  /// 旧模型只有亮度（`ambient`/`diffuse` 两个标量），颜色被烘在顶点色里，
+  /// 所以一直没有这个字段。而 three 的 `DirectionalLight`/`AmbientLight`
+  /// **有颜色的**，同构模型必须能表达（否则“暖光 + 冷环境”这种场景
+  /// 在两边会长得不一样）。
+  ///
+  /// 默认白色：旧模型不读它，所以对存量零影响。
+  math::Vec3 light_color{1.0f, 1.0f, 1.0f};
+  /// 环境光的颜色（线性）。
+  ///
+  /// three 的 `AmbientLight` 是 `intensity × color` 的 irradiance；只保留标量
+  /// 亮度会让“冷环境光”在两边差出颜色。旧模型不读它。
+  math::Vec3 ambient_color{1.0f, 1.0f, 1.0f};
   /// 环境项：无光照处的底色亮度（0 = 背光面全黑）。
   float ambient{0.35f};
   /// 漫反射权重（与环境项相加，1.10 ≈ 原值 ambient 0.35 + diffuse 0.75）。

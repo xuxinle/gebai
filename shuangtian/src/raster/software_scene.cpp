@@ -24,6 +24,7 @@
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/surface.hpp"
+#include "st/raster/three_parity.hpp"
 
 namespace st::raster {
 namespace {
@@ -681,8 +682,21 @@ class SoftwareScene final : public Scene3D {
     //
     // 若先清屏再重置，用的是**上一帧**的 `tone_map_`（首帧用默认值）——
     // 表现是“切了色调映射后背景慢一帧才跟上”。这类延迟在批量出片里很难查。
+    //
+    // ## 但“重置成默认 ACES”会让背景与实体用两个算子（2026-11-06 修）
+    //
+    // `set_lighting()` 总在 `begin_frame()` **之后**（调用方不可能把顺序倒过来，
+    // 那是 `Scene3D` 的契约）。所以清屏时 `tone_map_` 只能是默认的 `Aces`，
+    // 而实体用的是随后 `set_lighting` 设进去的算子。一帧里两种算子。
+    //
+    // 实测（背景 0.5 灰、tone = None，期望 sRGB 188）：实际清出 **206**——那正是
+    // Narkowicz ACES 作用于 0.5 的结果。全图背景（77%）系统性偏亮十几级，
+    // 而单看实体完全正常，所以极难定位。
+    //
+    // 修法：清屏色用**默认光照结构的算子**（= 调用方没设时的行为，与旧版逐位相同），
+    // 但实体绘制的算子重置保持不变。两项分开——这就是为什么
+    // `tone_map_` 不再从 `lighting_` 派生。
     lighting_ = Lighting{};          // 每帧回到默认：不调 `set_lighting` 的调用方行为完全不变
-    tone_map_ = lighting_.tone_map;
     cull_mode_ = CullMode::Back;     // 同上：不重置会让上一帧的设置泄漏
     material_ = Material{};
     shadow_ = PlanarShadow{};
@@ -698,18 +712,26 @@ class SoftwareScene final : public Scene3D {
     //
     // 输入约定：`clear_color` 是**线性**值（与 `Lighting`/顶点色同一口径），
     // 输出到画布前统一经 `encode_pixel`。
-    const math::Vec3 bg_linear{static_cast<float>(clear_color.r) / 255.0f,
-                               static_cast<float>(clear_color.g) / 255.0f,
-                               static_cast<float>(clear_color.b) / 255.0f};
+    //
     // ## 清屏 alpha 必须**透传**（与 GPU 腿一致）
     //
     // `encode_pixel` 只处理颜色链，返回的 alpha 恒为 255；直接用它清屏会让
     // `begin_frame({0,0,0,0})`（透明背景 —— 把模型叠在视频/画面上时的那条路）
     // 变成**一整块不透明白黑**：三维图层的矩形四角把下层画面盖死。
-    // 实测症状：脚本里 `model_backdrop` 为 false 的三维块在成片上是一个黑方框，
-    // 而文档承诺的是“带透明通道，可叠在视频背景上”。
-    //
-    // 只覆盖 alpha：颜色仍走同一条色调映射 + sRGB 链（混用两套空间会让深底发白）。
+    clear_color_ = clear_color;
+    clear_color_locked_ = false;
+    clear_canvas(clear_color);
+  }
+
+  /// 按**当前** `tone_map_` 清屏（+ 重置深度/绘制计数）。
+  ///
+  /// 为何抽成函数：`begin_frame` 与 `set_lighting` 都要清（前者只知道默认算子，
+  /// 后者才知道真实算子），两处必须走**同一份**编码逻辑，否则又会变成
+  /// “背景与实体两套算子”。
+  void clear_canvas(math::Color clear_color) {
+    const math::Vec3 bg_linear{static_cast<float>(clear_color.r) / 255.0f,
+                               static_cast<float>(clear_color.g) / 255.0f,
+                               static_cast<float>(clear_color.b) / 255.0f};
     math::Color cleared = encode_pixel(bg_linear, 1.0f, tone_map_);
     cleared.a = clear_color.a;
     canvas_.clear(cleared);
@@ -735,8 +757,21 @@ class SoftwareScene final : public Scene3D {
   }
 
   void set_lighting(const Lighting& lighting) override {
+    const ToneMap previous = tone_map_;
     lighting_ = lighting;
     tone_map_ = lighting.tone_map;
+    // ## 清屏色要跟着算子重做（2026-11-06 修）
+    //
+    // `begin_frame()` 不知道本次会用哪个算子（`set_lighting` 总在它之后），
+    // 所以它只能先用默认 ACES 清屏。而实体随后用的是这里的 `tone_map`——
+    // 一帧里背景与实体两套算子，背景系统性偏亮十几级。
+    //
+    // 修法：`set_lighting` 时**重清一次**（此时不可能已经画过东西：
+    // `Scene3D` 的契约是 `begin_frame → set_camera → set_lighting → draw`）。
+    // 为了避免调用方真的违反顺序时把画面抹掉，用 `draw_calls_ == 0` 作守卫。
+    if (tone_map_ != previous && draw_calls_ == 0 && !clear_color_locked_) {
+      clear_canvas(clear_color_);
+    }
   }
 
   void set_cull_mode(CullMode mode) override { cull_mode_ = mode; }
@@ -1382,6 +1417,61 @@ class SoftwareScene final : public Scene3D {
   void flush() override {}
 
  private:
+  /// 逐像素着色分发：按 `lighting_.model` 选公式。
+  ///
+  /// ## 为何在这里分发而不是在上层
+  ///
+  /// 着色发生在像素级（逐像素法线/视向/世界位置），两个模型的输入完全一样，
+  /// 差别只在**公式**。放在光栅化内部就不必让上层知道模型的存在，
+  /// 也保证了「两条腿 × 两种模型」里每个组合都走同一条插值路径。
+  [[nodiscard]] auto shade_pixel(math::Vec3 normal, math::Vec3 base_color, math::Vec3 view_dir,
+                                 math::Vec3 world) const -> math::Vec3 {
+    if (lighting_.model == Lighting::Model::Three) {
+      // ── three.js 同构 ──
+      // 直接光：`lighting_.diffuse` 当 `DirectionalLight.intensity`（three 里它已乘进
+      // irradiance，所以**不需要**再乘 π）。
+      math::Vec3 lit = three_direct_light(normal, view_dir, lighting_.light_from,
+                                          lighting_.light_color, lighting_.diffuse, base_color,
+                                          material_.metallic, material_.roughness);
+      // 环境光：`lighting_.ambient` 当 `AmbientLight` 的 irradiance（走 /π）。
+      // `ambient = 0` 时这一项**真的是 0**（背光面会全黑）——这正是 three 的行为，
+      // 也是旧模型「暗部占 0%」被修掉的关键。
+      if (lighting_.ambient > 0.0f) {
+        // three 的 `AmbientLight`：irradiance = intensity × color（按通道）。
+        // 旧模型只有一个标量亮度，这里用 `ambient_color`（默认白）。
+        const math::Vec3 amb = three_ambient_light(
+            base_color, material_.metallic,
+            math::Vec3{lighting_.ambient_color.x * lighting_.ambient,
+                       lighting_.ambient_color.y * lighting_.ambient,
+                       lighting_.ambient_color.z * lighting_.ambient});
+        lit.x += amb.x;
+        lit.y += amb.y;
+        lit.z += amb.z;
+      }
+      // 自发光：three 的 `outgoingLight = ... + totalEmissiveRadiance`，加在 saturate
+      // **之前**（这样超过 1 的部分能被色调映射滚降，而不是被截平）。
+      if (material_.emission > 0.0f) {
+        if (material_.emission_unlit) lit = math::Vec3{0.0f, 0.0f, 0.0f};
+        const math::Vec3 emissive =
+            material_.emissive_color_set ? material_.emissive_color : base_color;
+        lit.x += emissive.x * material_.emission;
+        lit.y += emissive.y * material_.emission;
+        lit.z += emissive.z * material_.emission;
+      }
+      const auto sat = [](float v) noexcept { return v < 0.0f ? 0.0f : v; };
+      return math::Vec3{sat(lit.x) * lighting_.exposure, sat(lit.y) * lighting_.exposure,
+                        sat(lit.z) * lighting_.exposure};
+    }
+    return shade_surface(normal, base_color, view_dir, lighting_, material_.metallic,
+                         material_.roughness, material_.specular, material_.emission,
+                         material_.specular_tint_set ? material_.specular_tint
+                                                     : math::Vec3{1.0f, 1.0f, 1.0f},
+                         world,
+                         material_.emissive_color_set ? material_.emissive_color : base_color,
+                         material_.emission_unlit);
+  }
+
+ private:
   /// 屏幕空间三角形光栅化：重心坐标 + z-buffer + 透视校正插值 + 逐像素光照。
   ///
   /// 坐标系是**超采样缓冲**（`width_*kBake` × `height_*kBake`）：透视映射、
@@ -1474,13 +1564,7 @@ class SoftwareScene final : public Scene3D {
           color = math::Vec3{color.x * texel.x, color.y * texel.y, color.z * texel.z};
         }
         const math::Vec3 lit =
-            shade_surface(normal, color, pixel_view, lighting_, material_.metallic,
-                          material_.roughness, material_.specular, material_.emission,
-                          material_.specular_tint_set ? material_.specular_tint
-                                                       : math::Vec3{1.0f, 1.0f, 1.0f},
-                          world,
-                          material_.emissive_color_set ? material_.emissive_color : color,
-                          material_.emission_unlit);
+            shade_pixel(normal, color, pixel_view, world);
         // ## 阴影贴图：把受光部分按遮挡因子压暗
         //
         // 为何乘在 `lit` 上而不是在着色公式里：阴影是**几何遮挡**，与材质/BRDF
@@ -1629,6 +1713,10 @@ class SoftwareScene final : public Scene3D {
   static constexpr int kBake = 3;
   int width_{1};
   int height_{1};
+  /// 本帧的清屏色（`set_lighting` 改算子时要重清）。
+  math::Color clear_color_{0, 0, 0, 255};
+  /// 是否已经开始画东西（画过就不允许再清，否则会把画面抹掉）。
+  bool clear_color_locked_{false};
   Canvas canvas_;
   std::vector<float> depth_{};
   math::Mat4 view_{math::Mat4::identity()};

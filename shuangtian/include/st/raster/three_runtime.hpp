@@ -153,6 +153,27 @@ struct ThreeScene {
   std::vector<std::string> warnings{};
   /// 场景里出现的 three.js 版本（由 `THREE.REVISION` 读）。
   std::string three_revision{};
+  /// 脚本是否请求了 **three.js 同构渲染**（`globalThis.renderer = { compat: 'three' }`）。
+  ///
+  /// ## 为何要显式声明而不是默认开
+  ///
+  /// 同构模型会把三样“本框架特有但 three 没有”的东西关掉：
+  /// 常量环境保底（`ambient = 0.35`）、边缘光（`rim`）、从背景推导的环境反射。
+  /// 关掉后**背光面会真的全黑**——这是物理正确的，但会改变存量出片的观感。
+  /// 所以默认关，脚本声明了才开。
+  bool three_parity{false};
+  /// 场景的清屏色（已按 three 的输出链编码好）；`background_set = false` 时调用方自己决定。
+  ///
+  /// ## 为什么要把它抽出来
+  ///
+  /// three 的清屏色就是 `scene.background`（`Color` 对象，**线性工作空间**），
+  /// 经 `toneMapping → outputColorSpace` 后写进帧缓冲。本框架的
+  /// `begin_frame(clear_color)` 也走同一条链，所以把**线性值**传进去即可。
+  ///
+  /// 不抽出来时实测的后果：脚本写 `background = 0.05 灰`，画面底色却是
+  /// 调用方传的 (13,13,13)，差 50 级——而背景占画面 77%，一差就是全图差。
+  bool background_set{false};
+  math::Vec3 background_linear{0.0f, 0.0f, 0.0f};
 
   [[nodiscard]] auto empty() const noexcept -> bool { return objects.empty(); }
 };

@@ -3558,7 +3558,15 @@ cbuffer Scene : register(b0) {
  // `g_probe_tune.y` = 锐利度（权重 = max(0,dot)^sharpness）。
  float4 g_probe_dirs[4];
  float4 g_probe_colors[4];
- float4 g_probe_tune;
+   float4 g_probe_tune;
+  // ## 色调映射算子（2026-11-06 新增）
+  // `g_tune2.x` = ToneMap 枚举值：0=None / 1=Reinhard / 2=Aces / 3=Filmic /
+  // 4=Agx / 5=AcesThree。
+  //
+  // 为何必须加它：GPU 腿原来**硬编码 ACES**，`set_lighting()` 里的 `tone_map`
+  // 传下来就被丢掉了——剧本写 `tone_map: "none"` 时两腿输出逐像素相同
+  // （实测 rgb(4,6,12) vs rgb(4,6,12)）。
+  float4 g_tune2;
 };
 
 struct VsIn {
@@ -3613,8 +3621,22 @@ float4 ps_scene3d(VsOut input) : SV_Target {
  float metallic = g_opacity.y;
  float roughness = g_opacity.z;
  float specular_w = g_opacity.w;
- float diffuse_weight = 1.0 - metallic;
- float scale = (g_light.w * diffuse_weight + diffuse * g_tune.x * diffuse_weight + rim) * g_tune.z;
+   float diffuse_weight = 1.0 - metallic;
+  // ## 着色模型分支（2026-11-06）
+  //
+  // `g_tune2.y > 0.5` = three.js 同构模型（与软件腿 `Lighting::Model::Three` 对应）。
+  //
+  // 为何把两条公式都放在同一个着色器而不是另建一个：换着色器就要换状态对象/常量
+  // 缓冲，而“两条腿 × 两种模型”已经够多组合了。分支只算一个 uniform，代价可忽略。
+  bool three_model = g_tune2.y > 0.5;
+  float scale = 0.0;
+  if (!three_model) {
+    scale = (g_light.w * diffuse_weight + diffuse * g_tune.x * diffuse_weight + rim) * g_tune.z;
+  } else {
+    // three 的 `RE_IndirectDiffuse_Physical`：irradiance × diffuseColor/π。
+    // `g_light.w` 就是 AmbientLight 的 irradiance（对齐模式下没写就是 0）。
+    scale = g_light.w * diffuse_weight * 0.31830988618;
+  }
   // g_tune.w > 0.5 = 本网格带 UV 且已设纹理 → 采样并与顶点色相乘
   // （与软件腿同一口径：顶点色当基础色/染色，纹理提供图案）
   // 基色：剧本指定时**取代**顶点色（与软件腿 `material_.base_color_set` 同语义）
@@ -3633,6 +3655,39 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   // 为何用 GGX 而不是 Blinn-Phong：后者的高光形状不随角度变化，掠射角下会崩
   // 成一束硬边；GGX 是微表面模型，粗糙度直接决定高光宽度与拖尾形状。
   float3 lit = base * scale;
+  if (three_model) {
+    // ## three.js 的直接光（与 `three_parity.cpp` 的 `three_direct_light` 逐式同构）
+    //
+    // 关键差： irradiance = saturate(n·l) × lightColor × intensity；
+    //           漫反射 = irradiance × diffuseColor/π；
+    //           高光 = irradiance × D·V·F（V 已含 1/(4·n·l·n·v)，**不再除一渔**）
+    float3 view_dir = normalize(g_eye.xyz - input.world);
+    float n_dot_v = max(dot(n, view_dir), 0.0);
+    float n_dot_l = max(dot(n, light), 0.0);
+    float3 diffuse_color = base * diffuse_weight;
+    // three：material.roughness = max(roughness, 0.0525)，然后 alpha = roughness²
+    float r = clamp(max(roughness, 0.0525), 0.0, 1.0);
+    float alpha = r * r;
+    float3 irradiance = n_dot_l * float3(1.0, 1.0, 1.0) * g_tune.x;
+    lit += irradiance * diffuse_color * 0.31830988618;
+    if (n_dot_l > 0.0 && n_dot_v > 0.0) {
+      float3 h = normalize(view_dir + light);
+      float n_dot_h = max(dot(n, h), 0.0);
+      float v_dot_h = max(dot(view_dir, h), 0.0);
+      float a2 = alpha * alpha;
+      float denom_d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+      float D = 0.31830988618 * a2 / (denom_d * denom_d);
+      // V_GGX_SmithCorrelated：0.5 / max(gv+gl, EPSILON)
+      float gv = n_dot_l * sqrt(a2 + (1.0 - a2) * n_dot_v * n_dot_v);
+      float gl = n_dot_v * sqrt(a2 + (1.0 - a2) * n_dot_l * n_dot_l);
+      float V = 0.5 / max(gv + gl, 1e-7);
+      // F_Schlick 的 exp2 拟合（不是 (1-v·h)^5）
+      float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
+      float fc = exp2((-5.55473 * v_dot_h - 6.98316) * v_dot_h);
+      float3 F = f0 * (1.0 - fc) + fc;
+      lit += irradiance * D * V * F;
+    }
+  } else {
   // ## 开关不能只看 specular_w（与 C++ 侧 2026-11-05 的修同步）
   //
   // 镜面反射的存在性由**菲涅耳 F0** 决定：绝缘体 0.04、金属 = 固有色。
@@ -3677,6 +3732,7 @@ float4 ps_scene3d(VsOut input) : SV_Target {
       lit += D * G * F / denom * n_dot_l * scale_spec;
     }
   }
+  }
 
   // ## 环境反射（与 C++ 侧 `shade_surface` 的环境段逐字对应）
   //
@@ -3699,7 +3755,12 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   //
   // 特性矩阵测试（`raster_scene3d_feature_matrix_test.cpp`）把它抓出来了：
   // 单看任一条腿都"正常"，只有并排比才看得见。
-  {
+  //
+  // ## 对齐模式下必须跳过（2026-11-06）
+  //
+  // three 的纯色 `scene.background` **不产生 IBL**；金属只能反射直接光。
+  // 旧路径凭空多一层环境反射，实测让背光面从 0 抬到 84/255。
+  if (!three_model) {
     float3 view_dir = normalize(g_eye.xyz - input.world);
     float n_dot_v = max(dot(n, view_dir), 0.0);
     // 菲涅耳（Schlick）
@@ -3814,14 +3875,62 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   // ## 输出链：线性 → 曝光 → 色调映射 → sRGB 编码
   //
   // ⚠ 本段是 `st::raster::encode_pixel`（`color_pipeline.cpp`）的**逐字翻译**。
-  // 两条腿必须同一条输出链，否则“降级”就变成“另一种长相”——
-  // 实测：只改软件腿时，`scene3d_two_legs_agree_on_the_same_scene` 立刻变红。
+  // 两条腿必须同一条输出链，否则“降级”就变成“另一种长相”。
   //
   // 顺序不能反：先编码再映射 = 在非线性空间做曲线，暗部被压得不均匀。
+  //
+  // ## 这里曾经是硬编码 ACES（2026-11-06 修，真缺陷）
+  //
+  // 原实现完全**不读 `tone_map`**：不管剧本写 `none` 还是 `agx`，
+  // 两腿输出逐像素相同。实测（同场景同参数，只切后端）：
+  //
+  // | 后端 | tone=0 (None) | tone=4 |
+  // |---|---|---|
+  // | software | rgb(13,18,25) | rgb(4,6,12) |
+  // | **gpu** | rgb(4,6,12) | rgb(4,6,12) ← 逐像素相同 |
+  //
+  // 第二个错是 **先 `saturate` 再映射**：HDR >1 的部分被截平后才进曲线，
+  // 高光滚降丢失（软件腿保留 HDR）。两个错都“不报错”，只是画面不对。
+  //
+  // 修法：把算子编号传进来，分支用与 C++ 侧相同的常数。
+  // `g_tune2.x` = `ToneMap` 枚举值（0=None / 1=Reinhard / 2=Aces / 3=Filmic /
+  // 4=Agx / 5=AcesThree）。AgX 是**色彩空间变换**，逐色道做不到，这里退到
+  // Narkowicz（与 C++ 侧 `tone_map_channel` 的 AgX 退法一致，便于两腿对得上）。
   float3 hdr = lit;
-  // Narkowicz 2015 的 ACES 近似（与 C++ 侧 `aces()` 同系数）
-  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-  hdr = saturate((hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e));
+  const int tone_op = (int)(g_tune2.x + 0.5);
+  if (tone_op == 0) {
+    hdr = saturate(hdr);
+  } else if (tone_op == 1) {
+    hdr = saturate(hdr / (float3(1.0, 1.0, 1.0) + hdr));
+  } else if (tone_op == 3) {
+    // Hable Uncharted2（与 C++ 侧 `filmic()` 同常数，白点 11.2）
+    float3 x = max(hdr, 0.0);
+    float3 num = x * (0.15 * x + 0.05) + 0.004;
+    float3 den = x * (0.15 * x + 0.5) + 0.06;
+    float3 w = 11.2;
+    float3 num_w = w * (0.15 * w + 0.05) + 0.004;
+    float3 den_w = w * (0.15 * w + 0.5) + 0.06;
+    hdr = saturate((num / den) / (num_w / den_w));
+  } else if (tone_op == 5) {
+    // three r160 的 ACESFilmic（与 C++ 侧 `aces_three` 逐字同构）
+    float3 c = hdr / 0.6;
+    const float3x3 aces_in = float3x3(0.59719, 0.35458, 0.04823,
+                                      0.07600, 0.90834, 0.01566,
+                                      0.02840, 0.13383, 0.83777);
+    const float3x3 aces_out = float3x3(1.60475, -0.53108, -0.07367,
+                                       -0.10208, 1.10813, -0.00605,
+                                       -0.00327, -0.07276, 1.07602);
+    c = mul(aces_in, c);
+    float3 a = c * (c + 0.0245786) - 0.000090537;
+    float3 b = c * (0.983729 * c + 0.4329510) + 0.238081;
+    c = a / b;
+    c = mul(aces_out, c);
+    hdr = saturate(c);
+  } else {
+    // 2 = Aces（Narkowicz）/ 4 = Agx（退到 Narkowicz）
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    hdr = saturate((hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e));
+  }
   // sRGB 编码交给硬件（RTV/_SRGB 视图）——手工再编码一次会偏亮
   float3 encoded = hdr;
   // ## alpha 两个字的意义（不要混淆）
@@ -3858,6 +3967,8 @@ struct Scene3dParams {
   std::array<std::array<float, 4>, 4> probe_colors{};
   /// x = 探针个数（0 = 走旧的天地插值），y = 锐利度
   std::array<float, 4> probe_tune{};
+  /// x = 色调映射算子（`ToneMap` 枚举值）；yzw 保留
+  std::array<float, 4> tune2{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -4424,6 +4535,12 @@ class GpuScene3d final : public st::raster::Scene3D {
       params.probe_tune = {static_cast<float>(count), lighting_.env_probe_sharpness, 0.0f,
                            0.0f};
     }
+    // 色调映射算子（2026-11-06）：原来 GPU 腿硬编码 ACES，这里是那个缺陷的修法。
+    // 必须**每次绘制都写**：`set_lighting()` 可能在任何一次 draw 之前。
+    //
+    // y = 1 表示 three.js 同构着色模型（与软件腿 `Lighting::Model::Three` 对应）。
+    params.tune2 = {static_cast<float>(lighting_.tone_map),
+                    lighting_.model == Lighting::Model::Three ? 1.0f : 0.0f, 0.0f, 0.0f};
     // 自发光：与软件腿 `shade_surface` 的 emission 逻辑对齐。
     // 用**带符号**强度传递 `emission_unlit`（负值 = 纯发光体），
     // 避免再加一个 float4 —— 常量缓冲多一个字段就多一处错位可能。
