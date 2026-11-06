@@ -672,11 +672,124 @@ describe("run 生命周期", () => {
     expect(result.output).toContain("action=init")
   })
 
-  test("框架目录缺失：明确提示而非静默", async () => {
+  test("应用找不到：列全**按名搜索过的位置**（而非静默/含糊失败）", async () => {
     const home = mkdtempSync(join(tmpdir(), "st-tools-"))
     const { ctx } = makeCtx(home)
     const result = await tools.run.execute({ action: "build", framework: join(home, "nope") }, ctx)
-    expect(result.output).toContain("未找到霜天框架")
+    expect(result.output).toContain("未找到应用")
+    // 搜索清单必须列出来（这是修好它的唯一线索）
+    expect(result.output).toContain("按应用名找过")
+  })
+
+  // ——————————————————————————————————————————————————————————————
+  // 纯二进制分发（无源码）：按需分发单个应用的 exe
+  // ——————————————————————————————————————————————————————————————
+
+  /** 造假一个“只有 exe、无源码”的分发目录（exe 不需要真能跑：本组只验定位与决策）。 */
+  function makeBinaryOnly(home: string, app = "jianmu"): string {
+    const dir = join(home, "bin")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, IS_WIN ? `${app}.exe` : app), "#!/bin/sh\nexit 0\n")
+    return dir
+  }
+
+  test("纯二进制分发：start **跳过构建**，直接用 GEBAI_HOME/bin 里的 exe", async () => {
+    // 这是本次改造的核心：旧实现无条件走 `st build`，于是没有源码时
+    // 连“把应用跑起来”都做不到（卡在“引导工具链失败”）。
+    const server = await control()
+    server.setHandler(() => ({ app: { name: "jianmu" }, backend: "headless", headless: true }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const binDir = makeBinaryOnly(home, "jianmu")
+
+    const { ctx, commands } = makeCtx(home, (cmd) => {
+      if (cmd.includes(LAUNCH_MARK)) {
+        const controlDir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+        mkdirSync(controlDir, { recursive: true })
+        writeFileSync(
+          join(controlDir, "jianmu-control.json"),
+          JSON.stringify({ port: server.port, pid: 777, token: "" }),
+        )
+        return { stdout: "" }
+      }
+      return {}
+    })
+
+    const result = await tools.run.execute(
+      { action: "start", target: "jianmu", framework: join(home, "no-such-source") },
+      ctx,
+    )
+    // ① 不能有任何构建/引导命令
+    expect(commands.some((c) => c.cmd.includes("bootstrap"))).toBe(false)
+    expect(commands.some((c) => c.cmd.includes(" build "))).toBe(false)
+    // ② 真的启动起来了，且指向那个分发的 exe
+    expect(result.output).toContain("已启动 jianmu")
+    expect(result.output).toContain("跳过构建")
+    const launch = commands.find((item) => item.cmd.includes(LAUNCH_MARK))
+    expect(launch?.cmd).toContain(binDir)
+    expect((result.data as Record<string, unknown>).mode).toBe("binary")
+  })
+
+  test("纯二进制分发：build/test/lint 明确拒绝而非伪装成功", async () => {
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    makeBinaryOnly(home, "jianmu")
+    const { ctx } = makeCtx(home, () => ({ stdout: "" }))
+    // 四者一致：没有源码就没有 build / test / lint / init
+    for (const action of ["build", "test", "lint"] as const) {
+      const result = await tools.run.execute(
+        { action, target: "jianmu", framework: join(home, "no-such-source") },
+        ctx,
+      )
+      expect(result.output).toContain("纯二进制分发")
+      expect(result.output).toContain("无法执行")
+      // 必须指出“该用什么”（否则调用方只知道错，不知道怎么办）
+      expect(result.output).toContain("action=start")
+    }
+  })
+
+  test("源码构建目录优先于分发目录（源码树里跑 start 仍看得到新产物）", async () => {
+    // 两种形态同时存在时必须**源码优先**：否则改完源码、构建完了，
+    // start 却还去跑旧的 dist exe——那种“改了没生效”极难查。
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    mkdirSync(join(root, "build", "dev", "bin"), { recursive: true })
+    writeFileSync(join(root, "build", "dev", "bin", IS_WIN ? "mdeditor.exe" : "mdeditor"), "#!/bin/sh\nexit 0\n")
+    makeBinaryOnly(home, "mdeditor")   // 同时存在一个分发副本
+
+    const server = await control()
+    server.setHandler(() => ({ app: { name: "mdeditor" }, backend: "headless", headless: true }))
+    const { ctx, commands } = makeCtx(home, (cmd) => {
+      if (cmd.includes(LAUNCH_MARK)) {
+        const controlDir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+        mkdirSync(controlDir, { recursive: true })
+        writeFileSync(
+          join(controlDir, "mdeditor-control.json"),
+          JSON.stringify({ port: server.port, pid: 777, token: "" }),
+        )
+        return { stdout: "" }
+      }
+      return { stdout: "构建完成 [dev]" }
+    })
+
+    const result = await tools.run.execute({ action: "start", target: "mdeditor", framework: root }, ctx)
+    const launch = commands.find((item) => item.cmd.includes(LAUNCH_MARK))
+    // 启动的必须是 **build/dev/bin** 里那份，不是分发的副本
+    expect(launch?.cmd).toContain(join("build", "dev", "bin"))
+    expect((result.data as Record<string, unknown>).mode).toBe("source")
+  })
+
+  test("shape：只探测不执行（不产生任何构建/启动命令）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    makeBinaryOnly(home, "jianmu")
+    const { ctx, commands } = makeCtx(home, () => ({ stdout: "" }))
+    const result = await tools.run.execute(
+      { action: "shape", target: "jianmu", framework: join(home, "no-such-source") },
+      ctx,
+    )
+    expect(commands.length).toBe(0)
+    expect(result.output).toContain("binary")
+    expect(result.output).toContain("不能构建")
+    // 搜索顺序要如实列出（调用方靠它判断“该把 exe 放哪”）
+    expect(result.output).toContain("搜索顺序")
   })
 
   test("action=start：脱离会话启动并等待控制端口，返回 port/pid/控制文件", async () => {

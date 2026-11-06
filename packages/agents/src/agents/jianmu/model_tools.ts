@@ -28,7 +28,13 @@ import { schema } from "@gebai/sdk/node"
 
 const IS_WINDOWS = process.platform === "win32"
 
-/** 框架根：`SHUANGTIAN_PROJECT` 优先，缺省歌白仓库下的 `shuangtian/`。 */
+/**
+ * 框架/分发根：`SHUANGTIAN_PROJECT` 优先，缺省歌白仓库下的 `shuangtian/`。
+ *
+ * ⚠ **不含 `scene3d_capability_probe` / `three_check` 这类离线工具**：那些是用**源码**
+ * 构建出来的探针，按需分发形态（只有 app 的 exe）里根本没有。所以下面每个用到它的
+ * 地方都必须**先探测再降级**，不能把“没构建”当成错误。
+ */
 function frameworkRoot(ctx: ToolContext): string {
   const explicit = String(ctx.env.SHUANGTIAN_PROJECT ?? "").trim()
   if (explicit) return resolve(explicit)
@@ -95,7 +101,10 @@ function requireExe(path: string, label: string, profile: string): string | null
   if (existsSync(path)) return null
   return (
     `找不到 ${label}：${path}\n`
-    + `先构建：shuangtian_run(action=build, target=${label}, profile=${profile})`
+    + `这一工具需要由**源码**构建出来的探针 exe。\n`
+    + `  · 源码形态：先构建 shuangtian_run(action=build, target=${label}, profile=${profile})\n`
+    + `  · 按需分发形态：没有这些探针。改用 shuangtian_capture（启应用后截图）\n`
+    + `    配合 shuangtian_get(id="viewport") 的 objects/error 判据，同样能完成出图核验。`
   )
 }
 
@@ -125,7 +134,19 @@ export const scenesTool: Tool = {
   async execute(args, ctx) {
     const rel = String(args.dir ?? "").trim() || "apps/jianmu/scenes"
     const dir = isAbsolute(rel) ? rel : join(frameworkRoot(ctx), rel)
-    if (!existsSync(dir)) return { output: `目录不存在：${dir}` }
+    if (!existsSync(dir)) {
+      // ## 分发形态：场景目录随 exe 走，不在框架树下
+      //
+      // 按需分发时根本没有 `<框架>/apps/jianmu/scenes`。此时该告诉调用方
+      // “脚本要放到哪”，而不是只报一句“目录不存在”让它自己猜。
+      return {
+        output:
+          `目录不存在：${dir}\n` +
+          `  源码形态下场景在 <框架>/apps/jianmu/scenes；\n` +
+          `  按需分发形态下场景在 **exe 同目录下的 scenes/**（建木以工作目录为基准解析）。\n` +
+          `  用 dir 参数可指定其他目录。`,
+      }
+    }
     const names = readdirSync(dir)
       .filter((n) => n.endsWith(".js") || n.endsWith(".py"))
       .sort()

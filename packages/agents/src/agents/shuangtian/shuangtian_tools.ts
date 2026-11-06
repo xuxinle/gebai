@@ -26,6 +26,126 @@ const DEFAULT_FRAMEWORK_DIR = "shuangtian"
 /** 运行期状态目录（控制文件/日志/截图），位于会话工作区。 */
 const RUNTIME_DIR = ".shuangtian"
 const DEFAULT_BUILD_TIMEOUT_MS = 600_000
+/** 源码树产物目录：`build/<profile>/bin/`。 */
+const SOURCE_BIN_SUBDIR = "build"
+/** 构建档探测顺序：dev 主用；quick/release 是发行与快速验证档；debug 兜底。 */
+const APP_PROFILES = ["dev", "quick", "release", "debug"] as const
+/** 需要源码与 `st` 工具链的动作（二进制分发形态下直接拒绝）。 */
+const BUILD_ACTIONS = new Set(["build", "test", "lint", "init"])
+
+/**
+ * 执行**形态**：手里是源码树，还是只有分发好的可执行文件。
+ *
+ * ## 为何要分形态（本工具集原先最强的隐含假设）
+ *
+ * 旧实现默认“手里一定有**源码树**”：`st.pkg` 必须在、`build/bin/st` 必须能自举、
+ * 每次 `start` 都先跑一次 `st build`。但真实交付形态常常只有**构建好的可执行文件**：
+ * 用户按需分发单个应用的 exe，机器上没有编译器、没有 `st`、也没有 `st.pkg`。
+ * 那时旧实现卡在第一步：`未找到霜天框架（.../st.pkg 不存在）`，
+ * 而真正想做的事（启动应用、截图、操控、看日志）**一个都不需要源码**。
+ *
+ * ## 与 `xiangqi-launch.ts` 同一套探测形状
+ *
+ * 仓里已有“按应用名找 exe”的成熟做法（源码构建目录 → GEBAI_HOME → PATH），
+ * 本函数照它的形**重写一份适配多应用的**，而不是另立一套规矩——两套规矩必然漂移。
+ * 差别只在于：那里固定找 `xiangqi`，这里要找**任意 target**。
+ *
+ * | 形态 | 判据 | 能做什么 |
+ * |---|---|---|
+ * | `source` | 有 `st.pkg`（能构建） | 全部（构建/测试/lint/启动/操控） |
+ * | `binary` | 只找到 exe，无源码 | 启动/操控/截图/日志（**不能**构建/测试/lint） |
+ * | `none` | 都没有 | 什么都不行——报清“按应用名找过哪些位置” |
+ */
+type DistMode = "source" | "binary" | "none"
+
+interface DistShape {
+  mode: DistMode
+  /** 源码树根（binary 形态下由 exe 位置上溯推算，仅供日志可读性）。 */
+  root: string
+  /** 源码形态的 `st` 工具链（binary 形态为空串）。 */
+  st: string
+  /** 本次目标的可执行文件（未找到为空串）。 */
+  binary: string
+  /** 按顺序找过的全部候选（找不到时必须列全，只报一个会误导排查方向）。 */
+  searched: string[]
+}
+
+/** 按平台拼可执行文件名。 */
+function exeName(name: string): string {
+  return IS_WINDOWS ? `${name}.exe` : name
+}
+
+/**
+ * 探测执行形态，并按**应用名**定位可执行文件。
+ *
+ * ## 查找顺序（用户指定，不另设环境变量）
+ *
+ * 1. **源码构建目录**：`<framework>/build/<profile>/bin/<app>`
+ * 2. **歌白可执行文件同级目录**：`dirname(process.execPath)`
+ * 3. **`{GEBAI_HOME}/bin/`**
+ * 4. **PATH**（`Bun.which`）
+ * 5. **`framework` 参数指向的目录本身**（按需分发最常见的摆法）
+ *
+ * 每一层都**四个档位都试**（dev/quick/release/debug）——分发过来的 exe 不会告诉你它当初
+ * 是哪个档编的，而源码树里常见的档位不止 dev。
+ *
+ * 形态判定：命中 ① ⇒ `source`；命中 ②③④⑤ ⇒ `binary`（没有源码就构建不了）；
+ * 都没命中时，有 `st.pkg` 仍算 `source`（只是该 target 还没构建）。
+ */
+function detectShape(ctx: ToolContext, args: Json, target: string): DistShape {
+  const root = frameworkDir(ctx, args)
+  const st = stBinary(root)
+  const candidates: string[] = []
+  const push = (p: string): void => {
+    if (!candidates.includes(p)) candidates.push(p)
+  }
+
+  // ① 源码构建目录（按档位优先；用户显式给的 profile 排最前）
+  const preferred = asString(args, "profile")
+  const profiles = preferred
+    ? [preferred, ...APP_PROFILES.filter((p) => p !== preferred)]
+    : [...APP_PROFILES]
+  const sourceCandidates: string[] = []
+  for (const profile of profiles) {
+    const p = join(root, SOURCE_BIN_SUBDIR, profile, "bin", exeName(target))
+    sourceCandidates.push(p)
+    push(p)
+  }
+
+  // ② 歌白二进制同级目录（分发的自然位置：与 gebai 可执行文件放一起）
+  const execDir = dirname(process.execPath)
+  push(join(execDir, exeName(target)))
+
+  // ③ {GEBAI_HOME}/bin/
+  if (ctx.home) push(join(ctx.home, "bin", exeName(target)))
+
+  // ④ PATH
+  const onPath = Bun.which(exeName(target)) ?? null
+  if (onPath !== null) push(onPath)
+
+  // ⑤ framework 参数指向的目录本身
+  //
+  // 按需分发时用户自然这么做：“把 exe 放到一个目录，然后把 framework 指过去”。
+  // 实测：第一版漏了这条，于是 `dist-test/jianmu.exe` 就摆在那里却报“未找到”
+  // （因为只找了它下面的 `build/<档>/bin/`）——而错误信息里列出的候选路径
+  // 看起来和用户看到的文件差得很远。
+  push(join(root, exeName(target)))
+
+  const sourceLike = existsSync(join(root, "st.pkg"))
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i]
+    if (!existsSync(candidate)) continue
+    const fromSource = sourceCandidates.includes(candidate)
+    return {
+      mode: fromSource ? "source" : "binary",
+      root,
+      st,
+      binary: candidate,
+      searched: candidates,
+    }
+  }
+  return { mode: sourceLike ? "source" : "none", root, st, binary: "", searched: candidates }
+}
 
 // ————————————————————————————————————————————————————————————————————
 // 宿主平台差异（**集中在这里**，不撒到各处）
@@ -92,15 +212,24 @@ function asBool(args: Json, key: string, fallback = false): boolean {
   return fallback
 }
 
-/** 框架根：显式参数 > 环境变量 > 仓库默认位置（含 `st.pkg` 校验）。 */
+/**
+ * 框架根：显式参数 > 环境变量 > 仓库默认位置 > GEBAI_HOME 的随包分发位置。
+ *
+ * ⚠ **不再要求必须有 `st.pkg`**：那是**源码形态**的特征。纯二进制分发时
+ * 目录里只有 `bin/<app>`，用它本来就不需要 `st.pkg`（不需要构建）。
+ * 判据改为“这里有东西”——`st.pkg`、`bin/`、或 `build/` 任一存在即认为是框架/分发根；
+ * 全都没有才如实报“找不到”（错误信息里会列出找过哪些位置）。
+ */
 function frameworkDir(ctx: ToolContext, args: Json): string {
   const explicit = asString(args, "framework") || String(ctx.env.SHUANGTIAN_PROJECT ?? "").trim()
   if (explicit) return ctx.resolvePath(explicit)
+  const looksLikeRoot = (dir: string): boolean =>
+    existsSync(join(dir, "st.pkg")) || existsSync(join(dir, "build")) || existsSync(join(dir, "bin"))
   const candidate = ctx.resolvePath(DEFAULT_FRAMEWORK_DIR)
-  if (existsSync(join(candidate, "st.pkg"))) return candidate
-  // 兜底：GEBAI_HOME 下的随包分发位置
+  if (looksLikeRoot(candidate)) return candidate
+  // 兜底：GEBAI_HOME 下的随包分发位置（二进制形态也允许只是 `bin/`）
   const vendored = join(ctx.home, "vendor", "shuangtian")
-  return existsSync(join(vendored, "st.pkg")) ? vendored : candidate
+  return looksLikeRoot(vendored) ? vendored : candidate
 }
 
 /**
@@ -376,13 +505,14 @@ const kLaunchTimeoutMs = 3_000
 const runTool: Tool = {
   name: "run",
   description:
-    "构建与运行霜天应用（框架生命周期入口）。action=build 构建（自动自举 stpm 工具链）；action=test 跑框架单元测试（可选 san=true 开 ASan/UBSan）；action=lint 跑禁用特性静态扫描；action=start 启动应用并等待控制通道**验证就绪**（文件新鲜 + 握手成功才算；返回 port 与 PID；已有存活实例时明确拒绝，先 stop）。**默认以无头模式启动**（开发/回归用）；需要**真实窗口**让用户亲手操作（鼠标缩放/拖动/键盘）时传 window=true——那时不注入 --headless，后端会自动落到 win32/x11 真窗口（无显示服务时框架自己回退无头）。action=stop 结束进程；action=status 查看进程与端口；action=logs 取运行日志尾部。target 为应用名（gallery/mdeditor 或自带工程的目标名），profile 为构建档（dev/debug/release/san）。",
+    "构建与运行霜天应用（框架生命周期入口）。**先看 action=shape**：它只探测不执行，告诉你当前是源码树还是只有分发的 exe、目标在哪、能不能构建。action=build 构建（自动自举 stpm 工具链）；action=test 跑框架单元测试（可选 san=true 开 ASan/UBSan）；action=lint 跑禁用特性静态扫描；action=start 启动应用并等待控制通道**验证就绪**（文件新鲜 + 握手成功才算；返回 port 与 PID；已有存活实例时明确拒绝，先 stop）。**默认以无头模式启动**（开发/回归用）；需要**真实窗口**让用户亲手操作（鼠标缩放/拖动/键盘）时传 window=true——那时不注入 --headless，后端会自动落到 win32/x11 真窗口（无显示服务时框架自己回退无头）。action=stop 结束进程；action=status 查看进程与端口；action=logs 取运行日志尾部。target 为应用名（gallery/mdeditor 或自带工程的目标名），profile 为构建档（dev/debug/release/san）。**按需分发形态**（只有 exe、无源码）下：build/test/lint 会被明确拒绝，start 直接跑已有 exe，exe 按 源码构建目录 → 歌白 exe 同级 → {GEBAI_HOME}/bin → PATH → framework 目录 依次查找。",
   parameters: schema(
     {
       action: {
         type: "string",
-        enum: ["init", "build", "test", "lint", "start", "stop", "status", "logs"],
-        description: "动作（init 新建独立工程；其余作用于 project 或框架自身）",
+        enum: ["init", "build", "test", "lint", "start", "stop", "status", "logs", "shape"],
+        description:
+          "动作（init 新建独立工程；其余作用于 project 或框架自身）。shape = **只探测不执行**：报告这个根是源码形态还是纯二进制分发、找过哪些位置、能做什么不能做什么（无法用错动作时先查它）",
       },
       target: { type: "string", description: "应用/目标名（默认 mdeditor）" },
       profile: { type: "string", description: "构建档：dev（默认，-O1）/debug/release/san" },
@@ -396,6 +526,11 @@ const runTool: Tool = {
         type: "string",
         description:
           "被操作的应用工程根（含 st.pkg）。独立工程与框架是不同目录，用本参数指定；不传则操作框架自身（可用 SHUANGTIAN_APP 覆盖）",
+      },
+      bin_dir: {
+        type: "string",
+        description:
+          "（已废弃，保留兼容）应用 exe 的搜索已改为固定顺序：源码构建目录 → 歌白可执行文件同级目录 → {GEBAI_HOME}/bin → PATH。通常不需要本参数",
       },
       name: { type: "string", description: "action=init 时的工程名（缺省取目录名）" },
       args: { type: "string", description: "start 时附加命令行参数（如 --demo-stream）" },
@@ -433,11 +568,88 @@ const runTool: Tool = {
     const buildSubdir = toolchain ? `${profile}-${toolchain}` : profile
     const root = frameworkDir(ctx, args as Json)
     const timeoutMs = asNumber(args as Json, "timeout_ms", DEFAULT_BUILD_TIMEOUT_MS)
+    // ## 形态探测（源码 / 纯二进制分发 / 都没有）
+    //
+    // 必须在**前置校验**之前做：旧实现开头就查 `st.pkg`，于是纯二进制分发
+    // 连 `start`（最不需要源码的那个动作）都过不去。
+    const shape = detectShape(ctx, args as Json, target)
 
-    if (!existsSync(join(root, "st.pkg"))) {
-      return { output: `未找到霜天框架（${root}/st.pkg 不存在）：请用 framework 参数指定框架根，或设置 SHUANGTIAN_PROJECT` }
+    // ## `shape`：只探测不执行
+    //
+    // 它存在的理由：调用方经常不知道该用 build 还是直接 start。猜错的代价是一轮
+    // 无用的失败（甚至误以为“环境坏了”）。先问一句就能得到“这里是源码还是分发、
+    // 目标 exe 在哪、能不能构建”的**确定答案**。
+    if (action === "shape") {
+      const lines: string[] = []
+      lines.push(`执行形态：${shape.mode}`)
+      lines.push(
+        `  源码树根：${shape.root}${existsSync(join(shape.root, "st.pkg")) ? "（有 st.pkg）" : "（无 st.pkg）"}`,
+      )
+      lines.push(
+        `  ${IS_WINDOWS ? "st.exe" : "st"} 工具链：${existsSync(shape.st) ? shape.st : "无（不能构建）"}`,
+      )
+      lines.push(
+        `  目标 ${target}：${shape.binary || "未找到"}` +
+          (shape.binary && shape.mode === "binary" ? "（纯二进制分发）" : ""),
+      )
+      const can = shape.mode === "source"
+      lines.push("")
+      lines.push(`  能做的：action=start / stop / status / logs（启动与操控永远不需要源码）`)
+      lines.push(
+        `  ${can ? "构建/测试/lint：可（有源码与 st 工具链）" : "构建/测试/lint：不可（纯二进制分发，无源码）"}`,
+      )
+      lines.push("")
+      lines.push("  搜索顺序（命中即止）：")
+      for (const p of shape.searched) lines.push(`    · ${p}`)
+      return {
+        output: lines.join("\n"),
+        data: {
+          ok: shape.mode !== "none",
+          action,
+          target,
+          mode: shape.mode,
+          binary: shape.binary,
+          searched: shape.searched,
+        },
+      }
     }
-    if (action !== "init" && !existsSync(projectManifest(ctx, args as Json))) {
+
+    if (shape.mode === "none") {
+      return {
+        output:
+          `未找到应用 \`${target}\`：既没有源码树（${root}），分发目录里也没有它。\n` +
+          `  按应用名找过：${shape.searched.map((p) => `\n    · ${p}`).join("")}\n` +
+          `\n  两种用法：\n` +
+          `    · 源码形态：把 framework 指向含 st.pkg 的霜天仓库，先 action=build\n` +
+          `    · 按需分发：把 ${exeName(target)} 放到任一处即可直接 action=start（**不需要构建**）：\n` +
+          `        — 歌白可执行文件同级目录（${dirname(process.execPath)}）\n` +
+          `        — ${join(ctx.home, "bin")}\n` +
+          `        — 或放进 PATH`,
+        data: { ok: false, action, target, mode: shape.mode, searched: shape.searched },
+      }
+    }
+    // 构建类动作必须有源码（binary 形态下没有 st 工具链）
+    //
+    // `build` 也算进来：既然没有源码，就不存在“构建”这件事。把 build 做成静默
+    // “跳过”会让人以为“改了源码并构建了”（而实际跑的还是旧 exe）——
+    // 那种误会在真实开发里要花几轮才查得清。宁可明确拒绝，并指出“直接 start”。
+    if (shape.mode === "binary" && BUILD_ACTIONS.has(action)) {
+      return {
+        output:
+          `当前是**纯二进制分发**形态（${shape.root}），没有 ${IS_WINDOWS ? "st.exe" : "st"} 工具链与源码，无法执行 action=${action}。\n` +
+          `  可用：action=start / stop / status / logs（启动与操控不需要源码）\n` +
+          `  已定位到可执行文件：${shape.binary}\n` +
+          `  想用源码构建：用 framework 参数指向含 st.pkg 的霜天仓库`,
+        data: { ok: false, action, target, mode: shape.mode },
+      }
+    }
+    // 工程清单只在**构建/测试类**动作里有意义：纯分发根本不构建，
+    // 也就不存在“工程根”这回事（应用已经在 bin/ 里了）。
+    if (
+      shape.mode === "source" &&
+      action !== "init" &&
+      !existsSync(projectManifest(ctx, args as Json))
+    ) {
       return {
         output:
           `未找到工程清单（${projectManifest(ctx, args as Json)}）：` +
@@ -475,32 +687,52 @@ const runTool: Tool = {
     }
 
     if (action === "build" || action === "start") {
-      // 变量名不要叫 toolchain：那会遮蔽上面的「交叉编译工具链名」参数
-      // （实测导致 `--toolchain` 变成 `[object Object]` 传下去）
-      const bootstrap = await ensureToolchain()
-      if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
-      // 被构建的是**工程**（可能与框架不同目录）；`st` 始终用框架自己的那份
-      const build_started_at = Date.now()
-          const st = stBinary(root)
-    const app = projectDir(ctx, args as Json)
-    const build = await ctx.runCommand(
-      invoke(st, `build ${target} --profile ${profile}${toolchainFlag}`),
-      { workdir: app, timeoutMs },
-    )
-      // 构建耗时**单独量**：`start` 把「构建 + 启动」捆在一起跑，而首次（冷缓存）
-      // 要编整个框架静态库，是本仓库最耗时的一步。不分开报告时，调用方只能看到
-      // `start` 很慢，无从判断"是不是构建在吃时间"（实测：Windows 冷构建 30s 级，
-      // 而缓存命中态的启动只要 0.2s）。
-      const build_ms = Date.now() - build_started_at
-      const tail = `${build.stdout}${build.stderr}`.trim().split("\n").slice(-12).join("\n")
-      if (build.code !== 0) return { output: `构建失败（exit ${build.code}）：\n${tail}` }
+      // ## 纯二进制分发：**跳过构建**，直接用已有的可执行文件
+      //
+      // 这是整个“脱离源码”改造的关键分支。旧实现无条件走 `st build`，
+      // 于是一个只需要“把应用跑起来”的请求在二进制形态下会卡在“引导工具链失败”。
+      //
+      // 跳过构建是有意为之的语义，而不是“容错”：用户手动分发的二进制就是**当前产物**，
+      // 重建它既不可能（没编译器）也不应该（可能覆盖掉用户验过的版本）。
+      const prebuilt = shape.mode === "binary"
+      let build_ms = 0
+      let buildTail = ""
+      if (!prebuilt) {
+        // 变量名不要叫 toolchain：那会遮蔽上面的「交叉编译工具链名」参数
+        // （实测导致 `--toolchain` 变成 `[object Object]` 传下去）
+        const bootstrap = await ensureToolchain()
+        if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
+        // 被构建的是**工程**（可能与框架不同目录）；`st` 始终用框架自己的那份
+        const build_started_at = Date.now()
+        const st = stBinary(root)
+        const app = projectDir(ctx, args as Json)
+        const build = await ctx.runCommand(
+          invoke(st, `build ${target} --profile ${profile}${toolchainFlag}`),
+          { workdir: app, timeoutMs },
+        )
+        // 构建耗时**单独量**：`start` 把「构建 + 启动」捆在一起跑，而首次（冷缓存）
+        // 要编整个框架静态库，是本仓库最耗时的一步。不分开报告时，调用方只能看到
+        // `start` 很慢，无从判断"是不是构建在吃时间"（实测：Windows 冷构建 30s 级，
+        // 而缓存命中态的启动只要 0.2s）。
+        build_ms = Date.now() - build_started_at
+        buildTail = `${build.stdout}${build.stderr}`.trim().split("\n").slice(-12).join("\n")
+        if (build.code !== 0) return { output: `构建失败（exit ${build.code}）：\n${buildTail}` }
+      }
       if (action === "build") {
+        if (prebuilt) {
+          // 显式告知“没构建”，而不是假装构建成功（后者会让人以为改了源码已生效）
+          return {
+            output:
+              `纯二进制分发形态：**跳过构建**，直接使用已有可执行文件\n  ${shape.binary}`,
+            data: { ok: true, action, target, mode: shape.mode, binary: shape.binary, build_ms: 0 },
+          }
+        }
         return {
           output: toolchain
             ? `交叉编译完成 · ${target} [${profile}] 工具链 ${toolchain}\n` +
-              `产物: build/${buildSubdir}/bin/${target}.exe（Windows 目标，需在目标平台运行）\n${tail}`
-            : `构建完成 · ${target} [${profile}]（耗时 ${build_ms}ms）\n${tail}`,
-          data: { ok: true, action, target, output: tail, build_ms },
+              `产物: build/${buildSubdir}/bin/${target}.exe（Windows 目标，需在目标平台运行）\n${buildTail}`
+            : `构建完成 · ${target} [${profile}]（耗时 ${build_ms}ms）\n${buildTail}`,
+          data: { ok: true, action, target, output: buildTail, build_ms },
         }
       }
 
@@ -512,15 +744,35 @@ const runTool: Tool = {
       }
       const control_file = controlFileFor(ctx, target)
       const log_file = logFileFor(ctx, target)
-      const binary = appBinary(app, buildSubdir, target)
-      if (!existsSync(binary)) return { output: `构建产物不存在：${binary}` }
+      // 二进制形态用探测到的路径；源码形态按档位现拼（与旧行为一致）
+      const app = projectDir(ctx, args as Json)
+      const binary = prebuilt ? shape.binary : appBinary(app, buildSubdir, target)
+      if (!existsSync(binary)) {
+        return {
+          output:
+            `构建产物不存在：${binary}\n` +
+            (prebuilt
+              ? `  按需分发形态下，把 ${exeName(target)} 放到：歌白可执行文件同级目录、${join(ctx.home, "bin")}、或 PATH 中`
+              : `  先执行 action=build`),
+        }
+      }
+      // ## 启动时的工作目录（分发形态下的一个真坑）
+      //
+      // 应用的**资源探测是相对工作目录的**（例：建木按 `apps/jianmu/scenes` 找场景）。
+      // 源码形态下这件事自然成立（`st` 在工程根跑）；而分发形态下如果从会话目录或其他
+      // 位置启动，应用能找到、控制通道能连、截图也有——就是**画面空**（objects=0）。
+      // 实测：从 dist 目录启的 jianmu 报 `objects=0`，因为工作目录里没有场景。
+      //
+      // 所以分发形态一律**以 exe 所在目录为工作目录**（用户把场景/资源跟 exe 放一起即可）。
+      // 源码形态保持原行为（工作目录 = 框架根），否则会改变既有开发习惯。
+      const launchDir = prebuilt ? dirname(binary) : root
       if (IS_WINDOWS) {
         await ctx.runCommand(
           `New-Item -ItemType Directory -Force -Path "${dirname(log_file)}" | Out-Null`,
-          { workdir: root },
+          { workdir: launchDir },
         )
       } else {
-        await ctx.runCommand(`mkdir -p "${dirname(log_file)}"`, { workdir: root })
+        await ctx.runCommand(`mkdir -p "${dirname(log_file)}"`, { workdir: launchDir })
       }
 
         const extra = asString(args as Json, "args")
@@ -600,11 +852,11 @@ const runTool: Tool = {
         ? ctx.runCommand(
             `$process = Start-Process -FilePath "${binary}" -ArgumentList @(${powershellFlags}) -PassThru -WindowStyle Hidden -RedirectStandardOutput "${log_file}" -RedirectStandardError "${err_file}"; ` +
               `$process.Id`,
-            { workdir: root, timeoutMs: kLaunchTimeoutMs },
+            { workdir: launchDir, timeoutMs: kLaunchTimeoutMs },
           )
         : ctx.runCommand(
             `setsid nohup "${binary}" ${posixFlags} > "${log_file}" 2>&1 < /dev/null & echo $!`,
-            { workdir: root, timeoutMs: kLaunchTimeoutMs },
+            { workdir: launchDir, timeoutMs: kLaunchTimeoutMs },
           )
       ).catch(() => ({ stdout: "", stderr: "" }))   // 超时是预期：子进程仍常驻
 
@@ -670,9 +922,13 @@ const runTool: Tool = {
   // 传了 window=true 但机器无显示服务时，框架会自己回退 headless——如实转述它。
   const reportedHeadless = /无头=true/.test(handshake)
   const modeText = reportedHeadless ? "headless 无头" : "真实窗口"
+  // 构建耗时在二进制形态下不适用：写出“跳过构建”而不是“构建 0ms”——
+  // 后者会让人以为“构建了但很快”，进而误以为改了源码已生效。
+  const buildNote = prebuilt ? "跳过构建（纯二进制分发）" : `构建 ${build_ms}ms`
   return {
     output:
-      `已启动 ${target}（${modeText}）\n  PID      : ${pid} · 端口 ${port} · 构建 ${build_ms}ms · 启动 ${startup_ms}ms\n` +
+      `已启动 ${target}（${modeText}）\n  PID      : ${pid} · 端口 ${port} · ${buildNote} · 启动 ${startup_ms}ms\n` +
+      (prebuilt ? `  可执行文件 : ${binary}\n` : "") +
       `  控制文件 : ${control_file}\n  日志     : ${log_file}\n  ${handshake}\n` +
       (wantWindow && reportedHeadless
         ? "⚠ 请求了真实窗口但后端回退为无头（本机无可用显示服务）；请改用截图与控制通道验证。\n"
@@ -680,7 +936,19 @@ const runTool: Tool = {
       `后续调用 target 二选一：① 省略 target（自动选中本会话唯一存活实例）；` +
       `② 传控制文件路径 target="${control_file}"` +
       `（注意：纯端口 / host:port 写法不带 token，会在握手阶段被拒）`,
-    data: { ok: true, action, target, pid, port, control_file, log_file, build_ms, startup_ms },
+    data: {
+      ok: true,
+      action,
+      target,
+      pid,
+      port,
+      control_file,
+      log_file,
+      build_ms,
+      startup_ms,
+      mode: shape.mode,
+      binary,
+    },
   }
     }
 

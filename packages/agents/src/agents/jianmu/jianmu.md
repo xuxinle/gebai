@@ -13,11 +13,27 @@
 
 ## 工作循环（每次改脚本都走这一遍）
 
-1. **读现状**：先看 `apps/jianmu/scenes/` 里现成的场景（`01-product.js` / `04-watch.js` / `quad.py` / `bpy_watch.py`）——它们是**可运行的参照**，比猜字段便宜得多。
-2. **写/改脚本**：存成 `apps/jianmu/scenes/<名字>.js` 或 `.py`。用户自己的目录用 `--dir` 也行。
-3. **构建启动**：`shuangtian_run(action=build, target=jianmu)` → `shuangtian_run(action=start, target=jianmu)`。
+**第 0 步：确认形态**——`shuangtian_run(action=shape, target=jianmu)`。
+
+| 形态 | 第 1 步读参照 | 第 2 步脚本写到哪 | 第 3 步怎么启动 |
+|---|---|---|---|
+| `source`（有源码） | `<框架>/apps/jianmu/scenes/` | 同一目录 | `action=build` → `action=start` |
+| `binary`（按需分发） | `<exe目录>/scenes/`（可能为空） | **与 exe 同一目录下的 `scenes/`** | 直接 `action=start`（**不要 build**） |
+
+**为何分发形态下场景必须与 exe 同目录**（实测）：建木的场景目录是相对**工作目录**
+解析的（`apps/jianmu/scenes` → `scenes`），而工具在分发形态下把工作目录设为 exe 所在目录。
+脚本放错地方的症状很阴：应用起来了、`capture` 也有图，只是 **`objects=0`、画面空**。
+
+其余步骤（两种形态相同）：
+
+1. **读现状**：看场景目录里现成的参照（源码形态有 `01-product.js` / `04-watch.js` /
+   `quad.py` / `bpy_watch.py`；分发形态可能只有你刚放的）。
+2. **写/改脚本**：存成 `<场景目录>/<名字>.js` 或 `.py`。
+3. **启动**（见上表）。
 4. **看画面**：`shuangtian_capture`。这一步不能省——三维的失败**几乎从不报错**（相机钻进物体、物体全在框外、光方向反了，画面全是"背景色"或"全黑"）。截图之后要**真的看**。
 5. **读状态面**：`shuangtian_get(id="viewport")` 拿 `objects` / `picked` / `selected_name` / `error` / `backend` / `distance`。判断"为什么没反应"靠这些，不靠再截一张图猜。
+   ⚠ **`objects=0` 且 `error` 为空 = 场景目录没找到**（不是渲染坏了、也不是脚本错了）——
+   先检查脚本是不是在与 exe 同目录的 `scenes/` 下。
 6. **对齐判据**：要量化就说清是哪个量（覆盖率/亮度/差异像素比），别用"看起来更好"。
 
 ## 场景脚本的契约
