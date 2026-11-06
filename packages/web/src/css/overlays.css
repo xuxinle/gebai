@@ -724,6 +724,11 @@
   cursor: pointer;
 }
 .todo-body { flex: 1; min-width: 0; }
+/* 允许换行：窄屏下操作区整行下沉，正文才拿得到整行宽（见「触屏与窄屏补充」）。
+   桌面宽度下所有子项本来就能排进一行，flex-wrap 不造成任何变化。
+   **必须加 `.todo-pop` 作用域**：`.todo-item` / `.todo-body` 这两个类名在 chat.css 里
+   也用于会话内的待办卡片（同一套名字），无前缀写法会把弹窗的排版规则泄漏到卡片上。 */
+.todo-pop .todo-item { flex-wrap: wrap; }
 .todo-text {
   display: block;
   line-height: 1.55;
@@ -869,6 +874,24 @@
 /* 待办浮层：宽度跟视口收，否则手机上 420px 起底会横向溢出屏幕 */
 @media (max-width: 480px) {
   .todo-pop { min-width: 0; width: calc(100vw - 20px); max-height: 76dvh; }
+}
+/* 窄屏 / 触屏：操作区整行下沉到正文下面。
+   不这么做的话，触屏下 6 个 36px 按钮横排占 264px，390px 视口里正文只剩 27px——
+   每个汉字换一行，待办内容变成一根竖线（实测）。操作区占满一整行后，
+   正文回到整行宽（约 330px），按钮也还在拇指可点范围内。 */
+@media (max-width: 640px), (pointer: coarse) {
+  /* 正文宽度下限：待办正文即模型提示词，被操作按钮挤到十几个像素宽时
+     每字单独一行、整条看起来像一根竖线（手机端实测：body 只有 27px）。
+     给足 min-width，父项的 flex-wrap 就会让操作区先换行，而不是把正文压成竖线。
+     只在窄屏/粗指针下生效：桌面宽度原本就够宽，没必要动它的排版。 */
+  .todo-pop .todo-body { min-width: 12em; }
+  .todo-pop .todo-actions {
+    flex: 1 1 100%;
+    /* 一行放不下就折行（320px 窄屏下 7 个 36px 按钮共需 264px，加上正文去掉的内缩会溢出） */
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    opacity: 1;
+  }
 }
 /* 排序：鼠标设备用拖动排序，排序按钮只在触屏下现身 */
 .todo-order-btn { display: none; }
