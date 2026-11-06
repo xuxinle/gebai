@@ -68,6 +68,8 @@
 #include <string_view>
 #include <vector>
 
+#include "battery/embed.hpp"
+
 #include "../app_icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
@@ -1469,6 +1471,20 @@ auto run_app(int argc, char** argv) -> int {
   st::ui::HotReload::Options hot_options;
   hot_options.ui_dir = ui_dir;
   hot_options.watch = options.watch;
+  // 内嵌回退：单文件分发时 `ui/` 不随 exe 同行，靠编进 exe 的 `main.xml` / `app.js`。
+  // 开发期仍读磁盘（`--watch` 改文件即重载）；发布产物（`B_PRODUCTION_MODE`）
+  // 则完全不读磁盘——两者共用同一条回退链，行为差异只在“磁盘上有没有这个文件”。
+  hot_options.embedded = [](const std::string& name) -> std::optional<std::string> {
+    if (name == "main.xml") {
+      const auto file = b::embed<"apps/xiangqi/ui/main.xml">();
+      return std::string(file.data(), file.length());
+    }
+    if (name == "app.js") {
+      const auto file = b::embed<"apps/xiangqi/ui/app.js">();
+      return std::string(file.data(), file.length());
+    }
+    return std::nullopt;
+  };
   st::ui::HotReload hot(app.root(), *script, bridge, hot_options);
   // 标题栏里那些元素是壳层自己的（不在 XML 里），热重载换根不会碰它们。
   (void)bridge.expose("hot.reload", [&hot](const std::vector<Json>&) -> st::Result<Json> {

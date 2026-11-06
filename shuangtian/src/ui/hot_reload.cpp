@@ -1,5 +1,7 @@
 #include "st/ui/hot_reload.hpp"
 
+#include "battery/embed.hpp"
+
 #include <cstdint>
 #include <format>
 #include <memory>
@@ -31,18 +33,33 @@ struct Watched {
   std::string path{};
   std::uint64_t fingerprint{0};
   bool present{false};
+  /// 相对 `ui_dir` 的文件名（内嵌回退要按它查）。
+  std::string name{};
+  /// 内嵌提供者（空 = 不做回退，纯磁盘语义）。
+  const std::function<std::optional<std::string>(const std::string&)>* embedded{nullptr};
+
+  /// 读一份内容：**磁盘优先，内嵌兜底**。
+  ///
+  /// 为何是“磁盘优先”：开发期改 XML/JS 要立刻生效（热重载靠文件变化），
+  /// 而内嵌字节是构建时的快照。单文件分发时磁盘上压根没这个文件，
+  /// 于是自然落到内嵌——两种形态共用同一条代码路径。
+  [[nodiscard]] auto read() const -> std::optional<std::string> {
+    if (auto text = st::fs::read_text(path); text.has_value()) return std::move(*text);
+    if (embedded != nullptr && *embedded && !name.empty()) return (*embedded)(name);
+    return std::nullopt;
+  }
 
   /// 重新取基线（读不到：`present=false`——**不报错**，因为"文件暂时不存在"
   /// 在编辑器原子保存（写临时文件 → rename）的过程里是常态，报错只是噪音）。
   void rebase() {
-    auto text = st::fs::read_text(path);
+    auto text = read();
     present = text.has_value();
     fingerprint = present ? st::hash::fnv1a64(*text) : 0;
   }
 
-  /// 内容变了没（**读文件比对哈希**，不是看 mtime；两边都不存在时不算变）。
+  /// 内容变了没（**读内容比对哈希**，不是看 mtime；两边都不存在时不算变）。
   [[nodiscard]] auto dirty() const -> bool {
-    auto text = st::fs::read_text(path);
+    auto text = read();
     if (!text.has_value()) return false;
     return !present || st::hash::fnv1a64(*text) != fingerprint;
   }
@@ -129,6 +146,14 @@ struct HotReload::Impl {
     }
     return paths;
   }
+
+  /// 全部脚本页（含内嵌回退信息；主脚本在前）。
+  [[nodiscard]] auto all_watched_scripts() const -> std::vector<Watched> {
+    std::vector<Watched> out{};
+    out.push_back(script_file);
+    for (const auto& page : pages) out.push_back(page);
+    return out;
+  }
 };
 
 HotReload::HotReload(UiRoot& root, ScriptHost& script, ScriptBridge& bridge, Options options)
@@ -139,10 +164,16 @@ HotReload::HotReload(UiRoot& root, ScriptHost& script, ScriptBridge& bridge, Opt
   impl_->options = std::move(options);
   impl_->visible = impl_->options.start_visible;
   impl_->xml.path = impl_->xml_path();
+  impl_->xml.name = impl_->options.xml_name;
+  impl_->xml.embedded = impl_->options.embedded ? &impl_->options.embedded : nullptr;
   impl_->script_file.path = impl_->script_path();
+  impl_->script_file.name = impl_->options.script_name;
+  impl_->script_file.embedded = impl_->options.embedded ? &impl_->options.embedded : nullptr;
   for (const auto& page : impl_->options.pages) {
     Watched watched;
     watched.path = st::fs::join(impl_->options.ui_dir, page);
+    watched.name = page;
+    watched.embedded = impl_->options.embedded ? &impl_->options.embedded : nullptr;
     impl_->pages.push_back(std::move(watched));
   }
 }
@@ -173,7 +204,15 @@ auto HotReload::refresh_ui() -> Status {
   } else {
     XmlBuildOptions build_options;
     build_options.strict = impl_->options.strict_xml;
-    tree = st::ui::build_from_xml_file(impl_->xml_path(), &report, build_options);
+    // 磁盘优先、内嵌兜底：单文件分发时 `ui_dir/main.xml` 不存在，靠内嵌字节建树。
+    // （`build_from_xml` 而不是 `_file`：回退链已在 `Watched::read` 里做完，
+    // 这里拿到的已经是最终内容。）
+    const auto xml_text = impl_->xml.read();
+    if (!xml_text.has_value()) {
+      impl_->last_error = std::format("读不到界面文件 {}", impl_->xml_path());
+      return st::unexpected(st::ErrorCode::NotFound, impl_->last_error);
+    }
+    tree = st::ui::build_from_xml(*xml_text, &report, build_options);
     if (tree == nullptr) {
       impl_->last_error = report.parse_warning.empty() ? "建树失败（未给出原因）"
                                                        : report.parse_warning;
@@ -249,16 +288,17 @@ auto HotReload::refresh_script() -> Status {
   // 页面脚本重装载影响）。所以"换树后重放"走的就是下面这条同一条路径。
 
   // —— ① 先把全部页读进内存（原子性的一半：读失败时一行旧逻辑都不动）——
+  // 读经 `Watched::read()`：磁盘优先、内嵌兜底（单文件分发时 app.js 只在内嵌里）。
   std::vector<std::string> sources{};
-  for (const auto& path : paths) {
-    auto text = st::fs::read_text(path);
+  for (const auto& watched : impl_->all_watched_scripts()) {
+    const auto path = watched.path;
+    auto text = watched.read();
     if (!text.has_value()) {
-      impl_->last_error = std::format("读不到脚本 {}：{}", path, text.error().message);
-      return st::unexpected(text.error().code, impl_->last_error);
+      impl_->last_error = std::format("读不到脚本 {}（磁盘与内嵌都没有）", path);
+      return st::unexpected(st::ErrorCode::NotFound, impl_->last_error);
     }
     sources.push_back(std::move(*text));
   }
-
   // —— ② 语法检查全部页（原子性的另一半：任一页写错，旧逻辑原封不动）——
   for (std::size_t index = 0; index < paths.size(); ++index) {
     auto checked = impl_->script->check_syntax(sources[index]);

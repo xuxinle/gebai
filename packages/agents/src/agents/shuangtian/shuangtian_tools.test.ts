@@ -792,6 +792,103 @@ describe("run 生命周期", () => {
     expect(result.output).toContain("搜索顺序")
   })
 
+  // ——————————————————————————————————————————————————————————————
+  // 应用外部资源（UI / 场景）：不内嵌的那部分
+  // ——————————————————————————————————————————————————————————————
+
+  test("分发形态：自动找到 exe 同目录的资源并传 --ui（相期/册府）", async () => {
+    // 为何这条重要：图标/logo 用 `b::embed` 内嵌了，但 UI（main.xml/app.js）
+    // 与三维场景是**故意外置**的（要能热重载）。分发形态下工具不能只靠
+    // “工作目录 = exe 目录”让应用自己猜——xiangqi 的相对候选里根本没有 `ui` 这一档。
+    const server = await control()
+    server.setHandler(() => ({ app: { name: "xiangqi" }, backend: "headless", headless: true }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const binDir = makeBinaryOnly(home, "xiangqi")
+    // 资源按推荐摆法放在 exe 旁边：<bin>/ui/main.xml
+    mkdirSync(join(binDir, "ui"), { recursive: true })
+    writeFileSync(join(binDir, "ui", "main.xml"), "<ui/>")
+
+    const { ctx, commands } = makeCtx(home, (cmd) => {
+      if (cmd.includes(LAUNCH_MARK)) {
+        const controlDir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+        mkdirSync(controlDir, { recursive: true })
+        writeFileSync(join(controlDir, "xiangqi-control.json"), JSON.stringify({ port: server.port, pid: 777 }))
+        return { stdout: "" }
+      }
+      return {}
+    })
+
+    await tools.run.execute(
+      { action: "start", target: "xiangqi", framework: join(home, "no-such-source") },
+      ctx,
+    )
+    const launch = commands.find((item) => item.cmd.includes(LAUNCH_MARK))
+    expect(launch).toBeDefined()
+    // 必须把 --ui 指向 exe 旁边的 ui 目录
+    expect(launch!.cmd).toContain("--ui")
+    expect(launch!.cmd).toContain(join(binDir, "ui"))
+  })
+
+  test("分发形态：建木场景目录用 --dir（场景与 exe 同目录）", async () => {
+    const server = await control()
+    server.setHandler(() => ({ app: { name: "jianmu" }, backend: "headless", headless: true }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const binDir = makeBinaryOnly(home, "jianmu")
+    mkdirSync(join(binDir, "scenes"), { recursive: true })
+    writeFileSync(join(binDir, "scenes", "01-product.js"), "scene;")
+
+    const { ctx, commands } = makeCtx(home, (cmd) => {
+      if (cmd.includes(LAUNCH_MARK)) {
+        const controlDir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+        mkdirSync(controlDir, { recursive: true })
+        writeFileSync(join(controlDir, "jianmu-control.json"), JSON.stringify({ port: server.port, pid: 777 }))
+        return { stdout: "" }
+      }
+      return {}
+    })
+
+    await tools.run.execute(
+      { action: "start", target: "jianmu", framework: join(home, "no-such-source") },
+      ctx,
+    )
+    const launch = commands.find((item) => item.cmd.includes(LAUNCH_MARK))
+    expect(launch!.cmd).toContain("--dir")
+    expect(launch!.cmd).toContain(join(binDir, "scenes"))
+  })
+
+  test("资源参数不覆盖用户显式写的同名 flag", async () => {
+    const server = await control()
+    server.setHandler(() => ({ app: { name: "xiangqi" }, backend: "headless", headless: true }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const binDir = makeBinaryOnly(home, "xiangqi")
+    mkdirSync(join(binDir, "ui"), { recursive: true })
+    writeFileSync(join(binDir, "ui", "main.xml"), "<ui/>")
+
+    const { ctx, commands } = makeCtx(home, (cmd) => {
+      if (cmd.includes(LAUNCH_MARK)) {
+        const controlDir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+        mkdirSync(controlDir, { recursive: true })
+        writeFileSync(join(controlDir, "xiangqi-control.json"), JSON.stringify({ port: server.port, pid: 777 }))
+        return { stdout: "" }
+      }
+      return {}
+    })
+
+    await tools.run.execute(
+      {
+        action: "start",
+        target: "xiangqi",
+        framework: join(home, "no-such-source"),
+        args: "--ui /custom/ui",
+      },
+      ctx,
+    )
+    const launch = commands.find((item) => item.cmd.includes(LAUNCH_MARK))
+    // 用户显式指定 → 用他的，不追加第二份 --ui（否则应用收到两个值，行为取决于解析）
+    expect(launch!.cmd).toContain("/custom/ui")
+    expect(launch!.cmd).not.toContain(join(binDir, "ui"))
+  })
+
   test("action=start：脱离会话启动并等待控制端口，返回 port/pid/控制文件", async () => {
     const server = await control()
     server.setHandler(() => ({ app: { name: "mdeditor" }, backend: "headless", headless: true }))

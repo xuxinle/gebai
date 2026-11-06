@@ -34,6 +34,73 @@ const APP_PROFILES = ["dev", "quick", "release", "debug"] as const
 const BUILD_ACTIONS = new Set(["build", "test", "lint", "init"])
 
 /**
+ * 各应用的**外部资源**（需要与 exe 一起分发的那部分）。
+ *
+ * ## 为什么它们没被内嵌
+ *
+ * 图标/logo/角色图等静态资源已经用 `b::embed` **编进了 exe**（见 st.pkg 的
+ * `embed` 声明），不需要源码。但下面这几项**故意不内嵌**：
+ *
+ * | 资源 | 为何保留为外部文件 |
+ * |---|---|
+ * | `xiangqi/ui`（main.xml + app.js） | 要能改 XML/JS 即重载（`--watch`） |
+ * | `cefu/ui`（main.xml + app.js） | 同上（工具书条目也要能外改） |
+ * | `jianmu/scenes`（*.js / *.py） | 三维脚本的核心工作流就是“改一行、画面就变” |
+ * | `caiyun` 的 media/剧本 | 素材与剧本是用户内容 |
+ *
+ * 内嵌它们等于把热重载废掉，所以只能做外部文件。
+ *
+ * ## 为何记录“参数”而不是只记录路径
+ *
+ * 这四个应用都支持**显式指定资源目录**（`--ui` / `--dir` / `--script`）。
+ * 这比让应用去猜相对路径可靠得多：工作目录一换，相对候选全失效。
+ */
+interface AppResources {
+  /** 资源目录在框架树里的相对路径（也是分发时的推荐子目录名）。 */
+  dir: string
+  /** 启动时把它传给应用的参数。 */
+  flag: string
+  /** 目录内必须存在的标志文件（确认真的是那个资源目录）。 */
+  marker: string
+}
+
+const APP_RESOURCES: Record<string, AppResources> = {
+  xiangqi: { dir: "apps/xiangqi/ui", flag: "--ui", marker: "main.xml" },
+  cefu: { dir: "apps/cefu/ui", flag: "--ui", marker: "main.xml" },
+  jianmu: { dir: "apps/jianmu/scenes", flag: "--dir", marker: "01-product.js" },
+}
+
+/**
+ * 为分发形态解析应用的**外部资源目录**，返回要追加的参数（找不到返回空）。
+ *
+ * 顺序：
+ *   1. `<exe目录>/<资源子目录名>`（推荐摆法：`<exe目录>/ui` 或 `<exe目录>/scenes`）
+ *   2. `<exe目录>/<框架内相对路径>`（保留完整目录结构时，如 `<exe目录>/apps/xiangqi/ui`）
+ *   3. `framework` 根下的原位置（用户把整个框架树也放在旁边）
+ *
+ * 都找不到时**不报错也不乱猜**——让应用自己按它的相对候选去试，
+ * 不行就由后面的启动日志报出原因（比工具凭空报错信息更多）。
+ */
+function resolveResourceArgs(target: string, binary: string, frameworkRoot: string): string[] {
+  const spec = APP_RESOURCES[target]
+  if (!spec) return []
+  const exeDir = dirname(binary)
+  const candidates = [
+    join(exeDir, basename(spec.dir)),          // <exe>/ui 、<exe>/scenes
+    join(exeDir, spec.dir),                    // <exe>/apps/xiangqi/ui（保留完整层级）
+    join(frameworkRoot, spec.dir),             // 框架树原位置
+  ]
+  for (const dir of candidates) {
+    if (existsSync(join(dir, spec.marker))) return [spec.flag, dir]
+  }
+  // 兜底：目录存在（即使标志文件不齐）也传给应用，让它的错报更准确
+  for (const dir of candidates) {
+    if (existsSync(dir)) return [spec.flag, dir]
+  }
+  return []
+}
+
+/**
  * 执行**形态**：手里是源码树，还是只有分发好的可执行文件。
  *
  * ## 为何要分形态（本工具集原先最强的隐含假设）
@@ -766,6 +833,8 @@ const runTool: Tool = {
       // 所以分发形态一律**以 exe 所在目录为工作目录**（用户把场景/资源跟 exe 放一起即可）。
       // 源码形态保持原行为（工作目录 = 框架根），否则会改变既有开发习惯。
       const launchDir = prebuilt ? dirname(binary) : root
+      // 外部资源参数在拼 flagArgs 时才需要（`extra` 在下面定义），这里只先算候选
+      const resourceArgs = prebuilt ? resolveResourceArgs(target, binary, root) : []
       if (IS_WINDOWS) {
         await ctx.runCommand(
           `New-Item -ItemType Directory -Force -Path "${dirname(log_file)}" | Out-Null`,
@@ -823,6 +892,15 @@ const runTool: Tool = {
         join(runtimeDir(ctx), "shots"),
         ...(scale > 0 ? ["--scale", String(scale)] : []),
         ...(theme ? ["--theme", theme] : []),
+        // ## 外部资源目录（分发形态的关键）
+        //
+        // 图标/logo 已内嵌进 exe（`b::embed`），但 UI/场景/剧本是**故意外置**的
+        // （要能热重载：改 XML/JS/脚本即生效）。这些应用都支持显式指定路径
+        // （`--ui` / `--dir`），所以由工具**找到并告知**，而不指望应用从相对路径里猜对
+        // ——工作目录一换，相对候选就全失效。
+        //
+        // 用户在 `args` 里已写同名 flag 时不重复追加（那是显式意图）。
+        ...(resourceArgs.length === 2 && !(extra ?? "").includes(resourceArgs[0]) ? resourceArgs : []),
         ...(extra ? extra.split(" ").filter(Boolean) : []),
       ]
       // POSIX 单引号内不能出现单引号，需拆成 `'\''`（结束-转义-重新开始）

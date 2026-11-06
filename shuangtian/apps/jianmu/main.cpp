@@ -389,7 +389,10 @@ void install_bridge(st::ui::ScriptBridge& bridge, LabState& state) {
 auto run_app(int argc, char** argv) -> int {
   const Options options = parse_options(argc, argv);
 
-  // 场景目录：默认相对可执行文件/工作目录的两个常见位置都试
+  // 场景目录：默认相对可执行文件/工作目录的几个常见位置都试
+  //
+  // `scenes` 这一档是给**单文件分发**用的：exe 与 `scenes/` 放同一目录即可。
+  // （场景脚本故意不内嵌：它们要能改一行就重载，且用户就靠改它们干活。）
   std::string scene_dir = options.dir;
   if (scene_dir.empty()) {
     for (const char* candidate : {"apps/jianmu/scenes", "scenes"}) {

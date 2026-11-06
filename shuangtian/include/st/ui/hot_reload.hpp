@@ -1,5 +1,10 @@
 #pragma once
 
+#include <functional>
+#include <optional>
+#include <string>
+#include <vector>
+
 /// **改文件即生效**（`HotReload`）：让「改界面 / 改逻辑」不再需要重编、也不再需要重启进程。
 ///
 /// ## 它解决什么
@@ -101,6 +106,26 @@ class HotReload {
     /// 开局 XML 树是否可见。开发期"先藏界面看背景"由 `set_ui_visible(false)` 完成；
     /// 这里只给"从第一帧就藏"的场景（少一次可见→隐藏的闪动）。
     bool start_visible{true};
+
+    /// **内嵌资源回退**（`ui_dir` 里的文件读不到时用）。
+    ///
+    /// ## 为何需要它
+    ///
+    /// 单文件分发的应用（交付给用户的 exe）不能把 `ui/` 当外部文件发出去——那就又回到
+    /// “漏拷一个目录就白屏”。正确做法是把 `main.xml` / `app.js` 用 `b::embed` 编进去。
+    /// 但 `HotReload` 原来的全部路径都是 `st::fs::read_text`：内嵌了也读不到。
+    ///
+    /// 本钩子就是那条回退链：**磁盘优先、内嵌兜底**。
+    ///
+    /// ## 与热重载的关系（两者不冲突，这里故意这么接）
+    ///
+    /// `b::embed` 在非生产档下自带文件监视：`get()` 会先读真实文件、读到了就用它，
+    /// 并注册到监视线程；生产档（`B_PRODUCTION_MODE`）则只用内嵌字节。
+    /// 所以开发期“改 XML 即重载”依旧成立（磁盘读优先），发布产物则完全不依赖外部文件。
+    ///
+    /// 入参是**相对 `ui_dir` 的文件名**（如 `main.xml`），返回该文件的内容；
+    /// 返回空 = “我没有这个文件”（继续按原语义报错）。
+    std::function<std::optional<std::string>(const std::string& relative_name)> embedded{};
   };
 
   HotReload(UiRoot& root, ScriptHost& script, ScriptBridge& bridge, Options options);

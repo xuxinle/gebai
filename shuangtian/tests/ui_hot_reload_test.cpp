@@ -15,7 +15,9 @@
 #include <filesystem>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -150,6 +152,23 @@ struct Fixture {
     options.ui_dir = workspace.dir.string();
     options.watch = watch;
     return options;
+  }
+
+  /// 带**内嵌回退**的选项：`ui_dir` 指向一个空目录（模拟单文件分发——磁盘上没有 ui/）。
+  /// `embedded` 里放的就是“编进 exe 的那份内容”。
+  [[nodiscard]] auto make_options_with_embedded(
+      std::function<std::optional<std::string>(const std::string&)> provider) const
+      -> st::ui::HotReload::Options {
+    st::ui::HotReload::Options options;
+    options.ui_dir = (workspace.dir / "absent_ui").string();   // 故意不创建
+    options.embedded = std::move(provider);
+    return options;
+  }
+
+  /// 直接用指定选项构造（不缓存单例：本用例要在同一夹具上比较两种选项）。
+  [[nodiscard]] auto hot_with(st::ui::HotReload::Options options)
+      -> std::unique_ptr<st::ui::HotReload> {
+    return std::make_unique<st::ui::HotReload>(root, script, bridge(), std::move(options));
   }
 
  private:
@@ -334,4 +353,68 @@ ST_TEST(hot_reload_exposes_status_for_diagnosis) {
   fixture.workspace.write("main.xml", "<Column><Nope/></Column>");
   ST_CHECK(!fixture.hot().refresh_ui().has_value());
   ST_CHECK(!st::json_get_string(fixture.hot().status(), "last_error").empty());
+}
+
+/// 单文件分发：磁盘上没有 `ui/` 时，靠**内嵌内容**建树与装脚本。
+///
+/// 为何必须钉：发布形态只有 exe（用户按需分发单个应用），`ui/` 一旦靠外带，
+/// 漏拷一个目录就是“双击白屏”。而全链路都是 `st::fs::read_text`——
+/// 内嵌了也读不到，这个回退钩子就是那条缝。
+///
+/// 逆向验证：把 `options.embedded` 置空（即 `make_options` 的默认行为），
+/// 本条立刻变红（`refresh_all()` 失败）——已实测。
+ST_TEST(hot_reload_falls_back_to_embedded_when_files_absent) {
+  Fixture fixture("embedded_fallback");
+  auto hot = fixture.hot_with(fixture.make_options_with_embedded(
+      [](const std::string& name) -> std::optional<std::string> {
+        if (name == "main.xml") {
+          return std::string(R"(<Column id="root" gap="8" grow="true">
+  <Text id="title">来自内嵌的标题</Text>
+</Column>
+)");
+        }
+        if (name == "app.js") {
+          // 调一次宿主函数：证明脚本也是从内嵌装载并真的跑起来了
+          return std::string("app.probe.bump();");
+        }
+        return std::nullopt;
+      }));
+
+  // ui_dir 指向一个**不存在的目录**：只能靠内嵌。
+  ST_REQUIRE(hot->refresh_all().has_value());
+
+  st::ui::Element* title = find_id(fixture.root, "title");
+  ST_REQUIRE(title != nullptr);
+  ST_CHECK_EQ(text_of(*title), std::string("来自内嵌的标题"));
+  ST_CHECK_EQ(fixture.bumps, 1);   // 脚本也从内嵌跑了
+}
+
+/// **磁盘优先**：磁盘上有文件时就不能用内嵌的旧快照。
+///
+/// 为何这是硬要求：开发期每天在改 `main.xml`/`app.js`，内嵌的是**构建那一刻**的内容。
+/// 若内嵌优先，改完不重编就看不到改动——那是“改了没生效”的经典陷阱。
+ST_TEST(hot_reload_prefers_disk_over_embedded) {
+  Fixture fixture("disk_first");
+  fixture.workspace.write("main.xml", R"(<Column id="root" gap="8" grow="true">
+  <Text id="title">磁盘上的标题</Text>
+</Column>
+)");
+  fixture.workspace.write("app.js", kJs);
+
+  // `ui_dir` 指回**有文件的那个目录**，同时提供内嵌——两者都在时必须是磁盘赢。
+  auto options = fixture.make_options(false);
+  options.embedded = [](const std::string& name) -> std::optional<std::string> {
+    if (name == "main.xml") {
+      return std::string(R"(<Column id="root"><Text id="title">内嵌的旧标题</Text></Column>)");
+    }
+    if (name == "app.js") return std::string("app.probe.bump();");
+    return std::nullopt;
+  };
+  auto hot = fixture.hot_with(std::move(options));
+
+  ST_REQUIRE(hot->refresh_all().has_value());
+  st::ui::Element* title = find_id(fixture.root, "title");
+  ST_REQUIRE(title != nullptr);
+  // 磁盘优先：拿到的是磁盘上的文字，不是内嵌的旧快照
+  ST_CHECK_EQ(text_of(*title), std::string("磁盘上的标题"));
 }
