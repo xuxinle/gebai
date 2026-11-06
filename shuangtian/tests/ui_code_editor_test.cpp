@@ -1276,6 +1276,56 @@ ST_TEST(code_editor_indent_guides_follow_detected_indent_width) {
   ST_CHECK(to_parent <= 1.5f);
 }
 
+ST_TEST(code_editor_indent_guide_ink_does_not_stack_with_indent_depth) {
+  // 同一条参考线**只能被画一次**：它的深浅不能随“本行缩进了几级”变化。
+  //
+  // 为何要钉这个（2026-11-06，用户报“对齐线是不是重复生成重叠加粗了”）：
+  // 1px 宽的线落在 `x - 0.5` 上，左右各占半像素；同一条线画两次，那两列边缘的
+  // 覆盖率叠成 75%（50% → 75%），看上去就是“深一档、边缘发散变粗”。
+  // 实测成固（2026-11-06 修前）：8 空格缩进的行里，列 0 的线被画了 8 次（每个
+  // 空格重算一遍 level 后又整批重画 0..level-1）——同一列深得能看出层次差，
+  // 相邻两列也一起叠深（看上去就是“线变粗”）。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  // 第一行缩进 1 级，第二行缩进 4 级：两行**共同的那条列线**（列 0）必须一样深。
+  fx.editor.set_text("  A\n        B\n");
+  fx.editor.set_cursor_index(0);
+  fx.editor.arrange(fx.context, st::math::Rect{0.0f, 0.0f, 400.0f, 120.0f});
+  st::raster::Canvas canvas(400, 120);
+  canvas.clear(fx.theme.colors().surface);
+  fx.editor.paint_content(fx.context, canvas);
+
+  const float row_height =
+      std::stof(fx.editor.get_property("line_height").value_or("20"));
+  const auto row_top = [row_height](int row) {
+    return static_cast<int>(static_cast<float>(row) * row_height);
+  };
+  const auto row_bottom = [row_height](int row) {
+    return static_cast<int>(static_cast<float>(row + 1) * row_height);
+  };
+  // 两行的**同一列**（正文左缘 = 参考线的列 0）取色。
+  //
+  // ⚠ 不能用 `bounds().x`：那是**控件左缘**（行号槽就在它右边），参考线的列 0
+  // 在正文原点。与其它用例同一个量尺：`caret_offset_x`（绘制/命中同源）。
+  fx.editor.set_cursor_index(0);
+  const float origin_x = fx.editor.bounds().x + fx.editor.caret_offset_x(fx.context);
+  const auto column_of = [&](int row) {
+    int darkest = 999;
+    for (int y = row_top(row) + 2; y < row_bottom(row) - 2; ++y) {
+      const st::math::Color c = canvas.pixel_at(static_cast<int>(origin_x), y);
+      darkest =
+          std::min(darkest, static_cast<int>(c.r) + static_cast<int>(c.g) + static_cast<int>(c.b));
+    }
+    return darkest;
+  };
+  // 两行的列 0 都是同一条线（一行缩 1 级、一行缩 4 级，都经过列 0）。
+  // 叠加会让深缩进那行的同一条线明显更黑。
+  const int shallow = column_of(0);
+  const int deep = column_of(1);
+  ST_CHECK(shallow < 999);   // 参考线真的画在列 0（否则下一条断言就成了空断言）
+  ST_CHECK_EQ(deep, shallow);
+}
+
 ST_TEST(code_editor_current_line_is_highlighted_in_gutter_and_row) {
   // 当前行高亮：行底色 + 行号槽都要变（行号槽高亮是"我在哪一行"的锚点）。
   Fixture fx;

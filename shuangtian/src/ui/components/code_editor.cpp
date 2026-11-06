@@ -2035,6 +2035,13 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       // 缩进宽度按**展开后**的视觉列算（与绘制/命中同一量尺）——原先 Tab 按
       // `tab_width`、空格按 1 各自累加，含 Tab 的行参考线会与字符错位。
       std::size_t visual = 0;
+      // `drawn` = 本行**已经画过的最外层级数**：每跨过一道缩进只补画新出现的那几级。
+      //
+      // ⚠ 不按“每级都画”逐字符重算：`1px` 宽的线落在 `x - 0.5` 上，左右各占半像素——
+      // 同一条线画两次，那两列边缘的覆盖率会叠加（50% → 75%），看上去就是
+      // **线深一档、边缘发散变粗**（实测：8 空格缩进的行里列 0 的线被画了 8 次，
+      // 比 4 空格行同一条线明显黑一截）。
+      std::size_t drawn = 0;
       for (std::size_t probe = begin; probe < end; ++probe) {
         const char raw = text_[probe];
         if (raw != ' ' && raw != '\t') break;
@@ -2048,11 +2055,12 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
         //
         // 列 0 的线不算“压字”：没缩进的行（level 0）不画任何线，而有缩进的行
         // 在列 0 处本来就是空白。
-        for (std::size_t step = 0; step < level; ++step) {
+        for (std::size_t step = drawn; step < level; ++step) {
           const float x = origin_x + static_cast<float>(step * unit) * space_w - 0.5f;
           canvas.fill_rect(math::Rect{x, row_top, 1.0f, height},
                            raster::Paint::solid(colors.border_strong), 0.0f);
         }
+        drawn = std::max(drawn, level);
       }
     }
 
