@@ -154,6 +154,21 @@ class ThreeView : public Element {
   /// 是否显示左上角的状态角标（物体数/后端/装载错误）。默认开。
   void set_show_hud(bool enabled) noexcept { show_hud_ = enabled; }
 
+  /// 角标里一段文字的位置：**背景框矩形 + 文本行盒顶边**。
+  ///
+  /// 公开出来是为了让“文字落在框里”成为可断言的事实，而不是靠看截图判断。
+  /// 曾经这里写过 `origin.y = 框顶 + padding + shaped_ascent(...)`，而
+  /// `TextPort::draw` 的 `origin.y` 本意就是**行盒顶边**（它内部会再 `+ ascent` 落基线）——
+  /// 于是补偿做了两遍，字迹整体比框低约一个行高（实测 19.3px），溢出框外。
+  struct HudChip {
+    math::Rect box{};        ///< 背景压条
+    math::Point text_origin; ///< 传给 `TextPort::draw` 的 `origin`（y = 行盒顶边）
+  };
+  /// 算一个角标 chip 的几何。`bottom_aligned`：从 `anchor_y` 向上排（底部标签用）。
+  [[nodiscard]] static auto hud_chip(float left, float anchor_y, float line_height,
+                                     float content_width, float padding, float max_width,
+                                     bool bottom_aligned = false) -> HudChip;
+
   /// 三维后端偏好（`""` = 自动选；`"software"` / `"gpu"` 强制）。默认 `software`。
   ///
   /// 理由见 `backend_pref_` 的说明（GPU 腿在交互式视口里合成失效，

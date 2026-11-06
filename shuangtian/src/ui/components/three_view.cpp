@@ -666,6 +666,27 @@ void ThreeView::render_into(const RenderContext& context, raster::Surface& canva
   backend_->end_frame(canvas, box);
 }
 
+auto ThreeView::hud_chip(float left, float anchor_y, float line_height, float content_width,
+                         float padding, float max_width, bool bottom_aligned) -> HudChip {
+  // ## 一条铁律：`TextPort::draw` 的 `origin.y` 是**行盒顶边**
+  //
+  // 内部落基线是 `baseline = (origin.y + ascent) * device_scale`（见 `text.cpp`）；
+  // 调用方若再自己加一次 ascent，就把同一项补偿做了两遍。
+  // 实测代价：角标文字比背景条低 **19.3px**（≈一个行高），底边溢出框下沿 11.3px——
+  // 用户看到的是“文字从框里漏到框外了”。
+  //
+  // 所以文字 `origin.y` 直接安排在框内顶部（留 `padding * 0.5` 呼吸），
+  // 绝不把基线或 ascent 混进来。
+  HudChip chip;
+  const float width = std::min(std::max(content_width + padding * 2.0f, 0.0f),
+                               std::max(max_width, 0.0f));
+  const float height = line_height + padding;
+  const float top = bottom_aligned ? anchor_y - height : anchor_y;
+  chip.box = math::Rect{left, top, width, height};
+  chip.text_origin = math::Point{left + padding, top + padding * 0.5f};
+  return chip;
+}
+
 void ThreeView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const math::Rect box = bounds_.inset(style_.padding);
   if (box.is_empty()) return;
@@ -694,41 +715,37 @@ void ThreeView::paint_content(const RenderContext& context, raster::Surface& can
   }
 
   const float padding = 6.0f;
-  const float text_x = box.x + padding;
-  float text_y = box.y + padding + port.shaped_ascent(title, title_size);
-
-  // 背景压条：不压的话浅色场景上白字看不见。
-  //
-  // ⚠ 宽度必须**两重夹取**：既不超过视口，也不超过文本自身的估算宽度。
-  // 第一版只用 `min(box.width - 4, 360)`，在窄视口上会**伸出右沿**——
-  // 截图里是一条黑边“悬”在视口外面（既不美观也不像有意设计）。
-  const auto draw_chip = [&](float top, float height, float content_width) {
-    const float width = std::min({content_width + padding * 2.0f, box.width - 4.0f, 420.0f});
-    if (width <= 0.0f) return;
-    canvas.fill_rect(math::Rect{box.x + 2.0f, top, width, height},
-                     raster::Paint::solid(math::Color{8, 10, 14, 190}), 4.0f);
-  };
-
-  const float chip_height = line_height + padding;
-  draw_chip(box.y + 2.0f, chip_height, port.measure_width(title, title_size));
+  // 角标几何统一由 `hud_chip` 算（可单测）：背景条与文字行盒顶边同一个来源。
+  // 宽度两重夹取（不只盯视口、也盯文本自身）也在那个函数里。
+  const float chip_max_width = box.width - 4.0f;
+  const HudChip title_chip = hud_chip(box.x + 2.0f, box.y + 2.0f, line_height,
+                                      port.measure_width(title, title_size), padding,
+                                      chip_max_width);
+  if (title_chip.box.width > 0.0f) {
+    canvas.fill_rect(title_chip.box, raster::Paint::solid(math::Color{8, 10, 14, 190}), 4.0f);
+  }
 
   const math::Color title_color = load_error_.empty() ? math::Color{210, 226, 245, 255}
                                                       : math::Color{255, 138, 128, 255};
-  port.draw(canvas, title, math::Point{text_x, text_y}, title_size, title_color);
+  port.draw(canvas, title, title_chip.text_origin, title_size, title_color);
 
   // 错误详情：多行，最多 3 行（再多会把视口盖住）
   if (!load_error_.empty()) {
     std::string remaining = load_error_;
     int lines = 0;
-    float y = text_y + line_height;
+    float y = title_chip.text_origin.y + line_height;
     while (!remaining.empty() && lines < 3) {
       const std::size_t newline = remaining.find('\n');
       const std::string line =
           newline == std::string::npos ? remaining : remaining.substr(0, newline);
       remaining = newline == std::string::npos ? std::string() : remaining.substr(newline + 1);
-      draw_chip(y - port.shaped_ascent(line, title_size * 0.92f) - 2.0f, line_height,
-                port.measure_width(line, title_size * 0.92f));
-      port.draw(canvas, line, math::Point{text_x, y}, title_size * 0.92f,
+      const HudChip line_chip = hud_chip(box.x + 2.0f, y, line_height,
+                                         port.measure_width(line, title_size * 0.92f), padding,
+                                         chip_max_width);
+      if (line_chip.box.width > 0.0f) {
+        canvas.fill_rect(line_chip.box, raster::Paint::solid(math::Color{8, 10, 14, 190}), 4.0f);
+      }
+      port.draw(canvas, line, line_chip.text_origin, title_size * 0.92f,
                 math::Color{255, 190, 180, 255});
       y += line_height;
       ++lines;
@@ -742,14 +759,17 @@ void ThreeView::paint_content(const RenderContext& context, raster::Surface& can
     const std::string label =
         std::format("{}{}", selected_.has_value() ? "选中 · " : "悬浮 · ", name);
     const float label_size = 12.0f;
-    const float y = box.bottom() - padding;
-    const float label_height = port.line_height(label_size) + padding;
-    const float label_width = port.measure_width(label, label_size) + padding * 2.0f;
-    canvas.fill_rect(
-        math::Rect{box.x + 2.0f, y - label_height, std::min(label_width, box.width - 4.0f),
-                   label_height},
-        raster::Paint::solid(math::Color{8, 10, 14, 190}), 4.0f);
-    port.draw(canvas, label, math::Point{text_x, y - padding * 0.5f}, label_size,
+    // 底部对齐：锚点给视口底边（向上排）。与顶部角标共用 `hud_chip`，
+    // 保证“框顶”与“文字行盒顶边”永远同一个来源。
+    const HudChip label_chip = hud_chip(
+        box.x + 2.0f, box.bottom() - padding, port.line_height(label_size),
+        port.measure_width(label, label_size), padding, box.width - 4.0f,
+        /*bottom_aligned=*/true);
+    if (label_chip.box.width > 0.0f) {
+      canvas.fill_rect(label_chip.box, raster::Paint::solid(math::Color{8, 10, 14, 190}),
+                       4.0f);
+    }
+    port.draw(canvas, label, label_chip.text_origin, label_size,
               math::Color{230, 238, 250, 255});
   }
 }

@@ -599,3 +599,40 @@ result = 'dispatch'
   ST_REQUIRE(js_view->load_script_file_kind(kScene, "scene.js"));
   ST_CHECK(js_view->scene().objects.size() >= 3);
 }
+
+/// 角标的文字必须**落在背景条内**（不是靠看截图判断）。
+///
+/// ## 为何要钉这条
+///
+/// `TextPort::draw` 的 `origin.y` 是**行盒顶边**，它内部会自己
+/// `+ ascent` 落基线。而这里曾经又加了一次 `shaped_ascent`，
+/// 把同一项补偿做了两遍——实测角标文字比背景条低 **19.3px**
+/// （≈ 一个行高），底边溢出框下沿 11.3px：用户看到的就是
+/// “`85 个物体 · gpu` 这个字从它的黑框里漏到框外了”。
+///
+/// 这条断言要的是**几何关系**：文字行盒（顶边 + 行高）必须包在框内。
+/// 它不验证字体度量（那与字体栈相关），只验证两个矩形的关系——
+/// 而那个关系正是当时算错的东西。
+ST_TEST(three_view_hud_chip_keeps_text_inside_box) {
+  const float padding = 6.0f;
+  const float line_height = 16.0f;
+
+  // 顶部角标：从锚点向下排
+  const ThreeView::HudChip top_chip =
+      ThreeView::hud_chip(2.0f, 2.0f, line_height, 120.0f, padding, 400.0f);
+  // 文字行盒 = [origin.y, origin.y + line_height]
+  ST_CHECK(top_chip.text_origin.y >= top_chip.box.y);
+  ST_CHECK(top_chip.text_origin.y + line_height <= top_chip.box.bottom() + 0.01f);
+  // 且要真的在框内（不能贴到底边——那就是当年“漏出去”的前一步）
+  ST_CHECK(top_chip.text_origin.y - top_chip.box.y > 1.0f);
+  ST_CHECK(top_chip.box.bottom() - (top_chip.text_origin.y + line_height) > 1.0f);
+
+  // 底部标签：从锚点向上排，同样必须包住文字行盒
+  const ThreeView::HudChip bottom_chip =
+      ThreeView::hud_chip(2.0f, 300.0f, line_height, 120.0f, padding, 400.0f,
+                          /*bottom_aligned=*/true);
+  ST_CHECK(bottom_chip.box.bottom() <= 300.0f + 0.01f);
+  ST_CHECK(bottom_chip.text_origin.y >= bottom_chip.box.y);
+  ST_CHECK(bottom_chip.text_origin.y + line_height <= bottom_chip.box.bottom() + 0.01f);
+  ST_CHECK(bottom_chip.box.bottom() - (bottom_chip.text_origin.y + line_height) > 1.0f);
+}
