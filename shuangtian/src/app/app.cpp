@@ -877,7 +877,12 @@ auto Application::metrics() const -> control::Metrics {
   return metrics;
 }
 
-auto Application::font_stack() const -> const st::text::FontStack& { return *impl_->fonts; }
+auto Application::font_stack() const -> const st::text::FontStack* {
+  // 字体在 `start()` 里装载（那里才拿得到真实 DPI 与后端），**构造后、启动前为空**。
+  // 返回指针而不是引用：让“还没准备好”成为一个**能被调用方看见**的状态，
+  // 而不是在解引用时变成一句断言失败（那是进程直接退出，没有任何上下文）。
+  return impl_->fonts.get();
+}
 
 auto Application::device_scale() const -> float { return impl_->device_scale; }
 

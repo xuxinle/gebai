@@ -4841,6 +4841,70 @@ mingw 头里没有，按 SDK 数值写死；三个调用任一失败都**不致�
 的真缺陷（上面“客户区 == 窗口矩形”那条断言因此永久变红）。声明 DPI 感知后读数回到
 3533/3533、差 0——量具不先对齐 DPI 口径，得到的“缺陷”可能是自己造的。
 
+#### 4.6.5 窗框纯自绘：外围阴影与圆角（2026-11-05，**取代 §4.6.3 的 DWM 方案**）
+
+**用户现象**：「霜天桌面窗口有未激活的灰色边框」；同时要求「不要 thickframe，改为纯自绘，
+包括外围阴影和窗口圆角，最大化时不要绘制这些，注意性能」。
+
+**真因**（`tools/window_frame_nc_probe.cpp` 逐变体，Win11 26200）：
+`DefWindowProc(WM_NCACTIVATE)` 会按 `WS_THICKFRAME` 画「未激活边框」，而自绘窗框用
+`WM_NCCALCSIZE` 返回 0 把客户区扩成整窗——于是那圈边框**正好画在客户区里**，盖掉外圈
+约 10px 的应用像素。它与 DWM 属性（圆角/描边/`NCRENDERING_POLICY`）、`WS_EX_LAYERED`、
+是否 TOPMOST **全无关**；只有「不归零 `WM_NCCALCSIZE`」时才不出现，但那条路会吃掉一圈客户区。
+
+| 变体（失焦时窗内的带） | 实测 |
+|---|---|
+| 默认（`WM_NCACTIVATE` 交给 `DefWindowProc`） | **10px** |
+| **`DefWindowProc(WM_NCACTIVATE, lParam = -1)` 后返回 TRUE** | **0px** ← 采纳 |
+| `WM_NCPAINT` 里 `return 0` | 10px（拦不住，它根本不走 NC 绘制） |
+| `DWMWA_NCRENDERING_POLICY=DISABLED` | 10px（拦不住） |
+| `WM_NCCALCSIZE` 不归零 | 0px，但客户区 380×280 / 窗口 400×300（放弃自绘窗框） |
+
+**修法**：`lParam = -1` 的含义就是「只更新激活状态、**不重画**非客户区」。两件事都要，
+不能省：直接 `return TRUE` 而不调默认实现会让激活状态位不更新；直接 `return FALSE` 会让
+系统认为框架状态没改完。成本：**零**（不再让系统画那 10px）。
+
+**外围阴影与圆角改为纯自绘**（用户明确要求「不要 thickframe」）。
+
+| 项 | 做法 | 理由 |
+|---|---|---|
+| 几何/位图生成 | `st/shell/window_chrome.hpp` 的纯函数（`ring_layout` / `build_ring_pixels` / `corner_radius_physical`） | 平台层只搬像素；几何是可测的设计参数，三平台将来共用 |
+| 外围阴影 | **独立的分层窗口**（`WS_EX_LAYERED\|TRANSPARENT\|NOACTIVATE\|TOOLWINDOW`）画一圈**预乘 BGRA** 环形位图，位置永远贴主窗后面 | 主窗的呈现通道（`BitBlt`/swapchain）一行不用改；逐帧零成本 |
+| 圆角 | 主窗 `SetWindowRgn(CreateRoundRectRgn)` | 系统只做裁剪，不画任何东西 |
+| 最大化/还原 | 影子层 `SW_HIDE` + `SetWindowRgn(nullptr)` | 用户明确要求；且最大化时阴影落在屏幕外、圆角会露桌面色 |
+| 几何缓存 | `chrome_signature_`（宽/高/半径/margin）相同就**不重建** | 拖动时每帧都会调 `update_window_chrome`，但只有尺寸真变才重新生成位图 |
+
+**性能（`tools/window_chrome_cost_probe.cpp`，可复算）**：
+
+| 规模 | 旧（全图逐像素 + 27 MiB assign） | **现（只写环、缓冲复用）** |
+|---|---|---|
+| 1280×800 @1.0x | 3.4 ms | **0.65 ms** |
+| 1600×1000 @1.0x | 11.4 ms | **0.81 ms** |
+| 2560×1400 @1.5x | — | **1.8 ms** |
+| 3533×1921 @1.5x（4K） | **20.6 ms** | **2.5 ms** |
+
+三个关键优化（缺一个就回到 20 ms 量级）：
+① **SDF 可分离**——`qx` 只依赖 x、`qy` 只依赖 y，先各算一遍一维数组，逐像素只剩 3 次浮点；
+② **整段跳过**——某行竖直方向已在窗口内时，只有左右两侧（`margin + radius + 1` 列）
+   可能是阴影，中间整段 `continue`（4K 下这一条就值 8 倍）；
+③ **缓冲复用**——DIB 像素地址只在尺寸变化时重建，重建时只让 `build_ring_pixels` 往已有
+   像素里写环（不再每次 `assign` 27 MiB + `memcpy`）。
+
+逐帧开销（几何不变）：**0.00000 ms**（只算一次布局 + 一次整数签名比较）。
+
+**`thickframe` 仍然保留**，但只为交互、不再为阴影：实测去掉它后 `WM_NCHITTEST` 回的
+`HT*` 码**仍能让系统拖动/缩放**，但 **Aero Snap（拖到屏幕边缘铺满半屏）失效**
+（窗口停在 -200 位置、宽度不变）。所以保留 `WS_THICKFRAME`，
+外观一侧完全由自绘负责（系统那圈 NC 绘制已被 `WM_NCACTIVATE` 挡掉）。
+
+**验证三道**：
+
+| 层 | 判据 | 实测 |
+|---|---|---|
+| `tests/shell_window_chrome_test.cpp`（7 用例） | 窗口内部不画、窗外单调衰减、最大化整张空、圆角随 DPI 缩放并夹取、阴影可关、SDF 符号 | 全绿（含**逆向验证**：3 处回退全变红） |
+| `tools/window_chrome_measure.py`（真窗口） | 四边 16px 与画布一致；角上有像素被让出；窗外阴影剖面单调；最大化后 `GetWindowRgn` 无区域且影子层隐藏 | 四边 **0 处**不一致；圆角让出 **59** 像素；阴影 **190→244** 单调；最大化 `GetWindowRgn=0` |
+| `tools/window_unfocused_frame_check.py` | **失焦态**下窗缘仍是应用像素（用户报的就是失焦） | 四边 16px 各 **0 处**不一致 |
+
 #### 4.6.4 上屏前的通道重排：为什么换不了、只能写快（2026-11-01）
 
 **背景**：软件腿上屏前要把画布 `0xRRGGBBAA` 重排成 DIB 的 `0xAARRGGBB`。
@@ -5793,6 +5857,58 @@ if (target_units != nullptr) direct_units.insert(direct_units.end(), ...);
 | `st tree` / `st audit` / `st outdated` | 依赖树 / 校验和与许可证字段复核 / 版本检查（**规划中**，CLI 尚未接线，见 `docs/BACKLOG.md`） |
 | `st clean [--all]` | 删除 `build/` 各档产物（`--all` 连共享对象缓存一起清） |
 | `st doctor` | 环境自检（编译器、字体、显示后端、GPU、TLS、缓存；报告内存上限、CPU 配额与推导出的并发） |
+
+### 7.6.1 MicroPython 接入：`nlr_push` 必须 `naked`（2026-11-05）
+
+**现象**：`three_view_dispatches_py_to_bpy_and_js_to_three` 单跑即死（`0xC0000005`），
+单进程全量 `st_tests.exe` 跑到它就中止；而**分片模式反而能过**（其他分片不碰 mp）。
+日志里一句有用的信息也没有。
+
+**根因**（`third_party/micropython/py/nlrx64.c`）：
+
+```c
+unsigned int nlr_push(nlr_buf_t *nlr) {
+    __asm volatile (
+        "movq   (%rsp), %rax   \n"   // ← 取**返回地址**：只有 naked 函数才成立
+        "movq   %rax, 16(%rcx) \n"   //   存进 nlr->regs[0]
+        ...
+        "jmp    nlr_push_tail  \n");
+```
+
+上游用 `#if !MICROPY_NLR_OS_WINDOWS` 包住 `USE_NAKED` 的定义，于是**Windows/MinGW
+下既不 `naked` 也不 `omit-frame-pointer`**，GCC 默认插入 `push %rbp; mov %rsp,%rbp`：
+`(%rsp)` 变成「刚存进去的 rbp」，被当成返回地址写进 `nlr->regs[0]`。
+`nlr_jump` 把那个值写回栈再 `ret`，执行流就跳进了数据区。
+
+**为何症状极度误导**：`st_mp_init()` 内部 `register_extra_modules()` 第一件事
+就是 `nlr_push`（装载 bpy 兼容层），所以**一启用 MicroPython 就崩**；
+崩溃地址落在 `0x15fcd0` 这类远低于 `.text` 基址（`0x140001000`）的地方，
+从报错里看不出跟“帧指针”有关。
+
+**修法**：去掉 `#if !MICROPY_NLR_OS_WINDOWS`，让 Windows 也走 `naked`
+（仅对不支持 `naked` 的老 GCC 退回 `omit-frame-pointer`）。
+
+**判据（可复算）**：
+
+```sh
+objdump -d build/debug/obj/*micropython_py_nlrx64.c.o | grep -A2 '<nlr_push>:'
+# 正确：0: 48 8b 04 24   mov (%rsp),%rax
+# 错误：0: 55            push %rbp      ← 就是这个
+```
+
+回归用例：`tests/mp_nlr_push_test.cpp`（3 条，其中一条**故意抛 Python 异常**
+以强制走 `nlr_jump`——不抛异常就永远测不到被写坏的 `regs[0]`）。
+逆向验证：`tools/nlr_push_reverse_verify.py`（回退→机器码变 `push %rbp` 且用例变红→恢复全绿）。
+
+**两条附带的工程教训**：
+
+1. **`third_party_sources` 的改动不触发重链**（见 BACKLOG P1）：对象重编了、
+   `.meta` 变了，产物却可能仍是旧的。本缺陷的定位里，“到底跑的是哪份代码”
+   一度成为主要障碍。**改第三方源后必须删产物再重建**。
+2. **“跑一段脚本不崩”不是充分判据**：`nlr_push` 写坏的是 `regs[0]`，
+   只要不发生 `nlr_jump`（没有 Python 异常）就永远用不到它——脚本正常跑完，
+   测试恒绿，缺陷原样留着。所以判据必须**覆盖异常路径**，或者直接断言
+   **机器码形态**。
 
 ### 7.7 引导（bootstrap）
 `st` 自身是 C++ 程序：`bootstrap.sh` 用最朴素的编译器调用把 `tools/stpm/*.cpp` + 所需 `src/core/*` + `src/ext/*` 编成 `build/bin/st`（唯一非 st 构建入口）；此后一切（含 `st` 自身重建）由 `st build` 完成。

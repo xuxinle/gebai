@@ -416,7 +416,16 @@ class Application final : public control::Host, public ui::WindowControl {
   /// （见 `st::app::OffscreenTextPort`——后台排版若复用主线程的 `TextRenderer`，
   /// 会把它 32k 条的宽度 LRU 刷爆，主线程随后每段文字都要重新整形）。
   /// 字体数据本身不可变，多个 `TextRenderer` 共享同一个 `FontStack` 是安全的。
-  [[nodiscard]] auto font_stack() const -> const st::text::FontStack&;
+  ///
+  /// ⚠ **`start()` 之前返回 `nullptr`**：字体是在 `start()` 里装载的（那里才知道
+  /// 真实 DPI、也才能拿到后端），构造完但未启动时这里没有东西可给。
+  /// 旧签名返回引用，于是“构造后、启动前”取用会**直接解空 `unique_ptr`**。
+  /// 实测代价：gbcode 在 `main.cc` 的装配段就取它（早于 `app.start()`），
+  /// 启动即 `Assertion 'get() != pointer()' failed` —— 整个应用起不来。
+  ///
+  /// 用法：需要长期持有的调用方在 **`start()` 之后**取一次并保存（那时恒非空），
+  /// 而不是提前缓存一个引用。
+  [[nodiscard]] auto font_stack() const -> const st::text::FontStack*;
   [[nodiscard]] auto metrics() const -> control::Metrics override;
   /// 控制通道 `perf` 用：报告 JSON（同 `st::perf::to_json` schema）。
   /// `capacity > 0` 时顺带把剖析器容量扩到该值（“我现在要采 2000 帧”）。

@@ -197,7 +197,10 @@ struct CodeEditorPage : Component {
   /// `TextRenderer`，会把它 32k 条的 LRU 挤空——主线程随后每段文字都要重新整形，
   /// 实测单帧 measure 1.4ms → 35ms。独立实例后主线程缓存始终热。
   std::unique_ptr<st::app::OffscreenTextPort> offscreen_text_port_{};
-  /// 字体栈（只读，供上面的离屏端口共享）——`main.cpp` 装配时填。
+  /// 字体栈（只读，供上面的离屏端口共享）——由 `main.cpp` 在 **`app.start()` 之后**填写。
+  ///
+  /// 为何是“之后”：字体在 `start()` 里装载，提前取会解空指针（旧代码就这么起不来）。
+  /// 本字段允许为 `nullptr`，`build_editor_area` 已按空放行（没有它就退同步排版）。
   const st::text::FontStack* font_stack_{nullptr};
   /// 输出面板按来源分栏（`St build` / `St test` / `终端`…）。
 

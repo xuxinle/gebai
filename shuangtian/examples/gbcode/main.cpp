@@ -519,7 +519,11 @@ auto run_app(int argc, char** argv) -> int {
   page->device_scale_getter = [&app] { return app.device_scale(); };
   // 后台排版的字体栈（只读共享）：离屏端口用它构造自己的 TextRenderer，
   // 缓存与主线程完全隔离——否则大文档排版会刷爆主线程的宽度 LRU。
-  page->font_stack_ = &app.font_stack();
+  //
+  // ⚠ **不在这里取**：字体是在 `app.start()` 里装载的，而本段代码跑在它**之前**
+  // （`start()` 在下面靠后的位置）。旧代码在这里写 `&app.font_stack()`，
+  // 于是启动即解空指针——打印的是 `unique_ptr::operator*` 的断言失败，
+  // 从报错里看不出跟字体时序有关。实际赋值在 `app.start()` 之后（见那里）。
   // 外壳：`WindowFrame`（与 gallery 同一形态：标题栏 + 内容槽 + 八向缩放边缘）。
   // 为什么由应用装配而不是写进 `build()`：窗框是**外壳**（也是窗口唯一的拖动/缩放区），
   // 应当先于声明式内容存在、且不随页面重组而重建；页面只把标题推给它。
@@ -845,6 +849,16 @@ auto run_app(int argc, char** argv) -> int {
   if (auto started = app.start(); !started) {
     std::fprintf(stderr, "启动失败: %s\n", started.error().to_string().c_str());
     return 1;
+  }
+  // 字体栈现在才可用（`start()` 里装载）。**在这里取**：此后它恒非空，
+  // 而离屏排版端口在 `build_editor_area` 里才按需创建（那时它已就位）。
+  //
+  // 为何不提前缓存：见上面 `page->font_stack_` 处的说明（提前取 = 启动即解空指针）。
+  page->font_stack_ = app.font_stack();
+  if (page->font_stack_ == nullptr) {
+    // 完全没字体时 `start()` 已经会报错；走到这里只可能是两边口径又被改坏了——
+    // 不静默继续（否则离屏排版会在别处摔一个更难查的跟头）。
+    std::fprintf(stderr, "启动异常：字体栈未就绪（后台排版将退回主线程）\n");
   }
   page->note_startup(std::format("歌白代码 0.1.0 · 后端 {} · headless={} · DPI {:.1f} · 控制通道 127.0.0.1:{}",
                                     app.backend_name(), app.headless(),

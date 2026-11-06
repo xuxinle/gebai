@@ -41,6 +41,7 @@
 #include "st/raster/simd.hpp"
 #include "st/shell/icon_scale.hpp"
 #include "st/shell/shell.hpp"
+#include "st/shell/window_chrome.hpp"
 #include "st/ui/window_control.hpp"
 
 namespace st::shell {
@@ -304,6 +305,7 @@ class Win32Backend final : public Backend {
     // 与 `this` 的生命周期绑定。`available()` 本身是进程级 static（可能还要用几十毫秒），
     // 所以这里真的是“等它跑完”，而不是只置个退出标志。
     if (gpu_worker_.joinable()) gpu_worker_.join();
+    release_window_chrome();
     if (dib_ != nullptr) ::DeleteObject(dib_);
     if (memory_dc_ != nullptr) ::DeleteDC(memory_dc_);
     if (window_ != nullptr) ::DestroyWindow(window_);
@@ -439,6 +441,10 @@ class Win32Backend final : public Backend {
   [[nodiscard]] auto toggle_maximize() -> Status override {
     if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
     ::ShowWindow(window_, ::IsZoomed(window_) != 0 ? SW_RESTORE : SW_MAXIMIZE);
+    // 最大化/还原的**立即**跟随：`WM_SIZE` 会迟到（系统先改样式再发消息），
+    // 而影子层在最大化时必须马上隐藏——否则会在屏幕外留下一个不必要的叠加层。
+    // `update_window_chrome()` 是幂等的，与 `WM_SIZE` 里那次不重复干活。
+    update_window_chrome();
     return ok();
   }
 
@@ -570,9 +576,10 @@ class Win32Backend final : public Backend {
         }
       }
     }
+    // 自绘影子层：建在 `ShowWindow` 之前（影窗必须永远在主窗后面，不能反过来）。
+    create_shadow_window();
     // 注意：**不在这里 `ShowWindow`**——见 `show_when_ready` 的说明。
     // 先建窗口（不显示）才能拿到它落在哪个显示器、那个显示器的 DPI 是多少。
-
     // 窗口实际 DPI 可能与请求不同（多显示器/系统缩放）。
     // 未显式指定时以窗口为准；**但必须连窗口尺寸一起改**——
     // 上面是按"请求的 scale"建的窗口，若实际 DPI 不同就会出现
@@ -656,6 +663,196 @@ class Win32Backend final : public Backend {
                          work.bottom - work.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
   }
 
+  // ── 自绘窗框：外围阴影 + 圆角 ───────────────────────────────────────────
+  //
+  // 结构（为何是**两个窗口**）：
+  //   · 主窗：外观全自绘（客户区 = 整窗），圆角用 `SetWindowRgn` 裁；
+  //   · 影窗：`WS_EX_LAYERED | TRANSPARENT | NOACTIVATE | TOOLWINDOW`，画**环形**阴影
+  //     （中间全透明），位置永远紧贴主窗后面。
+  //
+  // 为何不用「主窗自己变分层窗口」：那会动到整个上屏通道（`UpdateLayeredWindow` 必须当场
+  // 拷整块像素，实测 4K 屏每帧 +2.8 ms；GPU 腿的 swapchain 还根本不合成 alpha）。
+  // 影子另开一层则两条腿都不受影响：主窗还是原来的 `BitBlt`/swapchain。
+  //
+  // 为何不逐帧重画影子：环位图只依赖几何，几何不变就一个字节都不重算。拖动时每帧一次
+  // “尺寸没变吗”的整数比较，真的变了才重建（重建是 O(环面积) 的一次性活）。
+
+  /// 建影子窗口（须在主窗之后、`ShowWindow` 之前）。
+  void create_shadow_window() {
+    if (shadow_window_ != nullptr || decorations_) return;
+    if (!chrome_style_.shadow) return;
+    // 同一个窗口类里再建一个：它只需处理 `WM_NCHITTEST`（点击穿透）与 `WM_ERASEBKGND`。
+    //
+    // ⚠ **建之前先置 `creating_shadow_`**：新窗口的 `WM_NCCREATE` 会早于
+    // `CreateWindowExW` 返回（那时 `shadow_window_` 还是 nullptr），而窗口过程靠
+    // “`shadow_window_` 已非空”判别主/影窗——不置标志的话，影窗会把自己记成主窗，
+    // 之后所有上屏/命中都会落到那个 1×1 的透明窗上（实测症状：整个界面变黑）。
+    creating_shadow_ = true;
+    shadow_window_ = ::CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kWindowClass,
+        L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, ::GetModuleHandleW(nullptr), this);
+    creating_shadow_ = false;
+    if (shadow_window_ == nullptr) {
+      // 不致命：没有影子层就只是一圈阴影没了，窗口照常工作。
+      ST_LOG_INFO("自绘影子窗口创建失败（错误码 {}），窗框将无外阴影", ::GetLastError());
+    }
+  }
+
+  /// 该窗口句柄是不是影子窗口（主/影窗共用同一个窗口类，靠这两个成员区分）。
+  [[nodiscard]] auto is_shadow_window(HWND window) const noexcept -> bool {
+    if (creating_shadow_) return true;
+    return shadow_window_ != nullptr && window == shadow_window_;
+  }
+
+  /// 更新窗框（圆角裁剪区 + 影子层位置与位图）。**幂等且廉价**：几何没变时只做整数比较。
+  ///
+  /// 调用点：`WM_SIZE` / `WM_MOVE` / `WM_DPICHANGED` / 最大化状态变化 / 创建完成。
+  void update_window_chrome() {
+    if (decorations_ || window_ == nullptr) return;
+    RECT client{};
+    if (::GetClientRect(window_, &client) == 0) return;
+    WindowChromeGeometry geometry;
+    geometry.client_width = std::max(1, static_cast<int>(client.right));
+    geometry.client_height = std::max(1, static_cast<int>(client.bottom));
+    geometry.scale = scale_ > 0.0f ? scale_ : 1.0f;
+    geometry.maximized = ::IsZoomed(window_) != 0;
+
+    // ① 圆角裁剪区：只有半径变了才调（`SetWindowRgn` 会让窗口重算区域并重绘）。
+    const int radius = corner_radius_physical(geometry, chrome_style_);
+    if (radius != applied_corner_radius_) {
+      applied_corner_radius_ = radius;
+      if (radius <= 0) {
+        ::SetWindowRgn(window_, nullptr, TRUE);   // 直角：把裁剪区整个撒销
+      } else {
+        // `CreateRoundRectRgn` 的右下角是**排他的**，所以 +1 才能盖满整块客户区。
+        HRGN region = ::CreateRoundRectRgn(0, 0, geometry.client_width + 1,
+                                           geometry.client_height + 1, radius * 2, radius * 2);
+        if (region != nullptr) {
+          // `SetWindowRgn` 成功后**系统接管 region 所有权**，调用方不得再删。
+          if (::SetWindowRgn(window_, region, TRUE) == 0) ::DeleteObject(region);
+        }
+      }
+    }
+
+    // ② 影子层：位置/显隐随几何变；位图只在几何签名变化时重建。
+    if (shadow_window_ == nullptr) return;
+    const WindowRingLayout layout = ring_layout(geometry, chrome_style_);
+    if (!layout.visible) {
+      if (::IsWindowVisible(shadow_window_) != 0) ::ShowWindow(shadow_window_, SW_HIDE);
+      chrome_signature_ = 0;   // 下次重新显出来时必须重建
+      return;
+    }
+    // 内容签名：只要四项之一变了，环位图就得重生成。
+    const std::uint64_t signature =
+        (static_cast<std::uint64_t>(layout.width) << 32) |
+        (static_cast<std::uint64_t>(layout.height) << 8) |
+        static_cast<std::uint64_t>(layout.radius & 0xFF) |
+        (static_cast<std::uint64_t>(layout.margin & 0x0F) << 4);
+    if (signature != chrome_signature_) {
+      chrome_signature_ = signature;
+      rebuild_shadow_bitmap(layout);
+    }
+    RECT wr{};
+    if (::GetWindowRect(window_, &wr) == 0) return;
+    ::SetWindowPos(shadow_window_, window_, wr.left - layout.margin, wr.top - layout.margin,
+                   layout.width, layout.height,
+                   SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+  }
+
+  /// 生成环位图并交给分层窗口（`UpdateLayeredWindow`）。
+  ///
+  /// 只在**几何变化**时被调（见 `chrome_signature_`）。关键一点：**缓冲只分配一次**，
+  /// 重建时只让 `build_ring_pixels` 往已有的 DIB 像素里写环——实测 4K 下一次重建
+  /// 从 20.6 ms（含 27 MiB 分配/清零/拷贝）降到 **2.5 ms**（`tools/window_chrome_bench.cpp`）。
+  void rebuild_shadow_bitmap(const WindowRingLayout& layout) {
+    if (shadow_window_ == nullptr || layout.width <= 0 || layout.height <= 0) return;
+    const std::size_t needed = static_cast<std::size_t>(layout.width) *
+                              static_cast<std::size_t>(layout.height);
+
+    HDC screen = ::GetDC(nullptr);
+    if (screen == nullptr) return;
+    if (shadow_dc_ == nullptr) shadow_dc_ = ::CreateCompatibleDC(screen);
+    if (shadow_dc_ == nullptr) {
+      ::ReleaseDC(nullptr, screen);
+      return;
+    }
+    // 尺寸变了才重建位图（DIB 尺寸不可改），否则复用已有像素地址。
+    if (shadow_bitmap_ != nullptr &&
+        (shadow_bitmap_width_ != layout.width || shadow_bitmap_height_ != layout.height)) {
+      ::SelectObject(shadow_dc_, nullptr);
+      ::DeleteObject(shadow_bitmap_);
+      shadow_bitmap_ = nullptr;
+      shadow_bits_ = nullptr;
+    }
+    if (shadow_bitmap_ == nullptr) {
+      BITMAPINFO info{};
+      info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+      info.bmiHeader.biWidth = layout.width;
+      info.bmiHeader.biHeight = -layout.height;   // 自上而下
+      info.bmiHeader.biPlanes = 1;
+      info.bmiHeader.biBitCount = 32;
+      info.bmiHeader.biCompression = BI_RGB;
+      void* bits = nullptr;
+      shadow_bitmap_ = ::CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+      if (shadow_bitmap_ == nullptr || bits == nullptr) {
+        if (shadow_bitmap_ != nullptr) ::DeleteObject(shadow_bitmap_);
+        shadow_bitmap_ = nullptr;
+        ::ReleaseDC(nullptr, screen);
+        return;
+      }
+      shadow_bits_ = static_cast<std::uint32_t*>(bits);
+      shadow_bitmap_width_ = layout.width;
+      shadow_bitmap_height_ = layout.height;
+      ::SelectObject(shadow_dc_, shadow_bitmap_);
+    }
+    // 新位图的像素内容未定义（DIB 不保证清零），先整块清零——**只在重建位图时做一次**。
+    // 尺寸不变的重建（拖动中每帧）走上一步复用，这里不执行。
+    if (shadow_cleared_for_ != static_cast<std::uint64_t>(layout.width) * 100000ULL +
+                                  static_cast<std::uint64_t>(layout.height)) {
+      shadow_cleared_for_ = static_cast<std::uint64_t>(layout.width) * 100000ULL +
+                            static_cast<std::uint64_t>(layout.height);
+      std::memset(shadow_bits_, 0, needed * sizeof(std::uint32_t));
+    }
+    // 影色取固定近黑色（阴影就是“没有光”）：主题只影响不透明度（`chrome_style_.shadow_alpha`）。
+    const std::span<std::uint32_t> target(shadow_bits_, needed);
+    if (!build_ring_pixels(layout, chrome_style_, 0x0A0A12U, target)) {
+      ::ReleaseDC(nullptr, screen);
+      return;
+    }
+    POINT source{0, 0};
+    SIZE size{layout.width, layout.height};
+    POINT destination{0, 0};
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;   // 环位图是**预乘** BGRA
+    (void)::UpdateLayeredWindow(shadow_window_, screen, &destination, &size, shadow_dc_, &source, 0,
+                                &blend, ULW_ALPHA);
+    ::ReleaseDC(nullptr, screen);
+  }
+
+  /// 释放影子层的 GDI 资源与窗口。
+  void release_window_chrome() {
+    if (shadow_window_ != nullptr) {
+      ::DestroyWindow(shadow_window_);
+      shadow_window_ = nullptr;
+    }
+    shadow_bits_ = nullptr;
+    if (shadow_bitmap_ != nullptr) {
+      ::DeleteObject(shadow_bitmap_);
+      shadow_bitmap_ = nullptr;
+    }
+    if (shadow_dc_ != nullptr) {
+      ::DeleteDC(shadow_dc_);
+      shadow_dc_ = nullptr;
+    }
+    shadow_bitmap_width_ = 0;
+    shadow_bitmap_height_ = 0;
+    shadow_cleared_for_ = 0;
+    chrome_signature_ = 0;
+    applied_corner_radius_ = 0;
+  }
+
   /// 按**当前客户区**分配绘制面（收缩后可在调整尺寸/最大化前后复用）。
   ///
   /// 所有会影响尺寸的路径（创建 / 改 DPI / WM_SIZE）都必须走这里，
@@ -717,6 +914,9 @@ class Win32Backend final : public Backend {
     // 先设为**不激活**显示，避免系统在窗口还没内容时把焦点/重绘抢过去；
     // 内容贴好后再真正前置。
     ::ShowWindow(window_, SW_SHOWNOACTIVATE);
+    // 窗框（圆角裁剪区 + 影子层）必须在**窗口可见之前**就位：
+    // 先显再补会出现“先直角、后变圆角”的瞬闪（与 DWM 阴影“先无影后补影”同一类问题）。
+    update_window_chrome();
     // 把当前画布内容同步贴上去。`ShowWindow` 返回时窗口已被映射，此时呈现才有效。
     //
     // ⚠ **不要在这里判 `dib_ != nullptr`**：`blit()` 第一步就是 `ensure_dib()`，
@@ -1924,7 +2124,13 @@ class Win32Backend final : public Backend {
       const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
       self = static_cast<Win32Backend*>(create->lpCreateParams);
       ::SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-      self->window_ = window;
+      // **只有主窗**才把自己记成 `window_`：影子窗口与本类共享同一个窗口类，
+      // 它也走 `WM_NCCREATE`。不区分的话，后建的影窗会把 `window_` 覆成它自己——
+      // 之后所有“主窗”操作（上屏/命中/最大化）全落到影窗上。
+      //
+      // 判据用 `creating_shadow_`：影窗的 `WM_NCCREATE` 在 `CreateWindowExW` 返回
+      // **之前**到达，那时 `shadow_window_` 还是 nullptr，靠它判别不了。
+      if (!self->creating_shadow_) self->window_ = window;
     } else {
       self = reinterpret_cast<Win32Backend*>(::GetWindowLongPtrW(window, GWLP_USERDATA));
     }
@@ -1964,6 +2170,15 @@ class Win32Backend final : public Backend {
   }
 
   auto handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {
+    // **影子窗口**的消息先分流：它只负责把像素画到屏幕上，任何交互都要让到主窗去。
+    //
+    // `WS_EX_TRANSPARENT` 已经让系统把鼠标事件透给下面的窗口，但命中测试仍要先回
+    // `HTTRANSPARENT`（否则鼠标在影子带上掠过时主窗收不到 `WM_MOUSEMOVE`，
+    // 悬浮态会卡住）。其余消息交给默认处理（分层窗口靠 `UpdateLayeredWindow` 画自己）。
+    if (window != window_ && is_shadow_window(window)) {
+      if (message == WM_NCHITTEST) return HTTRANSPARENT;
+      return ::DefWindowProcW(window, message, wparam, lparam);
+    }
     // 托盘图标事件（自定义消息）：
     // - 左键单击/双击 = “把我叫回来”（计数，应用主循环取走）
     // - 右键 = 弹出系统菜单（打开主界面 / 退出）——托盘常驻应用的退出入口
@@ -2048,6 +2263,16 @@ class Win32Backend final : public Backend {
           }
         }
         repaint_for_resize();
+        update_window_chrome();
+        return 0;
+      }
+      case WM_MOVE: {
+        // 移动时影窗要跟着走（它是独立窗口，不会自己跟随）。
+        //
+        // 为何不在 `WM_WINDOWPOSCHANGED` 里做：那个消息也会在尺寸变化时来，
+        // 而尺寸路径已经在 `WM_SIZE` 里更新过一整轮（含位图重建）——两处都干
+        // 会让拖动时每帧多调一次 `SetWindowPos`。这里只处理“位置变了”这一路。
+        update_window_chrome();
         return 0;
       }
       case WM_GETMINMAXINFO: {
@@ -2235,6 +2460,10 @@ class Win32Backend final : public Backend {
           // 堵住，这里是唯一的执行机会。见 `repaint_for_resize()` 的说明。
           repaint_for_resize();
         }
+        // 窗框跟随尺寸：圆角裁剪区与影子层都依赖客户区尺寸，必须在这里跟上。
+        // **放在 `repaint_for_resize` 之后**：影窗要读主窗的最新矩形，先重绘再定位
+        // 会让影子晚一帧到位（拖动时能看到阴影拖后一行）。
+        update_window_chrome();
         return 0;
       }
 
@@ -2249,6 +2478,8 @@ class Win32Backend final : public Backend {
         // 与 `set_device_scale` 同一口径：**客户区是唯一真源**。
         // 手写 `client / scale` 取整再回乘可能差 1px，那会让 DXGI 拉伸整块纹理（整屏发糊）。
         (void)sync_buffers_to_client(new_scale);
+        // 窗框按新 DPI 重算（圆角半径与阴影带宽都是**逻辑像素**，物理尺寸随 scale 变）。
+        update_window_chrome();
         return 0;
       }
 
@@ -2458,8 +2689,7 @@ class Win32Backend final : public Backend {
         //
         // 失活（WA_INACTIVE）：指针没动但用户已不在本窗口——悬浮态留着就是
         // 「切回来时按钮还亮着」的残影；发一条 WindowLeave 让 UiRoot 一次性清掉
-        // （hover/光标/合并移动，语义同滑出窗口）。
-        //
+        // （hover/光标/合并移动，语义同滑出窗口）。        //
         // 激活（WA_ACTIVE/WA_CLICKACTIVE）：用 `GetCursorPos` **合成一条 MouseMove**——
         // 指针可能正停在窗口内某个控件上，但切换过程没有鼠标事件，悬浮与光标
         // 停在切换前的旧状态（用户报的「切前台但没点击过、指针无变化」）。
@@ -2491,6 +2721,34 @@ class Win32Backend final : public Backend {
       case WM_ERASEBKGND:
         return 1;  // 我们整屏重绘，抑制系统擦背景（否则闪白）
 
+      case WM_NCACTIVATE: {
+        // 去装饰窗口的**未激活边框**：必须在这里拦掉系统的「框架重画」。
+        //
+        // 现象（用户报）：窗口失焦（点别的程序、Alt+Tab）后，四周内侧冒出一圈约 10px
+        // 的灰白边框，把应用画的外圈像素盖掉；激活后自己消失。
+        //
+        // 真因（实测，`tools/window_frame_dwm_policy.cpp` 逐变体）：
+        // `DefWindowProc(WM_NCACTIVATE)` 会按 `WS_THICKFRAME` 画「未激活边框」。而自绘窗框
+        // 用 `WM_NCCALCSIZE` 返回 0 把客户区扩成整窗，于是那圈边框**正好画在客户区里**
+        // （窗口自己的重定向表面），盖掉外圈 10px 的应用像素。它与 DWM 属性、
+        // `WS_EX_LAYERED`、是否 TOPMOST 全无关；只有 `WM_NCCALCSIZE` 不归零时才不出现
+        // ——但那条路会把客户区缩掉一圈，等于放弃自绘窗框（`CONVENTIONS.md` §10 第 7 条）。
+        //
+        // 修法：`lParam = -1` 调 `DefWindowProc`。这个取值（`TRUE`/`FALSE` 之外的第三个值）
+        // 的语义就是「只更新激活状态，**不重画**非客户区」——两件事都要，不能省：
+        //   · 直接 `return TRUE` 不调默认实现：激活状态位不更新，后续系统判定错乱；
+        //   · 直接 `return FALSE`：系统认为「框架状态没改完」，有些路径会把窗口标记成
+        //     仍处于失活态（实测探针里「失焦生效=0」）。
+        // 实测同一探针：默认实现 → 失焦带 10px；`lParam=-1` → **0px**，且窗口其余行为不变。
+        //
+        // 成本：零（不做任何额外绘制，只是不再让系统画那 10px）。
+        if (!decorations_) {
+          (void)::DefWindowProcW(window, message, wparam, -1);
+          return TRUE;
+        }
+        break;
+      }
+
       default: break;
     }
     return ::DefWindowProcW(window, message, wparam, lparam);
@@ -2508,6 +2766,39 @@ class Win32Backend final : public Backend {
   /// 是否给窗口挂 DWM 外阴影（`WindowOptions::window_shadow`）。
   /// 运行时会因 DWM 不接受而转 `false`（见 `create_window`）。
   bool shadow_enabled_{true};
+
+  // ── 自绘窗框：外围阴影与圆角（`st/shell/window_chrome.hpp`）──
+  //
+  // 为什么不用 DWM：用户要求「窗框纯自绘、不要 thickframe」。而 DWM 的外阴影（`DwmExtendFrameIntoClientArea`）
+  // 必须挂在 `WS_THICKFRAME` 上，且失焦时系统会按那个位把「未激活边框」画进客户区
+  // （实测 10px，见 `WM_NCACTIVATE` 的说明）。自绘后两个问题一起消失，也拿到了圆角。
+  //
+  // 性能形状（这一块是本次要守住的）：
+  //   · 环位图只在**几何变化**（尺寸/DPI/最大化状态）时重建一次；
+  //   · 逐帧零成本：影窗是分层窗口，DWM 自己做合成，应用侧一帧不多画一笔；
+  //   · 最大化时直接 `SW_HIDE` 影窗并撤掉圆角裁剪区（用户明确要求）。
+  WindowChromeStyle chrome_style_{};
+  /// 影子窗口（分层、透明、不激活、点击穿透）；`nullptr` = 尚未建或建失败。
+  HWND shadow_window_{nullptr};
+  /// 正在 `CreateWindowExW` 建影窗（它的 `WM_NCCREATE` 会早于返回到达，故需要这个标志）。
+  bool creating_shadow_{false};
+  /// 影子窗口当前的环位图尺寸（与 `HDC` 配对；两者同时由 `rebuild_window_chrome` 重建）。
+  HDC shadow_dc_{nullptr};
+  HBITMAP shadow_bitmap_{nullptr};
+  /// 直接指向 `shadow_bitmap_` 的像素（`CreateDIBSection` 给的地址），供就地写环。
+  std::uint32_t* shadow_bits_{nullptr};
+  /// 已清零过的位图标识（宽 × 100000 + 高）：只在位图重建时清一次。
+  std::uint64_t shadow_cleared_for_{0};
+  int shadow_bitmap_width_{0};
+  int shadow_bitmap_height_{0};
+  /// 环位图上次生成对应的**内容签名**（尺寸 + margin + 半径 + 缩放 + 最大化）。
+  ///
+  /// 用它做「几何没变就不重建」的判据：逐帧调 `update_window_chrome()` 也只是一次
+  /// 整数比较（拖动/缩放时每帧都会调，但只有尺寸真的变了才重新生成位图）。
+  std::uint64_t chrome_signature_{0};
+  /// 已经应用过的圆角半径（`0` = 直角）。用它判断要不要再调 `SetWindowRgn`
+  /// （该 API 会让窗口重算区域并触发重绘，没必要每次都调）。
+  int applied_corner_radius_{0};
   HDC memory_dc_{nullptr};
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};

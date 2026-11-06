@@ -369,6 +369,132 @@
 
 ## 待做（2026-10-09 起）
 
+### P1：`third_party_sources` 的改动不触发**链接**（只重编对象）
+
+**现象**（2026-11-05，修 MicroPython `nlr_push` 时踩到）：改了
+`third_party/micropython/py/nlrx64.c` → 目标文件重编了、内容确实变了，
+但产物里跑的还是**旧的 `nlr_push`**。构建输出说“完成”，没有任何异常。
+
+**取证**：
+
+| 检查 | 结果 |
+|---|---|
+| `build/debug/obj/…_nlrx64.c.o` 里 `nlr_push` 首条指令 | `mov (%rsp),%rax`（**新**，正确） |
+| `build/debug/bin/st_tests.exe` 里 `nlr_push` 首条指令 | `push %rbp`（**旧**，坏的） |
+| `st build --force` 输出 | `重编 335 / 命中缓存 0`，但 `链接已跳过（产物最新）` |
+
+**根因方向**：`link_fingerprint` 的素材是「编译器族 + 链接集合的**对象路径** +
+标志 + 每个对象的 `.meta` 内容哈希」。`third_party` 的对象**在**链接集合里、
+`.meta` 也应该变了——但实测仍判为“没变”。最可能的是：`third_party_sources`
+走的是另一条对象路径 / 不进 `link_units`，或者它们的 `.meta` 没被 `deps_meta_path()`
+覆盖到。
+
+**为何它代价高**：它直接推翻“改了代码就一定生效”这个前提，而且**只在改
+第三方源时发作**（改 `src/` 下的东西一直正常，所以很久没被发现）。
+修 MicroPython 这类底层缺陷时，“到底跑的是哪份代码”会变成主要障碍。
+
+**当下的绕开手段**（写进提示词的临时纪律）：改 `third_party_sources` 后必须
+**删产物再重建**（单靠 `--force` 不够）。
+
+### P2：产物不存在时 `refresh_stale_test_binary` 静默不重建
+
+**现象**：删掉 `build/debug/bin/st_tests.exe` 后跑 `st build`（带或不带 `--force`），
+输出报「构建完成 · 链接已跳过（产物最新）」，而**产物根本不存在**。
+
+**根因**（`src/pkg/build.cpp` 的 `refresh_stale_test_binary`）：
+`if (!fs::is_regular_file(binary)) return false;` —— 注释写的是
+「从没构建过测试 → 不是“过期”，是“没开始”」。这个设计**本身有道理**
+（不然每次构建都白编几百个单元），但它与另一条纪律撞车：
+“删产物是强制重链的唯一可靠手段”（见上一条 P1）。
+两者一碰上，人就陷入「越删越不建」的环。
+
+**方向**：区分「从未构建过」与「曾构建过但产物没了」——后者应当重建。
+判据可用已有的 `test_binary_stamp_path(output)` 快照文件是否存在：
+有快照但没产物 = 被删了 ⇒ 重建；没快照也没产物 = 真没开始过 ⇒ 跳过。
+
+### P1：`--force` 重建时不该说“链接已跳过”
+
+**现象**：`st build --force` 重编了 335 个单元，汇总行却写「链接已跳过（产物最新）」。
+即使链接真的被跳过（产物确实最新），这个措辞在 `--force` 下也很误导——
+它让人以为 `--force` 没生效。
+
+**方向**：`--force` 下若 `up_to_date` 为真（产物的确最新），报「链接：产物已最新
+（--force 仅重编了单元）」；或者干脆让 `--force` 无条件重链。
+
+### ~~P0：MicroPython `st_mp_init` 在本机直接崩~~（**已修**，2026-11-05；根因保留供参照）
+
+> 根因与修法已沉淀到 `DESIGN.md` §7.6.1。此条留存是因为它的**取证路径**值得复用：
+> 三层探针（`mp_runtime_smoke_probe` / `mp_reinit_probe` / `mp_thread_safety_probe`）
+> 逐层排除假设，最后用 `objdump` 看一条指令定案。
+>
+> **一句话根因**：`third_party/micropython/py/nlrx64.c` 的 `nlr_push` 在 Windows
+> 分支下没有 `naked`（上游用 `#if !MICROPY_NLR_OS_WINDOWS` 包住了 `USE_NAKED`），
+> GCC 插入 `push %rbp` 序言，于是 `movq (%rsp), %rax`（本意是取返回地址）取到的是
+> **保存的 rbp**；`nlr_jump` 把那个值写回栈再 `ret`，执行流跳进数据区。
+
+**现象**：该用例单跑退出码 `0xC0000005`（SIGSEGV），且**单进程全量 `st_tests.exe`
+跑到它就中止**（分片模式反而能过，因为其他分片不碰 mp）。
+
+**已排除**：与本轮窗框/字体改动无关——用**纯 HEAD 源码重新编译**（二进制 02:35:20，
+比源码新）后同样崩。
+
+**取证（三层探针，已入仓）**：
+
+| 探针 | 结果 |
+|---|---|
+| `tools/mp_runtime_smoke_probe.cpp` | **`st_mp_init()` 自己就崩**（打印停在 `[A]` 之后，连 `rc=` 都没出）——绕开了 `Runtime` 的所有纪律，所以不是线程/单例问题 |
+| `tools/mp_reinit_probe.cpp` | 同样崩在第一次 `run()` |
+| `tools/mp_thread_safety_probe.cpp` | 无输出即死，进一步佐证“还没进 run” |
+
+**崩溃地址是决定性线索**：gdb 的 `#0` 落在 `0x15fd40`，而本模块 `.text` 区起于
+`0x140001000`——那个地址**不在任何可执行区間**。也就是说执行流跳进了一片数据/零页。
+这与“某个函数指针/结构体字段被当成代码地址”相符。
+
+**已排除的假设**（别再重跑）：
+
+- 不是 `available()` 误报导致走进 mp：`available()` 返 1 是**对的**（MicroPython 确实链接进来了）。
+- 不是跨线程互踩：最小探针单线程、不建任何 `std::thread` 也崩。
+- 不是 `mp_reinit`（重复 `st_mp_init`）：崩在**第一次** init。
+
+**待查方向**（按性价比排）：
+
+1. **`register_extra_modules()` / `s_printer` 的静态初始化**——`mp_bridge.c` 里大量
+   编译期模块表与函数指针；C 与 C++ 混合编译时若某个表在 `mp_init()` 前还没被填好，
+   `mp_module_...` 会拿到空指针并跳 0。
+2. **`mp_hal_alloc` 的实现**（`src/python/mphal_port.cpp`）——它就一句 `malloc`，
+   但 `gc_init` 对 16MB 堆的对齐/边界敏感；崩在那附近也会表现为跳数据区。
+3. **micropython 子模块的构建口径**（`third_party/micropython`）——是否与宿主的
+   `-march`/ABI/`mp_int_t` 宽度不匹配（不匹配的典型症状就是“结构体字段错位 → 拿到怪地址”）。
+
+**为何没当场修**：修它要动 Micropython 的接入层（模块表/ABI），属于跨层改动且
+目前**没有可用的判据**（连 init 都进不去，无法做二进制二分）。先把“崩在第一行”这个
+事实与三层探针落地，下一次开工直接从 `gdb` 单步 `st_mp_init` 开始。
+
+### P2：x11/wayland 也要**自绘窗框阴影与圆角**（几何已平台无关，只差接入）
+
+2026-11-05 在 Win32 一侧把窗框改成了**纯自绘**（外围阴影 + 圆角，见 `DESIGN.md` §4.6.5）。
+几何与位图生成已经抽到平台无关的 `include/st/shell/window_chrome.hpp`（纯函数，7 条单测），
+**剩下的事只是两个平台各自的“怎么把这块带 alpha 的位图交给合成器”**：
+
+| 平台 | 阴影层 | 圆角裁剪 |
+|---|---|---|
+| x11 | 另开一个 `_NET_WM_WINDOW_TYPE_UTILITY` 的 override-redirect 窗口 + ARGB visual，`XPutImage` 预乘 BGRA | `XFixesSetWindowShapeRegion`（一条圆角 region） |
+| wayland | `wl_surface` + `wp_viewporter`；需要 `wp_alpha_modifier_v1` 或者由合成器支持 ARGB buffer | `wl_surface.set_input_region` 只能裁交互，**圆角得靠 alpha buffer 自绘** |
+
+要注意的差别：两个平台都**没有** Win32 那种「失焦系统灰边」问题（那个来自
+`DefWindowProc(WM_NCACTIVATE)`），所以那边只需要接阴影/圆角两件事，不用动 `NC*`。
+**当下没做的原因**：开发机没有 Linux 桌面会话可实测（X11/Wayland 只能跑无头，
+而锚点就错在“阴影只能在真窗口上看得见”）。
+
+### P2：窗框圆角的**抗锯齿**（现在是系统区域裁剪的硬边）
+
+`SetWindowRgn(CreateRoundRectRgn)` 得到的圆角是**一位式**的（在区域内/在区域外），
+所以 45° 附近能看到阶梯。Win11 系统窗口的圆角是带 alpha 的平滑边。
+代价评估（未做）：要么把圆角也交给影子层（把窗口四角的像素夺走，即让主窗变成
+分层窗口——`DESIGN.md` §4.6.5 已经论证那会把整条上屏通道吐回去），要么用
+`DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE)` 让系统画（但那与“纯自绘”相悖）。
+**当前 1.5x 下半径 15px，盯不出来**；真要做得先拿到“有人看得出来”的证据。
+
 ### 冷启动首帧：**阴影占 62%**（2026-11-04 逐层量准，修正前一条的误判）
 
 前一条把首帧写成“字形光栅为主”——**实测否定了这个判断**。逐层探针（`paint_frame` 分段 → `Element::paint` 每元素子树 → `layered_shadow` 构建计时）得到的真实构成：

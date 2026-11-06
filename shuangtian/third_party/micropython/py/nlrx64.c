@@ -35,13 +35,27 @@
 
 __attribute__((used)) unsigned int nlr_push_tail(nlr_buf_t *nlr);
 
-#if !MICROPY_NLR_OS_WINDOWS
+// ## 为什么 Windows 也必须 `naked`（2026-11-05 修，实测代价：整个 MicroPython 不可用）
+//
+// `nlr_push` 的汇编第一句是 `movq (%rsp), %rax` —— 它假定 **`%rsp` 处就是返回地址**。
+// 只有 `naked` 函数才保证编译器不插序言。
+//
+// 上游原写 `#if !MICROPY_NLR_OS_WINDOWS`：Windows 分支既不 `naked`、也不
+// `optimize("omit-frame-pointer")`，于是一位于 GCC 默认插 `push %rbp; mov %rsp,%rbp`，
+// `(%rsp)` 取到的是 **保存的 rbp**，被当成返回地址存进 `nlr->regs[0]`。
+// 后果不是“微偏”而是**进程直接死**：`nlr_jump` 把那个值写回栈再 `ret`，
+// 执行流跳进数据区（实测 `0x15fcd0`，而本模块 `.text` 起于 `0x140001000`）。
+// 因为 `st_mp_init` 里的 `register_extra_modules` 第一件事就是装载 bpy 兼容层
+// （内含 `nlr_push`），所以**整个 MicroPython 一启用就崩**，报错还离真因很远。
+//
+// 判据（可复算）：`objdump -d` 看 `nlr_push` 的首条指令。修好后必须是 `mov (%rsp),%rax`
+// 或其上游，**绝不能是 `push %rbp`**。回归用例见
+// `tests/mp_nlr_push_test.cpp` 与 `tools/mp_runtime_smoke_probe.cpp`。
 #if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 8)
 #define USE_NAKED 1
 #else
-// On older gcc the equivalent here is to force omit-frame-pointer
+// 老 GCC 不支持 `naked` 时的退让：至少掐掉帧指针，让 `(%rsp)` 重新指向返回地址。
 __attribute__((optimize("omit-frame-pointer")))
-#endif
 #endif
 
 #if !defined(USE_NAKED)
