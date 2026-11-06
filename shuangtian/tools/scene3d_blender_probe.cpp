@@ -159,7 +159,7 @@ class ForcedSoftware {
   bool had_{false};
 };
 
-int failures = 0;   // lint-allow: L8 探针的失败计数器（单进程、单线程，与其它探针同例）
+int failures = 0;   // lint-allow: L8 探针的用例计数器（一次性量尺，与 tests/ 同口径）   // lint-allow: L8 探针的失败计数器（单进程、单线程，与其它探针同例）
 
 void report(bool ok, const char* name, const std::string& detail) {
   st::log::out("  {:<28} {}  {}\n", name, ok ? "[OK]" : "[X]", detail);

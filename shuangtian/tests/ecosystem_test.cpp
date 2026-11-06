@@ -243,7 +243,7 @@ ST_TEST(gltf_loads_texture_from_data_uri) {
   const std::string json = make_gltf_json(uri, "");
 
   const auto scene = st::raster::gltf_read(
-      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),
+      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),  // lint-allow: L6 字节视图（char→uint8_t，布局即字节）
                                     json.size()));
   ST_REQUIRE(scene.has_value());
   ST_REQUIRE(scene->textures.size() == 1U);
@@ -267,7 +267,7 @@ ST_TEST(gltf_texture_failure_is_reported_not_swallowed) {
   // 但绝不能静默丢掉——"这个模型怎么是纯色"查起来极慢。
   const std::string json = make_gltf_json("data:image/png;base64,bm90YXBuZw==", "");
   const auto scene = st::raster::gltf_read(
-      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),
+      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),  // lint-allow: L6 字节视图（char→uint8_t，布局即字节）
                                     json.size()));
   // 文件本身合法（几何没问题），所以必须读成功
   ST_REQUIRE(scene.has_value());
@@ -284,7 +284,7 @@ ST_TEST(gltf_missing_texture_file_is_reported) {
   // 外部文件不存在 → 记错误，不崩
   const std::string json = make_gltf_json("C:/definitely/not/here/nope.png", "");
   const auto scene = st::raster::gltf_read(
-      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),
+      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),  // lint-allow: L6 字节视图（char→uint8_t，布局即字节）
                                     json.size()));
   ST_REQUIRE(scene.has_value());
   ST_REQUIRE(scene->textures.size() == 1U);
@@ -304,7 +304,7 @@ ST_TEST(gltf_extension_three_tier_disposition) {
   {
     const std::string json = make_gltf_json(uri, "");
     const auto scene = st::raster::gltf_read(
-        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),
+        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),  // lint-allow: L6 字节视图（char→uint8_t，布局即字节）
                                       json.size()));
     ST_REQUIRE(scene.has_value());
     ST_CHECK(!scene->extensions.has_blocking());
@@ -314,7 +314,7 @@ ST_TEST(gltf_extension_three_tier_disposition) {
     const std::string json = make_gltf_json(
         uri, R"j(, "extensionsUsed": ["KHR_materials_clearcoat", "KHR_texture_transform"])j");
     const auto scene = st::raster::gltf_read(
-        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),
+        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),  // lint-allow: L6 字节视图（char→uint8_t，布局即字节）
                                       json.size()));
     if (!scene.has_value()) {
       std::printf("[dbg] read failed: %s\n", scene.error().message.c_str());
@@ -332,7 +332,7 @@ ST_TEST(gltf_extension_three_tier_disposition) {
         R"j(, "extensionsUsed": ["KHR_draco_mesh_compression"],
               "extensionsRequired": ["KHR_draco_mesh_compression"])j");
     const auto scene = st::raster::gltf_read(
-        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),
+        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),  // lint-allow: L6 字节视图（char→uint8_t，布局即字节）
                                       json.size()));
     ST_REQUIRE(!scene.has_value());
     ST_CHECK(scene.error().code == st::ErrorCode::Unsupported);
@@ -348,7 +348,7 @@ ST_TEST(gltf_extension_three_tier_disposition) {
         R"j(, "extensionsUsed": ["KHR_texture_basisu"],
               "extensionsRequired": ["KHR_texture_basisu"])j");
     const auto scene = st::raster::gltf_read(
-        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),
+        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(json.data()),  // lint-allow: L6 字节视图（char→uint8_t，布局即字节）
                                       json.size()));
     ST_REQUIRE(!scene.has_value());
     ST_CHECK(scene.error().message.find("KTX2") != std::string::npos);

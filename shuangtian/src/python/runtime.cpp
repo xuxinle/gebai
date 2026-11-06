@@ -45,6 +45,14 @@ constexpr std::size_t kBufferBytes = 4U * 1024U * 1024U;
 /// MicroPython 的解释器状态是进程全局的（`mp_state_ctx`），同一时刻只能有一个
 /// 活着的解释器。若两个线程各建一个，会互相踩堆——而症状是随机的内存破坏，
 /// 比崩溃难查得多。所以用原子变量记录持有者。
+///
+/// ## 为何是进程级（L8 登记）
+///
+/// 这个变量表达的是 **MicroPython 自己的全局约束**（`mp_state_ctx` 是进程级的），
+/// 不是本模块随意引入的共享状态。它不可能注入：被约束的对象（解释器）本身
+/// 就活在进程里，`Runtime` 的每个实例（每线程一个）必须看到同一份持有者。
+/// 生命周期与进程一致，且只被本文件读写。
+// lint-allow: L8 MicroPython 解释器是进程级单例，持有者必须跨线程可见（无 Context 可注）
 std::atomic<std::thread::id> g_owner{};
 
 }  // namespace
@@ -53,9 +61,7 @@ struct Runtime::Impl {
   bool initialized{false};
 };
 
-Runtime::Runtime() {
-  impl_ = new Impl();
-}
+Runtime::Runtime() : impl_(std::make_unique<Impl>()) {}
 
 Runtime::~Runtime() {
   if (impl_ != nullptr && impl_->initialized) {
@@ -63,7 +69,6 @@ Runtime::~Runtime() {
     impl_->initialized = false;
     g_owner.store(std::thread::id());
   }
-  delete impl_;
 }
 
 auto Runtime::available() -> bool {

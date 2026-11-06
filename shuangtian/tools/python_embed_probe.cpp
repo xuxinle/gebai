@@ -18,7 +18,7 @@
 
 namespace {
 
-int failures = 0;
+int failures = 0;   // lint-allow: L8 探针的用例计数器（一次性量尺，与 tests/ 同口径）
 
 auto check(const char* label, const char* source, const char* expect_substr) -> void {
   auto& runtime = st::mp::Runtime::instance();

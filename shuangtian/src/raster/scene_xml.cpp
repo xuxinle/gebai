@@ -650,27 +650,28 @@ auto instantiate_object(const Json& template_object, const std::string& prefix,
                         const std::string& mirror,
                         const std::set<std::string>& template_names, Json& out) -> void {
   out = template_object;
-  if (out.contains("name") && out.at("name").is_string()) {
-    const std::string inner = out.at("name").get<std::string>();
+  if (const Json* name = json_find(out, "name"); name != nullptr && name->is_string()) {
+    const std::string inner = json_as_string(*name);
     if (!inner.empty()) out["name"] = prefix + inner;
   }
   if (mirror == "x") {
     const auto flip = [&](const char* key) {
-      if (out.contains(key) && out.at(key).is_array() && !out.at(key).empty()) {
-        out[key][0] = -out.at(key).at(0).get<double>();
-      }
+      const Json* axis = json_find(out, key);
+      if (axis == nullptr || !axis->is_array() || axis->empty()) return;
+      out[key][0] = -(*(axis->begin())).get<double>();
     };
     flip("translate");
     flip("scale");
   }
   for (const char* key : {"attach", "connect", "align", "parent"}) {
-    if (out.contains(key) && out.at(key).is_string()) {
-      out[key] = rewrite_reference(out.at(key).get<std::string>(), prefix, template_names);
-    }
+    const Json* reference = json_find(out, key);
+    if (reference == nullptr || !reference->is_string()) continue;
+    out[key] = rewrite_reference(json_as_string(*reference), prefix, template_names);
   }
-  if (out.contains("children")) {
+  if (const Json* source_children = json_find(out, "children");
+      source_children != nullptr && source_children->is_array()) {
     Json children = Json::array();
-    for (const auto& child : out.at("children")) {
+    for (const auto& child : *source_children) {
       Json rewritten;
       instantiate_object(child, prefix, mirror, template_names, rewritten);
       children.push_back(std::move(rewritten));
@@ -713,8 +714,9 @@ auto parse_scene_xml_node(const xml::Node& root) -> Result<SceneSpec> {
       if (const auto status = object_to_json(child, obj); !status) {
         return st::forward_error(status.error());
       }
-      if (obj.contains("name") && obj.at("name").is_string()) {
-        names.insert(obj.at("name").get<std::string>());
+      if (const Json* object_name = json_find(obj, "name");
+          object_name != nullptr && object_name->is_string()) {
+        names.insert(json_as_string(*object_name));
       }
       objects.push_back(std::move(obj));
     }
@@ -766,27 +768,32 @@ auto parse_scene_xml_node(const xml::Node& root) -> Result<SceneSpec> {
         shell[attr] = std::move(*value);
       }
     }
-    const auto& names = part_names.at(std::string(*part));
+    const auto names_it = part_names.find(std::string(*part));
+    if (names_it == part_names.end()) {
+      return st::unexpected(ErrorCode::Parse,
+                            at(node, std::format("Use 引用的 Part \"{}\" 缺少名字表", *part)));
+    }
+    const std::set<std::string>& names = names_it->second;
     for (const Json& template_object : found->second) {
       Json instantiated;
       instantiate_object(template_object, prefix, mirror, names, instantiated);
       // 外壳变换叠加：translate 相加，其余（rotation/材质覆盖等）零件
       // 没写的才继承（模板优先——模板是部件的完整性定义）。
-      if (shell.contains("translate") && instantiated.contains("translate") &&
-          shell.at("translate").is_array() && instantiated.at("translate").is_array()) {
+      const Json* shell_translate = json_find(shell, "translate");
+      const Json* inner_translate = json_find(instantiated, "translate");
+      if (shell_translate != nullptr && inner_translate != nullptr &&
+          shell_translate->is_array() && inner_translate->is_array()) {
         Json merged = Json::array();
         for (std::size_t i = 0; i < 3U; ++i) {
           const double shell_value =
-              shell.at("translate").size() > i ? shell.at("translate").at(i).get<double>() : 0.0;
+              shell_translate->size() > i ? (*shell_translate)[i].get<double>() : 0.0;
           const double inner_value =
-              instantiated.at("translate").size() > i
-                  ? instantiated.at("translate").at(i).get<double>()
-                  : 0.0;
+              inner_translate->size() > i ? (*inner_translate)[i].get<double>() : 0.0;
           merged.push_back(shell_value + inner_value);
         }
         instantiated["translate"] = std::move(merged);
-      } else if (shell.contains("translate") && !instantiated.contains("translate")) {
-        instantiated["translate"] = shell.at("translate");
+      } else if (shell_translate != nullptr && inner_translate == nullptr) {
+        instantiated["translate"] = *shell_translate;
       }
       for (const auto& [key, value] : shell.items()) {
         if (key == "translate") continue;
@@ -912,7 +919,10 @@ auto write_json_attrs(const Json& object, std::string& out,
 auto object_to_xml(const Json& object, std::string& out, std::string_view indent) -> void {
   const std::string shape = object.value("shape", std::string("sphere"));
   const bool is_group = object.value("group", false);
-  const bool has_gltf = object.contains("gltf") && object.at("gltf").is_string();
+  const bool has_gltf = [&object] {
+    const Json* gltf = json_find(object, "gltf");
+    return gltf != nullptr && gltf->is_string();
+  }();
   std::string tag;
   if (!is_group) {
     if (const auto canonical = tag_for_shape(shape)) {
@@ -933,7 +943,8 @@ auto object_to_xml(const Json& object, std::string& out, std::string_view indent
   write_json_attrs(object, out, is_group ? std::vector<std::string>{"shape", "children", "gltf", "group"}
                                          : std::vector<std::string>{"shape", "children", "gltf"});
   if (has_gltf) {
-    out += " gltf=\"" + std::string(xml::escape(object.at("gltf").get<std::string>())) + "\"";
+    const std::string gltf = json_get_string(object, "gltf");
+    out += " gltf=\"" + std::string(xml::escape(gltf)) + "\"";
   }
 
   const auto children = object.find("children");
@@ -961,25 +972,24 @@ auto serialize_scene_xml(const SceneSpec& spec) -> std::string {
 
   const auto write_struct = [&](const char* key, const char* tag,
                                 const std::vector<std::string>& skip = {}) {
-    if (!json.contains(key)) return;
-    const Json& node = json.at(key);
+    const Json* node = json_find(json, key);
+    if (node == nullptr) return;
     out += "  <" + std::string(tag);
-    write_json_attrs(node, out, skip);
+    write_json_attrs(*node, out, skip);
     out += "/>\n";
   };
 
   write_struct("camera", "Camera");
   // Lighting：extra_lights → <ExtraLight> 子元素。
-  if (json.contains("lighting")) {
-    const Json& node = json.at("lighting");
-    const auto extra = node.find("extra_lights");
-    if (extra == node.end() || extra->empty()) {
+  if (const Json* node = json_find(json, "lighting"); node != nullptr) {
+    const auto extra = node->find("extra_lights");
+    if (extra == node->end() || extra->empty()) {
       out += "  <Lighting";
-      write_json_attrs(node, out);
+      write_json_attrs(*node, out);
       out += "/>\n";
     } else {
       out += "  <Lighting";
-      write_json_attrs(node, out, {"extra_lights"});
+      write_json_attrs(*node, out, {"extra_lights"});
       out += ">\n";
       for (const auto& light : *extra) {
         out += "    <ExtraLight";
@@ -991,14 +1001,14 @@ auto serialize_scene_xml(const SceneSpec& spec) -> std::string {
   }
   write_struct("shadow", "Shadow");
 
-  if (json.contains("skeleton")) {
-    const Json& skel = json.at("skeleton");
+  if (const Json* skel = json_find(json, "skeleton"); skel != nullptr) {
     out += "  <Skeleton";
-    if (skel.contains("joints")) {
+    if (const Json* joints_node = json_find(*skel, "joints");
+        joints_node != nullptr && joints_node->is_array()) {
       std::string joints;
-      for (const auto& joint : skel.at("joints")) {
+      for (const auto& joint : *joints_node) {
         if (!joints.empty()) joints += ", ";
-        joints += joint.get<std::string>();
+        joints += json_as_string(joint);
       }
       out += " joints=\"" + std::string(xml::escape(joints)) + "\"";
     }
@@ -1007,16 +1017,15 @@ auto serialize_scene_xml(const SceneSpec& spec) -> std::string {
     out += "/>\n";
   }
 
-  if (json.contains("animation")) {
-    const Json& anim = json.at("animation");
-    const auto tracks = anim.find("tracks");
-    if (tracks == anim.end() || tracks->empty()) {
+  if (const Json* anim = json_find(json, "animation"); anim != nullptr) {
+    const auto tracks = anim->find("tracks");
+    if (tracks == anim->end() || tracks->empty()) {
       out += "  <Animation";
-      write_json_attrs(anim, out);
+      write_json_attrs(*anim, out);
       out += "/>\n";
     } else {
       out += "  <Animation";
-      write_json_attrs(anim, out, {"tracks"});
+      write_json_attrs(*anim, out, {"tracks"});
       out += ">\n";
       for (const auto& track : *tracks) {
         out += "    <Track";
@@ -1033,8 +1042,9 @@ auto serialize_scene_xml(const SceneSpec& spec) -> std::string {
     }
   }
 
-  if (json.contains("objects")) {
-    for (const auto& object : json.at("objects")) {
+  if (const Json* objects = json_find(json, "objects");
+      objects != nullptr && objects->is_array()) {
+    for (const auto& object : *objects) {
       object_to_xml(object, out, "  ");
     }
   }

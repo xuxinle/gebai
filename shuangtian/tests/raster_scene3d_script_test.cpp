@@ -97,6 +97,10 @@ constexpr const char* kScene = R"json({
 ///
 /// 改成渲染时把实际后端记下来（`Scene3D::backend()` 本来就有），
 /// 判据与事实同源，抖动消失。
+// 用例级探针量：记「这次渲染实际用了哪个后端」，供断言与失败信息使用。
+// 作用域限于单个测试翻译单元，不跨用例泄漏（与 `test_runner.cpp` 的注册表同一类，
+// 见 CONVENTIONS §8 L8 的「行内（前置）」通道）。
+// lint-allow: L8 测试翻译单元内的用例级探针量（无 Context 可注，不跨 TU 泄漏）
 std::string g_last_backend{};
 
 auto render_text(const char* text) -> Canvas {

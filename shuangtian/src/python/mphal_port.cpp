@@ -33,8 +33,12 @@ extern "C" {
 // 所以“给 16 MB”不等于“占 16 MB 物理内存”。
 //
 // 对齐到 `alignof(std::uintptr_t)` 是 MicroPython 的要求（它把堆当指针数组用）。
-auto mp_hal_alloc(size_t bytes) -> void* { return malloc(bytes); }
-void mp_hal_free(void* ptr) { free(ptr); }
+//
+// 这两个函数是 **MicroPython 定的 C ABI**（`mp_hal_alloc`/`mp_hal_free` 的签名
+// 由解释器定，返回裸 `void*`、无权选择 RAII 类型）——它们就是“分配器实现方”本身，
+// 与 `L1` 要防的“随手 new/delete 泄漏”是两回事。
+auto mp_hal_alloc(size_t bytes) -> void* { return malloc(bytes); }  // lint-allow: L1 实现 mp_hal 分配器（C ABI，必须返回裸指针）
+void mp_hal_free(void* ptr) { free(ptr); }  // lint-allow: L1 同上，与 mp_hal_alloc 配对
 
 auto mp_hal_ticks_ms(void) -> std::uint64_t { return steady_us() / 1000U; }
 auto mp_hal_ticks_us(void) -> std::uint64_t { return steady_us(); }

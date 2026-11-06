@@ -2455,12 +2455,13 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     if (!status) return st::forward_error(status.error());
     const auto sampled = st::raster::sample_clip(clip, *time);
     if (std::getenv("ST_ANIM_DEBUG") != nullptr) {
-      std::fprintf(stderr, "[anim] t=%.2f 采样 %zu 个节点：", double(*time), sampled.size());
+      std::string joints;
       for (const auto& entry : sampled) {
-        std::fprintf(stderr, "%s(rot %.1f°)", entry.node.c_str(),
-                     double(entry.local.rotation.y * 57.29578f));
+        if (!joints.empty()) joints += " ";
+        joints += std::format("{}(rot {:.1f}°)", entry.node,
+                              double(entry.local.rotation.y * 57.29578f));
       }
-      std::fprintf(stderr, "\n");
+      ST_LOG_DEBUG("[anim] t={:.2f} 采样 {} 个节点：{}", double(*time), sampled.size(), joints);
     }
     roots = st::raster::apply_sample(roots, sampled);
   }

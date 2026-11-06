@@ -20,6 +20,7 @@
 #ifndef ST_MP_RUNTIME_H
 #define ST_MP_RUNTIME_H
 
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -75,7 +76,7 @@ class Runtime {
 
  private:
   struct Impl;
-  Impl* impl_{nullptr};
+  std::unique_ptr<Impl> impl_{};
 };
 
 }  // namespace st::mp

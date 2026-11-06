@@ -8,8 +8,8 @@ auto main() -> int {
   const auto symbols = st::lsp::parse_document_symbols(parsed);
   std::printf("解析出符号数 = %zu\n", symbols.size());
   for (const auto& s : symbols) {
-    std::printf("  %s kind=%lld line=%zu depth=%zu\n", s.name.c_str(),
-                static_cast<long long>(s.kind), s.range.start.line, s.depth);
+    std::printf("  %s kind=%d line=%zu depth=%zu\n", s.name.c_str(),
+                static_cast<int>(s.kind), s.range.start.line, s.depth);   // lint-allow: L17 printf 的 %d 接 int（SymbolKind 是其枚举底层的整数）
   }
   return symbols.empty() ? 1 : 0;
 }

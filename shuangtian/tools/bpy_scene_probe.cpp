@@ -16,7 +16,7 @@
 
 namespace {
 
-int failures = 0;
+int failures = 0;   // lint-allow: L8 探针的用例计数器（一次性量尺，与 tests/ 同口径）
 
 auto expect(bool ok, const char* label, const std::string& detail) -> void {
   std::printf("  [%s] %-30s %s\n", ok ? "PASS" : "FAIL", label, detail.c_str());

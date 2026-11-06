@@ -29,7 +29,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <format>
 #include <map>
@@ -37,6 +36,8 @@
 #include <optional>
 #include <utility>
 #include <vector>
+
+#include "st/core/log.hpp"
 
 namespace st::raster {
 
@@ -429,9 +430,8 @@ auto boolean(const Mesh& a, const Mesh& b, BooleanOp op, bool check_closed) -> R
 
   std::vector<Polygon> result = tree_a.all_polygons();
   if (std::getenv("ST_BOOLEAN_DEBUG") != nullptr) {
-    std::fprintf(stderr, "[boolean] op=%d 结果 %zu 个多边形，体积 %.4f\n",
-                 static_cast<int>(op), result.size(),
-                 std::abs(polygons_volume(result)));
+    ST_LOG_DEBUG("[boolean] op={} 结果 {} 个多边形，体积 {:.4f}", static_cast<int>(op),
+                 result.size(), std::abs(polygons_volume(result)));
   }
   if (result.empty()) {
     return st::unexpected(ErrorCode::Invalid, "布尔运算：结果为空（基体被完全去除？）");

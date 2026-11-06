@@ -153,39 +153,169 @@ constexpr std::array<RuleSpec, 18> kRules{{
      R"((?:^|[\s:;(])std::cout\b|(?:^|[\s:;(])std::cerr\b|\bstd::puts|\bstd::printf|\bprintf\s*\(|\bputs\s*\(|\bfprintf\s*\(|\bfprintf_s?\s*\()"},
 }};
 
-/// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。
-[[nodiscard]] auto strip_comments(std::string_view line, bool& in_block_comment) -> std::string {
-  std::string out;
-  out.reserve(line.size());
+/// 裸字符串（raw string）的**跨行状态**：`R"delim( … )delim"` 的定界符必须记住，
+/// 否则下一行开始就不知道该找 `)"` 还是 `)delim"`。
+///
+/// ## 为什么不能只用 bool（2026-11-06 实测代价）
+///
+/// 旧实现只有 `bool in_raw_string`，终结判据固定写死为 `)"`。而**带定界符**的裸串
+/// （`R"JS( … )JS"`、`R"PY( … )PY"`）的终结符是 `)JS"` —— 于是：
+/// - 内容里任意一处 `)"`（JS 里的 `f()"` 之类）就被当成终结，字符串状态**提前结束**；
+/// - 之后整段 C++ 代码被当成“字符串之外”或反过来，花括号标签栈整个错位。
+///
+/// 实测症状（`src/raster/three_runtime.cpp`）：第 381–709 整段被当成字符串**漏扫**
+/// （那一段里的代码一条规则都没检查过），而第 728–806 的花括号被算错，报出 9 条
+/// 假的 L8「可变全局」——全是函数内局部变量。**扫描器自己的词法错，看起来像代码违规**，
+/// 这是最坏的一类失效：它让人去修本来没问题的代码。
+struct RawStringState {
+  bool active{false};        ///< 是否正处在一段（可能跨行的）裸字符串里
+  std::string delimiter{};   ///< 定界符（无定界符的 `R"( … )"` 为空串）
+};
+
+/// 一行的**两层净化结果**（两个视图由**同一次词法扫描**产出）。
+///
+/// 为何必须合并：旧实现先 `strip_comments` 再 `strip_string_literals`，两条各自维护一套
+/// 状态。于是裸串内容里的 `//`（JS 注释、URL、正则）会被第一道当成行注释**截断整行**——
+/// 终结符如果写在 `//` 之后，第二道就永远看不到它，状态机卡在裸串里到文件末尾。
+/// 一次扫描、同时产出两个视图，从结构上消除这类“两道真源不同步”。
+struct LexedLine {
+  std::string uncommented{};  ///< 去掉注释、**保留**字符串内容（L15/L16 这类需看原文）
+  std::string code{};         ///< 再去掉字符串内容（花括号计数与关键字判定用）
+};
+
+/// 跨行的词法状态（注释块 + 裸字符串）。
+struct LexState {
+  bool in_block_comment{false};
+  RawStringState raw{};
+};
+
+/// 词法分析一行，**一次扫描产出两个视图**。
+///
+/// 状态机（优先级从高到低）：
+/// 1. 块注释中 → 找 `*/`，两视图都丢掉正文；
+/// 2. 裸字符串中 → 找 `) <定界符> "` 终结；内容进 `uncommented`，不进 `code`
+///    （**关键**：裸串里的 `//` 不是行注释，不能截断）；
+/// 3. 普通字符串/字符中 → 转义处理；内容进 `uncommented`，不进 `code`；
+/// 4. 行注释 → 本行剩余部分丢弃；
+/// 5. 裸串开头 `R"delim(` → 记住定界符并进入状态 2；定界符非法则当普通字符串起头
+///    （编译器自己会报那行的错，这里只需保证不把状态搞乱）；
+/// 6. 否则 → 普通字符，同时进两视图。
+[[nodiscard]] auto lex_line(std::string_view line, LexState& state) -> LexedLine {
+  LexedLine out;
+  out.uncommented.reserve(line.size());
+  out.code.reserve(line.size());
   bool in_string = false;
+  bool in_char = false;
+
+  // 裸串终结判定：当前字符起是否正好是 `)` + 定界符 + `"`（无定界符时就是 `)"`）。
+  const auto raw_terminator_at = [&line, &state](std::size_t position) -> bool {
+    if (line[position] != ')') return false;
+    const std::size_t after_paren = position + 1;
+    const std::size_t quote_at = after_paren + state.raw.delimiter.size();
+    if (quote_at >= line.size()) return false;   // 本行放不下终结符（继续当内容）
+    if (line.compare(after_paren, state.raw.delimiter.size(), state.raw.delimiter) != 0) {
+      return false;
+    }
+    return line[quote_at] == '"';
+  };
+
   for (std::size_t index = 0; index < line.size(); ++index) {
     const char current = line[index];
     const char next = index + 1 < line.size() ? line[index + 1] : '\0';
-    if (in_block_comment) {
+
+    // ① 块注释中
+    if (state.in_block_comment) {
       if (current == '*' && next == '/') {
-        in_block_comment = false;
+        state.in_block_comment = false;
         ++index;
       }
       continue;
     }
-    if (in_string) {
-      out.push_back(current);
+
+    // ② 裸字符串中：内容只进 `uncommented`（`//` 在此**不是**行注释）
+    if (state.raw.active) {
+      if (raw_terminator_at(index)) {
+        const std::string terminator = ")" + state.raw.delimiter + "\"";
+        out.uncommented += terminator;
+        out.code += terminator;
+        index += state.raw.delimiter.size() + 1;
+        state.raw.active = false;
+        state.raw.delimiter.clear();
+        continue;
+      }
+      out.uncommented.push_back(current);
+      continue;
+    }
+
+    // ③ 普通字符串 / 字符中
+    if (in_string || in_char) {
+      out.uncommented.push_back(current);
       if (current == '\\' && next != '\0') {
-        out.push_back(next);
+        out.uncommented.push_back(next);
+        out.code.append("  ");
         ++index;
         continue;
       }
-      if (current == '"') in_string = false;
+      if ((in_string && current == '"') || (in_char && current == '\'')) {
+        in_string = false;
+        in_char = false;
+        out.code.push_back(current);
+        continue;
+      }
+      out.code.push_back(' ');
       continue;
     }
+
+    // ④ 行注释：本行剩余部分丢弃
     if (current == '/' && next == '/') break;
     if (current == '/' && next == '*') {
-      in_block_comment = true;
+      state.in_block_comment = true;
       ++index;
       continue;
     }
-    if (current == '"') in_string = true;
-    out.push_back(current);
+
+    // ⑤ 裸字符串开头：`R"<定界符>(`。定界符最长 16 字符（C++ 标准上限），
+    //    且不得含空格/括号/反斜杠——遇到这些字符说明不是裸串开头。
+    if (current == 'R' && next == '"') {
+      const std::size_t delimiter_begin = index + 2;
+      std::size_t probe = delimiter_begin;
+      while (probe < line.size() && probe - delimiter_begin <= 16U && line[probe] != '(' &&
+             line[probe] != ' ' && line[probe] != ')' && line[probe] != '\\') {
+        ++probe;
+      }
+      if (probe < line.size() && line[probe] == '(') {
+        state.raw.active = true;
+        state.raw.delimiter = std::string(line.substr(delimiter_begin, probe - delimiter_begin));
+        const std::string opener = "R\"" + state.raw.delimiter + "(";
+        out.uncommented += opener;
+        out.code += opener;
+        index = probe;
+        continue;
+      }
+      // 非法定界符：退回普通字符串起头（那行编译时会报错，这里只保证状态不乱）
+      in_string = true;
+      out.uncommented.append("R\"");
+      out.code.append("R\"");
+      ++index;
+      continue;
+    }
+
+    if (current == '"') {
+      in_string = true;
+      out.uncommented.push_back(current);
+      out.code.push_back(current);
+      continue;
+    }
+    if (current == '\'') {
+      in_char = true;
+      out.uncommented.push_back(current);
+      out.code.push_back(current);
+      continue;
+    }
+
+    // ⑥ 普通代码字符
+    out.uncommented.push_back(current);
+    out.code.push_back(current);
   }
   return out;
 }
@@ -265,13 +395,22 @@ constexpr std::array<RuleSpec, 18> kRules{{
 ///
 /// 两者都不允许静默：清单里的 glob 命中即计入 `LintReport::suppressed`，
 /// `st lint` 的汇总行会如实报出"豁免 N 处"。
+///
+/// ## 两个计数器必须同步（2026-11-06 修的缺陷）
+///
+/// `suppressed` 是**合计**（行内 + 清单），而 `manifest_suppressed` 只数清单。
+/// 旧实现只累加后者——于是 `st lint` 汇总行里 `suppressed - suppressed_by_manifest`
+/// 在无符号数上下溢，报出「行内 18446744073709550046」。
+/// 两个计数器在**同一处**累加，就不存在“只加一个”的余地。
 [[nodiscard]] auto manifest_exempt(std::string_view path, std::string_view rule,
-                                  const LintExemptions& exemptions, std::size_t& suppressed) -> bool {
+                                  const LintExemptions& exemptions, std::size_t& suppressed,
+                                  std::size_t& manifest_suppressed) -> bool {
   const auto rule_it = exemptions.find(std::string(rule));
   if (rule_it == exemptions.end()) return false;
   for (const std::string& pattern : rule_it->second) {
     if (!st::fs::match_glob(pattern, path)) continue;
-    ++suppressed;
+    ++manifest_suppressed;
+    ++suppressed;   // 合计也要加：它是「行内 + 清单」的口径，不是只数行内
     return true;
   }
   return false;
@@ -284,13 +423,9 @@ constexpr std::array<RuleSpec, 18> kRules{{
   return tail.find(rule) != std::string_view::npos;
 }
 
-/// 把字符串字面量的**内容**替换为空格（定义在本文件后部；此处前向声明——
-/// L8 的花括号计数必须在“净代码”上做，见 `check_mutable_globals` 的误报防线）。
-[[nodiscard]] auto strip_string_literals(std::string_view line, bool& in_raw_string) -> std::string;
-
 /// 命名空间作用域下的**可变全局**声明判定（L8）。
 ///
-/// ## 历史缺陷（本轮修复）
+/// ## 历史缺陷（2026-10 收紧过一次）
 ///
 /// 旧实现只判 `line_depth == 0`（花括号深度为 0）。但本工程几乎每个文件的辅助全局都
 /// 包在**匿名命名空间**里（`namespace { ... }`），深度恒 ≥1——于是可变全局
@@ -340,8 +475,7 @@ constexpr std::array<RuleSpec, 18> kRules{{
 
   // 作用域标签栈：'N' = namespace 体、'C' = class/struct/union 体、'O' = 其他块。
   std::vector<char> scopes;
-  bool in_block_comment = false;
-  bool in_raw_string = false;
+  LexState lex;
   int open_parens = 0;
   // 前置作用域豁免的剩余行数（`// lint-allow: L8 …` 写在命名空间开括号之前，见函数头）。
   int block_allow_remaining = 0;
@@ -355,9 +489,9 @@ constexpr std::array<RuleSpec, 18> kRules{{
 
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const std::string_view raw = lines[index];
-    const std::string uncommented = strip_comments(raw, in_block_comment);
+    const LexedLine lexed = lex_line(raw, lex);
     // 净代码视图：字符串内容换成空格（花括号计数必须在这上面做）。
-    const std::string code = strip_string_literals(uncommented, in_raw_string);
+    const std::string code = lexed.code;
     const std::string body = std::string(trim(code));
 
     const bool allow_here = has_allow_comment(raw, "L8");
@@ -419,71 +553,6 @@ constexpr std::array<RuleSpec, 18> kRules{{
   return violations;
 }
 
-/// 把字符串字面量的**内容**替换为空格（保留引号与转义结构），返回"仅代码"视图。
-///
-/// 为什么必须做：`src/md/highlight.cpp` 里有关键字表（"goto"/"throw"/"reinterpret_cast"），
-/// `src/pkg/lint.cpp` 里有本规则表自己的正则字符串——按原文匹配会让 linter 对着自己的
-/// 关键词表报几十条"违规"。字符串内容不是代码，不应参与构造类规则（L4/L5/L6/L9/L11）匹配。
-[[nodiscard]] auto strip_string_literals(std::string_view line, bool& in_raw_string) -> std::string {
-  std::string out;
-  out.reserve(line.size());
-  bool in_string = false;
-  bool in_char = false;
-  for (std::size_t index = 0; index < line.size(); ++index) {
-    const char current = line[index];
-    if (in_raw_string) {
-      if (current == ')' && index + 1 < line.size() && line[index + 1] == '"') {
-        out.append(")\"");
-        ++index;
-        in_raw_string = false;
-        continue;
-      }
-      continue;
-    }
-    if (in_string || in_char) {
-      if (current == '\\' && index + 1 < line.size()) {
-        out.append("  ");
-        ++index;
-        continue;
-      }
-      if ((in_string && current == '"') || (in_char && current == '\'')) {
-        out.push_back(current);
-        in_string = false;
-        in_char = false;
-        continue;
-      }
-      out.push_back(' ');
-      continue;
-    }
-    if (current == 'R' && index + 1 < line.size() && line[index + 1] == '"') {
-      out.append("R\"");
-      ++index;
-      // 跳过分隔符直到 '('
-      std::size_t probe = index + 1;
-      while (probe < line.size() && line[probe] != '(') ++probe;
-      if (probe >= line.size()) {
-        in_raw_string = true;
-        continue;
-      }
-      index = probe;
-      in_raw_string = true;
-      continue;
-    }
-    if (current == '"') {
-      in_string = true;
-      out.push_back(current);
-      continue;
-    }
-    if (current == '\'') {
-      in_char = true;
-      out.push_back(current);
-      continue;
-    }
-    out.push_back(current);
-  }
-  return out;
-}
-
 /// Element 保护成员名（L13 用）。
 ///
 /// **与 `include/st/ui/element.hpp` 的成员表保持同步**：基类新增或改名保护成员时
@@ -504,6 +573,14 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
 /// L13：组件不得**遮蔽** `Element` 的保护成员；`semantics_flags` 覆写不得重建标志。
 ///
 /// 为何单独立一条：这两类缺陷**编译零警告**，且症状具有欺骗性——焦点写基类、
+/// 读遮蔽副本时，直接调 `set_focused` 的组件级单测读写落在同一侧，
+/// 只有真实应用（`UiRoot::set_focus`）才暴露。实测代价：`CodeEditor` 自带
+/// `bool focused_{false}` → 光标永不绘制、括号高亮失效，而测试全绿。
+///
+/// 为何专用检查：需判断「当前类是否继承 `Element`」与「这行是否在 `semantics_flags`
+/// 覆写体内」——单行正则表达不了。类继承状态按花括号深度跟踪（类头行记下当时的深度，
+/// 深度回落即类结束）。
+///
 /// L15：**无定界符 raw string 里出现 `)"`**——会在该处提前终结。
 ///
 /// 判据刻意收窄到"能确定性判定的情形"，而不是"凡 `R"(` 就提示"：
@@ -524,16 +601,17 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
                                                std::size_t& suppressed)
     -> std::vector<LintViolation> {
   std::vector<LintViolation> violations;
-  bool in_block_comment = false;
+  LexState lex;
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const std::string_view raw = lines[index];
     if (has_allow_comment(raw, "L15")) {
       ++suppressed;
       continue;
     }
-    const std::string uncommented = strip_comments(raw, in_block_comment);
+    const LexedLine lexed = lex_line(raw, lex);
+    const std::string& uncommented = lexed.uncommented;
     // 找无定界符起点：`R"(`。
-    std::size_t at = uncommented.find("R\"(");
+    const std::size_t at = uncommented.find("R\"(");
     if (at == std::string::npos) continue;
     // 该行的这一处：往后找第一个 `)"`。
     const std::size_t close = uncommented.find(")\"", at + 3);
@@ -579,16 +657,16 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
                        normalized.contains("include/st/core/");
   if (!in_core) return {};
   std::vector<LintViolation> violations;
-  bool in_block_comment = false;
+  LexState lex;
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const std::string_view raw = lines[index];
     if (has_allow_comment(raw, "L16")) {
       ++suppressed;
       continue;
     }
-    const std::string uncommented = strip_comments(raw, in_block_comment);
+    const LexedLine lexed = lex_line(raw, lex);
     // include 的 ui 头：`#include "st/ui/…"`（引号形式——框架内头都是引号 include）。
-    const std::size_t hit = uncommented.find("#include \"st/ui/");
+    const std::size_t hit = lexed.uncommented.find("#include \"st/ui/");
     if (hit == std::string::npos) continue;
     violations.push_back(LintViolation{std::string(path), static_cast<int>(index) + 1, "L16",
                                        "core 层 include 了 ui 层头（依赖方向反了）：" +
@@ -597,7 +675,10 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
   return violations;
 }
 
-/// 读遮蔽副本（或语义标志被重建）时，直接调 `set_focused` 的组件级单测读写落在同一侧，
+/// L13：组件不得**遮蔽** `Element` 的保护成员；`semantics_flags` 覆写不得重建标志。
+///
+/// 为何单独立一条：这两类缺陷**编译零警告**，且症状具有欺骗性——焦点写基类、
+/// 读遮蔽副本时，直接调 `set_focused` 的组件级单测读写落在同一侧，
 /// 只有真实应用（`UiRoot::set_focus`）才暴露。实测代价：`CodeEditor` 自带
 /// `bool focused_{false}` → 光标永不绘制、括号高亮失效，而测试全绿。
 ///
@@ -618,8 +699,7 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
       R"(^\s*(?:return|if|else|for|while|switch|do|case|break|continue|goto|throw|using|typedef|friend)\b)");
 
   std::vector<LintViolation> violations;
-  bool in_block_comment = false;
-  bool in_raw_string = false;
+  LexState lex;
   bool class_is_element = false;
   int depth = 0;
   int class_depth = -1;      // 当前类开始时的深度（-1 = 不在类内）
@@ -630,8 +710,8 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
   };
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const std::string_view raw = lines[index];
-    const std::string uncommented = strip_comments(raw, in_block_comment);
-    const std::string stripped = strip_string_literals(uncommented, in_raw_string);
+    const LexedLine lexed = lex_line(raw, lex);
+    const std::string& stripped = lexed.code;
     const std::string body = std::string(trim(stripped));
     if (body.empty()) continue;
     // 类头（进入新类：**基类子句**里提到 Element 才算「Element 子类」——
@@ -707,16 +787,16 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
   const auto lines = split(text, '\n');
   const std::string file_name = fs::file_name(path);
   std::vector<LintViolation> violations;
-  bool in_block_comment = false;
-  bool in_raw_string = false;
+  LexState lex;
 
   const std::vector<std::regex>& patterns = compiled_patterns();
 
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const std::string_view raw = lines[index];
     // 两层净化：① 注释（不参与任何规则）② 字符串字面量内容（不参与任何规则）
-    const std::string uncommented = strip_comments(raw, in_block_comment);
-    const std::string stripped = strip_string_literals(uncommented, in_raw_string);
+    // **一次扫描出两个视图**：分开做时裸串里的 `//` 会把终结符那一行截掉（见 `lex_line`）。
+    const LexedLine lexed = lex_line(raw, lex);
+    const std::string& stripped = lexed.code;
     if (trim(stripped).empty()) continue;
     for (std::size_t rule_index = 0; rule_index < kRules.size(); ++rule_index) {
       const RuleSpec& rule = kRules[rule_index];
@@ -727,7 +807,7 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
         ++suppressed;
         continue;
       }
-      if (manifest_exempt(path, rule.id, exemptions, manifest_suppressed)) continue;
+      if (manifest_exempt(path, rule.id, exemptions, suppressed, manifest_suppressed)) continue;
       LintViolation violation;
       violation.file = std::string(path);
       violation.line = static_cast<int>(index) + 1;

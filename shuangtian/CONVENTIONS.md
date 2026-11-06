@@ -528,6 +528,24 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。
 只涉及**代码文本**。
 
+**净化实现（`lex_line`，2026-11-06 重写）**：两层净化由**同一次词法扫描**产出两个视图
+（`uncommented` 保留字符串内容、`code` 剔除之），不再分两道各自维护状态。
+
+- **裸字符串的定界符必须记住**：`R"JS( … )JS"` 的终结符是 `)JS"`，不是 `)"`。
+  旧实现只记 `bool in_raw_string`、终结判据写死 `)"`，于是内容里第一处 `)"`
+  就提前终结——实测把 `src/raster/three_runtime.cpp` 的 381–709 行整段当成字符串
+  **漏扫**（那一段一条规则都没检查过），并让 728–806 行的花括号栈错位，
+  报出 9 条假的 L8（全是函数内局部变量）。**扫描器自己的词法错看起来像代码违规**，
+  这是最坏的一类失效：它让人去修本来没问题的代码。
+- **裸串内容里的 `//` 不是行注释**：分两道做时第一道会把那样的行截断，
+  终结符若写在 `//` 之后便永不可见，状态机卡在字符串里到文件末尾。
+- 回归用例在 `tests/pkg_lint_lex_test.cpp`（含"退回旧口径必然变红"的逆向验证记录）。
+
+**豁免计数口径**：`LintReport::suppressed` 是**合计**（行内 + 清单），
+`suppressed_by_manifest` 只数清单。两者必须在**同一处**累加（`manifest_exempt`），
+否则汇总行的 `suppressed - suppressed_by_manifest` 会在无符号数上下溢——
+实测报出过「行内 18446744073709550046」，读起来像内存损坏，实际只是少加了一个计数器。
+
 **文件级豁免登记（§9 变更流程要求）**：
 | 规则 | 豁免对象 | 理由 | 通道 |
 |---|---|---|---|
@@ -552,6 +570,10 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L18 | `tools/**`、`tests/**`、`apps/**` | 存量输出已各有落盘通道：`tools/**`（stpm 的 `st::print`/`fprintf` 走 `cli_log` 镜像落盘 `st` 命令日志；探针/参考工具是独立实体不进框架库）、`tests/**`（测试输出进分片日志）、`apps/**`（应用入口错误经宿主 stderr 捕获）。迁移到 `ST_LOG` 是增量过程，新增代码应走 `st::print`/`ST_LOG_*` | **清单**（`st.pkg` 的 `lint.exempt.L18`） |
 | L18 | `print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*` | 打印**实现方**：`print`/`console_log` 是 `st::print` 的底层、`log_file` 是 `st::log` 的落盘实现、`platform_crash` 的崩溃栈必须在日志系统不可用时仍能输出（信号处理器里不能依赖分配/锁） | 内置 |
 | L6 / L8 / L12 / L17 | `tools/window_shadow_*_probe.cpp`、`tools/present_layered_cost_probe.cpp`（窗口层探针，2026-11-01） | 它们量的是 **OS 窗口**而不是画布：要直调 Win32（`reinterpret_cast<HDC/LPARAM>` 不可避免 —— L6）；**L8 走行内单点豁免**（窗口过程无参数可传，只能靠进程级状态拿「当前这一组实验参数」，共 4 处）；**L12/L17 走清单**——L12 是**文本级误报**（探针自有的像素取值器叫 `Shot::at(x,y)`，接收者不是容器），L17 是接 Win32 `HRESULT`/`DWORD`/`long` 的 ABI 边界 | **清单**（`st.pkg` 的 `lint.exempt.L12/L17`）+ 行内（L8） |
+| L1 | `src/python/mphal_port.cpp` 的 `mp_hal_alloc` / `mp_hal_free` | 这两个函数**就是**分配器的实现——MicroPython 定的 C ABI（返回裸 `void*`、不接受 RAII 类型）。L1 要防的是"随手 new/delete 泄漏"，而这里是它的反面：唯一一处**应当**直接调 `malloc`/`free` 的地方 | 行内 |
+| L8 | `src/python/runtime.cpp` 的 `g_owner` | MicroPython 解释器状态（`mp_state_ctx`）是**进程级**的：同一时刻只能有一个活着的解释器。持有者标记必须被每个线程的 `Runtime` 实例看见——被约束的对象本身就活在进程里，无 Context 可注 | 行内（前置） |
+| L8 | `tests/raster_scene3d_script_test.cpp` 的 `g_last_backend`、`tools/*_probe.cpp` 的 `failures` | 用例级探针量与计数器：作用域限于单个翻译单元（不跨用例泄漏），与 `tests/ui_dsl_test.cpp` 的用例级计数器同一类；探针本身是**一次性量尺**、不进任何 target 产物 | 行内 |
+| L12 | `src/geom/pick.cpp` 的 `Ray::at` | **文本级误报**：接收者不是容器（`Ray::at(t)` 取射线上一点）。收窄判据需要类型信息，而本规则是行文本级的——同一形态的 `Shot::at(x,y)` 已按清单豁免（见上一行） | 行内 |
 
 > 两条豁免通道都**各自计数**（`st lint` 汇总行报出「行内 N / 清单 M」），不允许静默。
 >

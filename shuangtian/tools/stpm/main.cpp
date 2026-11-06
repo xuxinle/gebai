@@ -815,10 +815,18 @@ auto command_lint(const Arguments& arguments) -> int {
   }
   // 豁免计数**分开报**：行内（单点破例）与清单（工程级边界）是两种性质的东西，
   // 混在一起就看不出全局边界有多宽。
+  //
+  // ⚠ 行内数必须**减前先夹取**：`suppressed` 是两条通道的合计，是无符号数——
+  // 一旦清单计数大于合计（计数器语义漂移、单文件入口不接清单等），
+  // `suppressed - suppressed_by_manifest` 会下溢成天文数字。实测报出过
+  // 「行内 18446744073709550046」，读起来像内存损坏，实际只是格式化时的下溢：
+  // 这种数字被看见时，人的第一反应是去查堆破坏，而真相在 printf 里。
+  const std::size_t by_manifest = report->suppressed_by_manifest;
+  const std::size_t inline_suppressed =
+      report->suppressed > by_manifest ? report->suppressed - by_manifest : 0U;
   st::log::out("\n扫描 {} 个文件，违反 {} 项（提示 {} 项，豁免 {} 处：行内 {} / 清单 {}）\n",
               report->files_scanned, failing, report->violations.size() - failing,
-              report->suppressed, report->suppressed - report->suppressed_by_manifest,
-              report->suppressed_by_manifest);
+              report->suppressed, inline_suppressed, by_manifest);
   return failing == 0 ? 0 : 1;
 }
 
@@ -1743,7 +1751,8 @@ auto write_self_stamp(const std::string& exe) -> void {
         std::fprintf(stderr, "可信增量校验失败：读不了新产物 %s\n", staging.c_str());
         return 1;
       }
-      const std::string haystack(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+      const std::string haystack(reinterpret_cast<const char*>(bytes->data()),  // lint-allow: L6 字节视图（uint8_t→char，只做子串搜索）
+                                 bytes->size());
       if (!haystack.contains(*token)) {
         std::fprintf(stderr,
                      "可信增量校验失败：新产物里找不到 ST_VERIFY_TOKEN=%s\n"
