@@ -180,11 +180,16 @@ describe("tasks REST（统一任务管理面）", () => {
     })
     expect(done.lastStatus).toBe("success")
     expect(String(done.lastOutput)).toContain("task-ok")
-    // 执行记录不在任务定义里（runs 字段已移出），经独立端点读取（新→旧）
+    // 执行记录不在任务定义里（runs 字段已移出），经独立端点读取（新→旧）。
+    // 注意：`state=idle && runCount>=1` 在 finishRun **开头**就成立，而执行记录文件是随后才落的——
+    // 直接读会偶发拿到空表（实测偶发）。这里等到记录真的可读再断言。
+    const runs = await waitFor(async () => {
+      const res = await fetch(`${base()}/api/v1/tasks/${id}/runs`)
+      if (res.status !== 200) return null
+      const list = (await res.json()) as Array<{ status: string; manual?: boolean; durationMs: number }>
+      return list.length > 0 ? list : null
+    })
     expect(done).not.toHaveProperty("runs")
-    const runsRes = await fetch(`${base()}/api/v1/tasks/${id}/runs`)
-    expect(runsRes.status).toBe(200)
-    const runs = (await runsRes.json()) as Array<{ status: string; manual?: boolean; durationMs: number }>
     expect(runs).toHaveLength(1)
     expect(runs[0].status).toBe("success")
     expect(runs[0].manual).toBe(true)

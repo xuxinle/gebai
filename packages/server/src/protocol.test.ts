@@ -97,6 +97,42 @@ describe("WS heartbeat", () => {
     expect(r.ok).toBe(true)
     expect((r.payload as { pong?: boolean }).pong).toBe(true)
   })
+
+  test("多域并发：一条连接上背靠背发不同域的消息，全部得到应答且同域内保序", async () => {
+    // 为什么这条存在：连接内的消息按**领域**分队列（ws-lanes.ts）——同 lane 严格保序、
+    // 跨 lane 并发。「跨 lane 真的并发」由 ws-lanes.test.ts 用可控阻塞直接证明（那里能构造
+    // 真实的长 await）；这里守端到端契约：混发不串台、不丢应答、同域不乱序、非法请求结构化拒绝。
+    const ws = new WebSocket(`ws://127.0.0.1:${single.server.port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve()
+      ws.onerror = () => reject(new Error("ws error"))
+    })
+    const replies = new Map<string, { ok: boolean; error?: string }>()
+    const arrived: string[] = []
+    ws.onmessage = (m) => {
+      const data = JSON.parse(String(m.data)) as { id?: string; ok?: boolean; error?: string }
+      if (!data.id) return
+      arrived.push(data.id)
+      replies.set(data.id, { ok: data.ok === true, error: data.error })
+    }
+    const ids = ["l1", "s1", "snap1", "s2", "l2", "snap2", "s3", "p1"]
+    ws.send(JSON.stringify({ type: "ping", id: "l1" }))
+    for (const id of ["s1", "s2", "s3"]) ws.send(JSON.stringify({ type: "session.list", id }))
+    for (const id of ["snap1", "snap2"]) ws.send(JSON.stringify({ type: "state.snapshot", id }))
+    ws.send(JSON.stringify({ type: "ping", id: "l2" }))
+    // p1：一次注定被拒的任务请求（会话不存在）——应答必须是结构化错误而不是消失
+    ws.send(JSON.stringify({ type: "session.prompt", payload: { id: "missing-session", prompt: "x" }, id: "p1" }))
+    await waitFor(() => ids.every((id) => replies.has(id)))
+    for (const id of ids) expect(replies.has(id)).toBe(true)
+    // 同域保序：session.list 三次按提交顺序应答
+    expect(arrived.filter((id) => /^s\d$/.test(id))).toEqual(["s1", "s2", "s3"])
+    // ping 走 default lane，应答成功
+    expect(replies.get("l1")?.ok).toBe(true)
+    expect(replies.get("l2")?.ok).toBe(true)
+    // 任务请求被结构化拒绝，而不是悬挂
+    expect(replies.get("p1")?.ok).toBe(false)
+    ws.close()
+  })
 })
 
 describe("WS state model (MVC 一致性)", () => {

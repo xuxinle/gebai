@@ -4,6 +4,7 @@ import type { ServerWebSocket } from "bun"
 import type { AuthUser } from "../auth"
 import { SERVICE_USER, type AppDeps } from "../app"
 import { handleWsMessage, type WsConn, type WsSink } from "../ws"
+import { WsLanes } from "../ws-lanes"
 import { WsStateService } from "../ws-state"
 import { originAllowed } from "../core/base/origin"
 import type { Composed } from "./compose"
@@ -16,14 +17,10 @@ const wsSubs = new WeakMap<object, () => void>()
 const wsSinks = new WeakMap<object, WsSink>()
 /** 每个 WS 连接的连接上下文（open/message 共享同一实例，保证用户变更回调一致）。 */
 const wsConns = new WeakMap<object, WsConn>()
-/**
- * 每个 WS 连接的消息处理链（以连接为键）：Bun 对 async `websocket.message` 处理器
- * **不保证串行**（前一条 await 磁盘/网络 I/O 时下一条即并发进入）——认证（auth.login
- * 依赖磁盘读用户注册表）、会话切换等消息的顺序语义会被打乱，导致紧跟在认证后的
- * 请求以未登录态被拒绝（`unauthorized: login required`）。此处按到达顺序串行处理，
- * 对齐 SDK 假设的「服务端顺序处理消息」契约（认证消息先于其后请求生效）。
- */
-const wsMsgChains = new WeakMap<object, Promise<void>>()
+/** 每个 WS 连接的消息队列调度器（按领域拆 lane：同 lane 保序、跨 lane 并发，见 ws-lanes.ts）。
+ *  替代原先的「每条连接一条 promise 链」——单链虽保证了认证顺序，但把终端按键、LSP 编辑、
+ *  会话读盘全排在一个队里，表现为「点哪都没反应，过一会儿一起出来」。 */
+const wsLanes = new WeakMap<object, WsLanes>()
 
 /** 单连接发送缓冲上限（字节）：Bun WebSocket 发送缓冲超限说明客户端消费速度远低于
  *  推送速率（慢客户端/高频流式），继续发送缓冲无界增长——断开让其走自动重连 + seq 重放收敛。 */
@@ -181,12 +178,21 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
           return
         }
         const conn = makeWsConn(ws, deps, state)
-        // 按到达顺序串行处理（见 wsMsgChains 注释）：前一条消息完成后再处理下一条，
-        // 保证 auth.login 的 conn.set(u) 先于后续请求生效（Bun 不保证 async handler 串行）
-        const prev = wsMsgChains.get(ws) ?? Promise.resolve()
-        const next = prev.then(() => handleWsMessage(deps, sinkOf(ws), msg, conn)).catch(() => {})
-        wsMsgChains.set(ws, next)
-        await next
+        // 按领域拆队列（ws-lanes.ts）：同 lane 严格保序、跨 lane 真并发。
+        // 认证顺序由 auth lane + auth 屏障保证——「刚登录就发的请求」仍能看到已登录身份；
+        // 而终端按键/ LSP 编辑这类高频小消息不再阻塞会话读盘与快照拉取。
+        let lanes = wsLanes.get(ws)
+        if (!lanes) {
+          lanes = new WsLanes()
+          wsLanes.set(ws, lanes)
+        }
+        await lanes.submit(
+          msg.type,
+          () => handleWsMessage(deps, sinkOf(ws), msg, conn),
+          // 队列深度超限：该 lane 已积压（消费者跟不上），直接告诉客户端这条没被受理，
+          // 而不是让它无休止堆积把内存与延迟一起拖垮
+          () => sinkOf(ws).send(JSON.stringify({ type: msg.type, id: msg.id, ok: false, error: "queue_full: 该通道消息积压过多，请稍后重试" })),
+        )
       },
       close(ws) {
         // 相期窗口断开：通知控制器（清 peer，卡片仍在 live，重连后重推）
