@@ -32,12 +32,15 @@ namespace st::shell {
 /// 取值理由（与 `docs/perceptual_changes.md` 的口径一致：观感参数要么有实测依据，
 /// 要么照抄已被验证的参照）：
 /// - `shadow_margin` 18：够容纳 `shadow_blur × 1.6` 的衰减（否则阴影会被边缘硬切一刀）；
-/// - `shadow_alpha` 0.30：浅色底上超过 ~0.40 会显脏（像污渍而不是光）；深色主题由主题覆盖；
+/// - `shadow_alpha` 0.42：浅色底（#E6E6E6）上合成后窗口边缘暗约 ~35%，
+///   与 Win11 系统窗口的阴影强度相当。
+///   **实测调整**（2026-11-05）：原本 0.30 在深色壁纸上看不出（合成后只比桌面暗 4/255）；
+///   用户在浅色桌面下能看见，深色下就"没有阴影"。
 /// - `corner_radius` 10：比 Win11 系统圆角（8）略大：自绘窗框没有系统那圈 1px 描边，
 ///   圆角太小会看不出是圆的。
 struct WindowChromeStyle {
   int shadow_margin{18};
-  float shadow_alpha{0.30f};
+  float shadow_alpha{0.42f};
   int shadow_blur{9};
   int corner_radius{10};
   bool shadow{true};
@@ -88,10 +91,22 @@ struct WindowRingLayout {
 /// 先 `assign` 一块 27 MiB 再整块拷回去，光内存在 4K 上就要 20 ms（分配 + 清零 + 页错），
 /// 而真正需要写的只有 **0.5 MiB 量级**的环。
 ///
+/// ## 两个颜色参数
+///
+/// - `shadow_rgb`：窗外阴影的颜色；
+/// - `edge_rgb`：窗口本身的底色。用于**圆角边缘的抗锯齿**——`SetWindowRgn` 是一位
+///   区域，无法表达部分覆盖，所以紧贴圆角内缘那一像素由影子层用该色 + 覆盖率 alpha 补上。
+///   传错颜色会变成一圈异色边（传黑就是黑边），调用方应当传真实的窗口底色。
+///
 /// 返回是否写入成功（尺寸不符/不可见 → `false`，`out` 不被修改）。
+///
+/// `antialias_corner`：是否在弧外侧补一像素窗口色（= 圆角抗锯齿）。
+/// 生产路径恒为 `true`；传 `false` 只用于对照测试（验证“关掉后确实没有那一条带”）。
 [[nodiscard]] auto build_ring_pixels(const WindowRingLayout& layout,
                                      const WindowChromeStyle& style, std::uint32_t shadow_rgb,
-                                     std::span<std::uint32_t> out) -> bool;
+                                     std::span<std::uint32_t> out,
+                                     std::uint32_t edge_rgb = 0xFFFFFFU,
+                                     bool antialias_corner = true) -> bool;
 
 /// 窗口裁剪用的圆角半径（**物理像素**，取整后）；`0` = 直角（调用方据此撤销裁剪区）。
 ///

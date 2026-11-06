@@ -76,22 +76,33 @@ constexpr DWORD kDwmwaWindowCornerPreference = 33;  // Win11+，未进 mingw 头
 constexpr DWORD kDwmwaBorderColor = 34;             // Win11+
 constexpr DWORD kDwmColorNone = 0xFFFFFFFE;         // DWMWA_COLOR_NONE
 constexpr int kDwmCornerDoNotRound = 1;             // DWMWCP_DONOTROUND
+constexpr int kDwmCornerRound = 2;                  // DWMWCP_ROUND
 
 /// 是否让 DWM 画外阴影。`false` 只用于"确实要系统窗框"的宿主与远程会话诊断。
 struct ShadowOptions {
   bool enabled{true};
 };
 
-/// 给一个**已经建好**的窗口挂上 DWM 外阴影（圆角/描边一并关掉）。
+/// 给一个**已经建好**的窗口挂上 DWM 外阴影；圆角交给谁画由 `round_corners` 决定。
+///
+/// `round_corners = true`：让 **DWM 画圆角**（`DWMWCP_ROUND`）。这是圆角能真正
+/// 光滑的唯一途径——`SetWindowRgn` 是一位区域，弧上必然有台阶（实测：每行跳
+/// 2~3 像素的硬边，零过渡）。DWM 的圆角由合成器做抗锯齿，零成本、无每帧开销。
+/// 代价：① 半径由系统决定（Win11 约 8 逻辑像素，不可调）；
+///       ② 仅 Win11+ 有效，Win10 上退化为直角（自绘的 `SetWindowRgn` 可以作为
+///          兼容补充——两边同时开会让角被裁两次，所以调用方只能选一种）。
+///
+/// `round_corners = false`：关 DWM 圆角，由自绘的 `SetWindowRgn` 负责（旧行为）。
 ///
 /// 返回 `false` 表示 DWM 不接受（旧系统/无合成/远程会话），调用方只记日志。
-[[nodiscard]] auto apply_dwm_window_shadow(HWND window) -> bool {
+[[nodiscard]] auto apply_dwm_window_shadow(HWND window, bool round_corners = false) -> bool {
   if (window == nullptr) return false;
   // ① 触发阴影：1px 的"框架"扩展到客户区。传 0 会关掉阴影，故至少 1。
   const MARGINS margins{1, 1, 1, 1};
   if (::DwmExtendFrameIntoClientArea(window, &margins) != S_OK) return false;
-  // ② 关圆角：否则 Win11 把四角裁掉，客户区像素被吃掉（自绘窗框的直角会缺角）。
-  const int corner = kDwmCornerDoNotRound;
+  // ② 圆角：默认关（旧行为：自绘 `SetWindowRgn` 负责）。
+  // `round_corners` 时交给 DWM——它能做抗锯齿。
+  const int corner = round_corners ? kDwmCornerRound : kDwmCornerDoNotRound;
   (void)::DwmSetWindowAttribute(window, kDwmwaWindowCornerPreference, &corner, sizeof(corner));
   // ③ 关系统描边：否则窗内多一条 1px 系统色边，与自绘边框叠成双线。
   const COLORREF none = kDwmColorNone;
@@ -562,18 +573,33 @@ class Win32Backend final : public Backend {
                         std::format("CreateWindowExW 失败（错误码 {}）", ::GetLastError()));
     }
     // 窗口一建好就挂阴影（在 `ShowWindow` 之前）：晚于首帧会出现"先无影后补影"的闪一下。
+    //
+    // 第三个参数 `false` = **不用 DWM 画圆角**，圆角由本框架自绘（`SetWindowRgn` 裁形状
+    // + 影子层画边缘抗锯齿）。
+    //
+    // 为何不用 DWM 圆角（虽然它自带抗锯齿）：那是 Windows 独有的，而本框架要
+    // **跨平台同款效果**。自绘路径在 Windows / Linux（XFixes）/ macOS 下共用同一份
+    // 几何与覆盖率算法，观感才对得上。
+    //
+    // 对齐目标：DWM 的圆角是标准 1 像素抗锯齿（实测过渡值 34/80/127/174/221，
+    // 等差 ≈ 47），自绘的 `build_ring_pixels` 用同口径公式。
     if (shadow_enabled_ && !decorations_) {
-      if (!apply_dwm_window_shadow(window_)) {
+      if (!apply_dwm_window_shadow(window_, /*round_corners=*/false)) {
         // 不致命：DWM 不可用（远程会话/旧系统）时窗口照常工作，只是没阴影。
         // 但要让日志里看得见，否则"为什么这台机器没阴影"又要重新猜一遍。
         ST_LOG_INFO("win32 窗口阴影未启用（DWM 不接受：远程会话/无合成/旧系统）");
         shadow_enabled_ = false;
+        dwm_rounds_corners_ = false;   // DWM 不可用 → 圆角退回自绘裁剪
         // 阴影不可用时把为此加上的 `WS_THICKFRAME` 撤掉（不可缩放的窗口本该最轻）。
         if (!window_resizable_) {
           const LONG_PTR current = ::GetWindowLongPtrW(window_, GWL_STYLE);
           (void)::SetWindowLongPtrW(window_, GWL_STYLE,
                                     current & ~static_cast<LONG_PTR>(WS_THICKFRAME));
         }
+      } else {
+        // DWM 接受阴影（但**不画圆角**——圆角由本框架自绘，以保证跨平台同款效果）。
+        // `dwm_rounds_corners_` 保持 false，于是 `update_window_chrome` 会走自绘裁剪。
+        dwm_rounds_corners_ = false;
       }
     }
     // 自绘影子层：建在 `ShowWindow` 之前（影窗必须永远在主窗后面，不能反过来）。
@@ -718,8 +744,32 @@ class Win32Backend final : public Backend {
     geometry.maximized = ::IsZoomed(window_) != 0;
 
     // ① 圆角裁剪区：只有半径变了才调（`SetWindowRgn` 会让窗口重算区域并重绘）。
+    //
+    // ## 为什么是 `CreateRoundRectRgn` + **影子层补一像素**
+    //
+    // `SetWindowRgn` 接受的是**一位区域**："在区内"或"在区外"，没有中间态。
+    // 光靠它，圆角边缘必然是一步跳变（实测：沿 45° 屏过边缘，亮度 `248 → 13`，
+    // 中间过渡像素数 **0**）——就是用户说的"不光滑"。
+    //
+    // 解法：两层分工。
+    //   · 窗口本体：`CreateRoundRectRgn` 裁成圆角（这保证了圆角**外**的窗口内容
+    //     不会伸出来，否则四角会看到窗口底色方块）；
+    //   · 影子层：在**弧外侧紧邻的一像素**画上"窗口色×覆盖率"（见 `build_ring_pixels`
+    //     的 `edge_rgb`）。那恰好是被裁掉的位置——影子层能透出来，于是视觉上
+    //     弧线上出现了半透明过渡 = 抗锯齿。
+    //
+    // ⚠ 不要用"矩形区域 + 影子层画内侧 AA"：那样 AA 带被窗口本体盖住，
+    //   实测窗口左上角变成纯直角（`GetWindowRgn=2`、PrintWindow 全 247），
+    //   也就是把圆角彻底弄没了——比台阶更糟。
     const int radius = corner_radius_physical(geometry, chrome_style_);
-    if (radius != applied_corner_radius_) {
+    // **DWM 在画圆角时不要自绘裁剪**：两边同时裁会把角裁两次（角被啃掉一块）。
+    // 而且 `SetWindowRgn` 的一位区域本身就是圆角台阶的根源——它是被替换掉的那个东西。
+    if (dwm_rounds_corners_) {
+      if (applied_corner_radius_ != 0) {
+        applied_corner_radius_ = 0;
+        ::SetWindowRgn(window_, nullptr, TRUE);   // 撒掉可能存在的旧裁剪
+      }
+    } else if (radius != applied_corner_radius_) {
       applied_corner_radius_ = radius;
       if (radius <= 0) {
         ::SetWindowRgn(window_, nullptr, TRUE);   // 直角：把裁剪区整个撒销
@@ -742,12 +792,15 @@ class Win32Backend final : public Backend {
       chrome_signature_ = 0;   // 下次重新显出来时必须重建
       return;
     }
-    // 内容签名：只要四项之一变了，环位图就得重生成。
+    // 内容签名：只要五项之一变了，环位图就得重生成。
+    // （含 `chrome_edge_rgb_`：主题换底色后圆角抗锯齿的颜色也得跟着变，
+    //   否则浅色主题的圆角上会留一圈上一主题的色。）
     const std::uint64_t signature =
         (static_cast<std::uint64_t>(layout.width) << 32) |
         (static_cast<std::uint64_t>(layout.height) << 8) |
         static_cast<std::uint64_t>(layout.radius & 0xFF) |
-        (static_cast<std::uint64_t>(layout.margin & 0x0F) << 4);
+        (static_cast<std::uint64_t>(layout.margin & 0x0F) << 4) |
+        (static_cast<std::uint64_t>((chrome_edge_rgb_ >> 8) & 0xFF) << 56);
     if (signature != chrome_signature_) {
       chrome_signature_ = signature;
       rebuild_shadow_bitmap(layout);
@@ -814,8 +867,13 @@ class Win32Backend final : public Backend {
       std::memset(shadow_bits_, 0, needed * sizeof(std::uint32_t));
     }
     // 影色取固定近黑色（阴影就是“没有光”）：主题只影响不透明度（`chrome_style_.shadow_alpha`）。
+    //
+    // 第三个颜色是**窗口本体底色**，只用于圆角边缘的抗锯齿（见 `build_ring_pixels` 的说明）。
+    // 取主题的面色：不传对就会在圆角处显出一圈异色边（传黑就是黑边）。
     const std::span<std::uint32_t> target(shadow_bits_, needed);
-    if (!build_ring_pixels(layout, chrome_style_, 0x0A0A12U, target)) {
+    const std::uint32_t edge_rgb = chrome_edge_rgb_;
+    if (!build_ring_pixels(layout, chrome_style_, 0x0A0A12U, target, edge_rgb,
+                            /*antialias_corner=*/!dwm_rounds_corners_)) {
       ::ReleaseDC(nullptr, screen);
       return;
     }
@@ -909,7 +967,20 @@ class Win32Backend final : public Backend {
   ///
   /// 幂等：重复调用只在第一次生效。
   void show_when_ready() override {
-    if (window_ == nullptr || shown_) return;
+    if (window_ == nullptr) return;
+    // **已由 `show_early` 显过**：不重复 `ShowWindow`/抢焦点，但**必须补一次 present**
+    // ——那正是首帧内容贴上去的时机（`show_early` 只填了底色）。
+    if (shown_) {
+      if (presenter_ != nullptr) {
+        (void)presenter_->present(*surface_, surface_->physical_width(),
+                                  surface_->physical_height());
+      } else if (surface_ != nullptr) {
+        (void)blit();
+      }
+      ::UpdateWindow(window_);
+      ::SetForegroundWindow(window_);
+      return;
+    }
     shown_ = true;
     // 先设为**不激活**显示，避免系统在窗口还没内容时把焦点/重绘抢过去；
     // 内容贴好后再真正前置。
@@ -996,6 +1067,42 @@ class Win32Backend final : public Backend {
     ui::Event event = std::move(events_.front());
     events_.pop_front();
     return event;
+  }
+
+  /// 启动慢阶段保活：只 `pump_messages()`（它会调 `PeekMessage`/`DispatchMessage`），
+  /// 不取事件——见接口声明处的说明。
+  void pump_events() override { pump_messages(); }
+
+  /// 启动阶段提前显窗：映射窗口 + 立刻用**主题底色**填一帧（不是黑块）。
+  ///
+  /// 为何不直接用 `show_when_ready`：那个函数假设"首帧已经画好了"，会直接
+  /// `present` 当前画布——而启动阶段画布还是空的（全零 = 黑）。所以这里单独一条：
+  /// 显示后用背景色把整个窗口涂一遍，再 `SetForegroundWindow`。
+  ///
+  /// 副作用：`shown_` 会被置真，于是后面那次 `show_when_ready` 走幂等路径
+  /// （只补 present），不会重复 `ShowWindow` 或重复抢焦点。
+  void show_early() override {
+    if (window_ == nullptr || shown_) return;
+    shown_ = true;
+    ::ShowWindow(window_, SW_SHOWNOACTIVATE);
+    update_window_chrome();   // 影子层与圆角在可见前就位（避免"先直角后变圆"）
+    // 用主题背景色填一帧：`HWND` 背景刷足够，不需要走画布与交换链
+    // （那一步要等 GPU 就绪，正是我们要避开的那 1.4s）。
+    RECT client{};
+    if (::GetClientRect(window_, &client) != 0) {
+      HDC dc = ::GetDC(window_);
+      if (dc != nullptr) {
+        HBRUSH brush = ::CreateSolidBrush(RGB((chrome_edge_rgb_ >> 16) & 0xFF,
+                                             (chrome_edge_rgb_ >> 8) & 0xFF,
+                                             chrome_edge_rgb_ & 0xFF));
+        if (brush != nullptr) {
+          ::FillRect(dc, &client, brush);
+          ::DeleteObject(brush);
+        }
+        ::ReleaseDC(window_, dc);
+      }
+    }
+    ::SetForegroundWindow(window_);
   }
 
   void set_title(std::string_view title) override {
@@ -2799,6 +2906,14 @@ class Win32Backend final : public Backend {
   /// 已经应用过的圆角半径（`0` = 直角）。用它判断要不要再调 `SetWindowRgn`
   /// （该 API 会让窗口重算区域并触发重绘，没必要每次都调）。
   int applied_corner_radius_{0};
+  /// 窗口**本体底色**（`0xRRGGBB`），只用于圆角边缘的抗锯齿。
+  std::uint32_t chrome_edge_rgb_{0xF7F7FAU};
+  /// 圆角是不是由 **DWM** 在画（`DWMWCP_ROUND`）。
+  ///
+  /// 为真时 `update_window_chrome` **不得**调 `SetWindowRgn`——两边同时裁会把角
+  /// 裁两次（表现为角被啃掉一块）。为假（Win10/远程会话）时退回自绘裁剪，
+  /// 这时圆角有台阶，但总比没有好。
+  bool dwm_rounds_corners_{false};
   HDC memory_dc_{nullptr};
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};

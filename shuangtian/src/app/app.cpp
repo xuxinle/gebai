@@ -1092,6 +1092,28 @@ auto Application::start() -> Status {
   }
   perf::startup_mark("window.create");
 
+  // ## 启动期间在慢阶段边界**泵一次消息**
+  //
+  // 现象（用户报）：gbcode 启动时鼠标短暂变成旋转圆圈。
+  //
+  // 实测（`SendMessageTimeout(WM_NULL)` 探主线程响应性，见
+  // `tools/startup_responsiveness_probe.py`）：从建窗到首帧完成这一段，
+  // 主线程有 **1008 ms** 不回消息（探测超时、`ok=0`），而窗口此时已创建。
+  // Windows 的判定是：进程长时间不响应基本消息 ⇒ 标 Ghost，光标变等待圈。
+  //
+  // 为何阻塞：这一段要做字体首次光栅化、画布分配、GPU 设备后台就绪
+  // （本机实测 GPU 就绪 ~400ms）——全在主线程。
+  //
+  // 修法：在慢阶段的边界上泵消息。**只泵不处理业务**：
+  // 这里 `started_` 还是 false，任何输入事件都不应生效（界面尚未就位），
+  // 所以只泵不派——`pump_events()` 只做 `pump_messages()`，不取事件。
+  //
+  // ⚠ **实测结论：单靠边界泵消息不足以消除等待圈**。首帧内部
+  // （字体光栅化 + 图元缓存建表，实测 ~1.4s）是一整块不可分割的工作，
+  // 泵点只能在它之前/之后生效。真正的修法是让首帧变快或提前显窗，
+  // 见 `show_early` 与 `docs/BACKLOG.md` 里“启动慢”的条目。
+  impl_->backend->pump_events();
+
   // **软件渲染（WARP）帧预算自适应**（2026-10-29，后收敛为仅日志）：
   //
   // 背景：WARP（CPU 模拟 GPU）下曾因「每事件整窗重绘 + 整纹理 CopyResource」
@@ -1195,8 +1217,13 @@ auto Application::start() -> Status {
     }
   }
 
+  // 字体栈首次装配（实测 63.5 ms：要读多个 TTC 的表目录）——泵一次消息。
+  impl_->backend->pump_events();
   auto stack = st::text::FontStack::system_default();
   if (stack) {
+    // 字体栈就绪后再泵一次：后面是 TextRenderer 构造 + 首帧字形光栅化，
+    // 那一段是启动里最大的单笔阻塞。
+    impl_->backend->pump_events();
     impl_->fonts = std::make_unique<st::text::FontStack>(std::move(*stack));
     // **超采样用后端解析出的真实 DPI，而不是 `options_.scale`**（真缺陷，2026-10-04）。
     //
@@ -1540,6 +1567,21 @@ auto Application::start() -> Status {
   impl_->backend->set_resize_repaint([this] { render_frame(); });
   started_ = true;
   perf::startup_mark("before_first_frame");
+  // 首帧是最重的一笔：实测 **~1.4 s**（字体首次光栅化 + 图元缓存建表）。
+  // 而 `SendMessageTimeout(WM_NULL)` 探到主线程连续 **1008 ms** 不回消息，
+  // Windows 据此判为无响应、把鼠标换成旋转圆圈（用户报的"启动时转圈"）。
+  //
+  // 处理：首帧**之前**先把窗口显出来（`show_early`）。
+  // 原先的顺序是"首帧画完才 show_when_ready"，理由是怕用户看到未初始化的黑块；
+  // `show_early` 的语义是"映射窗口 + 立刻用主题底色填一帧"（一次 fill，微秒级），
+  // 所以露出的是干净底色而不是黑块。首帧完成后 `show_when_ready` 再 present 一次贴内容。
+  //
+  // ⚠ **这不能让等待圈消失**：首帧仍是 1.4 s 的不分割工作，窗口虽已可见，
+  // 但主线程仍不处理消息。要使它真正消失，得降首帧耗时（目前主要用于
+  // 文字首次光栅化，实测占 927 ms）——那是独立议题。
+  impl_->backend->pump_events();
+  impl_->backend->show_early();
+  impl_->backend->pump_events();
   render_frame();
   // 首帧完成：这是“启动慢”的真实终点（用户看到完整界面的时刻）。
   // 它里面含字体首次光栅化与图元缓存建表——那正是帧剖析里“冷启动帧”的 200ms。
@@ -1637,8 +1679,7 @@ void Application::render_frame() {
   const auto to_ms = [](std::int64_t value) { return static_cast<double>(value) / 1'000'000.0; };
   impl_->layout_ms = to_ms(paint_start - layout_start);
   impl_->paint_ms = to_ms(present_start - paint_start);
-  impl_->present_ms = to_ms(end_ns - present_start);
-  ++impl_->frames;
+  impl_->present_ms = to_ms(end_ns - present_start);  ++impl_->frames;
   impl_->last_frame_ms = to_ms(end_ns - start_ns);
   impl_->frame_times.push(impl_->last_frame_ms);
   impl_->repaint = false;
