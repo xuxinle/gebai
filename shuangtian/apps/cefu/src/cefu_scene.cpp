@@ -113,7 +113,6 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   out.reserve(graph.nodes.size() * 420 + graph.edges.size() * 160 + 8192);
 
   const double radius = bounding_radius(graph);
-  const double node_radius = radius * options.node_radius_ratio;
   const double edge_radius = radius * options.edge_radius_ratio;
   const double camera_distance = std::max(3.0, radius * 1.25);
 
@@ -156,14 +155,29 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   out += "  const a = new THREE.Vector3(from.x, from.y, from.z);\n";
   out += "  const b = new THREE.Vector3(to.x, to.y, to.z);\n";
   out += "  const dir = new THREE.Vector3().subVectors(b, a);\n";
-  out += "  const len = dir.length();\n";
-  out += "  if (len < 1e-6) return null;\n";
-  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, len, 8, 1);\n";
-  out += "  const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.85 });\n";
+  out += "  const full = dir.length();\n";
+  out += "  if (full < 1e-6) return null;\n";
+  // 端点内缩：线不要画到节点中心（那里是文字），否则字被线穿过。
+  //
+  // 缩进量取 full 的 10%（上限 26%）：短边的线不能缩太多，否则中间那截消失；
+  // 长边缩 10% 已足够让出文字的宽度（文字宽约 100~300 世界单位）。
+  out += "  const trim = Math.min(full * 0.10, full * 0.26);\n";
+  out += "  if (full - trim * 2.0 < 1e-6) return null;\n";
+  out += "  dir.multiplyScalar(1.0 / full);\n";
+  // 不用 addScaledVector（three 精简版不一定有）：手动乘加，兼容面最宽
+  out += "  const ax = a.x + dir.x * trim, ay = a.y + dir.y * trim, az = a.z + dir.z * trim;\n";
+  out += "  const bx = b.x - dir.x * trim, by = b.y - dir.y * trim, bz = b.z - dir.z * trim;\n";
+  out += "  const len = full - trim * 2.0;\n";
+  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, len, 12, 1);\n";
+  // 连线颜色调亮、不透明度提满。
+  //
+  // 之前用 opacity 0.85：软件光栅器下细圆柱的抗锯齿会叠在半透明上，
+  // 结果是“颜色更淡 + 边缘更脏”双重变差。不透明反而更干净。
+  out += "  const mat = new THREE.MeshBasicMaterial({ color: color });\n";
   out += "  const mesh = new THREE.Mesh(geo, mat);\n";
-  out += "  mesh.position.copy(a).add(b).multiplyScalar(0.5);\n";
+  out += "  mesh.position.set((ax + bx) * 0.5, (ay + by) * 0.5, (az + bz) * 0.5);\n";
   out += "  const up = new THREE.Vector3(0, 1, 0);\n";
-  out += "  mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(up, dir.clone().normalize()));\n";
+  out += "  mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(up, dir));\n";
   out += "  return mesh;\n";
   out += "}\n\n";
 
@@ -191,75 +205,32 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   }
   out += "\n";
 
-  // ── 节点 ──
+  // ── 节点：**不画球**（只画连线，文字由二维叠层画）──
   //
-  // 每个节点三层：
-  //   ① 接地影（扁圆，Y 略微下沉）——**三维感的关键**，没有它节点像浮在空中
-  //   ② 核心球（实体，主光源打出高光）
-  out += "// ── 节点 ──\n";
-  // 几何体：球与光壳（不做接地影，见节点处的注释）
-  out += "const sphereGeo = new THREE.SphereGeometry(1.0, 28, 20);\n";
-  out += "const haloGeo = new THREE.SphereGeometry(1.0, 20, 14);\n";
-  out += "const matCache = {};\n";
-  out += "function coreMat(color) {\n";
-  out += "  if (!matCache['c' + color]) {\n";
-  out += "    matCache['c' + color] = new THREE.MeshStandardMaterial({\n";
-  out += "      color: color, metalness: 0.55, roughness: 0.26,\n";
-  out += "      emissive: color, emissiveIntensity: 0.30\n";
-  out += "    });\n";
-  out += "  }\n";
-  out += "  return matCache['c' + color];\n";
-  out += "}\n";
-  out += "function haloMat(color) {\n";
-  out += "  if (!matCache['h' + color]) {\n";
-  out += "    matCache['h' + color] = new THREE.MeshBasicMaterial({\n";
-  out += "      color: color, transparent: true, opacity: 0.13, side: THREE.BackSide\n";
-  out += "    });\n";
-  out += "  }\n";
-  out += "  return matCache['h' + color];\n";
-  out += "}\n\n";
-
+  // 为何去掉球（用户直说“球都去掉”）：
+  // 球只能表达“这里有个点”，而图谱要表达的是“这里是什么”。
+  // 文字已经在同一位置说了是什么，再叠一个球只是噪声——
+  // 而且球的光晕会盖住文字、加重密集区的拥挤。
+  //
+  // 保留的部分：**连线**。关系是三维才能表达好的东西，
+  // 而且没有连线就看不出结构（只剩一堆散落的字）。
+  //
+  // 每个节点留一个空 Group 当锚点：让场景物体数与节点数一致（便于核对），
+  // 也给将来的拾取留个落点。
+  out += "// ── 节点锚点（无几何，仅用于计数与拾取）──\n";
   for (std::size_t i = 0; i < graph.nodes.size(); ++i) {
     const auto& node = graph.nodes[i];
-    const auto color = node_color(node.kind, node.confidence);
-    const bool is_hub = node.kind != graph::NodeKind::Entry;
-    // 词条小、枢纽大（大小差异就是“谁管着谁”的视觉表达）
-    const double scale = node_radius * std::max(0.85, node.weight);
-
-    // ① 接地影：**不做**。
-    //
-    // 为何放弃（实测两次都坏）：`CircleGeometry` + `MeshBasicMaterial`
-    // 的黑色半透明面，在软件光栅器的光栅路径上没有深度写入与正确的
-    // alpha 混合，结果变成**一大片白块**（比不做难看得多）。
-    // 三维感改由“核心球 + 枢纽光壳 + 三点布光”三者承担，已经够。
-
-    // ① 核心球
-    out += std::format("const m{} = new THREE.Mesh(sphereGeo, coreMat({}));\n"
-                       "m{}.position.set({});\n"
-                       "m{}.scale.setScalar({:.3f});\n"
-                       "m{}.name = '{}';\n"
-                       "scene.add(m{});\n",
-                       i, color, i,
+    // 用 Group 而不是 Object3D：`three.cjs` 里 Object3D 是基类、可构造，
+    // 但 Group 更保险（它在任何版本都存在且可 `scene.add`）。
+    out += std::format("const a{} = new THREE.Group();\n"
+                       "a{}.position.set({});\n"
+                       "a{}.name = '{}';\n"
+                       "scene.add(a{});\n",
+                       i, i,
                        vec3(static_cast<double>(node.position.x),
                             static_cast<double>(node.position.y),
                             static_cast<double>(node.position.z)),
-                       i, scale, i, escape_js(node.id), i);
-
-    // ③ 枢纽外发光壳：只给分类/人加。
-    //
-    // 不给词条加：几十个半透明壳重叠会变成一层雾，反而遮住结构。
-    if (is_hub) {
-      out += std::format("const h{} = new THREE.Mesh(haloGeo, haloMat({}));\n"
-                         "h{}.position.set({});\n"
-                         "h{}.scale.setScalar({:.3f});\n"
-                         "h{}.name = 'halo_{}';\n"
-                         "scene.add(h{});\n",
-                         i, color, i,
-                         vec3(static_cast<double>(node.position.x),
-                              static_cast<double>(node.position.y),
-                              static_cast<double>(node.position.z)),
-                         i, scale * 1.9, i, i, i);
-    }
+                       i, escape_js(node.id), i);
   }
   out += "\n";
 

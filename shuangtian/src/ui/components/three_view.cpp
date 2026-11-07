@@ -509,12 +509,22 @@ void ThreeView::render_into(const RenderContext& context, raster::Surface& canva
   // 所以在这里夹一道：超过 8192 就夹到 8192。真实视口不可能需要更大
   //（4K 屏 3840 宽，乘 DPI 2 也只 7680）。
   constexpr float kMaxRenderEdge = 8192.0f;
+  // 渲染缩放：**先乘 scale 再夹上限**。
+  //
+  // 为何要有这个（实测卡顿的根因）：软件光栅器逐像素算。视口逻辑尺寸
+  // 2355×1246、DPI 1.5 → 渲染缓冲 3533×1870 = **680 万像素**，
+  // 拖拽旋转每帧全算，操作发卡。
+  //
+  // 而这张图的内容是**连线 + 文字**：文字由二维叠层画（不受此影响），
+  // 三维层只剩几根细连线——用 1/3 分辨率渲染再缩放，连线略软，
+  // 但换到跟手的流畅度，在这里完全值得。
+  const float scale = render_scale_ * canvas.device_scale();
   const int width = std::clamp(
-      static_cast<int>(std::lround(std::min(box.width, kMaxRenderEdge) * canvas.device_scale())), 1,
+      static_cast<int>(std::lround(std::min(box.width, kMaxRenderEdge) * scale)), 1,
       static_cast<int>(kMaxRenderEdge));
   const int height = std::clamp(
-      static_cast<int>(std::lround(std::min(box.height, kMaxRenderEdge) * canvas.device_scale())),
-      1, static_cast<int>(kMaxRenderEdge));
+      static_cast<int>(std::lround(std::min(box.height, kMaxRenderEdge) * scale)), 1,
+      static_cast<int>(kMaxRenderEdge));
 
   if (!raster::Scene3D::available()) {
     canvas.fill_rect(box, raster::Paint::solid(math::Color{48, 20, 26, 255}), style_.radius);

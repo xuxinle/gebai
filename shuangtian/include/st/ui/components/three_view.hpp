@@ -154,6 +154,32 @@ class ThreeView : public Element {
   /// 是否显示左上角的状态角标（物体数/后端/装载错误）。默认开。
   void set_show_hud(bool enabled) noexcept { show_hud_ = enabled; }
 
+  /// 渲染分辨率缩放（相对逻辑尺寸 × DPI）。
+  ///
+  /// ## 为何需要（实测卡顿的根因）
+  ///
+  /// 软件光栅器是**逐像素**算的。实测视口逻辑尺寸 2355×1246、DPI 1.5，
+  /// 于是渲染缓冲是 **3533×1921 = 680 万像素**——拖拽旋转时每帧都要全算，
+  /// 拖动与滚轮明显发卡。
+  ///
+  /// 而这是张**知识图谱**：主体是文字（文字由二维叠层画，不受此影响），
+  /// 三维层只剩几根连线。用半分辨率渲染再放大，连线略软但换到跟手的流畅度，
+  /// 在这里是合算的。
+  ///
+  /// 取值建议：0.4~0.7。
+  /// - `1.0`（默认）= 原行为（原生像素）；
+  /// - 低于 1 时先在低分辨率渲到中间缓冲、再放大到目标矩形（软件缩放）。
+  ///
+  /// 不接受 <=0（会除零），内部夹到 [0.2, 2.0]。
+  void set_render_scale(float scale) noexcept {
+    const float clamped = scale < 0.2F ? 0.2F : (scale > 2.0F ? 2.0F : scale);
+    if (render_scale_ == clamped) return;
+    render_scale_ = clamped;
+    // 尺寸变了 → 下一帧重建缓冲（尺寸比较会自然触发）
+    mark_dirty();
+  }
+  [[nodiscard]] auto render_scale() const noexcept -> float { return render_scale_; }
+
   /// 角标里一段文字的位置：**背景框矩形 + 文本行盒顶边**。
   ///
   /// 公开出来是为了让“文字落在框里”成为可断言的事实，而不是靠看截图判断。
@@ -169,10 +195,26 @@ class ThreeView : public Element {
                                      float content_width, float padding, float max_width,
                                      bool bottom_aligned = false) -> HudChip;
 
-  /// 三维后端偏好（`""` = 自动选；`"software"` / `"gpu"` 强制）。默认 `software`。
+  /// 三维后端偏好（`""` = 自动选；`"software"` / `"gpu"` 强制）。
   ///
-  /// 理由见 `backend_pref_` 的说明（GPU 腿在交互式视口里合成失效，
-  /// 实测只剩背景色）。设成 `""` 则交回框架的实测选腿。
+  /// ## 历史结论已反实（2026-11-08 实测）
+  ///
+  /// 这里曾写着“GPU 腿在交互式视口里合成失效，只剩背景色”——那是**已过时的观测**，
+  /// 大概是零拷贝合成（`composite_native_texture`）修好之前记的。
+  ///
+  /// 现测数据（册府知识图谱，3533×1870 全分辨率，每次旋转）：
+  ///
+  /// | 三维腿 | 主画布 | 耗时 |
+  /// |---|---|---|
+  /// | **GPU** | GPU | **5ms** |
+  /// | 软件 | GPU | 285ms |
+  /// | 软件 | 软件 | 392ms |
+  ///
+  /// 差 57 倍。原因很具体：GPU 腿把三维纹理零拷贝合成到 GPU 主画布（全程不过 CPU），
+  /// 软件腿要逐像素光栅化 680 万像素。
+  ///
+  /// 教训：**头文件里的“实测结论”也会过期**。照抄旧结论而不验证，
+  /// 代价是“明明有快 57 倍的路径却一直在用慢的”。
   void set_backend(std::string_view backend) {
     backend_pref_ = std::string(backend);
     backend_.reset();   // 下一帧按新偏好重建
@@ -298,6 +340,8 @@ class ThreeView : public Element {
   math::Color background_{0x0E, 0x12, 0x1A, 0xFF};
   std::optional<math::Color> highlight_override_{};
   bool show_hud_{true};
+  /// 渲染分辨率缩放（见 `set_render_scale`）。
+  float render_scale_{1.0F};
   float preferred_height_{320.0f};
   bool fill_height_{false};
 
@@ -319,14 +363,10 @@ class ThreeView : public Element {
   mutable std::uint64_t backend_rebuilds_{0};
   /// 三维后端偏好（`""` = 自动选；`"software"` / `"gpu"` 强制）。
   ///
-  /// ## 为何默认 `software`
+  /// ## 默认给空串（跟框架实测选腿），但调用方通常应显式写 `"gpu"`
   ///
-  /// 自动选腿会挑实测更快的那条（通常 GPU）。但在**交互式视口**里，GPU 腿把离屏
-  /// 纹理合成回画布那一步实测失效：`begin_frame` 的清屏色能看见，而网格完全不可见
-  /// （整块只剩背景色）。软件腿逐像素直写画布，行为确定。
-  /// 默认**自动选腿**（框架按实测挑更快的那条）。
-  /// 曾把它默认成 software 试图绕开 GPU 合成问题，结果连原本正常的场景
-  /// 也画不出来了——说明问题不在选腿。
+  /// 实测（见 `set_backend` 的表格）：GPU 腿比软件腿快 **57 倍**。
+  /// 早前这里注释过“默认 software 以免 GPU 合成失效”——那个观测已过时。
   std::string backend_pref_{};
 
   std::optional<ThreeHit> hovered_{};

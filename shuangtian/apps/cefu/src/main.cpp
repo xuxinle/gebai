@@ -934,13 +934,24 @@ auto run_app(int argc, char** argv) -> int {
     // 宽度同理：吃满可用宽度（`fill_width` 在 measure 里已经是这个语义）。
     view->style().width = st::ui::kAuto;
     view->style().height = st::ui::kAuto;
-    // **必须用软件腿**。
+    // **必须用 GPU 腿**（实测：快 57 倍）。
     //
-    // 实测：GPU 腿在交互式视口里把离屏纹理合成回画布那一步失效——
-    // 清屏色看得见（整块深蓝），而球体与连线完全不见（截图就是一片黑）。
-    // 这是 `three_view.hpp` 里 `backend_pref_` 注释已经记下的已知问题。
-    // 软件腿逐像素直写画布，行为确定。
-    view->set_backend("software");
+    // ## 为什么之前写“必须软件”是错的
+    //
+    // 头文件里有条旧注释说“GPU 腿在交互式视口里合成失效”，我照抄了。
+    // 实测证明那个结论**已经过时**：
+    //
+    // | 组合 | 每次旋转 |
+    // |---|---|
+    // | 三维 GPU + 全分辨率 3533×1870 | **5ms** |
+    // | 三维 GPU + 半分辨率 | 2ms |
+    // | 三维软件 + 全分辨率 | **285ms** |
+    //
+    // GPU 腿把三维纹理通过 `composite_native_texture` **零拷贝**合成到 GPU 主画布，
+    // 完全不经过 CPU；软件腿则要逐像素光栅化 680 万像素。
+    // 而且全分辨率下 GPU 已只需 5ms，所以**不要降分辨率**——那会白白牺牲画质。
+    view->set_backend("gpu");
+    view->set_render_scale(1.0F);
     // 关掉自转：知识图谱的结构本身就是信息，自己动会干扰“看清哪里连哪里”
     view->set_animation_enabled(false);
     // 绝对定位：**不参与父的 flex 分配**，铺满内容区、叠在三栏之上。
@@ -977,6 +988,13 @@ auto run_app(int argc, char** argv) -> int {
     overlay->style().width = st::ui::kAuto;
     overlay->style().height = st::ui::kAuto;
     overlay->set_visible(false);
+    // **必须关掉输入拦截**（这是本轮的 bug 根源）。
+    //
+    // 标签层是一个纯视觉覆盖层：它铺满整个内容区、又在 ThreeView **之上**，
+    // 默认的 `intercepts_input()==true` 会把鼠标事件全吃掉——
+    // 于是旋转/缩放直接失效（实测：拖拽与滚轮都不再改变相机）。
+    // 而它自己没有需要交互的东西，本来就该点击穿透。
+    overlay->set_intercepts_input(false);
     graph_labels = overlay.get();
     if (host->add_child(std::move(overlay)) == nullptr) graph_labels = nullptr;
     return true;
@@ -1010,8 +1028,9 @@ auto run_app(int argc, char** argv) -> int {
         const auto z = static_cast<double>(node.position.z);
         max_r = std::max(max_r, std::sqrt(x * x + y * y + z * z));
       }
-      // 节点自身的半径也要算进去，否则边缘球会被切。
-      max_r *= 1.0 + cefu::scene::Options{}.node_radius_ratio * 2.0;
+      // 节点自身的半径也要算进去，否则边缘节点会被切。
+      // （现在不画球了，但文字有宽度与行高；留一点额外余量）
+      max_r *= 1.06;
       constexpr double fov_deg = 46.0;
       const double half = fov_deg * 3.14159265358979 / 360.0;
       // 1.12 余量：留一点呼吸空间，但不至于大片空白
@@ -1030,11 +1049,11 @@ auto run_app(int argc, char** argv) -> int {
                                 const std::string& confidence) -> unsigned int {
           switch (kind) {
             case cefu::graph::NodeKind::Category:
-              return 0xFFE8B54BU;  // 册：暖金
+              return 0xFFFFD782U;  // 册：暖金（深底上亮黄最好认）
             case cefu::graph::NodeKind::Person:
-              return 0xFF4ED4A0U;  // 人：薄荷绿
+              return 0xFF72EDBEU;  // 人：薄荷绿
             case cefu::graph::NodeKind::Scope:
-              return 0xFFB48CF0U;  // 作用域：紫
+              return 0xFFCFA8FFU;  // 作用域：紫
             case cefu::graph::NodeKind::Entry:
               break;
           }
@@ -1057,8 +1076,12 @@ auto run_app(int argc, char** argv) -> int {
           float weight = node.kind == cefu::graph::NodeKind::Entry ? 0.35f : 0.9f;
           if (node.confidence == "verified") weight += 0.15f;
           if (node.confidence == "stale") weight -= 0.1f;
-          anchor.weight = std::clamp(weight, 0.0f, 1.0f);
           anchor.argb = argb_of(node.kind, node.confidence);
+          anchor.weight = std::clamp(weight, 0.0f, 1.0f);
+          // 两者都画底板（无底板时分类字会被背景+连线弄成一团糊影）；
+          // 分类用淡一些的底板，让它在视觉上退后一层。
+          anchor.plate = true;
+          anchor.plate_alpha = node.kind == cefu::graph::NodeKind::Entry ? 0xE6 : 0xB4;
           labels.push_back(std::move(anchor));
         }
         graph_labels->set_labels(std::move(labels));
@@ -1133,6 +1156,46 @@ auto run_app(int argc, char** argv) -> int {
     app.request_repaint();
     return Json(true);
   });
+  // 读/写相机状态（脚本可控——性能测试与自动化截图都要它）。
+  (void)bridge.expose("cefu.graph_camera", [&](const std::vector<Json>&) -> st::Result<Json> {
+    Json out = Json::object();
+    if (graph_view == nullptr) return out;
+    const auto cam = graph_view->camera_state();
+    out["yaw"] = cam.yaw;
+    out["pitch"] = cam.pitch;
+    out["distance"] = cam.distance;
+    out["fov_y_degrees"] = cam.fov_y_degrees;
+    out["target"] = Json{{{"x", cam.target.x}, {"y", cam.target.y}, {"z", cam.target.z}}};
+    return out;
+  });
+  (void)bridge.expose("cefu.graph_set_camera", [&](const std::vector<Json>& args) -> st::Result<Json> {
+    if (graph_view == nullptr || args.empty()) return Json(false);
+    const auto& in = args[0];
+    auto cam = graph_view->camera_state();
+    if (in.contains("yaw")) cam.yaw = in["yaw"].get<float>();
+    if (in.contains("pitch")) cam.pitch = in["pitch"].get<float>();
+    if (in.contains("distance")) cam.distance = in["distance"].get<float>();
+    graph_view->set_camera_state(cam);
+    app.request_repaint();
+    return Json(true);
+  });
+  // 运行时切三维后端（A/B 实测用：软件腿 vs GPU 腿到底差多少）。
+  (void)bridge.expose("cefu.graph_backend", [&](const std::vector<Json>& args) -> st::Result<Json> {
+    if (graph_view == nullptr || args.empty()) return Json(false);
+    graph_view->set_backend(args[0].is_string() ? args[0].get<std::string>() : std::string{});
+    app.request_repaint();
+    Json out = Json::object();
+    out["ok"] = true;
+    return out;
+  });
+  (void)bridge.expose("cefu.graph_render_scale", [&](const std::vector<Json>& args) -> st::Result<Json> {
+    if (graph_view == nullptr || args.empty()) return Json(false);
+    graph_view->set_render_scale(args[0].get<float>());
+    app.request_repaint();
+    Json out = Json::object();
+    out["scale"] = graph_view->render_scale();
+    return out;
+  });
   // 诊断：视口的相机与取景信息。
   //
   // 为何走桥而不是 `get`：视口是 C++ 挂的**绝对定位元素**，不在声明式树里，
@@ -1180,6 +1243,36 @@ auto run_app(int argc, char** argv) -> int {
     // 托盘左键点击：把窗口叫回前台（关窗只隐藏、进程常驻，恢复靠这里）
     if (app.take_tray_clicks() > 0) (void)app.window_restore();
     if (hot.poll() > 0) app.request_repaint();
+    // **每帧把视口当前相机同步给标签层**。
+    //
+    // 为何必须在主循环里做（而不是装载时设一次）：
+    // 拖拽旋转 / 滚轮缩放改的是 `ThreeView` 内部的 `orbit_`，
+    // 标签层拿不到通知。之前只在 `load_graph` 里设一次投影参数，
+    // 现象就是“球转了、字不转”——文字钉在屏幕上，看着像两张图叠在一起。
+    //
+    // 开销：读相机状态是返回一个结构体，比较几个 float；只在变了时才 mark_dirty，
+    // 所以静止时零额外重绘。
+    if (graph_view != nullptr && graph_labels != nullptr && graph_view->visible()) {
+      const auto live = graph_view->camera_state();
+      auto projection = graph_labels->projection();
+      const bool changed = projection.yaw != live.yaw || projection.pitch != live.pitch ||
+                           projection.distance != live.distance ||
+                           projection.fov_degrees != live.fov_y_degrees ||
+                           projection.target_x != live.target.x ||
+                           projection.target_y != live.target.y ||
+                           projection.target_z != live.target.z;
+      if (changed) {
+        projection.yaw = live.yaw;
+        projection.pitch = live.pitch;
+        projection.distance = live.distance;
+        projection.fov_degrees = live.fov_y_degrees;
+        projection.target_x = live.target.x;
+        projection.target_y = live.target.y;
+        projection.target_z = live.target.z;
+        graph_labels->set_projection(projection);
+        app.request_repaint();
+      }
+    }
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;

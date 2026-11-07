@@ -143,6 +143,8 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
     math::Color color;
     float text_w;
     float weight;
+    bool plate;
+    unsigned char plate_alpha;
   };
   std::vector<Placed> placed;
   placed.reserve(labels_.size());
@@ -166,7 +168,7 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
     const float font_size = base_font * (0.88f + 0.34f * std::clamp(label.weight, 0.0f, 1.0f));
     const float text_w = port.measure_width(label.text, font_size);
     placed.push_back(Placed{label.text, at, font_size, math::Color::from_rgba_hex(label.argb), text_w,
-                            label.weight});
+                            label.weight, label.plate, label.plate_alpha});
   }
   if (placed.empty()) return;
 
@@ -242,14 +244,18 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
     const float tx = best.x + 2.0F;
     const float ty = best.y + 1.0F;
 
-    // 底板：深色半透明，保证文字在任何球体颜色上都能读。
+    // 底板：深色半透明，保证文字在任何背景上都能读。
     //
     // 不做描边而做底板：这个渲染器没有文字描边能力，而底板一次
     // `fill_rect` 就够，且对密集区域的对比度更稳。
     //
-    // 不透明度 0xE6（90%）：之前用 0xC8（78%）时，深色文字叠在球体的
-    // 亮色光晕上会发糊——实测截图里“调度”两字几乎读不出。
-    canvas.fill_rect(best, raster::Paint::solid(math::Color{0x0A, 0x0D, 0x13, 0xE6}), 3.0F);
+    // 但**分类/人/作用域不画底板**（`plate=false`）：它们是“册名”，
+    // 往往落在空白处，加底板反而变成一块黑斑（实测截图里“运维”“调度”
+    // 就像被消字了）。
+    if (item.plate) {
+      canvas.fill_rect(best,
+                       raster::Paint::solid(math::Color{0x0A, 0x0D, 0x13, item.plate_alpha}), 3.0F);
+    }
     port.draw(canvas, item.text, math::Point{tx, ty}, item.font_size, item.color);
     ++painted_;
   }
