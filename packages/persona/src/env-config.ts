@@ -252,24 +252,50 @@ export function chatSessionKeyOf(event: { kind: string; channel: string; context
   return thread ? `${chat}__t_${thread}` : chat
 }
 
-/** 审批姿态（`GEBAI_PERSONA_APPROVAL`）。 */
-export type PersonaApprovalMode = "ask" | "auto" | "deny"
+/**
+ * 审批姿态（`GEBAI_PERSONA_APPROVAL`）。
+ *
+ * ## 关键区分：**工具执行** vs **对外输出**
+ *
+ * 这两件事被审的程度不该一样，而早期实现把它们混为一谈（每个工具调用都推卡问人）——
+ * 结果是人格在无人值守场景里几乎寸步难行：查一个日志要等人点卡，而人可能在睡觉。
+ *
+ * | | 工具执行（读文件/跑命令/查接口） | 对外输出（以用户本人名义发消息） |
+ * |---|---|---|
+ * | 审什么 | 默认不审 | **总是审**（独立开关） |
+ * | 为何 | 它是“自己动手查/算”，错了能改，且不改外部状态 | 发出去就是用户说的话，错发的代价由用户本人承担 |
+ * | 入口 | 本函数 | `persona-outbound-review.ts` |
+ *
+ * 所以缺省是 `readonly`：**工具执行不弹卡，输出照旧过出站审核**。
+ *
+ * ## 四档
+ *
+ * | 值 | 工具执行 | 适用 |
+ * |---|---|---|
+ * | `readonly`（**缺省**） | 一律放行（不弹卡） | 生产默认：人格能干活，但发出去的话仍需人批准 |
+ * | `ask` | 需审批工具才推卡问人 | 高敏环境（删除/提交单等需要人点头） |
+ * | `auto` | 一律放行（旧名，等价 readonly） | 兼容旧配置 |
+ * | `deny` | 一律拒绝 | 只读人格：不执行任何需审批操作 |
+ */
+export type PersonaApprovalMode = "readonly" | "ask" | "auto" | "deny"
 
 /**
  * 解析审批姿态。
  *
- * 缺省 `ask`：**不能决策的事要人介入**（设计口径），而人格场景恰恰大量存在
- * 「要不要跑这条命令 / 删这个文件」——自动通过与一律拒绝都不对：
- * 前者让无人值守变成无把关，后者让人格一遇审批就哑掉。
+ * 缺省 `readonly`：**工具执行不审，输出才审**（见类型注释里的区分）。
+ *
+ * 兼容旧值：`auto`/`off`/`true` → `auto`（与 readonly 同效）；`deny`/`false` → `deny`；
+ * 只有显式 `ask` 才回到“每个需审批工具都推卡”。
  */
 export function personaApprovalMode(env: EnvView): PersonaApprovalMode {
   const raw = (env.GEBAI_PERSONA_APPROVAL ?? "").trim().toLowerCase()
+  if (raw === "ask") return "ask"
   if (raw === "auto" || raw === "off" || raw === "true" || raw === "1") return "auto"
+  if (raw === "readonly" || raw === "read") return "readonly"
   if (raw === "deny" || raw === "false" || raw === "0" || raw === "no") return "deny"
-  if (raw) return "ask"
-  // 向后兼容：旧变量 `GEBAI_PERSONA_AUTO_APPROVE` 只在**显式设为 false** 时生效
-  // （旧默认 true 不能继续生效——那正是“无人把关自动执行”的根源）。
+  if (raw) return "readonly"
+  // 向后兼容：旧变量 `GEBAI_PERSONA_AUTO_APPROVE` 只在**显式设为 false** 时收紧。
   const legacy = (env.GEBAI_PERSONA_AUTO_APPROVE ?? "").trim().toLowerCase()
   if (/^(false|0|no|off)$/.test(legacy)) return "deny"
-  return "ask"
+  return "readonly"
 }

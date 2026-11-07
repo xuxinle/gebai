@@ -41,7 +41,7 @@ export interface PersonaEnginePort {
     opts?: {
       attachments?: Array<{ name: string; mime?: string; path?: string; data?: Uint8Array }>
       channelNote?: string
-      /** auto 姿态：需审批工具自动通过（仅当 `approvalMode=auto`）。 */
+      /** auto 姿态：需审批工具自动通过（仅当 `approvalMode` 为 readonly/auto）。 */
       autoApprove?: boolean
       /**
        * 交互模式（**必须显式传**）。
@@ -73,17 +73,19 @@ export interface EnginePersonaRunnerOptions {
    * 审批姿态（`GEBAI_PERSONA_APPROVAL` 的解析结果）。
    *
    * 可以传**函数**以支持热改（推荐：读环境变量的解析函数）——人格进程常常跑几周，
-   * 而“临时放开审批”是个真实诉求（先把活干完再收回）；写死成构造时的快照就必须重启，
-   * 而重启会中断正在跑的人格任务。
+   * 而“临时放开/收紧”是真实诉求；写死成构造快照就必须重启，而重启会中断在跑的人格任务。
    *
-   * - `ask`（缺省）：需审批工具走引擎审批点 → 审批桥推相期卡问人。**不传 autoApprove**。
-   * - `auto`：直接自动通过（引擎 `autoApprove: true`）。
-   * - `deny`：一律拒绝（不传 autoApprove，同时 `interactionMode: none`）。
+   * - `readonly`（缺省）：**工具执行不弹卡，输出才审**（出站审核独立开关）
+   * - `ask`：需审批工具走引擎审批点 → 审批桥推相期卡问人
+   * - `auto`：同 readonly（旧名）
+   * - `deny`：需审批工具直接拒绝
+   *
+   * 四档与引擎入参的对应关系见 `run()` 里的表格（尤其 deny 必须显式传
+   * `autoApprove: false`，否则会被引擎的“无交互自动通过”变成全放行）。
    */
-  approvalMode?: "ask" | "auto" | "deny" | (() => "ask" | "auto" | "deny")
+  approvalMode?: import("@gebai/persona").PersonaApprovalMode | (() => import("@gebai/persona").PersonaApprovalMode)
   /**
-   * @deprecated 旧字段（等价 `approvalMode` 的 deny/ask 两态）。保留只为兼容既有装配代码，
-   * 新代码用 `approvalMode`：`autoApprove=false` 映射为 `deny`，未给则 `ask`。
+   * @deprecated 旧字段（等价 `approvalMode` 的 deny/readonly 两态）。保留只为兼容既有装配代码。
    */
   autoApprove?: boolean
 }
@@ -103,7 +105,7 @@ export interface EnginePersonaRunnerOptions {
  * 5. **同人格其它分身**：不告诉它有哪些兄弟时，同一个问题会被几个分身重复答一遍
  *    （每个都在自己的会话里把它当第一次看见）
  */
-export function personaNote(input: PersonaRunInput, now = Date.now()): string {
+export function personaNote(input: PersonaRunInput, now = Date.now(), approvalMode: "readonly" | "ask" | "auto" | "deny" = "readonly"): string {
   const { identity, driver } = input
   const siblings = (input.siblings ?? []).filter((s) => s.id !== driver.id)
   const lines: string[] = []
@@ -164,11 +166,24 @@ export function personaNote(input: PersonaRunInput, now = Date.now()): string {
   }
   // 审批姿态：模型必须知道“哪些事会被人卡住”，否则它会反复重试被拒的操作，
   // 或者把“等审批”误当成“已失败”。
-  lines.push("## 遇到需要授权的操作")
+  //
+  // 关键在于把**工具执行**与**对外输出**分开说：人格在 readonly 下可以随便动手查/算，
+  // 但“发出去的话”仍要人批准——这两件事混淆时，模型要么不敢动手，要么以为发消息也不用审。
+  lines.push("## 动手与发言：审的东西不一样")
   lines.push("")
-  lines.push("跑命令、改删文件、提交单据这类操作可能需要**用户本人批准**（卡片会弹在他桌面上）。因此：")
-  lines.push("")
-  lines.push("- 被拒或超时后**不要重复试同一个操作**——先换方案，或在消息里说清需要人做什么。")
+  if (approvalMode === "deny") {
+    lines.push("这个部署把你设成了**只读**：需要授权的操作（改删文件、提交单据等）会直接失败。")
+    lines.push("遇到失败不要反复重试——改用只读手段查清事实，并在回复里把“需要人来做的那一步”说清楚。")
+  } else if (approvalMode === "ask") {
+    lines.push("这个部署要求：**需要授权的操作会弹卡让人点头**（卡片在他桌面上）。因此：")
+    lines.push("")
+    lines.push("- 被拒或超时后**不要重复试同一个操作**——先换方案，或在消息里说清需要人做什么。")
+    lines.push("- 能自己查清的不必等人：只读操作（读文件/查接口/跑查询）不弹卡。")
+  } else {
+    lines.push("- **动手不弹卡**：读文件、跑命令、查接口这些你自己做，不必等人批准（错了能改）。")
+    lines.push("- **发言要人点头**：以用户本人名义发出去的消息会先弹卡给人看（发出去就是他说的，错发代价在他）。")
+    lines.push("  所以一次把话说清就行；**被驳回了不要改个字再发一遍**——那等于绕过审核。")
+  }
   lines.push("- 需要主管决策、需要外部信息、需要人去某个地方动手时，不要硬猜也不要装成功：")
   lines.push("  在你要发出去的回复里**直接把问题问出来**（“这个要你确认一下：……”），不要自言自语。")
   lines.push("")
@@ -236,27 +251,27 @@ export function personaNote(input: PersonaRunInput, now = Date.now()): string {
 
 export class EnginePersonaRunner implements PersonaRunner {
   private readonly engine: PersonaEnginePort
-  private readonly approvalModeOf: () => "ask" | "auto" | "deny"
+  private readonly approvalModeOf: () => import("@gebai/persona").PersonaApprovalMode
   private readonly log?: EnginePersonaRunnerOptions["log"]
   private readonly refreshBeforeRun?: () => Promise<void>
 
   constructor(opts: EnginePersonaRunnerOptions) {
     this.engine = opts.engine
-    // 兼容旧字段：显式给 autoApprove=false 的场景等价于 deny（不空等、直接拒），
-    // 但缺省（undefined）必须走 ask——不能再用“旧默认 true”。
-    const fixed = opts.approvalMode ?? (opts.autoApprove === false ? "deny" : "ask")
+    // 兼容旧字段：显式给 autoApprove=false 的场景等价于 deny；旧缺省 true 等价 readonly。
+    // 缺省（都不给）= readonly（工具执行不弹卡，输出仍审）。
+    const fixed = opts.approvalMode ?? (opts.autoApprove === false ? "deny" : "readonly")
     this.approvalModeOf = typeof fixed === "function" ? fixed : () => fixed
     this.log = opts.log
     this.refreshBeforeRun = opts.refreshBeforeRun
   }
 
   /** 当前审批姿态（每次现取，支持热改）。 */
-  get approvalMode(): "ask" | "auto" | "deny" {
+  get approvalMode(): import("@gebai/persona").PersonaApprovalMode {
     try {
       return this.approvalModeOf()
     } catch {
-      // 解析函数抛错：回到最安全的一档（问人）而不是 auto
-      return "ask"
+      // 解析函数抛错：回到缺省 readonly（不把人格卡死，也不意外提权）
+      return "readonly"
     }
   }
 
@@ -313,20 +328,34 @@ export class EnginePersonaRunner implements PersonaRunner {
     }
     input.signal.addEventListener("abort", onAbort, { once: true })
     try {
-      // 审批姿态决定两个入参（缺一都会错）：
-      // - auto：显式 autoApprove=true（需审批工具直接过）
-      // - ask：不传 autoApprove（走引擎审批点 → 事件 → 审批桥推相期卡问人）
-      // - deny：不传 autoApprove + interactionMode=none（交互类工具直接不可用，需审批工具由引擎拒）
+      // 审批姿态 → 引擎入参。**三个都要显式传**，少一个就会走错分支：
       //
-      // interactionMode：`ask` / `deny` 都用 `multi_turn` / `none`，**绝不能用引擎缺省的 realtime**——
-      // 后者假定有实时前端，会让 ask 推没人看的卡并阻塞 5 分钟。
+      // | 姿态 | autoApprove | interactionMode | 实际效果 |
+      // |---|---|---|---|
+      // | readonly（缺省） | true | multi_turn | 工具直接执行；模型主动 ask 时仍能弹卡问人 |
+      // | ask | 不传 | multi_turn | 需审批工具 → 事件 → 审批桥推相期卡 |
+      // | auto | true | multi_turn | 同 readonly（兼容旧值） |
+      // | deny | **false** | none | 需审批工具直接拒绝（不空等超时） |
+      //
+      // ## deny 必须显式传 `autoApprove: false`（否则它等于 auto）
+      //
+      // 引擎里“无交互模式 + 本地形态”会**自动通过**审批（engine.ts 的 isApprovalSkipped：
+      // `interactionMode === "none" && authMode !== "server"` → true）。所以只传
+      // `interactionMode: "none"` 的 deny，实际行为是“全部放行”——与语义完全相反。
+      // 传 `autoApprove: false` 后引擎的 approvalPolicy 变 `deny`，无交互硬门槛才真的拦住。
+      //
+      // ## interactionMode 绝不能用引擎缺省的 `realtime`
+      //
+      // 后者假定有实时前端：`ask` 会推一张没人看的选择卡并阻塞 5 分钟，
+      // `show` 的 html 分支 / `page_capture` 被当成可用随后失败。
       const mode = this.approvalMode
       const interactionMode: "none" | "multi_turn" = mode === "deny" ? "none" : "multi_turn"
+      const approveOpt = mode === "readonly" || mode === "auto" ? { autoApprove: true } : mode === "deny" ? { autoApprove: false } : {}
       await this.engine.run(input.sessionId, input.user, prompt, {
-        channelNote: personaNote(input),
+        channelNote: personaNote(input, undefined, mode),
         interactionMode,
+        ...approveOpt,
         ...(attachments.length ? { attachments } : {}),
-        ...(mode === "auto" ? { autoApprove: true } : {}),
       })
     } finally {
       input.signal.removeEventListener("abort", onAbort)

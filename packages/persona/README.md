@@ -250,6 +250,35 @@ GEBAI_PERSONA_XIAOSHUANG_SUPPORT_SESSION_MAP=[{"when":"message","key":"{chat}-{t
 收窄用**订阅匹配函数**探测（而非字符串枚举 `feishu`/`message`/…）：枚举法会在订阅语法
 演进后静默漏掉一类，表现为「配了 CHATS 但某些群还是能唤醒它」。
 
+## 审批：工具执行默认不审，输出才审
+
+两件事必须分清（混淆过，后果是人格在无人值守里几乎无法行动——查一条日志也要等人点卡）：
+
+| | 工具执行 | 对外输出 |
+|---|---|---|
+| 默认 | **不审**（`readonly`） | **总是审**（`GEBAI_PERSONA_OUTBOUND_REVIEW`） |
+| 为何 | 自己动手查/算，错了能改，不改外部状态 | 发出去就是用户说的话，错发代价在他 |
+
+| `GEBAI_PERSONA_APPROVAL` | 工具执行 |
+|---|---|
+| `readonly`（**缺省**） | 一律放行（不弹卡） |
+| `ask` | 需审批工具才推相期卡问人（高敏环境） |
+| `auto` | 同 readonly（旧名） |
+| `deny` | 一律拒绝（只读人格） |
+
+输出审核**独立于本项**：即使 `readonly`，以用户本人名义发飞书消息前仍弹相期卡；
+设 `GEBAI_PERSONA_OUTBOUND_REVIEW=false` 可显式跳过。
+
+两个实测踩出的坑（`persona-runner.test.ts` 钉住）：
+
+1. **`deny` 必须显式传 `autoApprove: false`**——引擎在“无交互模式 + 本地形态”下会**自动通过**审批，
+   只传 `interactionMode: "none"` 的 deny 实际是“全部放行”。
+2. **`interactionMode` 不能是引擎缺省的 `realtime`**——它假定有前端，会让 `ask` 推无人看的卡并阻塞 5 分钟。
+
+审批桥（`core/session/persona-approval.ts`）**只在 `ask` 档装配**：其它档根本不订阅审批事件
+（否则就是“每步弹卡”的回潮）。四条硬规矩：fail-closed（相期不在 → 拒绝）、同一 `toolCallId`
+只问一次、超时不记结论、只代理人**人格会话**。
+
 ## 幂等：每源必有一条
 
 | 来源 | 幂等键 |

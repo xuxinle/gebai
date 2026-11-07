@@ -148,6 +148,16 @@ describe("审批桥：问人与结论", () => {
 })
 
 describe("审批桥：姿态与作用域", () => {
+  test("mode=readonly（缺省）→ 直接放行，且不推卡（工具执行不审）", async () => {
+    const ask = makeAsk({ answered: true, choice: "reject" })
+    const { engine, approvals } = makeEngine()
+    const b = new ApprovalBridge({ engine, deps: { mode: "readonly", askCard: ask.tool } })
+    await b.handleApproval(REQ)
+    // 注意：就算相期送了“驳回”也不影响——readonly 根本不问
+    expect(approvals[0]!.approve).toBe(true)
+    expect(ask.calls).toHaveLength(0)
+  })
+
   test("mode=auto → 直接通过，且不推卡", async () => {
     const ask = makeAsk({ answered: true, choice: "approve" })
     const { engine, approvals } = makeEngine()

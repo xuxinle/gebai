@@ -837,6 +837,11 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 审批姿态与会话路由（两处都现读环境，改完下次请求即生效；热加载不必重扫目录）
     const personaApprovalMode = readApprovalMode(envView)
     const sessionRouting = readSessionRouting(envView)
+    /** 输出审核开关（与工具审批分开：人格发言始终要人点头，可显式关）。仅用于日志展示。 */
+    const personaOutboundReviewOn = (() => {
+      const raw = (envView.GEBAI_PERSONA_OUTBOUND_REVIEW ?? "").trim().toLowerCase()
+      return !raw || !/^(off|0|false|no)$/i.test(raw)
+    })()
 
     const foundFiltered = applyPersonaEnv(found.personas)
     if (found.personas.size === 0) {
@@ -953,9 +958,11 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     const workerSpawner = new SessionWorkerSpawner({
       engine,
       store,
-      // worker 是「派出去的活」，它的审批姿态跟随 driver：
-      // ask 模式下 worker 里需要审批的工具照样推卡问人（否则 driver 被卡、worker 却自行放开）。
-      autoApprove: personaApprovalMode === "auto",
+      // worker 是「派出去的活」，审批姿态**必须跟随 driver**，否则会出现两种错配：
+      // - driver 是 readonly 而 worker 不自动通过 → 派出去的活反而被审批卡住（比不派更差）
+      // - driver 是 ask 而 worker 自动通过 → driver 被卡、worker 却自行放开（绕过人的把关）
+      // 这里只区分“是否需要人点头”：ask 档不自动通过，其余档自动通过。
+      autoApprove: personaApprovalMode !== "ask",
       log: { info: log.info, warn: log.warn },
     })
 
@@ -992,11 +999,17 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       if (n > 0) log.info(`[gebai] 已恢复 ${n} 个人格会话绑定`)
     })
 
-    // ── 审批桥：把引擎的审批/选择请求送到相期，等人点头 ──
+    // ── 审批桥：只在 `ask` 档装配（工具执行要人点头时）──
     //
     // 为何是“桥”而不是“引擎里加个分支”：引擎只负责「发起询问 + 等结论」，
     // 询问**送到哪里**是部署形态（网页/飞书/相期桌面），不该写进引擎。
     // 人格场景的实际形态是：人不在终端前，但桌面常驻着相期窗口。
+    //
+    // ## 为何只在 ask 档装配（而不是每档都装）
+    //
+    // 缺省 `readonly` 的语义是「**工具执行不审，输出才审**」，而输出审核走
+    // `persona-outbound-review.ts`（独立开关、默认开）。若这里也订阅审批事件，
+    // 就会把“改个文件/跑个查询”也推成卡——那正是把人格卡死在无人值守里的原因。
     //
     // 只代理人**人格会话**：普通 web 会话有真前端，用户会自己在页面上点，
     // 不判定的话会把网页里的审批重复推一张到桌面。
@@ -1038,8 +1051,18 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           `相期不在时**拒绝**（fail-closed）`,
       )
     } else {
-      log.info(`[gebai] 人格审批姿态：${personaApprovalMode}（${personaApprovalMode === "auto" ? "全自动通过——仅建议隔离环境" : "一律拒绝——人格不会执行需审批操作"}）`)
+      // readonly / auto / deny：不订阅审批事件（工具直接执行或直接拒），避免每步弹卡。
+      const why =
+        personaApprovalMode === "deny"
+          ? "需审批工具一律拒绝——人格只做只读的事"
+          : "工具执行不弹卡（**输出仍需人批准**，见 GEBAI_PERSONA_OUTBOUND_REVIEW）"
+      log.info(`[gebai] 人格工具审批姿态：${personaApprovalMode}（${why}）`)
     }
+    // 输出审核（默认开）：与工具审批**分开**、且**不看 approvalMode**。
+    // 人格以用户本人名义发言，发出去就是他说的话——这一步始终需要人点头（可显式关）。
+    log.info(
+      `[gebai] 人格输出审核：${personaOutboundReviewOn ? "开（飞书发送前推相期卡，驳回/超时不发）" : "关（GEBAI_PERSONA_OUTBOUND_REVIEW=false 自行承担）"}`,
+    )
 
     // ── 自我组织：把 driver_list / driver_create / driver_retire 交给模型 ──
     //

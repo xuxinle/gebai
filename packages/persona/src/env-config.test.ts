@@ -338,19 +338,38 @@ describe("会话路由：缺省面向上下文，不面向群", () => {
   })
 })
 
-describe("审批姿态解析", () => {
-  test("缺省 ask（不能决策的事要人介入）", () => {
-    expect(personaApprovalMode({})).toBe("ask")
+describe("审批姿态解析（工具执行 vs 对外输出）", () => {
+  test("缺省 readonly：**工具执行不审，输出才审**", () => {
+    expect(personaApprovalMode({})).toBe("readonly")
   })
 
-  test("auto / deny 及其同义词", () => {
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "auto" })).toBe("auto")
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "off" })).toBe("auto")
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "deny" })).toBe("deny")
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "false" })).toBe("deny")
+  test("ask 才回到“每个需审批工具都弹卡”（高敏环境显式选）", () => {
+    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "ask" })).toBe("ask")
   })
 
-  test("无法识别的值 → 回到最安全的 ask（不是 auto）", () => {
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "也许吧" })).toBe("ask")
+  test("auto / off / true → auto（旧名，与 readonly 同效）", () => {
+    for (const v of ["auto", "off", "true", "1"]) {
+      expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: v })).toBe("auto")
+    }
+  })
+
+  test("deny / false → deny（只读人格）", () => {
+    for (const v of ["deny", "false", "0", "no"]) {
+      expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: v })).toBe("deny")
+    }
+  })
+
+  test("readonly 可显式写", () => {
+    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "readonly" })).toBe("readonly")
+  })
+
+  test("无法识别的值 → readonly（不是 ask：不能把人格卡死）", () => {
+    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "也许吧" })).toBe("readonly")
+  })
+
+  test("向后兼容：旧 GEBAI_PERSONA_AUTO_APPROVE=false → deny", () => {
+    expect(personaApprovalMode({ GEBAI_PERSONA_AUTO_APPROVE: "false" })).toBe("deny")
+    // 旧缺省 true 不再生效（它曾是“工具全自动执行”的根源）
+    expect(personaApprovalMode({ GEBAI_PERSONA_AUTO_APPROVE: "true" })).toBe("readonly")
   })
 })

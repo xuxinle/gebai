@@ -1296,36 +1296,60 @@ refs 有 threadId 时必传 root。调度器队列本就按 sessionId 分桶，�
 记录就成了悬空指针，且没有任何机制保证它被清理。挂在会话上，「会话没了→映射自然没了」
 是存储层的免费保证。
 
-#### 审批姿态：不能决策的事推相期卡问人（`GEBAI_PERSONA_APPROVAL`）
+#### 审批姿态：**工具执行默认不审，对外输出才审**（`GEBAI_PERSONA_APPROVAL`）
 
-人格跑在无人值守的通道里，需审批工具（`sh` / 删文件 / `py` / 工单…）只有三种姿态，前两种都是错的：
+这是本模块最容易搞反的一条。把每个工具调用都推卡问人，看起来“很安全”，实际后果是：
+**人格在无人值守场景里几乎寸步难行**——查一条日志要等人点卡，而人可能在睡觉。
 
-| 姿态 | 后果 |
-|---|---|
-| 自动通过 | 提示词注入诱导的 `rm -rf` **没人拦**。人格以用户本人名义工作，责任落在用户头上 |
-| 一律拒绝 | 人格一遇动手就哑掉（「这个需要你确认」然后什么也不做） |
-| **相期弹窗问人**（缺省） | 人不在终端前也能在桌面看到「要跑这条命令，准不准」，点一下继续 |
+所以先分清两件事：
 
-| 值 | 行为 |
-|---|---|
-| `ask`（缺省） | 引擎审批点 → `event.approval.request` → **审批桥**（`core/session/persona-approval.ts`）推相期 `card_ask` → 人点选 → `decideApproval` |
-| `auto` | 引擎 `autoApprove: true`（仅建议隔离环境） |
-| `deny` | 不传 `autoApprove` + `interactionMode: none`（交互类工具直接不可用） |
+| | 工具执行（读文件/跑命令/查接口） | 对外输出（以用户本人名义发消息） |
+|---|---|---|
+| 审什么 | **默认不审** | **总是审**（独立开关） |
+| 为何 | 它是“自己动手查/算”，错了能改，不改外部状态 | 发出去就是用户说的话，错发代价由用户本人承担 |
+| 入口 | 本档位 | `persona-outbound-review.ts`（`GEBAI_PERSONA_OUTBOUND_REVIEW`） |
 
-审批桥的四条硬规矩（`persona-approval.test.ts` 逐条钉住）：
+| 值 | 工具执行 | 适用 |
+|---|---|---|
+| `readonly`（**缺省**） | 一律放行（不弹卡） | 生产默认：人格能干活，发出去的话仍需人批准 |
+| `ask` | 需审批工具才推卡问人 | 高敏环境（删除/提交单要人点头） |
+| `auto` | 一律放行（旧名，同 readonly） | 兼容旧配置 |
+| `deny` | 一律拒绝 | 只读人格 |
 
-1. **fail-closed**：相期未连接 / 卡工具未装配 / 推卡抛错 / 送达失败 → 一律**拒绝**并说明原因。
+**输出审核不受本档位影响**：即使 `readonly`，以用户本人名义发飞书消息前仍弹相期卡
+（`GEBAI_PERSONA_OUTBOUND_REVIEW=false` 可显式跳过）。两者不能合并——合并会让
+「批准了发消息」顺带批准同一轮里的 `rm`。
+
+##### 引擎入参对应（四个都要显式传，少一个就走错分支）
+
+| 态度 | `autoApprove` | `interactionMode` |
+|---|---|---|
+| `readonly` / `auto` | `true` | `multi_turn` |
+| `ask` | 不传 | `multi_turn` |
+| `deny` | **`false`** | `none` |
+
+两个坑（都是实测踩出来的）：
+
+1. **`deny` 必须显式传 `autoApprove: false`**。引擎里“无交互模式 + 本地形态”会**自动通过**审批
+   （`isApprovalSkipped`：`interactionMode === "none" && authMode !== "server"` → true）。
+   只传 `interactionMode: "none"` 的 deny，实际行为是“全部放行”——与语义完全相反。
+2. **`interactionMode` 绝不能用引擎缺省的 `realtime`**。后者假定有实时前端：`ask` 会推一张
+   没人看的选择卡并阻塞 5 分钟，`show` 的 html 分支 / `page_capture` 被当成可用随后失败。
+
+##### 审批桥（仅 `ask` 档装配）
+
+`core/session/persona-approval.ts`：引擎审批点 → `event.approval.request` → 相期 `card_ask`
+→ 人点选 → `decideApproval`。只代理人**人格会话**（普通 web 会话有真前端，不判定就会
+把网页里的审批重复弹到桌面）。
+
+四条硬规矩（`persona-approval.test.ts` 逐条钉住）：
+
+1. **fail-closed**：相期未连接 / 卡工具未装配 / 推卡抛错 / 送达失败 → 一律**拒绝**。
    反过来「送不到就放行」会让一张送不出去的卡变成空白支票。
-2. **同一 `toolCallId` 只问一次**：引擎审批被拒/超时后会重试同一调用，每次都推卡会把窗口刷成瀑布；
-   已知结论按结论回答。
-3. **超时不记结论**：卡还在用户窗口上，他随时可能点；但引擎那一轮不能永远挂着 → 超时按拒绝回。
-4. **只代理人**人格会话**：普通 web 会话有真前端，用户会自己在页面上点（不判定就会重复弹到桌面）。
+2. **同一 `toolCallId` 只问一次**：引擎审批被拒/超时后会重试同一调用，每次都推卡会把窗口刷成瀑布。
+3. **超时不记结论**：卡还在窗口上，人随时可能点；但引擎那一轮不能永远挂着 → 超时按拒绝回。
+4. **其它档不装桥**：`readonly`/`deny` 下根本不订阅审批事件（否则就是“每步弹卡”的回潮）。
 
-`ask` 分支**必须显式传 `interactionMode: "multi_turn"`**：引擎缺省是 `realtime`（假定有实时前端），
-不传会让 `ask` 每次推一张没人看的卡并阻塞 5 分钟，`show` 的 html 分支 / `page_capture` 被当成可用随后失败。
-
-相对地，**出站审核**（`persona-outbound-review.ts`）审的是「这条消息以你的名义发出去行不行」，
-在 act 内部；两者不能合并——合并会让「批准了发消息」顺带批准同一轮里的 `rm`。
 
 #### 出站加工：程序化整形 + 可选润色（`GEBAI_PERSONA_<ID>_OUTBOUND`）
 
@@ -1485,8 +1509,9 @@ scope 就是会话键，优先于一切推导规则（推导只看得到单个�
 
 #### 人格运行的审批姿态
 
-见上「审批姿态：不能决策的事推相期卡问人」。旧的 `GEBAI_PERSONA_AUTO_APPROVE` 已废弃
-（缺省 `false`）；显式设为 `false` 等价于 `GEBAI_PERSONA_APPROVAL=deny`。
+见上「审批姿态：**工具执行默认不审，对外输出才审**」。旧的 `GEBAI_PERSONA_AUTO_APPROVE` 已废弃
+（显式 `false` 等价 `deny`）。缺省 `readonly` 意味着人格可以自由动手查/算，
+而“发出去的话”始终过出站审核。
 
 #### 飞书用户凭据：进程级、自动检查、需要时横幅提示授权
 
@@ -1647,7 +1672,8 @@ port+token，经**长度前缀 JSON-RPC**（4 字节大端长度 + `{id,method,p
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `GEBAI_PERSONA` | false | 拟人模式总开关（关闭时 persona 组件**完全实例化**） |
-| `GEBAI_PERSONA_APPROVAL` | ask | 人格审批姿态：`ask`（推相期卡问人）/ `auto`（全自动，仅隔离环境）/ `deny`（一律拒绝） |
+| `GEBAI_PERSONA_APPROVAL` | readonly | **工具审批**：`readonly`（不弹卡）/ `ask`（推卡问人）/ `deny`（一律拒）/ `auto`（同 readonly） |
+| `GEBAI_PERSONA_OUTBOUND_REVIEW` | true | **输出审核**（独立于上项）：人格发飞书消息前推卡，驳回/超时不发；`false` 可跳过 |
 | `GEBAI_PERSONA_SESSION_ROUTING` | driver | 兜底会话规则：`driver`（一个分身一个上下文，**缺省**）/ `chat`（按群×话题） |
 | `GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP` | — | 会话映射规则表（预设名 / `when=key;…` / JSON；分身级覆盖人格级） |
 | `GEBAI_PERSONA_ENABLE` | — | 人格启用白名单 |

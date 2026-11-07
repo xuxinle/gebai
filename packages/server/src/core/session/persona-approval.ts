@@ -65,8 +65,11 @@ export interface ApprovalBridgeDeps {
   isXiangqiConnected?: () => boolean
   /**
    * 审批姿态。可以传函数以支持热改（`GEBAI_PERSONA_APPROVAL` 改完下一个审批即生效）。
+   *
+   * 审批桥只在 `ask` 档下有意义（其它档根本不订阅事件，见 compose）；
+   * `readonly`/`auto` 在这里作为“直接放行”处理，以免意外挂起。
    */
-  mode: "ask" | "auto" | "deny" | (() => "ask" | "auto" | "deny")
+  mode: import("@gebai/persona").PersonaApprovalMode | (() => import("@gebai/persona").PersonaApprovalMode)
   /** 等待答复时限（毫秒，缺省 5 分钟；与引擎审批超时对齐）。 */
   waitMs?: number
   log?: { info(msg: string): void; warn(msg: string): void }
@@ -190,13 +193,13 @@ export class ApprovalBridge {
   }
 
   /** 审批姿态（运行期现读；改配置后下次请求即生效）。 */
-  get mode(): "ask" | "auto" | "deny" {
+  get mode(): import("@gebai/persona").PersonaApprovalMode {
     const m = this.deps.mode
     if (typeof m !== "function") return m
     try {
       return m()
     } catch {
-      return "ask" // 解析抛错：回到最安全的一档（问人）
+      return "readonly" // 解析抛错：回到缺省档（不把人格卡死）
     }
   }
 
@@ -251,12 +254,13 @@ export class ApprovalBridge {
     const isPersona = await this.safeIsPersona(req.sessionId)
     if (!isPersona) return
 
-    // ② 姿态：auto / deny 直接给结论（不推卡）
-    if (this.deps.mode === "auto") {
-      await this.decide(req.sessionId, req.toolCallId, true, "auto")
+    // ② 姿态：readonly / auto 直接放行（不推卡）；deny 直接拒绝
+    const mode = this.mode
+    if (mode === "readonly" || mode === "auto") {
+      await this.decide(req.sessionId, req.toolCallId, true, mode)
       return
     }
-    if (this.deps.mode === "deny") {
+    if (mode === "deny") {
       this.deps.log?.info(`[persona:approval] ${req.tool}（${req.toolCallId}）按 deny 策略拒绝`)
       await this.decide(req.sessionId, req.toolCallId, false, "deny")
       return
@@ -349,7 +353,6 @@ export class ApprovalBridge {
     const isPersona = await this.safeIsPersona(req.sessionId)
     if (!isPersona) return
 
-    // auto：模型自己决定（回 null = 用户未在时限内作答，模型据提示自行决策）
     if (this.deps.mode === "auto") {
       await this.safeDecideChoice(req.sessionId, req.choiceId, null)
       return

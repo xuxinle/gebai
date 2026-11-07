@@ -254,8 +254,8 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
     expect(c.sessionId).toBe("sess-1")
     expect(c.user).toBe("admin")
     expect(c.prompt).toContain("pending")
-    // 关键：只用了引擎已有的入参（channelNote + interactionMode），不新增 persona 专用字段
-    expect(Object.keys(c.opts ?? {}).sort()).toEqual(["channelNote", "interactionMode"])
+    // 缺省 readonly：工具执行不弹卡 → 显式 autoApprove:true
+    expect(Object.keys(c.opts ?? {}).sort()).toEqual(["autoApprove", "channelNote", "interactionMode"])
     expect(String(c.opts?.channelNote)).toContain("答支持群的问题")
   })
 
@@ -271,9 +271,16 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
     expect(new EnginePersonaRunner({ engine: makeEngine({ running: false }).engine }).isRunning("s")).toBe(false)
   })
 
- test("审批姿态：缺省 ask（不传 autoApprove，等审批桥问人）", async () => {
+ test("审批姿态：缺省 readonly（工具执行不弹卡，输出才审）", async () => {
   const a = makeEngine()
   await new EnginePersonaRunner({ engine: a.engine }).run(runInput())
+  expect(a.calls[0]!.opts?.autoApprove).toBe(true)
+  expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
+})
+
+ test("审批姿态：ask → 不传 autoApprove（等审批桥问人）", async () => {
+  const a = makeEngine()
+  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "ask" }).run(runInput())
   expect(a.calls[0]!.opts?.autoApprove).toBeUndefined()
   expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
 })
@@ -285,18 +292,45 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
   expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
 })
 
- test("审批姿态：deny → 不传 autoApprove + interactionMode=none", async () => {
+ test("**deny 必须显式传 autoApprove=false**（否则引擎的“无交互自动通过”会把它变成全放行）", async () => {
   const a = makeEngine()
   await new EnginePersonaRunner({ engine: a.engine, approvalMode: "deny" }).run(runInput())
-  expect(a.calls[0]!.opts?.autoApprove).toBeUndefined()
+  expect(a.calls[0]!.opts?.autoApprove).toBe(false)
   expect(a.calls[0]!.opts?.interactionMode).toBe("none")
 })
 
- test("旧字段 autoApprove=false 兼容：映射为 deny（不空等超时）", async () => {
+ test("旧字段 autoApprove=false 兼容：映射为 deny", async () => {
   const b = makeEngine()
   await new EnginePersonaRunner({ engine: b.engine, autoApprove: false }).run(runInput())
-  expect(b.calls[0]!.opts?.autoApprove).toBeUndefined()
+  expect(b.calls[0]!.opts?.autoApprove).toBe(false)
   expect(b.calls[0]!.opts?.interactionMode).toBe("none")
+})
+
+ test("审批姿态支持热改（传函数）：同一个 runner 改环境即生效", async () => {
+  let mode: import("@gebai/persona").PersonaApprovalMode = "readonly"
+  const a = makeEngine()
+  const r = new EnginePersonaRunner({ engine: a.engine, approvalMode: () => mode })
+  await r.run(runInput())
+  expect(a.calls[0]!.opts?.autoApprove).toBe(true)
+  mode = "deny"
+  await r.run(runInput())
+  expect(a.calls[1]!.opts?.autoApprove).toBe(false)
+})
+
+ test("提示词按姿态分岔：readonly 告诉它“动手不弹卡、发言要人点头”", async () => {
+  const a = makeEngine()
+  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "readonly" }).run(runInput())
+  const note = String(a.calls[0]!.opts?.channelNote)
+  expect(note).toContain("动手不弹卡")
+  expect(note).toContain("发言要人点头")
+})
+
+ test("提示词按姿态分岔：deny 告诉它“只读，不要反复重试”", async () => {
+  const a = makeEngine()
+  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "deny" }).run(runInput())
+  const note = String(a.calls[0]!.opts?.channelNote)
+  expect(note).toContain("只读")
+  expect(note).toContain("不要反复重试")
 })
 
  test("取消桥：signal abort → engine.cancel（调度器 cancelRunning/stop 能真正停下引擎轮）", async () => {
