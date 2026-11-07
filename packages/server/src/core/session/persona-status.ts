@@ -95,6 +95,29 @@ export interface PersonaStateSnapshot {
   workers: PersonaWorkerView[]
   /** 出站凭据（不含令牌明文）。 */
   credentials: { ready: boolean; state: string; message: string; remainingMs?: number; needsAuth: boolean } | null
+  /**
+   * 记忆（册府）观测。
+   *
+   * 为何要能看到它：自动学习是**静默的**——它不写在聊天里。
+   * 没有这个段，可观测性就是零：
+   * - 用户不知道它到底学没学（“不写”与“写了但错了”看起来一样）
+   * - 待确认条目一直积着没人处理，知识库慢慢变成一湖未审核的推断
+   *
+   * `null` = 该部署未接册府（不是错误）。
+   */
+  memory?: {
+    /** 词条总数 / 册数。 */
+    entries: number
+    categories: number
+    /** 置信度分布。 */
+    verified: number
+    inferred: number
+    stale: number
+    /** 待人确认的条数（自动学习的产物堆在这里）。 */
+    needsReview: number
+    /** 库文件路径（排查“它写到哪了”的第一手信息）。 */
+    dbPath: string
+  } | null
   /** 汇总计数（一眼看全貌）。 */
   totals: { drivers: number; activeDrivers: number; running: number; queued: number; failed: number; workersRunning: number }
 }
@@ -108,6 +131,8 @@ export interface PersonaStatusDeps {
   /** 派活账本（未注入时不展示 worker 段）。 */
   workers?: WorkerTaskBook | null
   channelInput?: () => Record<string, InputCounters>
+  /** 册府统计（未接册府时不传）。异步：要问边车进程。 */
+  memoryStats?: () => Promise<{ entries: number; categories: number; verified: number; inferred: number; stale: number; needs_review: number; db_path: string } | null>
   /** 会话是否在跑（引擎 `isRunning`）：比调度器计数更早/更准地反映「正在干活」。 */
   sessionRunning: (sessionId: string) => boolean
 }
@@ -217,6 +242,25 @@ export async function collectPersonaState(deps: PersonaStatusDeps): Promise<Pers
     channelInput: deps.channelInput?.() ?? {},
     workers,
     credentials,
+    // 册府统计：异步（要问边车），失败就当未接——不能因为它拖垮整个状态快照
+    memory: await (async () => {
+      if (!deps.memoryStats) return null
+      try {
+        const s = await deps.memoryStats()
+        if (!s) return null
+        return {
+          entries: s.entries,
+          categories: s.categories,
+          verified: s.verified,
+          inferred: s.inferred,
+          stale: s.stale,
+          needsReview: s.needs_review,
+          dbPath: s.db_path,
+        }
+      } catch {
+        return null
+      }
+    })(),
     totals: {
       drivers: allDrivers.length,
       activeDrivers: allDrivers.filter((d) => d.active).length,

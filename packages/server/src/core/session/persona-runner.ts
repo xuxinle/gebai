@@ -88,6 +88,19 @@ export interface EnginePersonaRunnerOptions {
    * @deprecated 旧字段（等价 `approvalMode` 的 deny/readonly 两态）。保留只为兼容既有装配代码。
    */
   autoApprove?: boolean
+  /**
+   * 自动学习回调（可选）：每轮跑完后调一次，从**进来的人话**里识别值得记的知识。
+   *
+   * 为何用回调而不是在 runner 里直接调册府：runner 属于 persona 内核，
+   * 而册府是边缘能力（可能未启用/未构建）。用回调后：
+   * - 未注入 = 不学习（内核零依赖）
+   * - 注入了但抛错 = 只记 warn，不影响本轮（学习不能拖垮干活）
+   */
+  learnFrom?: (input: {
+    input: PersonaRunInput
+    events: import("@gebai/persona").PersonaEvent[]
+    log?: { info(msg: string): void; warn(msg: string): void }
+  }) => Promise<void>
 }
 
 /**
@@ -231,6 +244,20 @@ export function personaNote(input: PersonaRunInput, now = Date.now(), approvalMo
     lines.push("- **`source_ref`**：出处（`文件:行号` / 会话 id / 人名）。**没有出处的知识事后无法判断该不该信**——")
     lines.push("  这条是硬性的，缺了会被拒绝。")
     lines.push("")
+    // scope：不写清会让知识跨场景串味（A 群的做法被 B 群当真）。
+    // 这段与册府的 visible 过滤成对：写了 scope 才有隔离，不写就是 global。
+    lines.push("### 写哪一档（scope）——决定了谁会看到它")
+    lines.push("| scope | 谁能看到 | 什么时候用 |")
+    lines.push("|---|---|---|")
+    lines.push("| 不填（= `global`） | 所有群、所有分身 | **公共知识**：环境、制度、找谁、通用故障处置 |")
+    lines.push("| `{kind:\"chat\", id:\"oc_…\"}` | 只这个群 | **本群特有**：这个群的规矩、这个客户的习惯、本群的群里约定 |")
+    lines.push("| `{kind:\"persona\", id:\"<你自己的人格 id>\"}` | 只你自己 | **你自己的经验**：你摸索出的工作方式、你在本岗位积累的判断 |")
+    lines.push("")
+    lines.push("判断口诀：**换了群就不成立的 → chat；换了人就不成立的 → persona；哪都成立的 → global。**")
+    lines.push("写错的代价：把本群规矩写成 global，会在别的群也变成“理应如此”——而没人会知道那是从别处传染来的。")
+    lines.push("")
+    lines.push("检索时也一样：查之前想一下自己是谁、在哪个群，把对应 scope 传进去——")
+    lines.push("不传只是到公共知识（安全侧），但会漏掉你/本群自己积累的那些。")
     lines.push("另两件最值钱的事：")
     lines.push("- **`aliases` 是召回率最便宜的投资**：把“别人会怎么问”都写上（同义词/口语/报错原文/缩写）。")
     lines.push("  “写入延迟高”和“p99 上涨”和“TSDB 慢”是同一个问题的三种问法。")
@@ -254,6 +281,7 @@ export class EnginePersonaRunner implements PersonaRunner {
   private readonly approvalModeOf: () => import("@gebai/persona").PersonaApprovalMode
   private readonly log?: EnginePersonaRunnerOptions["log"]
   private readonly refreshBeforeRun?: () => Promise<void>
+  private readonly learnFrom?: EnginePersonaRunnerOptions["learnFrom"]
 
   constructor(opts: EnginePersonaRunnerOptions) {
     this.engine = opts.engine
@@ -263,6 +291,7 @@ export class EnginePersonaRunner implements PersonaRunner {
     this.approvalModeOf = typeof fixed === "function" ? fixed : () => fixed
     this.log = opts.log
     this.refreshBeforeRun = opts.refreshBeforeRun
+    this.learnFrom = opts.learnFrom
   }
 
   /** 当前审批姿态（每次现取，支持热改）。 */
@@ -357,6 +386,21 @@ export class EnginePersonaRunner implements PersonaRunner {
         ...approveOpt,
         ...(attachments.length ? { attachments } : {}),
       })
+      // ⑦ 自动学习（只在装了册府时）：从**进来的人话**里识别值得记的东西。
+      //
+      // 为何放在引擎跑完之后：这一轮已经把话答出去了，写库是“事后沉淀”，
+      // 失败不影响用户已经看到的回复（与“先写库再答”相比风险低得多）。
+      //
+      // 为何只看人话而不看模型输出：模型自己的推理不是事实。
+      // 它说“其实应该是……”是假设，人说的纠正才是知识。
+      if (this.learnFrom && (input.agents ?? []).includes("cefu")) {
+        try {
+          await this.learnFrom({ input, events, log: this.log })
+        } catch (err) {
+          // 学习是附加能力：它坏了不能影响人格正常干活
+          this.log?.warn(`[persona:runner] 自动学习失败（本轮照常完成）: ${String((err as Error)?.message || err)}`)
+        }
+      }
     } finally {
       input.signal.removeEventListener("abort", onAbort)
     }

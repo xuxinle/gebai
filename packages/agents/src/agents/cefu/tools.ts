@@ -67,6 +67,16 @@ export function createTools(deps: CefuControllerOptions = {}): ToolSet {
       properties: {
         query: { type: "string", description: "自然语言短句（如「写入延迟高」「配额找谁」）" },
         limit: { type: "number", description: "返回条数（缺省 5，上限 20）" },
+        scope: {
+          type: "object",
+          description:
+            "检索上下文（决定能看到哪些非公共词条）。人格会自报身份：kind=persona, id=自己的人格 id；在具体群里则带上 chat。" +
+            "不传 = 只看得到 global（公共）词条。",
+          properties: {
+            kind: { type: "string", enum: ["persona", "chat"] },
+            id: { type: "string", description: "kind=persona 时是人格 id；kind=chat 时是群 chat_id" },
+          },
+        },
       },
       required: ["query"],
     },
@@ -74,8 +84,19 @@ export function createTools(deps: CefuControllerOptions = {}): ToolSet {
       const query = String(args.query ?? "").trim()
       if (!query) return textResult("query 不能为空")
       const limit = Math.max(1, Math.min(20, Number(args.limit ?? 5) || 5))
+      // 作用域上下文（第三个参数）：让检索只看得到“自己范围内 + 公共”的条目。
+      //
+      // 不传的后果：A 群/他人格/别的项目学到的知识会参与排序，
+      // 现象是“它很自信地答了一个与当前部署无关的旧故障”（因为确实命中了一条）。
+      let scopeArg = ""
+      if (args.scope && typeof args.scope === "object") {
+        const s = args.scope as { kind?: unknown; id?: unknown }
+        if (s.kind) {
+          scopeArg = ", " + JSON.stringify({ kind: String(s.kind), id: s.id === undefined ? "" : String(s.id) })
+        }
+      }
       try {
-        const hits = (await cefuCall("search", `${JSON.stringify(query)}, ${limit}`, deps)) as Array<Record<string, unknown>>
+        const hits = (await cefuCall("search", `${JSON.stringify(query)}, ${limit}${scopeArg}`, deps)) as Array<Record<string, unknown>>
         if (!Array.isArray(hits) || hits.length === 0) return textResult("册府里没有相关词条（检索无命中）——不要用通用常识冒充知识库内容。")
         return textResult(hits.map(renderHit).join("\n"), { hits })
       } catch (err) {
@@ -122,6 +143,18 @@ export function createTools(deps: CefuControllerOptions = {}): ToolSet {
         facts: { type: "array", items: { type: "object", properties: { k: { type: "string" }, v: { type: "string" } }, required: ["k", "v"] }, description: "硬事实：IP/端口/阈值/chat_id/人名（k-v 对）" },
         aliases: { type: "array", items: { type: "string" }, description: "别名（别人会怎么问：同义词/口语/报错原文/缩写）" },
         confidence: { type: "string", enum: ["verified", "inferred"], description: "verified=人说的或实测；inferred=推断（30 天不确认自动过期）" },
+        scope: {
+          type: "object",
+          description:
+            "作用域（决定谁能检索到这条）。缺省 global。" +
+            "persona=只给该人格用（如小霜在支持群学到的），chat=只给该群用，global=公共知识（环境/制度/找谁）。" +
+            "不填的后果：别的群/别的人格会拿这条当真——同一句话在不同群的答案可能完全不同。",
+          properties: {
+            kind: { type: "string", enum: ["global", "persona", "chat"] },
+            id: { type: "string", description: "kind 为 persona 时是人格 id，chat 时是群 chat_id；global 时不填" },
+          },
+          required: ["kind"],
+        },
         id: { type: "string", description: "更新已有词条时传它的 id（同册内高度相似会被拒，应沿用 id 更新）" },
       },
       required: ["title", "category", "source"],
@@ -142,6 +175,16 @@ export function createTools(deps: CefuControllerOptions = {}): ToolSet {
       if (Array.isArray(args.facts) && args.facts.length) entry.facts = args.facts
       if (Array.isArray(args.aliases) && args.aliases.length) entry.aliases = args.aliases.map(String)
       if (args.confidence) entry.confidence = String(args.confidence)
+      // scope：缺省 global（不传 = 公共知识）。
+      //
+      // 为何要归一化成 JSON 串：册府的字段就是这个形态（字符串而非枚举，
+      // 方便后续扩展 persona/driver/user 维度而不迁移数据）。
+      if (args.scope && typeof args.scope === "object") {
+        const s = args.scope as { kind?: unknown; id?: unknown }
+        const kind = String(s.kind ?? "global")
+        const id = s.id === undefined || s.id === null ? "" : String(s.id)
+        entry.scope = id ? JSON.stringify({ kind, id }) : JSON.stringify({ kind })
+      }
       try {
         const r = (await cefuCall("put", JSON.stringify(entry), deps)) as Record<string, unknown>
         const id = String(r.id ?? "?")

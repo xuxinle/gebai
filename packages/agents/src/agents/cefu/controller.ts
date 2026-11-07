@@ -274,6 +274,32 @@ async function defaultConnect(port: number): Promise<{ socket: import("node:net"
 }
 
 /**
+ * 没拿到 GEBAI_HOME 时的数据根兑底（**从仓库标记上溯找仓库根**）。
+ *
+ * ## 为何需要它（真实故障）
+ *
+ * 原本 `GEBAI_HOME` 为空就直接抛“册府启动需要 GEBAI_HOME”。这在**服务进程里**
+ * 不会发生（compose 注入了），但工具边车/子会话/直接调工具的场景经常没有——
+ * 结果就是“工具在但在任何场景下都报错”，而报错文案看起来像配置问题，
+ * 实际是代码没兑底。
+ *
+ * 与相期 `resolveXiangqiBin` 同一手法：不上数级数，而是逐级上溯找
+ * `shuangtian/apps/cefu/ui`（源码树里一定在）——数级数写错过一次。
+ * 找不到才回落到 cwd（此处调用方会拼 data/cefu，至少在能写的工作目录）。
+ */
+function defaultGebaiHome(env: Record<string, string | undefined>): string {
+  void env
+  let cur = resolve(import.meta.dirname)
+  for (let i = 0; i < 16; i++) {
+    if (existsSync(join(cur, ...REPO_MARKER))) return cur
+    const parent = dirname(cur)
+    if (parent === cur) break
+    cur = parent
+  }
+  return process.cwd()
+}
+
+/**
  * 启动（或复用已启动的）册府无头进程并返回连接。
  *
  * 每次启动前先接管（kill 同一 exe 的旧实例）——服务重启后旧册府进程还占着
@@ -284,8 +310,7 @@ export async function ensureCefu(opts: CefuControllerOptions = {}): Promise<Cefu
   if (starting) return starting
   starting = (async () => {
     const env = opts.env ?? process.env
-    const gebaiHome = opts.gebaiHome ?? env.GEBAI_HOME ?? ""
-    if (!gebaiHome) throw new Error("册府启动需要 GEBAI_HOME（未设置时无法定位数据根与 exe）")
+    const gebaiHome = opts.gebaiHome ?? env.GEBAI_HOME ?? defaultGebaiHome(env)
     const probe = resolveCefuBin({
       gebaiHome,
       moduleDir: import.meta.dirname,
@@ -312,7 +337,18 @@ export async function ensureCefu(opts: CefuControllerOptions = {}): Promise<Cefu
     const take = await takeoverProcess(probe.bin, { log: opts.log, env })
     for (const w of take.warnings) opts.log?.warn(`[cefu] 接管警告：${w}`)
     const spawnFn = opts.spawnFn ?? ((bin: string, args: string[]) => spawn(bin, args, { stdio: "ignore", windowsHide: true, cwd: uiDir ?? dirname(bin) }))
-    const args = ["--headless", "--db", dbPath, "--control-port", "0", "--control-file", ctlFile]
+    // `--seed <不存在的路径>`：**生产库不导入示例种子**。
+    //
+    // 册府缺省会在空库首次启动时导入 `seed.md`（7 条示例值班知识）——那是为界面
+    // 演示准备的（“打开就有内容而不是空白页”）。但它们全部 `needs_review=1` 且
+    // `confidence=inferred`，进了生产库就是**检索污染源**：人格会命中
+    // “TSDB 写入延迟升高”这种与当前部署无关的假条目，还可能当真引给用户。
+    //
+    // 为何不能传空串：册府的 `resolve_seed("")` 会把空串当成“用缺省”——
+    // `is_regular_file("")` 为 false，于是去试候选列表并命中 `apps/cefu/seed.md`，
+    // 又导了回来（实测踩到）。传一个**确定不存在**的路径才能真的关掉。
+    const noSeed = join(home, "no-seed.md")   // 不创建它；册府读不到就跳过导入
+    const args = ["--headless", "--db", dbPath, "--seed", noSeed, "--control-port", "0", "--control-file", ctlFile]
     if (uiDir) args.push("--ui", uiDir)
     opts.log?.info(`[cefu] 拉起无头册府：${probe.bin} ${args.join(" ")}`)
     const proc = spawnFn(probe.bin, args)

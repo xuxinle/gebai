@@ -189,6 +189,40 @@ class CeFu {
       const auto limit = args.size() > 1 ? static_cast<std::size_t>(args[1].get<double>()) : std::size_t{8};
       cefu::SearchOptions options;
       options.limit = limit;
+      // 作用域过滤（第三个参数）：把 `{"kind":"persona","id":"xiaoshuang"}`
+      // 这类上下文传进来，就**只看得到自己范围内的条目**。
+      //
+      // 为何必须接上（否则 scope 字段形同虚设）：不传 visible 时，
+      // A 群/他人格/别的项目学到的知识会全部参与排序——现象是
+      // “它答了一个完全无关部署的旧故障”，而且很自信（因为确实命中了一条）。
+      //
+      // 语义：词条 scope 为 global → 所有人可见；否则要求与查询上下文
+      // 至少有一个相同维度（kind+id 全等）。
+      //
+      // 不传上下文时**只看 global**（缺省安全侧）：
+      // 不过滤会让所有非公共条目都参与排序，而调用方往往不知道要传——
+      // 那正是“知识库混入无关部署”的成因。要查自己范围的，显式传 scope。
+      // 注：直接调 `cefu.search` 的旧脚本（只传 query/limit）也会变成只看 global，
+      // 这是**有意的行为变更**：隔离优先于向后兼容。
+      {
+        std::string ctx_kind;
+        std::string ctx_id;
+        if (args.size() > 2 && args[2].is_object()) {
+          ctx_kind = st::json_as_string(args[2].value("kind", std::string{}));
+          ctx_id = st::json_as_string(args[2].value("id", std::string{}));
+        }
+        options.visible = [ctx_kind, ctx_id](const cefu::Entry& e) -> bool {
+          // global 永远可见（公共知识：环境/制度/找谁）
+          if (e.scope.find(R"("kind":"global")") != std::string::npos) return true;
+          // 没给上下文：非 global 一律隐藏（缺省安全侧）
+          if (ctx_kind.empty()) return false;
+          // 同 kind 且同 id → 可见；只要有一个不匹配就隐藏
+          const bool kind_match = e.scope.find("\"kind\":\"" + ctx_kind + "\"") != std::string::npos;
+          if (!kind_match) return false;
+          if (ctx_id.empty()) return true;
+          return e.scope.find("\"id\":\"" + ctx_id + "\"") != std::string::npos;
+        };
+      }
       const auto hits = index_.search(query, options);
       Json out = Json::array();
       for (const auto& h : hits) {
@@ -248,6 +282,22 @@ class CeFu {
       const auto now = st::time::now_ms();
       entry.created_at = now;
       entry.updated_at = now;
+
+      // `needs_review`：推断类知识**必须进待确认队列**（否则永远没人看它）。
+      //
+      // 为何在这里定而不是让调用方传：调用方（人格自动学习/模型手写）
+      // 很容易忘、也不应该为它负责——它是「这条知识的可信度该不该被人看一眼」
+      // 的直接推论，属于存储层的内在不变量：
+      //   confidence=verified → 人说的/实测过的，不用再确认
+      //   confidence=inferred → 推断，**默认待人确认**（否则它永远停在推断）
+      //
+      // 实测踩到的后果：自动学习写进去的 inferred 条目 needs_review=0，
+      // 于是 cefu_review 永远不报它们，也没有任何地方会提示“这些还没验证”——
+      // 知识库看起来在学，实际是一湖未审核的推断。
+      entry.needs_review = entry.confidence != "verified";
+      // 过期时刻：verified 的事实给 180 天；推断的先给 30 天，
+      // 让人在这段时间内确认（未确认则自然过期，不会被无限当真）。
+      entry.expires_at = now + (entry.confidence == "verified" ? 180LL : 30LL) * 86'400'000;
 
       // 查重：同分类内高度相似时**不静默新增**，把既有词条交回去让人选
       for (const auto& other : index_.entries()) {
@@ -684,8 +734,21 @@ auto resolve_ui_dir(const std::string& requested) -> std::string {
   return requested;  // 找不到就原样返回，让后面的报错说清路径
 }
 
+/// 解析种子文件路径。
+///
+/// ## 关键：**显式指定就不猜候选**（否则关不掉种子导入）
+///
+/// 原来只要 `requested` 不存在就去试相对候选列表。于是「明确传一个不存在的路径」
+/// （意图是“不要导入种子”）会又被猜回 `apps/cefu/seed.md`——配置明明写了、
+/// 行为却没变。
+///
+/// 调用方（无头控制器）正是靠 `--seed <不存在>` 来关掉示例数据导入：
+/// seed.md 里那 7 条示例都是 `needs_review=1` 的假数据，进生产库就是检索污染源。
+///
+/// 现在：给了非空路径就**只用它**（存在就读、不存在就跳过导入）；
+/// 只有调用方没给（空串）时才去猜候选——那才是“找默认位置”的本意。
 auto resolve_seed(const std::string& requested) -> std::string {
-  if (st::fs::is_regular_file(requested)) return requested;
+  if (!requested.empty()) return requested;
   for (const char* candidate : {"apps/cefu/seed.md", "../apps/cefu/seed.md",
                                 "../../apps/cefu/seed.md", "../../../apps/cefu/seed.md"}) {
     if (st::fs::is_regular_file(candidate)) return candidate;

@@ -1063,6 +1063,58 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           await refreshSources()
           await refreshPersonas()
         },
+        // 自动学习（只在人格装了 cefu 时真正生效，见 runner 的分支）：
+        // 每轮跑完后从**人话**里识别“值得记的东西”沉进册府。
+        //
+        // 为何在 compose 里拼接而不是 runner 内置：runner 属于 persona 内核，
+        // 而册府是边缘能力（可能未构建/未启用）。这里失败 = 不学习，不是故障。
+        learnFrom: async ({ input, events }) => {
+          // 识别（纯函数，来自内核）+ 辅助（人话提取，来自本包）
+          const { humanTextsOf } = await import("../core/session/persona-learn")
+          const memoryLearn = await import("@gebai/persona")
+          const texts = humanTextsOf(events)
+          if (!texts.length) return
+          // 册府工具（与模型用的同一套；取不到 = 未发现子Agent，直接跳过）
+          const cefuDef = subAgents.defOf("cefu")
+          const putTool = cefuDef?.tools?.cefu_put
+          if (!putTool) return
+          const chatId = events[0]?.context.refs?.chatId
+          for (const text of texts) {
+            const candidates = [
+              memoryLearn.detectCorrection({ humanText: text, personaId: input.personaId, ...(chatId ? { chatId } : {}), ...(input.sessionId ? { sessionId: input.sessionId } : {}) }),
+              memoryLearn.detectConsensus({ humanText: text, ...(chatId ? { chatId } : {}), ...(input.sessionId ? { sessionId: input.sessionId } : {}) }),
+            ]
+            for (const c of candidates) {
+              if (!c) continue
+              const verdict = memoryLearn.shouldLearn(c)
+              if (!verdict.ok) {
+                log.info(`[persona:learn] 跳过：${verdict.why}`)
+                continue
+              }
+              const scope = chatId
+                ? JSON.stringify({ kind: "chat", id: chatId })
+                : JSON.stringify({ kind: "persona", id: input.personaId })
+              try {
+                const r = await putTool.execute(
+                  {
+                    title: c.title,
+                    category: c.category,
+                    source: c.source,
+                    ...(c.symptom ? { symptoms: c.symptom } : {}),
+                    ...(c.steps.length ? { steps: c.steps } : {}),
+                    ...(c.facts?.length ? { facts: c.facts } : {}),
+                    scope: JSON.parse(scope) as Record<string, unknown>,
+                    confidence: c.confidence,
+                  },
+                  {} as never,
+                )
+                log.info(`[persona:learn] ${String(r.output)}`)
+              } catch (err) {
+                log.warn(`[persona:learn] 写入失败（不影响回答）：${String((err as Error)?.message || err)}`)
+              }
+            }
+          }
+        },
         log: { info: log.info, warn: log.warn },
       }),
       log: { info: log.info, warn: log.warn },
@@ -1225,6 +1277,28 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         credentials: personaCredentials,
         workers: workerBook,
         channelInput: () => personaChannelBridge?.allStats() ?? {},
+    // 册府统计（未装册府时子Agent 取不到 → 返回 null，面板不显示该段）
+    memoryStats: async () => {
+      const statsTool = subAgents.defOf("cefu")?.tools?.cefu_stats
+      if (!statsTool) return null
+      try {
+        const r = await statsTool.execute({}, {} as never)
+        const s = (r.data as { stats?: Record<string, unknown> } | undefined)?.stats
+        if (!s) return null
+        const num = (k: string): number => Number(s[k] ?? 0) || 0
+        return {
+          entries: num("entries"),
+          categories: num("categories"),
+          verified: num("verified"),
+          inferred: num("inferred"),
+          stale: num("stale"),
+          needs_review: num("needs_review"),
+          db_path: String(s.db_path ?? ""),
+        }
+      } catch {
+        return null
+      }
+    },
         sessionRunning: (id) => {
           try {
             return engine.isRunning(id)

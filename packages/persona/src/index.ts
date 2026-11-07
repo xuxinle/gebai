@@ -122,6 +122,10 @@ export { ACTOR_FIELDS_JSON_KEY, actorFieldsFromEnv, renderTemplate, resolveActor
 export type { SpeakerInput, SpeakerKind, SpeakerVerdict } from "./speaker-filter"
 export { classifySpeaker, replyToOwnerFromEnv } from "./speaker-filter"
 
+// ── 自动学习（从人话里识别值得进知识库的东西；纯函数，可穷举单测）──
+export type { LearnedCandidate } from "./memory-learn"
+export { detectConsensus, detectCorrection, detectProcedure, shouldLearn } from "./memory-learn"
+
 // ── 部署配置面（启用名单/入站收窄/输出目标/审批姿态/会话路由）──
 export type { EnvView, PersonaApprovalMode, PersonaEnvReport } from "./env-config"
 export {
