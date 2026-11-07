@@ -202,24 +202,33 @@ export async function personaOutboundGate(
     }
   }
 
-  // ② 让位窗口（C）：用户刚在这个群亲手说过话 → 人格不抢话。
+  // ② 让位窗口（C）：**只拦“人格主动插话”，不拦“回复他刚问的那句”**。
   //
-  // 放在审核之前：既然注定要拒，就不应该先弹一张卡浪费人一次点击。
-  // 例外：用户**明确要求**的发送不受限（否则“你回他”之后人格还会静默，荒谬）。
+  // ## 这里曾写错过（真实事故）
+  //
+  // 上一版只要“用户刚说过话”就拒，结果每次正常问答都被拦：
+  // 用户 20:25 问「多久元旦」→ 事件入站时记下让位 → 人格处理完想回复时
+  // 恰好落在 180 秒窗口内 → 被拒 → 用户 20:31 才收到回复（延迟 6 分钟）。
+  //
+  // 根因是把两件相反的事混成一件：
+  // - “用户正在说话”——人格别插嘴（让位）
+  // - “用户说完了，等人答”——人格**必须**回（这是对话的基本礼节）
+  //
+  // 区分依据：这条要发的内容**是不是在回应刚刚那个群的人**。最直接的信号是
+  // `reply_to`（引用回复一个具体消息）——那说明就是在回他，放行。
+  // 主动发起（无 reply_to、也不是回本轮事件）才谈得上“抢话”。
   const chatId = input.target.startsWith("feishu:") ? input.target.slice("feishu:".length).split(/[#=]/)[0]! : ""
-  // 例外：`args.explicit === true`（模型声明“这是用户本人要求的”）。
-  // 为何由模型声明而不是我猜：判定逻辑看不懂语义；而“用户说了‘你回他’”这件事
-  // 只有模型读得到。风险是模型滥用它——但那与它本就有的自由天平相当
-  // （审核卡仍是最后一道关，用户会在卡上看到并驳回）。
   const explicit = input.args.explicit === true || deps.isExplicitRequest?.(input.args) === true
-  if (chatId && !explicit && deps.humanSpeech?.inWindow(chatId)) {
+  // 引用回复 = 在回具体某条消息：这是对话主线，永远不被让位拦。
+  const isReply = input.verb === "reply" || String(input.args.reply_to ?? "").trim() !== "" || String(input.args.root ?? "").trim() !== ""
+  if (chatId && !explicit && !isReply && deps.humanSpeech?.inWindow(chatId)) {
     const seconds = Math.max(1, Math.ceil(deps.humanSpeech.remainingMs(chatId) / 1000))
     return {
       allowed: false,
       reason:
-        `用户本人在这个群刚亲手发过言（还有约 ${seconds} 秒的让位窗口）——此刻发言会看着像抢话。` +
-        `**这不是失败**：你已经处理完了就不必再发；确实需要回复就等窗口过去，` +
-        `或在消息里注明这是用户本人要求的（传 \`explicit: true\`）。`,
+        `用户本人在这个群刚亲手发过言（还有约 ${seconds} 秒）——此刻**主动**发言会看着像抢话。` +
+        `**这不是失败**：如果这条是在回他刚说的那句（或本轮事件），用 \`reply\` + \`reply_to\` 重发即可放行；` +
+        `也可以传 \`explicit: true\` 表示是你本人要求的。`,
     }
   }
 

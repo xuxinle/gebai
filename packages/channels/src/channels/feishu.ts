@@ -449,7 +449,6 @@ export const channel: ChannelDef = {
     // 自发送消息记账（宿主注入）：自己发出/回复的消息按 message_id 精确过滤——
     // 以用户名义（as_user=true）发的消息 sender_type=user，能绕过 IGNORE_SELF 的 app 过滤，
     // 不查这笔账就会把自己说的话又当新消息投回去（人格多处理一轮）。
-    const sentMessages = ctx.deps.sentMessages as { hit(id: string): boolean } | undefined
     const allowed = new Set((ctx.env("GEBAI_CHANNELS_FEISHU_CHATS") ?? "").split(/[,\s]+/).filter(Boolean))
     // 未配白名单 = 不限定入站群（入站不做写操作，风险低于出站）；但日志里明确说清楚
     if (!allowed.size) ctx.log("info", "未配置 GEBAI_CHANNELS_FEISHU_CHATS：入站不限群（出站仍 fail-closed）")
@@ -460,20 +459,38 @@ export const channel: ChannelDef = {
       onEvent: (ev) => {
         const msg = extractMessage(ev)
         if (!msg) return // 非消息事件（卡片回调等）不归本渠道
-        // 自己发出的消息（含 as_user 名义）精确过滤：命中记账即丢弃，防自触发循环
-        if (sentMessages?.hit(msg.messageId)) {
-          ctx.log("info", `忽略自发送消息 ${msg.messageId}（防回灌）`)
-          return
-        }
         if (ignoreSelf && msg.senderType === "app") return // 防自触发循环
         if (allowed.size && !allowed.has(msg.chatId)) {
           ctx.log("info", `忽略非白名单群消息：${msg.chatId}`)
           return
         }
+        // 发送者判定（防回灌 + 是否回用户本人）。
+        //
+        // 为何渠道也要判：渠道入站是**投给人格运行时**的（ChannelInputBridge），
+        // 而人格事件源现在也在收同一批消息。两处口径不一致 → 「有时回有时不回」。
+        // 判定实现由宿主注入（channels 不依赖 persona 包，保持依赖方向）。
+        const sentMessages = ctx.deps.sentMessages as { hit(id: string): boolean } | undefined
+        const isSelf = sentMessages?.hit(msg.messageId) === true
+        void (async () => {
+          const decide = ctx.deps.speakerFilter as
+            | ((input: { senderId?: string; isSelf: boolean }) => { deliver: boolean; reason?: string })
+            | undefined
+          if (decide) {
+            const v: { deliver: boolean; reason?: string } = await Promise.resolve(
+              decide({ ...(msg.senderId ? { senderId: msg.senderId } : {}), isSelf }),
+            ).catch(() => ({ deliver: true }))
+            if (!v.deliver) {
+              ctx.log("info", `忽略消息 ${msg.messageId}：${v.reason ?? "被 speakerFilter 拦下"}`)
+              return
+            }
+          } else if (isSelf) {
+            // 未注入判定器（旧宿主）：至少保留防回灌
+            ctx.log("info", `忽略自发送消息 ${msg.messageId}（防回灌）`)
+            return
+          }
         // 发送者姓名：优先群成员表（批量，一次覆盖全群），未命中再逐条查 contact API。
         // 查不到（权限不足/接口失败）时 body 兜底标「用户」——模型至少知道这条是别人发的，
-        // 而不是把无前缀消息当成来自自己的上下文。
-        void (async () => {
+        // 而不是把无前缀消息当成来自自己的上下文。        void (async () => {
           let senderName: string | undefined
           // 群消息：先尝试整群成员表；单聊（p2p）没有群成员接口，直接走 contact。
           // 判据取**协议字段** `chatType`，不拿展示文案 `chatName === "与我的单聊"` 当前置条件——

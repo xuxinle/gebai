@@ -118,6 +118,10 @@ export {
 // ── 身份模板（角色身份由部署环境的白名单变量提供）──
 export { ACTOR_FIELDS_JSON_KEY, actorFieldsFromEnv, renderTemplate, resolveActorFields, templateVars, validateTemplate } from "./identity"
 
+// ── 发送者判定（防回灌 + 是否回复用户本人；两条入站路径共用同一口径）──
+export type { SpeakerInput, SpeakerKind, SpeakerVerdict } from "./speaker-filter"
+export { classifySpeaker, replyToOwnerFromEnv } from "./speaker-filter"
+
 // ── 部署配置面（启用名单/入站收窄/输出目标/审批姿态/会话路由）──
 export type { EnvView, PersonaApprovalMode, PersonaEnvReport } from "./env-config"
 export {

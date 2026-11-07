@@ -736,6 +736,21 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       ...(config.feishuAppId ? { feishuSessionAppId: config.feishuAppId, feishuSessionBotEnabled: config.feishuBotEnabled } : {}),
       // 自发送消息记账（防回灌，与人格事件源共享同一实例）
       sentMessages,
+      // 发送者判定（防回灌 + 是否回用户本人）：与人格事件源用**同一个**实现。
+      //
+      // 为何注入而不是在 channels 里重写：判定涉及「用户 openId」（要从凭据存取）
+      // 与「发送记录」，channels 包不能依赖 persona；而两边口径必须完全一致
+      //（不一致的现象是“有时回有时不回”）。
+      speakerFilter: async (i: { senderId?: string; isSelf: boolean }) => {
+        const { classifySpeaker, replyToOwnerFromEnv } = await import("@gebai/persona")
+        const ownerOpenId = await personaCredentials?.ownerOpenId().catch(() => undefined)
+        return classifySpeaker({
+          ...(i.senderId ? { senderId: i.senderId } : {}),
+          ...(ownerOpenId ? { ownerOpenId } : {}),
+          isSelf: i.isSelf,
+          replyToOwner: replyToOwnerFromEnv(process.env as Record<string, string | undefined>),
+        })
+      },
       // 拟人凭据（feishu 渠道的 `as_user=true` 用它以用户本人名义发消息）；未启用时为 null
       ...(personaCredentials ? { personaCredentials } : {}),
     },
@@ -1304,8 +1319,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         return await feishuTenantToken(id, secret)
       },
       log: { info: log.info, warn: log.warn },
-      // 自发送消息记账（防回灌，与渠道共享同一实例）：入站过滤自己发出的消息
-      sentMessages,
+              // 自发送消息记账（防回灌，与渠道共享同一实例）：入站过滤自己发出的消息
+        sentMessages,
+        // 用户本人 openId（判定“这条是不是用户自己发的”；见 speaker-filter）
+        ...(personaCredentials ? { personaOwnerOpenId: () => personaCredentials!.ownerOpenId() } : {}),
     })
     personaSources = new EventSourceManager({
       scanDirs: defaultEventSourceScanDirs({ packageRoot: await resolvePersonaPackageRoot() }),

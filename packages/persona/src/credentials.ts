@@ -202,6 +202,25 @@ export class PersonaCredentials {
     return { reason: resolved.reason }
   }
 
+  /**
+   * 用户本人的飞书 open_id（拿不到返回 undefined）。
+   *
+   * 用途：判定「这条消息是不是用户自己发的」（见 `speaker-filter`）。
+   * 为何从令牌写体取而不是现查接口：`open_id` 在授权兑换时已顺手存下，
+   * 多打一次 `user_info` 只为拿它没意义。
+   *
+   * 令牌过期也照返回：“用户是谁”不会因令牌过期而变，而判定身份恰恰在
+   * 凭据不可用时也需要（比如决定要不要提醒授权）。
+   */
+  async ownerOpenId(): Promise<string | undefined> {
+    try {
+      const snapshot = await this.opts.store.snapshot()
+      return snapshot.token?.openId?.trim() || undefined
+    } catch {
+      return undefined
+    }
+  }
+
   /** 撤销授权（清除落盘令牌）。 */
   async revoke(): Promise<void> {
     await this.opts.store.clear()

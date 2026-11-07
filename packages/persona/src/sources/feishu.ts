@@ -39,6 +39,7 @@
  */
 
 import type { EventSourceContext, EventSourceDef, IngressEvent } from "../source"
+import { classifySpeaker, replyToOwnerFromEnv } from "../speaker-filter"
 
 /** 宿主注入的长连接工厂形状（与 channels 侧同口径，不 import 宿主包）。 */
 type LongConnFactory = (opts: {
@@ -180,6 +181,10 @@ export const source: EventSourceDef = {
 
     const historyLimit = Math.max(0, Math.min(50, Number(ctx.env("GEBAI_PERSONA_FEISHU_HISTORY") ?? "0") || 0))
     const useUser = !/^(off|0|false|no)$/i.test(ctx.env("GEBAI_PERSONA_FEISHU_USE_USER") ?? "")
+    // 是否回复**用户本人**发的消息（缺省 false：调试时自己的话不吵自己）。
+    // 判定走 `speaker-filter`（纯函数、单测穷举），与渠道侧同口径。
+    const replyToOwner = replyToOwnerFromEnv(process.env as Record<string, string | undefined>)
+    const ownerOpenIdOf = ctx.deps.personaOwnerOpenId as (() => Promise<string | undefined>) | undefined
     const allowed = new Set(
       (ctx.env("GEBAI_PERSONA_FEISHU_CHATS") ?? "")
         .split(/[,\s]+/)
@@ -204,13 +209,6 @@ export const source: EventSourceDef = {
         if (stopped) return
         const msg = extractMessage(ev)
         if (!msg) return
-        // 自发送消息记账（宿主注入，与渠道共享同一实例）：自己发出/回复的消息
-        // （含 as_user 名义，sender_type=user 拦不住）按 message_id 精确过滤，防回灌
-        const sentMessages = ctx.deps.sentMessages as { hit(id: string): boolean } | undefined
-        if (sentMessages?.hit(msg.messageId)) {
-          ctx.log("info", `忽略自发送消息 ${msg.messageId}（防回灌）`)
-          return
-        }
         // 防自触发循环：机器人自己发的消息若被当输入，会无限自我对话
         if (msg.senderType === "app") return
         if (allowed.size && !allowed.has(msg.chatId)) return
@@ -218,8 +216,25 @@ export const source: EventSourceDef = {
           ctx.log("info", `忽略空正文消息 ${msg.messageId}（撤回/系统消息）`)
           return
         }
-        // 回看历史是**附加**能力：失败不影响本条投递（只是没有上下文）
+        // 发送者判定（防回灌 + 是否回用户本人）。
+        //
+        // 为何要异步：owner openId 要从凭据存里取（首次可能读盘）。
+        // 为何不能只看 sender_type：人格以 `as_user` 发言时 sender_type=user，
+        // 与用户本人**完全同形**——只能靠发送记录（message_id）与 open_id 区分。
+        const sentMessages = ctx.deps.sentMessages as { hit(id: string): boolean } | undefined
+        const isSelf = sentMessages?.hit(msg.messageId) === true
         void (async () => {
+          const ownerOpenId = await ownerOpenIdOf?.().catch(() => undefined)
+          const verdict = classifySpeaker({
+            ...(msg.senderId ? { senderId: msg.senderId } : {}),
+            ...(ownerOpenId ? { ownerOpenId } : {}),
+            isSelf,
+            replyToOwner,
+          })
+          if (!verdict.deliver) {
+            ctx.log("info", `忽略消息 ${msg.messageId}：${verdict.reason ?? verdict.kind}`)
+            return
+          }
           let history = ""
           if (historyLimit > 0 && typeof reader === "function") {
             try {
