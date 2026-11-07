@@ -98,6 +98,37 @@ auto scope_id_of(std::string_view scope) -> std::string {
   return std::string{scope.substr(first_quote + 1, second_quote - first_quote - 1)};
 }
 
+/// 作用域类型 → 人话标签。
+///
+/// 为何需要：schema 里的 kind 是 `chat` / `persona` 这样的**存储值**，
+/// 直接显示会得到 `chatoc_f71d4c…` 这种看不懂的串。
+/// 图谱给人看，标签就得是人话。
+auto scope_label(std::string_view kind) -> std::string {
+  if (kind == "chat") return "本群";
+  if (kind == "persona") return "小霜的";   // 人格级知识（只给该人格用）
+  if (kind == "person") return "个人的";
+  if (kind == "global") return "全局";
+  // 未知类型：原样显示，但不拼 id（未知 kind 本身就说明作者用了新值，
+  // 显示原值比报错更有用）
+  return std::string(kind);
+}
+
+/// 把内部 id 缩成一个**人能认的尾巴**，不可读时返回空。
+///
+/// 为何默认不拼 id：`oc_f71d4c992494a66b60c82000b48aa00` 有 40 多个字符，
+/// 画到图上就是一根宽横条，把真正的内容挤掉；
+/// 即便取前 10 位（`oc_f71d4cc`）人也读不出是哪个群——“本群 oc_f71d4cc”
+/// 相对“本群”没有任何信息增量。
+///
+/// 所以：只在 id **看起来是人写的**（短、且不像随机串）时才显示。
+/// 识别随机串的判据：含下划线且长度 > 8——本仓的内部 id 都是这个形态
+/// （`oc_xxx` 会话、`ou_xxx` 用户、`e_xxx` 词条）。
+auto short_id_tail(std::string_view id) -> std::string {
+  if (id.empty() || id.size() > 12) return {};
+  if (id.find('_') != std::string_view::npos && id.size() > 8) return {};
+  return std::string(id);
+}
+
 /// 确定性伪随机（布局必须可重复：否则每次打开图形状都变，截图回归也就飘了）。
 class Rng {
  public:
@@ -184,7 +215,19 @@ auto build(const std::vector<Entry>& entries, const BuildOptions& options) -> Gr
       const auto kind = scope_kind_of(e.scope);
       if (kind != "global" && !kind.empty()) {
         const auto sid = scope_id_of(e.scope);
-        const std::string label = sid.empty() ? kind : (kind + ":" + sid);
+        // 标签用**人能读的类型名**，不拼内部 id。
+        //
+        // 之前是 `kind + ":" + sid`，而 sid 是 `oc_f71d4c...` 这种会话/用户 id：
+        // 画面上出现 `chatoc_f71d4c...`，既读不懂又占宽度，还把标签挤掉。
+        //
+        // 类型名用到中文的人话（本群 / 我的 / 此人），而不是英文 key，
+        // 因为图谱是给人看的。
+        std::string label = scope_label(kind);
+        if (!sid.empty()) {
+          // 保留 id 的可认尾部（只在短时可读时拼接，否则纯噪声）
+          const std::string tail = short_id_tail(sid);
+          if (!tail.empty()) label += " " + tail;
+        }
         connect_meta(std::string{kScopePrefix} + label, label, NodeKind::Scope, 1.3,
                      EdgeKind::ScopedTo, from);
       }

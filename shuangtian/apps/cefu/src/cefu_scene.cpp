@@ -167,7 +167,7 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   out += "  const full = dir.length();\n";
   out += "  if (full < 1e-6) return null;\n";
   out += "  dir.multiplyScalar(1.0 / full);\n";
-  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, full, 10, 1);\n";
+  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, full, 14, 1);\n";
   out += "  const mat = new THREE.MeshBasicMaterial({ color: color });\n";
   out += "  const mesh = new THREE.Mesh(geo, mat);\n";
   out += "  mesh.position.set((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);\n";
