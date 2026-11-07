@@ -75,6 +75,21 @@ export interface CreateDriverInput {
 const DRIVER_ID_RE = /^[a-z0-9_]+$/
 const MAX_DYNAMIC_PER_PERSONA = 16
 
+/** `personaId/driverId` 的展示形式（日志用）。 */
+const fmt = (x: { personaId: string; driverId: string }): string => `${x.personaId}/${x.driverId}`
+
+/** 两个 driver 定义是否等价（只比影响行为的字段：输出目标变了也算变）。 */
+function sameDriverDef(a: DriverDef, b: DriverDef): boolean {
+  if (a.focus !== b.focus) return false
+  if (a.maxConcurrent !== b.maxConcurrent) return false
+  if (a.subscriptions.length !== b.subscriptions.length) return false
+  if (a.subscriptions.some((s, i) => s !== b.subscriptions[i])) return false
+  if (a.sessionKeyOf !== b.sessionKeyOf) return false
+  const sig = (t?: DriverDef["outputs"]): string =>
+    (t ?? []).map((o) => `${o.channel}:${o.address}#${o.thread ?? ""}:${o.default ? 1 : 0}`).join(",")
+  return sig(a.outputs) === sig(b.outputs)
+}
+
 /**
  * Driver 注册表。
  *
@@ -140,6 +155,67 @@ export class DriverRegistry {
   }
 
   /**
+   * **整体替换静态定义**（热加载用）：差量下线被删的、改写变了的。
+   *
+   * 为何不能只靠 `putStatic` 逐条覆盖：它只能“加/改”，删不掉。
+   * 人格定义被修改（删了一个 driver、改了订阅或 focus）后，旧条目会永久留在注册表里：
+   * `driver_list` 会列出一个不存在的分身、新建同名动态分身被「已存在」拒绝、
+   * 状态面板也会显示已删除的分工。
+   *
+   * 动态创建的条目**保留**（它们是模型自己的工位结构，不归静态配置管）。
+   *
+   * @returns 实际发生的变化（供调用方同步运行时调度器）
+   */
+  syncStatics(statics: ReadonlyArray<{ personaId: string; def: DriverDef }>): {
+    added: Array<{ personaId: string; driverId: string }>
+    removed: Array<{ personaId: string; driverId: string }>
+    changed: Array<{ personaId: string; driverId: string }>
+  } {
+    const added: Array<{ personaId: string; driverId: string }> = []
+    const removed: Array<{ personaId: string; driverId: string }> = []
+    const changed: Array<{ personaId: string; driverId: string }> = []
+    const wanted = new Map<string, Map<string, DriverDef>>()
+    for (const s of statics) {
+      const m = wanted.get(s.personaId) ?? new Map<string, DriverDef>()
+      m.set(s.def.id, s.def)
+      wanted.set(s.personaId, m)
+    }
+    // 下线：旧静态条目已不在新定义里
+    for (const [personaId, map] of this.byPersona) {
+      const want = wanted.get(personaId)
+      for (const [driverId, rec] of [...map]) {
+        if (rec.origin !== "static") continue
+        if (!want?.has(driverId)) {
+          map.delete(driverId)
+          removed.push({ personaId, driverId })
+        }
+      }
+    }
+    // 上线/改写
+    for (const [personaId, map] of wanted) {
+      for (const [driverId, def] of map) {
+        const rec = this.byPersona.get(personaId)?.get(driverId)
+        if (rec?.origin === "static") {
+          if (sameDriverDef(rec.def, def)) continue
+          rec.def = def
+          changed.push({ personaId, driverId })
+          continue
+        }
+        // 动态条目同名：静态胜出（手写配置才是权威）
+        this.putStatic(personaId, def)
+        added.push({ personaId, driverId })
+      }
+    }
+    if (added.length || removed.length || changed.length) {
+      this.log?.info(
+        `[persona:drivers] 静态定义已同步：新增 ${added.map(fmt).join("、") || "-"}；` +
+          `下线 ${removed.map(fmt).join("、") || "-"}；修改 ${changed.map(fmt).join("、") || "-"}`,
+      )
+    }
+    return { added, removed, changed }
+  }
+
+  /**
    * 动态创建 driver（模型经工具调用）。
    *
    * 校验从严（与审批规则同一取向：**写错就报错，不静默降级**）——
@@ -197,7 +273,6 @@ export class DriverRegistry {
 
 /**
  * 创建入参校验。
- *
  * 两类典型错误都在这里挡住：
  * 1. `subscriptions` 写成不存在的类型 → 该 driver 永远收不到事件（静默失效）
  * 2. `id` 与已有 driver 冲突 → 覆盖掉一个正在工作的分工（意外改变行为）

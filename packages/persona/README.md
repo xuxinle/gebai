@@ -89,16 +89,166 @@ credentials.ts / oauth.ts / user-token.ts   飞书进程级用户凭据
 
 ### 额度的真实作用面（容易配错的地方）
 
-调度器是 **per-driver** 的，而一个 driver 只对应**一个常驻会话**（`SessionResolver.resolveDriver`
-幂等），因此：
+调度器是 **per-driver** 的（一个 driver 可有**多个**会话，取决于会话路由），因此：
 
 | 配置 | 实际效果 |
 |---|---|
-| `driver.maxConcurrent > 1` | **不生效**：该 driver 的全部事件都路由到同一会话，会话级串行先把它锁死 |
+| `driver.maxConcurrent > 1` | 声明了 `sessionKeyOf`（按事务分割）时**是真上限**：该 driver 可同时跑多个上下文；不分上下文的 driver 只有一个会话，额度等于不起作用 |
+同上 + 未声明 `sessionKeyOf` | **不生效**：全部事件进同一常驻会话，会话级串行先把它锁死 |
 | `PersonaLookup.maxConcurrent(personaId)` | 只是 driver 未单独配置时的**继承默认值**，**不是**该角色的并发上限 |
 
-真实的并发度 = **同时有事的 driver 个数**（每个各 1 个会话）。要给某个角色做总额限制，
-得在宿主侧（或新增跨 driver 闸门）实现，不能靠这两个字段。
+要给某个角色做总额限制，得在宿主侧（或新增跨 driver 闸门）实现，不能靠这两个字段。
+
+## 会话关联：会话是上下文，不是群
+
+设计口径：**会话是一段连续工作的上下文**，不是“一个群”。渠道不参与会话身份。
+
+| `GEBAI_PERSONA_SESSION_ROUTING` | 含义 |
+|---|---|
+| `driver`（**缺省**） | 一个分身一个常驻会话；**不同群的消息都注入这个上下文** |
+| `chat` | 按「群 × 话题」分会话（仅当**显式要求**群间隔离时） |
+
+driver 可声明 `sessionKeyOf` 按**事务**分割（工单号 / 话题根 / 仓库名）：
+同一工单跨群进同一会话，不同工单各自独立——这才是“按上下文分”的正向用法。
+
+为何缺省不按群分：把群当会话身份会把“一个人”拆成几份互不知情的助手
+（A 群排查一小时，B 群问同一件事时又从零开始）。
+
+### 批投递也按会话键分组
+
+`dispatchBatch` 会把一批事件合进一轮，而一批里完全可能是“工单 A 一条 + 工单 B 一条”。
+`enqueueRound` 按会话键**分组入队**（而不是全投进首条事件的会话）。
+
+## 身份：角色是代码，扮演者是部署事实
+
+人格定义里的 `name` / `identity` / `role` / `driver.focus` / `user` / `actor.*`
+支持 `${VAR}` 模板，取值来自**该人格 `envVars` 声明过**的环境变量：
+
+```ts
+export const persona: PersonaDef = {
+  id: "xiaoshuang", name: "小霜", role: "值班工程师",
+  identity: "你是${ACTOR_NAME}，训练平台的值班工程师。",
+  user: "${ACTOR_ACCOUNT}",          // 会话归属/审计归属
+  // 身份字段：一组自由键值（键由部署方定）
+  actor: { fields: { 姓名: "${ACTOR_NAME}", 工号: "${ACTOR_STAFF}" } },
+  envVars: [
+    { name: "ACTOR_NAME", description: "扮演者姓名" },
+    { name: "ACTOR_STAFF", description: "工号" },
+    { name: "ACTOR_ACCOUNT", description: "账号（会话归属）" },
+  ],
+}
+```
+
+两条硬约束：
+
+1. **加载期校验**：模板引用了未在 `envVars` 声明的变量 → 人格加载失败（不静默）。
+   不校验的后果是运行期渲染成 `${FOO}` 或空串，提示词里“你是谁”残缺而日志全绿。
+2. **未配置的变量原样保留**（`${FOO}` 留着）而不是渲染成空串：空串会静默污染提示词，
+   原样保留一眼能看出“这个变量没配”。
+
+### 身份字段为什么是自由键值
+
+`actor.fields` 是一组**自由键值**，不是 `name`/`staffId`/`account` 三件套：
+真实部署里“这个人是谁”包含什么完全取决于组织——姓名/花名/工号/账号/部门/
+团队/邮箱/职位/工位/成本中心…写死三个字段的后果是第四件事只能塞进子对象，
+于是同一个概念有两种写法（`actor.name` 与 `actor.extra.姓名`），模型得学两套。
+
+框架**不解释键的含义**（不做“name 优先于花名”这种猜测）：那是部署方的领域知识。
+进提示词时**拥有的字段全部原样列出**，不挑不筛。
+
+### 两种取值写法
+
+```ts
+// ① 逐字段（推荐：一眼看出读哪个变量，且能做拼接）
+actor: { fields: { 姓名: "${ACTOR_NAME}", 工号: "${ACTOR_STAFF}", 邮箱: "${ACTOR_NAME}@corp.com" } }
+
+// ② 整组注入（一个 JSON 变量装下所有身份字段，适合按部署下发）
+actor: { fields: actorFieldsFromEnv("GEBAI_ACTOR") }
+// GEBAI_ACTOR={"姓名":"张三","花名":"小张","工号":"10086","部门":"基础架构"}
+```
+
+整组注入的三条处理：未配置 → **安静跳过**（部署方还没填不是错误）；
+不是合法 JSON / 不是对象 / 含嵌套对象 → **如实上报问题**（不阻断人格加载）。
+逐字段与整组可混用，逐字段写在后面可覆盖整组里的同名键。
+
+## 部署配置面（环境变量 → 定义）
+
+解析是**内核的纯函数**（`env-config.ts`），装配层只负责把 `process.env` 传进去：
+
+| 变量 | 语义 |
+|---|---|
+| `GEBAI_PERSONA_ENABLE` | 启用白名单 |
+| `GEBAI_PERSONA_<ID>_CHATS` | 该人格只监听这些群（替换其 feishu 消息订阅） |
+| `GEBAI_PERSONA_<ID>_<DRIVER>_CHATS` | 该分身只监听这些群（覆盖人格级） |
+| `GEBAI_PERSONA_<ID>[_<DRIVER>]_OUTPUT` | 输出目标（`channel:address[#话题][=标签]`，逗号分隔；首条默认，`*` 前缀可指定） |
+| `GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP` | 会话映射规则（预设名 / `when=key;…` / JSON，见下） |
+| `GEBAI_PERSONA_SESSION_ROUTING` | 兜底：`driver`（缺省，一个上下文）/ `chat`（按群×话题） |
+
+### 按需注入同一会话（`dispatchInto`）
+
+会话不面向群，但“归到哪个上下文”有时只有**调用方**知道——三个群的未答问题汇总成
+“今天这批支持求助”、一单在多群的讨论聚到一起。这类需求走 `dispatchInto`：
+
+```ts
+await runtime.dispatchInto(event, "digest:2026-11-07")   // 不同群的事件 → 同一会话
+```
+
+`scope` 就是会话键（与 `sessionKeyOf` 返回值同一个空间），**优先于一切推导规则**：
+调用方显式指定了就不该被覆盖。空串 = 回到该分身的常驻上下文。
+
+### 会话映射：可配置规则表（`sessionMap` / `SESSION_MAP`）
+
+会话不面向群——但“上下文怎么切”是**部署事实**，每个部署不同，不该只能改代码。
+规则表**按顺序匹配，第一条命中即用**：
+
+```ts
+sessionMap: [
+  { when: "feishu:message", key: "{chat}__t_{thread}" },  // 话题群：每话题一个会话
+  { when: "message",        key: "{chat}" },              // 其余群：每群一个会话
+]
+```
+
+**占位符**：`{channel}` `{kind}` `{chat}` `{thread}` `{sender}` `{senderName}` `{task}` `{msg}`
+`{extra.名字}`（`extra.*` 不限 ASCII，`{extra.工单}` 合法）。拼错占位符名 **加载期报错**。
+
+**`onMissing`**（占位符为空时）：
+
+| 策略 | 行为 |
+|---|---|
+| `skip`（**缺省**） | 本规则不命中，继续下一条 |
+| `drop` | 删占位符 + 折叠连续分隔符 |
+| `literal` | 保留 `{thread}` 原样（排查用） |
+
+为何缺省是 `skip`：`drop` 会把 `{chat}__t_{thread}` 变成 `oc_a_t` 这类残键——看起来像
+一个正常会话，实际是从原上下文分裂出来的新会话，而没人会察觉。
+因此**带形态标记的键要写成两条规则**（这就是 `per_thread` 预设的形态，也是
+“话题群 + 普通群混合”这种最常见真实形态的标准写法）。
+
+**预设**（部署侧写一行就能用）：
+
+| 预设 | 切法 |
+|---|---|
+| `single` | 一个上下文（等于不声明） |
+| `per_chat` | 每群一个会话 |
+| `per_thread` | **每群话题一个会话**，无话题退回按群 |
+| `per_sender` | 每发言者一个会话（客服型：同一客户的追问都进他的上下文） |
+
+**部署侧三种写法**（都不用改代码）：
+
+```ini
+GEBAI_PERSONA_XIAOSHUANG_SESSION_MAP=per_thread
+GEBAI_PERSONA_XIAOSHUANG_SESSION_MAP=feishu:message={chat}__t_{thread};message={chat};*=
+GEBAI_PERSONA_XIAOSHUANG_SUPPORT_SESSION_MAP=[{"when":"message","key":"{chat}-{thread}","onMissing":"drop"}]
+```
+
+分身级覆盖人格级；写错时进日志告警并**保留定义里的规则**（不静默失效）。
+| `GEBAI_PERSONA_APPROVAL` | `ask`（缺省）/ `auto` / `deny` |
+
+输出目标为什么归驱动层而不是提示词：主动行为（定时巡检报群、告警推运维群）**没有入站 refs**，
+模型只能猜一个 chat_id，猜错就被白名单拒。目标应由部署配置给定。
+
+收窄用**订阅匹配函数**探测（而非字符串枚举 `feishu`/`message`/…）：枚举法会在订阅语法
+演进后静默漏掉一类，表现为「配了 CHATS 但某些群还是能唤醒它」。
 
 ## 幂等：每源必有一条
 
@@ -112,13 +262,24 @@ credentials.ts / oauth.ts / user-token.ts   飞书进程级用户凭据
 各源都会重投（飞书 ACK 前断连会重推、调度器重启会重新触发、webhook 按自身策略重试），
 重复事件 = 重复副作用（重复发消息、重复提交单据），是真实事故形态而非理论风险。
 
-## 出站纪律（`renderEventContext`）
+## 出站纪律（`renderBatch`，全仓唯一一份）
 
 取消「任务结束时自动回推」后，最大失败模式是**人格沉默**——它想清楚了、写进了会话记录、
-但没调动作工具，用户什么也没收到。所以入站上下文文本明确声明：
+但没调动作工具，用户什么也没收到。所以模型输入里明确声明：
 
-> 你的回复不会被自动发送。要让别人看到，必须调用发消息工具显式指定目标；
-> 不需要回复时（判断无需处理）直接结束即可，这是正常结果。
+> 【出站纪律】你的回复不会被自动发送。要让别人看到，必须调用发消息工具（act）显式指定目标；
+> 判断无需处理时直接结束即可，这是正常结果。
+
+历史上这里有过**两份**渲染实现（`renderEventContext` 与 `renderBatch`），它们在这句文案上
+分叉过——改了一处，另一处还是旧说法，模型收到两套矛盾的指令。现在 `renderEventContext`
+只是 `renderBatch` 的单条入口（委托），两处不可能再漂移。
+
+渲染里还包含两类**协议事实**（不属于“消息内容”，所以单独一行）：
+
+- 【当前会话】本轮所属会话键（模型据此知道自己在哪个群/话题里）
+- 【可用发送目标】驱动注入的输出目标（含默认标记与话题 root 的传法）
+- 【元信息】里带 `摘要=`（webhook/定时类事件的正文很冗长，“发生了什么”只在 summary 里；
+  与正文实质重复时不渲染，省 token）
 
 ## 扩展事件源（丢文件即注册）
 

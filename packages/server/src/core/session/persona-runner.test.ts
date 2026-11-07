@@ -98,6 +98,54 @@ describe("personaNote：注入注记的必备内容", () => {
     expect(note).toContain("先")
   })
 
+  test("身份字段（自由键值）全部进提示词，不挑不筛", () => {
+    const withActor = personaNote({
+      ...runInput(),
+      identity: {
+        ...IDENTITY,
+        actor: { fields: { 姓名: "张三", 花名: "小张", 工号: "10086", 部门: "基础架构", 邮箱: "z@corp.com" } },
+      },
+      now: 0,
+    } as never)
+    for (const [k, v] of Object.entries({ 姓名: "张三", 花名: "小张", 工号: "10086", 部门: "基础架构", 邮箱: "z@corp.com" })) {
+      expect(withActor).toContain(k)
+      expect(withActor).toContain(v)
+    }
+    // 不挑不筛：没有“只列姓名工号”的白名单
+    expect(withActor).toContain("你扮演的是")
+    // 明确禁止自称机器人（不写这句它就会说“我帮你转达”）
+    expect(withActor).toContain("不要自称机器人")
+  })
+
+  test("没有身份字段时不渲染那一行（不编造）", () => {
+    const bare = personaNote({ ...runInput(), identity: IDENTITY, now: 0 } as never)
+    expect(bare).not.toContain("你扮演的是")
+  })
+
+  test("输出目标进提示词（含默认标记与话题 root 的传法）", () => {
+    const withOutputs = personaNote({
+      ...runInput(),
+      driver: {
+        ...DRIVER,
+        outputs: [
+          { channel: "feishu", address: "oc_support", label: "支持群", default: true },
+          { channel: "feishu", address: "oc_topic", thread: "om_root" },
+        ],
+      },
+      now: 0,
+    } as never)
+    expect(withOutputs).toContain("feishu:oc_support")
+    expect(withOutputs).toContain("默认")
+    expect(withOutputs).toContain('root:"om_root"')
+    // 名单外目标会被拒——这条纪律不写，模型会去试别的群
+    expect(withOutputs).toContain("名单之外的目标一律会被拒")
+  })
+
+  test("会话键进提示词（模型得知道自己在哪个群/话题里）", () => {
+    const scoped = personaNote({ ...runInput(), sessionKey: "oc_support__t_om_1", now: 0 } as never)
+    expect(scoped).toContain("oc_support__t_om_1")
+  })
+
   test("写明自组织：三个 driver_* 工具与「临时的事不要建分身」的取舍", () => {
     // 不写进去时模型根本不知道自己能开/撤分工——工具在表里，但它只会“这次先顶着”
     for (const t of ["driver_list", "driver_create", "driver_retire"]) expect(note).toContain(t)
@@ -196,7 +244,7 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
     expect(calls.length).toBe(1)
   })
 
-  test("跑一轮 → engine.run 收到 prompt 与 channelNote（无其他新增入参）", async () => {
+  test("跑一轮 → engine.run 收到 prompt 与 channelNote（无 persona 专用新字段）", async () => {
     const { engine, calls } = makeEngine()
     const r = new EnginePersonaRunner({ engine })
     await r.run(runInput())
@@ -206,9 +254,15 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
     expect(c.sessionId).toBe("sess-1")
     expect(c.user).toBe("admin")
     expect(c.prompt).toContain("pending")
-    // 关键：只用了引擎已有的 channelNote（不新增 persona 专用字段）
-    expect(Object.keys(c.opts ?? {}).sort()).toEqual(["autoApprove", "channelNote"])
+    // 关键：只用了引擎已有的入参（channelNote + interactionMode），不新增 persona 专用字段
+    expect(Object.keys(c.opts ?? {}).sort()).toEqual(["channelNote", "interactionMode"])
     expect(String(c.opts?.channelNote)).toContain("答支持群的问题")
+  })
+
+  test("interactionMode 必显式传：人格会话没有前端，缺省 realtime 会让 ask 推死卡并阻塞 5 分钟", async () => {
+    const { engine, calls } = makeEngine()
+    await new EnginePersonaRunner({ engine }).run(runInput())
+    expect(calls[0]!.opts?.interactionMode).toBe("multi_turn")
   })
 
   test("isRunning 直接转发引擎", () => {
@@ -217,14 +271,32 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
     expect(new EnginePersonaRunner({ engine: makeEngine({ running: false }).engine }).isRunning("s")).toBe(false)
   })
 
-  test("autoApprove 可控：默认 true（无人值守没人守审批卡）", async () => {
+ test("审批姿态：缺省 ask（不传 autoApprove，等审批桥问人）", async () => {
   const a = makeEngine()
   await new EnginePersonaRunner({ engine: a.engine }).run(runInput())
-  expect(a.calls[0]!.opts?.autoApprove).toBe(true)
+  expect(a.calls[0]!.opts?.autoApprove).toBeUndefined()
+  expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
+})
 
+ test("审批姿态：auto → 显式 autoApprove=true", async () => {
+  const a = makeEngine()
+  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "auto" }).run(runInput())
+  expect(a.calls[0]!.opts?.autoApprove).toBe(true)
+  expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
+})
+
+ test("审批姿态：deny → 不传 autoApprove + interactionMode=none", async () => {
+  const a = makeEngine()
+  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "deny" }).run(runInput())
+  expect(a.calls[0]!.opts?.autoApprove).toBeUndefined()
+  expect(a.calls[0]!.opts?.interactionMode).toBe("none")
+})
+
+ test("旧字段 autoApprove=false 兼容：映射为 deny（不空等超时）", async () => {
   const b = makeEngine()
   await new EnginePersonaRunner({ engine: b.engine, autoApprove: false }).run(runInput())
   expect(b.calls[0]!.opts?.autoApprove).toBeUndefined()
+  expect(b.calls[0]!.opts?.interactionMode).toBe("none")
 })
 
  test("取消桥：signal abort → engine.cancel（调度器 cancelRunning/stop 能真正停下引擎轮）", async () => {

@@ -6,6 +6,7 @@
  */
 
 import { type PersonaAttachment, type PersonaEvent, type PersonaEventContext, type PersonaEventKind, type PersonaEventRefs } from "./event"
+import { renderBatch } from "./render"
 
 /** 构造入参（各源填自己有的）。 */
 export interface BuildEventInput {
@@ -78,28 +79,21 @@ export function buildEvent(input: BuildEventInput): PersonaEvent {
 }
 
 /**
- * 入站上下文文本（注入系统提示词的「事件来源」段）。
+ * 入站上下文文本（单条事件的便捷入口）。
+ *
+ * **委托 `renderBatch`**：历史上这里曾是一份独立实现（自带一套「来源/发起者/出站纪律」），
+ * 与 `render.ts` 的渲染并行存在。两份必然漂移——它们已经在出站纪律文案上分叉过：
+ * 改了一处，另一处还是旧说法，模型收到两套矛盾的指令。所以现在只保留一份。
  *
  * 刻意**不含**"回复会自动发出"这类暗示——恰恰相反，它明确要求显式出站。
  * 这段文案是「人格沉默」的首要防线（模型必须知道没人替它转发）。
  */
 export function renderEventContext(e: PersonaEvent, opts: { canReply: boolean } = { canReply: true }): string {
-  const lines: string[] = []
-  lines.push(`【本次事件来源】${e.context.source}`)
-  const refs = e.context.refs
-  if (refs?.senderName || refs?.senderId) {
-    lines.push(`【发起者】${refs.senderName ?? ""}${refs.senderId ? `（${refs.senderId}）` : ""}`)
-  }
-  if (refs?.messageId) lines.push(`【原消息 id】${refs.messageId}`)
-  if (refs?.chatId) lines.push(`【渠道会话 id】${refs.chatId}`)
-  lines.push(`【事件摘要】${e.context.summary}`)
-  lines.push(
-    opts.canReply
-      ? "【出站纪律】你的回复不会被自动发送。要让别人看到，必须调用发消息工具显式指定目标；" +
-          "不需要回复时（判断无需处理）直接结束即可，这是正常结果。"
-      : "【出站纪律】本轮无可用出站通道；你的输出仅写入工作记录。",
-  )
-  return lines.join("\n")
+  if (opts.canReply) return renderBatch([e])
+  // 无出站通路：正文照常给，但把出站提示换成「本轮无可用通道」。
+  // 不能只改提示而不改正文——模型仍需要知道发生了什么。
+  const body = renderBatch([e], { includeReplyHint: false })
+  return `${body}\n（【出站纪律】本轮无可用出站通道；你的输出仅写入工作记录。）`
 }
 
 /** 稳定的 32 位哈希（FNV-1a）：仅用于兜底幂等键，不作安全用途。 */

@@ -12,6 +12,39 @@
 
 import type { PersonaAttachment, PersonaEvent } from "./event"
 
+/**
+ * 输出目标：人格发消息的「去处」清单（驱动层注入，模型据此选或直接不用感知）。
+ *
+ * ## 为什么需要它
+ *
+ * 靠模型从事件 refs 里抄 chat_id，只在「回来源那条消息」时成立；而人格大量行为是
+ * 主动的（定时巡检报群里、告警推运维群、周报发部门群）——那些场景没有入站 refs，
+ * 模型只能猜一个 id，猜错就被白名单拒绝。目标该由**部署配置**给定。
+ *
+ * ## 三个字段的语义
+ *
+ * - `channel:address` 是 act 的 `to`（如 `feishu:oc_xxx`、`local:outbox`），逐字可用
+ * - `thread` 落进话题（飞书话题群 = 回复那条消息，自动继承 thread_id）
+ * - `default` 表示「没有特别理由就用它」——模型不必每次自己选
+ */
+export interface OutputTarget {
+  /** 渠道名（`feishu` / `local` / 二开渠道名）。 */
+  channel: string
+  /** 地址（群 chat_id / outbox / 工单项目…）。 */
+  address: string
+  /** 话题根消息 id（仅在话题群内需要）。 */
+  thread?: string
+  /** 给人看的标签（如「训练平台支持群」），进提示词。 */
+  label?: string
+  /** 默认目标（模型没理由时用它；同一声明里有多个 default 时取第一个）。 */
+  default?: boolean
+}
+
+/** 输出目标的 `to` 串（可直接给 act）。 */
+export function outputTargetTo(t: OutputTarget): string {
+  return `${t.channel}:${t.address}`
+}
+
 /** 人格（角色）身份：**一个角色下可以有多个 driver**。 */
 export interface PersonaIdentity {
   id: string
@@ -20,6 +53,50 @@ export interface PersonaIdentity {
   /** 身份与角色（原样进系统提示词，本包不做任何改写）。 */
   identity: string
   role: string
+  /**
+   * 扮演角色的**实际用户身份**（可选；值支持 `${VAR}` 模板，由部署环境提供）。
+   *
+   * 为何单列而不是“写进 identity 文本里就行了”：
+   * 1. 审批卡与出站审核要说“以谁的名义发”——那是结构化事实，不能靠正则从提示词里抓。
+   * 2. 模型需要知道“我代表的是组织里哪个真人”，否则它会把自己当机器人。
+   */
+  actor?: PersonaActor
+}
+
+/**
+ * 扮演角色的**实际用户身份**：一组**自由键值**（`fields`），不是几个固定字段。
+ *
+ * ## 为什么是自由键值而不是 name/staffId/account 三件套
+ *
+ * 那三个字段只是**示例**。真实部署里“这个人是谁”包含什么完全取决于组织：
+ * 姓名/花名/工号/账号/open_id/部门/团队/邮箱/职位/工位/成本中心/入司时间…
+ * 写死三个字段的后果是：第四件事只能塞进一个 `extra` 子对象，于是同一个概念
+ * 有两种写法（`actor.name` 与 `actor.extra.姓名`），而模型与审批卡都得学两套。
+ *
+ * 所以这里只留**一个**容器：键由部署方自己定，值支持 `${VAR}` 模板。
+ * 框架不解释键的含义（不做“name 优先于花名”这种猜测）——那是部署方的领域知识。
+ *
+ * ## 取值的环境变量风格
+ *
+ * 两种都支持，因为不同部署的心智不同：
+ *
+ * ```ts
+ * // ① 显式模板（推荐：一眼看出读哪个变量，且能做拼接）
+ * fields: { 姓名: "${ACTOR_NAME}", 工号: "${ACTOR_STAFF}", 邮箱: "${ACTOR_NAME}@corp.com" }
+ *
+ * // ② 整组注入（一个 JSON 变量搞定所有身份字段，适合按部署下发）
+ * fields: actorFieldsFromEnv("GEBAI_ACTOR")
+ * ```
+ *
+ * ② 的写法要求变量在 `envVars` 里声明为 `GEBAI_ACTOR`（值为 JSON 对象）。
+ */
+export interface PersonaActor {
+  /**
+   * 身份字段（键自由：姓名 / 工号 / 部门 / 邮箱 / 花名…）。
+   *
+   * 值支持 `${VAR}` 模板；变量必须在该人格 `envVars` 里声明（否则加载期报错）。
+   */
+  fields: Record<string, string>
 }
 
 /**
@@ -51,37 +128,46 @@ export interface DriverDef {
    */
   subscriptions: string[]
   /**
-   * 该 driver 的并发额度（同时最多跑几个轮次），缺省继承 `PersonaLookup.maxConcurrent()`。
+   * 该分身**发消息的去处**（驱动层注入；缺省不注入，模型只能回事件来源）。
    *
-   * 实际作用面：一个 driver 只对应一个常驻会话，会话级串行先把它锁死——
-   * 所以大于 1 在当前路由下不会生效。真正的并发来自「同时有事的 driver 个数」。
-   * （声明 `sessionKeyOf` 后一个 driver 可有多个会话，此时额度才是真上限。）
+   * 为何放在 driver 上而不是人格上：同一个人的两个分身往往面向不同受众
+   * （盯告警的发运维群、答支持的发支持群）。放人格级会迫使它们共用一套目标，
+   * 结果是「告警发到支持群」这类事故。人格级声明只是分身的默认值。
+   */
+  outputs?: OutputTarget[]
+  /**
+   * 该 driver 的并发额度（同时最多跑几个会话）。缺省继承 `PersonaLookup.maxConcurrent()`。
+   *
+   * 实际作用面取决于会话路由：声明了 `sessionKeyOf`（按事务分割）的 driver 可能同时
+   * 有**多个**上下文，此时额度就是真上限；不分上下文的 driver 只有一个会话，
+   * 会话级串行先把它锁死，额度等于不起作用。
    */
   maxConcurrent?: number
   /**
-   * 会话路由键（可选）：从事件推导「这件事归哪个会话」。
+   * 会话映射规则表（可选）：决定「这件事归哪个上下文」。
    *
-   * ## 语义
+   * ## 语义（按顺序匹配，第一条命中即用）
    *
-   * - 不声明（缺省）：该 driver **单一会话**（现状，所有事件进同一个常驻会话）。
-   * - 声明：返回非空字符串 = 以 `(personaId, driverId, key)` 为绑定建/取会话；
-   *   返回空/undefined = 退回默认键（与不声明同路径，即事件本身不适合分会话时不必强行分）。
+   * 不声明 = 该分身一个常驻上下文（**缺省，也是推荐**）：所有事件（含不同群的消息）
+   * 都注入同一会话。因为会话面向的是**上下文**，不是群。
    *
-   * 典型用法：`sessionKeyOf: (e) => e.context.refs?.chatId ?? ""`——每个群一个会话，
-   * 上下文按群隔离（A 群的排障细节不挤占 B 群的答疑上下文）。
+   * 声明了就按规则表分（规则语法与占位符见 `session-map.ts`）：
    *
-   * ## 为什么是函数而不是配置字符串
+   * ```ts
+   * sessionMap: [
+   *   { when: "feishu:message", key: "{chat}__t_{thread}" },  // 话题群：每话题一会话
+   *   { when: "message",        key: "{chat}" },              // 其余群：每群一会话
+   * ]
+   * ```
+   */
+  sessionMap?: import("./session-map").SessionMapRule[]
+  /**
+   * 会话路由函数（可选，**优先级最高**，比 `sessionMap` 更直接）。
    *
-   * 「按什么分会话」是每个部署自己的判断（按群/按工单号/按仓库名），预设几个枚举
-   * 字段要么不够用、要么泛滥。函数把判断权交给定义方，运行期只拿一个稳定的字符串。
+   * 何时用函数而不是规则表：键要经过代码才能算出来（查表、拼哈希、调本地索引）。
+   * 声明它就等于声明「按什么分割上下文」，应当基于**事务**而不是渠道。
    *
-   * ## 约束（加载期强制）
-   *
-   * - 必须是同步纯函数（拿不到异步信息；需要查外部系统才能定的键不适合在这里做）。
-   * - 返回值会拼进会话名与绑定键：只允许 `[A-Za-z0-9_.:-]`（非法字符在加载期拒绝），
-   *   且长度限制 128——防路由函数返回超长/怪形字符串污染会话名与盘上键。
-   * - 键不稳定 = 同一件事被拆进多个会话（上下文断裂）——这是定义方的责任，
-   *   运行期无法代偿；文档里必须写明「同一连续事务必须返回同一键」。
+   * 返回空串 = 此事不属于任何特殊事务 → 回到该分身的常驻会话。
    */
   sessionKeyOf?: (event: import("./event").PersonaEvent) => string
 }
@@ -140,6 +226,13 @@ export interface PersonaRunInput extends DriverTarget {
   events: PersonaEvent[]
   /** 首个事件（便利字段）。 */
   event: PersonaEvent
+  /**
+   * 本轮事件归属的会话键（已解析；空串 = 默认单会话）。
+   *
+   * 为何要给 runner：提示词需要告知模型「你现在在哪个群/哪个话题里」——
+   * 否则同一个分身在不同群里的答复会互相串味，而模型无法从事件本身区分。
+   */
+  sessionKey?: string
   /** 本轮序号（1 起；>1 说明被插话续上了）。 */
   round: number
   sessionId: string
@@ -216,8 +309,8 @@ export interface PersonaLookup {
    * 角色级并发额度的默认值（driver 未单独配置时继承）。
    *
    * 注意语义：这**不是**「该角色同时运行会话数」的上限——调度器是 per-driver 的，
-   * 每个 driver 各自受限，真实并发度 = 同时有事的 driver 个数。要做角色总额限制
-   * 得靠宿主侧或新增跨 driver 闸门。
+   * 每个 driver 各自受限（多会话路由下一个 driver 可有多个并发会话）。
+   * 要做角色总额限制得靠宿主侧或新增跨 driver 闸门。
    */
   maxConcurrent(personaId: string): number
   /**
@@ -233,6 +326,14 @@ export interface PersonaLookup {
    * 可选：未实现的旧 `PersonaLookup` 实现可缺省它（返回 undefined = 无工具包）。
    */
   agents?(personaId: string): string[]
+  /**
+   * 该人格的**会话归属用户**（决定会话建在谁的目录下）。
+   *
+   * 为何要从 lookup 取而不是写死 `"admin"`：人格定义里可以用 `user` 声明
+   * “这个角色由谁扮演”（工号/账号）——它是一个**部署事实**，不能全靠一个常量。
+   * 缺省实现返回 `"admin"`（本地形态的默认用户）。
+   */
+  userOf?(personaId: string): string
 }
 
 /** 日志接口（避免本包依赖具体日志实现）。 */

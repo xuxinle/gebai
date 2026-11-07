@@ -768,6 +768,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   let personaSources: import("@gebai/persona").EventSourceManager | null = null
   /** 渠道入站桥接（诊断计数；未启用时为 null）。 */
   let personaChannelBridge: ChannelInputBridge | null = null
+  /** 人格审批桥（把引擎审批/选择送到相期；仅 ask 姿态下装配）。 */
+  let approvalBridge: import("../core/session/persona-approval").ApprovalBridge | null = null
   /** 运行态快照（REST /api/v1/persona/state 与前端面板共用）。 */
   let personaState: (() => Promise<import("../core/session/persona-status").PersonaStateSnapshot>) | null = null
   /** 拟人装配失败的原因（null = 装配成功 / 未启用）。装配失败不阻断启动，只如实上报。 */
@@ -787,7 +789,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       discoverPersonas,
       createDriverTools,
       createDriverListTool,
-      matchesSubscription,
+      applyPersonaEnv: applyPersonaEnvCore,
+      personaApprovalMode: readApprovalMode,
+      sessionRoutingMode: readSessionRouting,
     } = await import("@gebai/persona")
     type PersonaDef = import("@gebai/persona").PersonaDef
     const { PersonaSessionResolver } = await import("../core/session/persona-sessions")
@@ -796,55 +800,43 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     const { collectPersonaState } = await import("../core/session/persona-status")
     const { SessionWorkerSpawner } = await import("../core/session/worker-spawner")
     const { createWorkerTools, createWorkerTaskBook } = await import("../core/session/worker-tools")
+    const { ApprovalBridge } = await import("../core/session/persona-approval")
 
     const personaDirs = defaultPersonaScanDirs({ packageRoot: await resolvePersonaPackageRoot() })
     const found = await discoverPersonas(personaDirs)
 
-    // 环境变量配置面：**人格共性放代码、使用者差异放 env**（同名角色在不同部署
-    // 只需改 env 不改代码）。两个变量在热加载重扫时同样生效（见 syncPersonaDefs）。
+    // 环境变量配置面：**人格共性写代码、使用者差异写 env**。
     //
-    // GEBAI_PERSONA_ENABLE：人格启用白名单（逗号分隔 id；非空仅启用名单内——
-    // 与 GEBAI_EVENT_SOURCES_ENABLE / GEBAI_SUB_AGENTS_ENABLE 同口径）。
-    // GEBAI_PERSONA_<ID>_CHATS：该人格只监听这些群（逗号分隔 chat_id）——
-    // 注入为三段式订阅 `feishu:<chatId>:message`，与定义里的共性订阅取并集；
-    // <ID> 为人格 id 的大写（下划线不变），如 finops_auditor → GEBAI_PERSONA_FINOPS_AUDITOR_CHATS。
+    // 解析本身在 `@gebai/persona` 的 `applyPersonaEnv`（纯函数、可单测）——
+    // 为何不写在这里：入站收窄、输出目标、启用名单都属于**人格语义**，
+    // 不是某一种宿主的装配细节；写两处必然分叉（同一个变量被两种口径解释过，是真实踩过的坑）。
+    //
+    // 覆盖的变量（完整语义见 `packages/persona/src/env-config.ts`）：
+    //   GEBAI_PERSONA_ENABLE                   启用白名单
+    //   GEBAI_PERSONA_<ID>_CHATS               该人格只监听这些群
+    //   GEBAI_PERSONA_<ID>_<DRIVER>_CHATS      该分身只监听这些群（更细）
+    //   GEBAI_PERSONA_<ID>[_<DRIVER>]_OUTPUT   输出目标（channel:address[#话题][=标签]，逗号分隔）
+    const envView = process.env as Record<string, string | undefined>
+    /** 上一次的解析报告（只为「只在变化时打日志」，避免热加载每 5s 刷屏）。 */
+    let lastEnvReport = ""
     const applyPersonaEnv = (personas: Map<string, PersonaDef>): Map<string, PersonaDef> => {
-      const enableRaw = (process.env.GEBAI_PERSONA_ENABLE ?? "").trim()
-      const enable = new Set(enableRaw ? enableRaw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean) : [])
-      const matchesSub = matchesSubscription
-      const out = new Map<string, PersonaDef>()
-      for (const [id, def] of personas) {
-        if (enable.size && !enable.has(id)) {
-          log.info(`[gebai] 人格 ${id} 不在 GEBAI_PERSONA_ENABLE 名单内，未启用`)
-          continue
+      const { personas: next, report } = applyPersonaEnvCore(personas, envView)
+      const sig = JSON.stringify(report)
+      if (sig !== lastEnvReport) {
+        lastEnvReport = sig
+        for (const id of report.disabled) log.info(`[gebai] 人格 ${id} 不在 GEBAI_PERSONA_ENABLE 名单内，未启用`)
+        for (const [who, chats] of Object.entries(report.narrowed)) {
+          log.info(`[gebai] ${who} 已收窄到群：${chats.join("、")}`)
         }
-        const chatsRaw = (process.env[`GEBAI_PERSONA_${id.toUpperCase()}_CHATS`] ?? "").trim()
-        if (!chatsRaw) {
-          out.set(id, def)
-          continue
-        }
-        const chats = chatsRaw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
-        if (chats.length === 0) {
-          out.set(id, def)
-          continue
-        }
-        // 群收窄（替换而非追加——追加不收窄：既有 feishu:message 仍匹配所有群）：
-        // 凡能匹配「feishu 渠道 message 事件」的订阅（feishu / feishu:message /
-        // message / *），一律替换为逐群三段式订阅；其余订阅（schedule/webhook 等
-        // 不碰 feishu 消息的）原样保留。
-        // 注：订阅了 `*`/`message` 的人格会被收窄到名单内群（其它渠道 message 事件
-        // 也不再匹配）——设置 CHATS 即声明「这个人格只看这些群」。
-        const chatSubs = chats.map((chatId) => `feishu:${chatId}:message`)
-        const narrow = (subs: string[]): string[] => {
-          const kept = subs.filter((s) => !matchesSub(s, { kind: "message", channel: "feishu", chatId: "__probe__" }))
-          return [...kept, ...chatSubs.filter((s) => !kept.includes(s))]
-        }
-        const drivers = (def.drivers ?? []).map((d) => ({ ...d, subscriptions: narrow(d.subscriptions) }))
-        out.set(id, { ...def, drivers })
-        log.info(`[gebai] 人格 ${id} 已收窄到群：${chats.join("、")}（GEBAI_PERSONA_${id.toUpperCase()}_CHATS）`)
+        for (const [who, n] of Object.entries(report.outputs)) log.info(`[gebai] ${who} 已注入 ${n} 个输出目标`)
+        for (const [who, n] of Object.entries(report.sessionMaps)) log.info(`[gebai] ${who} 会话映射已生效：${n} 条规则`)
+        for (const e of report.errors) log.warn(`[gebai] 人格环境变量配置有误：${e}`)
       }
-      return out
+      return next
     }
+    // 审批姿态与会话路由（两处都现读环境，改完下次请求即生效；热加载不必重扫目录）
+    const personaApprovalMode = readApprovalMode(envView)
+    const sessionRouting = readSessionRouting(envView)
 
     const foundFiltered = applyPersonaEnv(found.personas)
     if (found.personas.size === 0) {
@@ -877,7 +869,6 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     })
     // 会话名用「人格显示名·分身 id」：侧栏里一眼能认出来
     personaSessions.nameOf = (id) => personaCatalog!.get(id)?.name ?? id
-
     /**
      * 人格定义热加载：重扫目录 → 整体替换 → 同步调度器。
      *
@@ -901,7 +892,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         return
       }
       // env 配置面同样作用于热加载重扫（改 GEBAI_PERSONA_ENABLE/_CHATS 后无需重启）
-      const diff = personaCatalog.replace(applyPersonaEnv(res.personas))
+      const replaced = applyPersonaEnv(res.personas)
+      const diff = personaCatalog.replace(replaced)
+      // 静态定义同步：**只改 catalog 不够**。`DriverRegistry` 里还留着上一次扫描的静态条目，
+      // 删掉一个 driver / 改了订阅后旧条目会永久残留：driver_list 仍列着它、
+      // 新建同名动态分身被「已存在」拒绝、状态面板也显示已删除的分工。
+      driverRegistry.syncStatics(
+        [...replaced.values()].flatMap((p) => (p.drivers ?? []).map((def) => ({ personaId: p.id, def }))),
+      )
       for (const [id, err] of res.errors) log.warn(`[gebai] 人格 ${id} 重加载失败 [${err.domain}]: ${err.error}`)
       if (!diff.added.length && !diff.removed.length && !diff.changed.length && !diff.driversAdded.length && !diff.driversRemoved.length) {
         return // 内容无变化（只是 mtime 变了/别的文件动了）：不打日志不刷屏
@@ -955,16 +953,24 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     const workerSpawner = new SessionWorkerSpawner({
       engine,
       store,
-      autoApprove: config.personaAutoApprove,
+      // worker 是「派出去的活」，它的审批姿态跟随 driver：
+      // ask 模式下 worker 里需要审批的工具照样推卡问人（否则 driver 被卡、worker 却自行放开）。
+      autoApprove: personaApprovalMode === "auto",
       log: { info: log.info, warn: log.warn },
     })
 
     personaRuntime = new PersonaRuntime({
       lookup: personaCatalog,
       sessions: personaSessions,
+      // 会话关联规则（`GEBAI_PERSONA_SESSION_ROUTING`）：**缺省 driver = 一个分身一个上下文**，
+      // 不同群的消息都注入同一会话（会话面向上下文，不面向群）。
+      // `chat` 只是可选的群间隔离模式，需部署方显式要求。
+      sessionRouting,
       runner: new EnginePersonaRunner({
         engine,
-        autoApprove: config.personaAutoApprove,
+        // 传**函数**而不是快照：`GEBAI_PERSONA_APPROVAL` 热改后下一个审批即生效
+        // （人格进程常常跑几周，“临时放开审批”是真实诉求，而重启会中断在跑的任务）。
+        approvalMode: () => readApprovalMode(process.env as Record<string, string | undefined>),
         // 每轮之前两项重扫：源（驱动面）与人格定义（身份/订阅）——
         // 两者各自节流。不放定时器：空闲进程不该白跑目录遍历。
         refreshBeforeRun: async () => {
@@ -985,6 +991,55 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     void personaSessions.warm("admin").then((n) => {
       if (n > 0) log.info(`[gebai] 已恢复 ${n} 个人格会话绑定`)
     })
+
+    // ── 审批桥：把引擎的审批/选择请求送到相期，等人点头 ──
+    //
+    // 为何是“桥”而不是“引擎里加个分支”：引擎只负责「发起询问 + 等结论」，
+    // 询问**送到哪里**是部署形态（网页/飞书/相期桌面），不该写进引擎。
+    // 人格场景的实际形态是：人不在终端前，但桌面常驻着相期窗口。
+    //
+    // 只代理人**人格会话**：普通 web 会话有真前端，用户会自己在页面上点，
+    // 不判定的话会把网页里的审批重复推一张到桌面。
+    if (personaApprovalMode === "ask") {
+      approvalBridge = new ApprovalBridge({
+        engine: {
+          decideApproval: (sid, tcId, approve) => engine.decideApproval(sid, tcId, approve),
+          decideChoice: (sid, chId, selection) => engine.decideChoice(sid, chId, selection),
+          isPersonaSession: async (sid) => {
+            const s = await store.load(sid, "admin").catch(() => null)
+            // 归属可能是部署自定用户（PersonaDef.user），不能只试 admin：
+            // 拿不到就退一步按 sessionId 问引擎的 personaSessions 视图不可得，
+            // 于是逐个已知人格的 owner 试一遍（有界：人格数很少）。
+            if (s?.persona?.personaId) return true
+            for (const pid of personaCatalog?.ids() ?? []) {
+              const owner = personaCatalog?.userOf?.(pid) ?? "admin"
+              if (owner === "admin") continue
+              const other = await store.load(sid, owner).catch(() => null)
+              if (other?.persona?.personaId) return true
+            }
+            return false
+          },
+        },
+        deps: {
+          ...(personaOutboundDeps.askCard ? { askCard: personaOutboundDeps.askCard } : {}),
+          ...(personaOutboundDeps.isXiangqiConnected ? { isXiangqiConnected: personaOutboundDeps.isXiangqiConnected } : {}),
+          mode: () => readApprovalMode(process.env as Record<string, string | undefined>),
+          log: { info: log.info, warn: log.warn },
+        },
+      })
+      events.subscribe((ev) => {
+        // 只关心两类交互请求（其它事件零成本跳过）
+        if (ev.type !== "event.approval.request" && ev.type !== "event.choice.request") return
+        if (!ev.sessionId) return
+        approvalBridge!.onEvent({ type: ev.type, sessionId: ev.sessionId, payload: ev.payload })
+      })
+      log.info(
+        `[gebai] 人格审批桥已启用（GEBAI_PERSONA_APPROVAL=ask）：需审批操作推相期卡等人点；` +
+          `相期不在时**拒绝**（fail-closed）`,
+      )
+    } else {
+      log.info(`[gebai] 人格审批姿态：${personaApprovalMode}（${personaApprovalMode === "auto" ? "全自动通过——仅建议隔离环境" : "一律拒绝——人格不会执行需审批操作"}）`)
+    }
 
     // ── 自我组织：把 driver_list / driver_create / driver_retire 交给模型 ──
     //

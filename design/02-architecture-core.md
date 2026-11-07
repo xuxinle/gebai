@@ -1296,6 +1296,178 @@ refs 有 threadId 时必传 root。调度器队列本就按 sessionId 分桶，�
 记录就成了悬空指针，且没有任何机制保证它被清理。挂在会话上，「会话没了→映射自然没了」
 是存储层的免费保证。
 
+#### 审批姿态：不能决策的事推相期卡问人（`GEBAI_PERSONA_APPROVAL`）
+
+人格跑在无人值守的通道里，需审批工具（`sh` / 删文件 / `py` / 工单…）只有三种姿态，前两种都是错的：
+
+| 姿态 | 后果 |
+|---|---|
+| 自动通过 | 提示词注入诱导的 `rm -rf` **没人拦**。人格以用户本人名义工作，责任落在用户头上 |
+| 一律拒绝 | 人格一遇动手就哑掉（「这个需要你确认」然后什么也不做） |
+| **相期弹窗问人**（缺省） | 人不在终端前也能在桌面看到「要跑这条命令，准不准」，点一下继续 |
+
+| 值 | 行为 |
+|---|---|
+| `ask`（缺省） | 引擎审批点 → `event.approval.request` → **审批桥**（`core/session/persona-approval.ts`）推相期 `card_ask` → 人点选 → `decideApproval` |
+| `auto` | 引擎 `autoApprove: true`（仅建议隔离环境） |
+| `deny` | 不传 `autoApprove` + `interactionMode: none`（交互类工具直接不可用） |
+
+审批桥的四条硬规矩（`persona-approval.test.ts` 逐条钉住）：
+
+1. **fail-closed**：相期未连接 / 卡工具未装配 / 推卡抛错 / 送达失败 → 一律**拒绝**并说明原因。
+   反过来「送不到就放行」会让一张送不出去的卡变成空白支票。
+2. **同一 `toolCallId` 只问一次**：引擎审批被拒/超时后会重试同一调用，每次都推卡会把窗口刷成瀑布；
+   已知结论按结论回答。
+3. **超时不记结论**：卡还在用户窗口上，他随时可能点；但引擎那一轮不能永远挂着 → 超时按拒绝回。
+4. **只代理人**人格会话**：普通 web 会话有真前端，用户会自己在页面上点（不判定就会重复弹到桌面）。
+
+`ask` 分支**必须显式传 `interactionMode: "multi_turn"`**：引擎缺省是 `realtime`（假定有实时前端），
+不传会让 `ask` 每次推一张没人看的卡并阻塞 5 分钟，`show` 的 html 分支 / `page_capture` 被当成可用随后失败。
+
+相对地，**出站审核**（`persona-outbound-review.ts`）审的是「这条消息以你的名义发出去行不行」，
+在 act 内部；两者不能合并——合并会让「批准了发消息」顺带批准同一轮里的 `rm`。
+
+#### 出站加工：程序化整形 + 可选润色（`GEBAI_PERSONA_<ID>_OUTBOUND`）
+
+设计要求「输出信息可由驱动进一步程序化处理，或使用大模型润色」。纯靠提示词要求「不要 @所有人」
+只能得到概率性服从（第八轮上下文里模型就开始忘），而这里是确定性的、可单测的：
+
+| 值 | 行为 |
+|---|---|
+| `raw`（缺省） | 原文直发 |
+| `shape` | 去 `@全体`、按渠道长度截断并标注明、附署名（幂等：不叠两行） |
+| `polish` | `shape` + 主模型润色（只改措辞，不许增删事实） |
+
+两条取舍：
+
+- **`@全体` 无条件剥掉**：人格以用户本人名义发言，模型把「@all」当排版手段用一次，代价是几百人被打扰
+  而用户完全不知情。这不是措辞偏好，是**权限问题**（模型不该拥有点名整个群的能力）。
+- **润色失败回落原文，审批失败一律拒绝**——方向相反因为代价不同：润色挂了拦消息 = 一句本来能发的话
+  发不出去；审批挂了放行 = 一条没人批准过的 `rm` 执行了（不可逆）。
+
+加工在 **act 执行之前**做（发出去了就改不了）；痕迹如实回报给模型（它得知道自己写的话被系统改过）。
+
+#### 身份：角色是代码，扮演者是部署事实
+
+人格定义的 `name` / `identity` / `role` / `driver.focus` / `user` / `actor.*` 支持 `${VAR}` 模板，
+取值只能来自该人格 `envVars` 声明过的环境变量：
+
+```ts
+export const persona: PersonaDef = {
+  id: "xiaoshuang", name: "小霜", role: "值班工程师",
+  identity: "你是${ACTOR_NAME}，训练平台的值班工程师。",
+  user: "${ACTOR_ACCOUNT}",          // 会话归属/审计归属
+  // 身份字段是一组**自由键值**（键由部署方定）
+  actor: { fields: { 姓名: "${ACTOR_NAME}", 工号: "${ACTOR_STAFF}", 部门: "${ACTOR_DEPT}" } },
+  envVars: [
+    { name: "ACTOR_NAME", description: "姓名" },
+    { name: "ACTOR_STAFF", description: "工号" },
+    { name: "ACTOR_DEPT", description: "部门" },
+    { name: "ACTOR_ACCOUNT", description: "账号（会话归属）" },
+  ],
+}
+```
+
+为何是**自由键值**而不是 `name`/`staffId`/`account` 三件套：那三个只是示例。真实部署里
+“这个人是谁”包含什么完全取决于组织（花名/部门/邮箱/工位/成本中心…），写死三个字段的后果是
+第四件事只能塞进一个子对象，于是同一个概念有两种写法（`actor.name` 与 `actor.extra.姓名`），
+而模型与审批卡都得学两套。框架**不解释键的含义**（不做“name 优先于花名”这种猜测）——
+那是部署方的领域知识。
+
+除逐字段模板，还支持**整组注入**（适合身份字段按部署下发）：
+
+```ts
+actor: { fields: actorFieldsFromEnv("GEBAI_ACTOR") }
+// GEBAI_ACTOR={"姓名":"张三","花名":"小张","工号":"10086","部门":"基础架构"}
+```
+
+整组变量未配置时**安静跳过**（部署方还没填，不是错误）；不是合法 JSON / 不是对象 /
+含嵌套对象则如实上报问题（不阻断人格加载，但要让人看见）。
+
+| 约束 | 理由 |
+|---|---|
+| 加载期校验模板变量已声明 | 否则运行期渲染成 `${FOO}` 或空串，提示词里“你是谁”残缺而日志全绿 |
+| 未配置的变量**原样保留** | 空串会静默污染提示词；原样保留一眼能看出“没配” |
+| 只读本角色声明过的变量 | 防「读告警的人格」顺手拿到模型密钥（与渠道/事件源同口径） |
+
+`actor` 进提示词（模型得知道自己代表组织里哪个真人，否则会把自己当机器人）——拥有的字段**全部原样列出**（
+不挑不筛：挑掉哪一条都是我们替部署做了决定）；`user` 决定会话归属与审计归属。
+
+#### 输出目标与驱动级入站（部署配置面）
+
+| 变量 | 语义 |
+|---|---|
+| `GEBAI_PERSONA_<ID>_CHATS` | 该人格只监听这些群（替换其 feishu 消息订阅） |
+| `GEBAI_PERSONA_<ID>_<DRIVER>_CHATS` | 该**分身**只监听这些群（覆盖人格级） |
+| `GEBAI_PERSONA_<ID>[_<DRIVER>]_OUTPUT` | 输出目标（`channel:address[#话题][=标签]`，逗号分隔；首条默认，`*` 前缀指定） |
+
+解析全在 `packages/persona/src/env-config.ts`（纯函数、可脱离引擎单测）。为何不写在装配层：
+入站收窄、输出目标、启用名单都属于**人格语义**，不是某一种宿主的装配细节；写两处必然分叉。
+
+输出目标归驱动层而不是提示词的根本原因：**主动**行为（定时巡检报群、告警推运维群）没有入站 refs，
+模型只能猜一个 chat_id，猜错就被白名单拒。目标应由部署配置给定，并作为提示词里的「可用发送目标」段。
+
+收窄用**订阅匹配函数**探测而非字符串枚举（`feishu`/`message`/…）：枚举法在订阅语法演进后会静默漏掉一类。
+
+#### 会话关联：会话面向**上下文**，不面向群（`GEBAI_PERSONA_SESSION_ROUTING`）
+
+这是本模块最容易理解错的一条，先写成契约：
+
+> **会话是一段连续工作的上下文，不是“一个群”。渠道（群）只是事件的一个属性，不参与会话身份。**
+> 因此同一个会话里可以同时有来自多个群的消息——它们都归这个分身当前的关注面。
+
+| 值 | 含义 |
+|---|---|
+| `driver`（**缺省**） | 一个分身一个常驻会话；不同群的消息都注入这个上下文 |
+| `chat` | 按「群 × 话题」分会话（仅当**显式要求**群间隔离时） |
+
+为何缺省不是按群分：把群当会话身份会把“一个人”拆成几份互不知情的助手——A 群排查了一小时，
+B 群里问同一件事时它又从头问起；而人不是这样工作的。真正的分割应来自**上下文**（不同事务），
+而不是来自**渠道**（消息从哪里来）。
+
+需要按上下文切分时，用 driver 的 `sessionMap` 规则表（**按顺序匹配，第一条命中即用**）：
+
+```ts
+// 飞书群话题 → 每话题一个会话；普通群退回按群
+sessionMap: [
+  { when: "feishu:message", key: "{chat}__t_{thread}" },
+  { when: "message", key: "{chat}" },
+]
+// 工单维度（跨群共享）
+sessionMap: [{ when: "message", key: "ticket:{extra.ticket}" }]
+```
+
+| 占位符 | 取值 |
+|---|---|
+| `{channel}` `{kind}` | 渠道 / 事件类别 |
+| `{chat}` | 群/会话 id |
+| `{thread}` | 话题根消息 id（话题群有，普通消息无） |
+| `{sender}` `{senderName}` | 发送者 id / 显示名 |
+| `{msg}` `{task}` | 消息 id / 调度任务 id |
+| `{extra.名字}` | `refs.extra` 里的自定义字段（工单号/仓库名…由源塞） |
+
+**`onMissing`**（占位符为空时）：`skip`（缺省，本规则不命中 → 继续下一条）/ `drop` /
+`literal`。缺省选 `skip` 是因为 `drop` 会产出 `oc_a_t` 这类**残键**——看起来像正常会话，
+实际是从原上下文分裂出来的新会话且没人察觉。所以带形态标记的键要写成两条规则。
+
+**预设**：`single`（一个上下文）/ `per_chat` / `per_thread`（每群话题一会话）/ `per_sender`。
+部署侧不用改代码：`GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP` 支持预设名、
+`when=key;…` 紧凑 DSL、或 JSON。拼错占位符**加载期报错**（否则该规则永不命中，
+现象是“配了但没生效”）。
+
+「**按需要**把不同群的消息注入同一个会话」走 `PersonaRuntime.dispatchInto(event, scope)`：
+scope 就是会话键，优先于一切推导规则（推导只看得到单个事件，而“这批消息是一件事”
+往往只有调用方知道——如把三个群的未答问题汇总成一个 digest 上下文）。
+
+`dispatchBatch` 的多事件也**按会话键分组入队**——一批里可能是“工单 A 一条 + 工单 B 一条”，
+全投进首条的会话等于把两个事务的上下文串在一起。
+
+#### 会话解析缓存的失效（会话被删/归档后的恢复）
+
+`PersonaRuntime` 把 `(persona, driver, sessionKey) → sessionId` 缓存住（并发也只解析一次），
+但**必须有 TTL**（缺省 30 分钟）并提供 `invalidateSession()`：会话被用户删除 / 被 GC 归档后，
+永久缓存会把死 id 钉死在这里，表现为「这个分身从此再也不回消息」而日志只有一条 warn。
+
 #### 引擎零改动：身份走既有 `channelNote`
 
 `EnginePersonaRunner` 只调 `engine.run(sessionId, user, prompt, { channelNote, attachments, autoApprove })`
@@ -1313,9 +1485,8 @@ refs 有 threadId 时必传 root。调度器队列本就按 sessionId 分桶，�
 
 #### 人格运行的审批姿态
 
-`GEBAI_PERSONA_AUTO_APPROVE` 默认 `true`：人格跑在无交互通道（群里来消息→自己判断要不要回），
-没有人在审批卡前等着。这与既有 `GEBAI_FEISHU_BOT_AUTO_APPROVE` 同一姿态（部署方整体担责）。
-设为 `false` 时需审批工具**直接拒绝**（不空等超时）——人格会如实说「需要确认」而不是卡死。
+见上「审批姿态：不能决策的事推相期卡问人」。旧的 `GEBAI_PERSONA_AUTO_APPROVE` 已废弃
+（缺省 `false`）；显式设为 `false` 等价于 `GEBAI_PERSONA_APPROVAL=deny`。
 
 #### 飞书用户凭据：进程级、自动检查、需要时横幅提示授权
 
@@ -1476,7 +1647,15 @@ port+token，经**长度前缀 JSON-RPC**（4 字节大端长度 + `{id,method,p
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `GEBAI_PERSONA` | false | 拟人模式总开关（关闭时 persona 组件**完全实例化**） |
-| `GEBAI_PERSONA_AUTO_APPROVE` | true | 人格运行自动通过审批 |
+| `GEBAI_PERSONA_APPROVAL` | ask | 人格审批姿态：`ask`（推相期卡问人）/ `auto`（全自动，仅隔离环境）/ `deny`（一律拒绝） |
+| `GEBAI_PERSONA_SESSION_ROUTING` | driver | 兜底会话规则：`driver`（一个分身一个上下文，**缺省**）/ `chat`（按群×话题） |
+| `GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP` | — | 会话映射规则表（预设名 / `when=key;…` / JSON；分身级覆盖人格级） |
+| `GEBAI_PERSONA_ENABLE` | — | 人格启用白名单 |
+| `GEBAI_PERSONA_<ID>_CHATS` | — | 该人格只监听这些群 |
+| `GEBAI_PERSONA_<ID>_<DRIVER>_CHATS` | — | 该分身只监听这些群（覆盖人格级） |
+| `GEBAI_PERSONA_<ID>[_<DRIVER>]_OUTPUT` | — | 输出目标（`channel:address[#话题][=标签]`） |
+| `GEBAI_PERSONA_<ID>_OUTBOUND` | raw | 出站加工：`raw` / `shape` / `polish` |
+| `GEBAI_PERSONA_<ID>_SIGNATURE` | — | 出站署名（如 `——小霜`） |
 | `GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL` | false | `driver_create`/`driver_retire` 是否需审批 |
 | `GEBAI_EVENT_SOURCES_ENABLE` / `_DISABLE` | — | 事件源启停名单（先白后黑，同名机制同子 Agent） |
 | `GEBAI_PERSONA_SCOPES` | 基础集 | 授权 scopes 追加（**并集**，非替换） |

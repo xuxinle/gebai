@@ -41,6 +41,9 @@ export type ToolContext = ContractToolContext & {
   /** 人格出站治理依赖（act 的 feishu 发送审核：相期 card_ask 工具 + 授权卡推送）。
    *  compose 装配时注入；未注入时人格审核环节如实拒绝（fail-closed）。 */
   personaOutboundDeps?: import("../tools/persona-outbound-review").OutboundGateDeps
+  /** 人格出站润色用的模型（`GEBAI_PERSONA_<ID>_OUTBOUND=polish` 时 act 用它改措辞）。
+   *  引擎按当前任务的 provider 注入（与主对话同一个模型，不在工具层自建）。 */
+  polishModel?: import("../tools/persona-outbound-shape").PolishModel
   /** 子会话向父会话合入/拉取（subsession_merge 工具；仅异步子会话运行上下文注入）。 */
   subSessionMerge?: (content?: string) => Promise<string>
   /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用）。 */

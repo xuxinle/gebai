@@ -32,9 +32,10 @@ import { ActionExecutor, ChannelRegistry } from "@gebai/channels"
 import type { ActOutcome, ObserveOutcome } from "@gebai/channels"
 import type { Tool } from "../base/types"
 import { schema, type GlobalToolEntry } from "./shared"
-import { personaOutboundBlock } from "./persona-outbound"
+import { personaOutboundBlock, personaIdOfSession } from "./persona-outbound"
 import { personaOutboundGate, isAuthFailure, notifyAuthNeeded } from "./persona-outbound-review"
 import type { OutboundGateDeps } from "./persona-outbound-review"
+import { outboundModeOf, polishOutbound, shapeOutbound, signatureOf, type PolishModel } from "./persona-outbound-shape"
 
 /** 出站治理依赖（相期卡工具/授权卡推送）在 ToolContext 上的注入键（compose 装配时写入）。 */
 export const PERSONA_OUTBOUND_DEPS_KEY = "personaOutboundDeps" as const
@@ -134,7 +135,16 @@ export const actTool: Tool = {
       return { output: `发送未放行：${gate.reason}`, data: { ok: false, kind: "rejected", reason: gate.reason } }
     }
 
-    const r = await ex.act({ target: to, verb, args: payload })
+    // 出站加工（人格会话才走；普通会话不动）：
+    // - shape：确定性整形（去 @全体 / 字号截断 / 署名）
+    // - polish：再叠一层模型润色（失败回落原文）
+    //
+    // 为何要放在 **act 执行之前**：一旦发出去了就改不了（飞书没有可靠的“编辑已发消息”通路）；
+    // 而这件事写进提示词只能是概率性服从（第八轮上下文里模型就忘了）。
+    const shaped = await shapeForPersona(ctx, to, verb, payload)
+    const finalPayload = shaped.payload
+
+    const r = await ex.act({ target: to, verb, args: finalPayload })
     if (!r.ok) {
       const head = r.kind === "rejected" ? "动作被拒绝" : "动作失败"
       // 授权不可用类失败 → 推相期授权卡（用户在群里等回复的当下就该看到提醒）
@@ -148,6 +158,9 @@ export const actTool: Tool = {
     const o: ActOutcome = r.outcome
     const why = String(args.why ?? "").trim()
     const lines = [o.summary]
+    // 加工痕迹如实报给模型：它得知道“我写的话被系统改过”
+    // （不说的话，下一轮它会以为自己那句话里没有 @全体，继续按自己的版本推理）
+    if (shaped.notes.length) lines.push(`（系统已对消息做整形：${shaped.notes.join("、")}）`)
     if (o.ref) lines.push(`ref: ${o.ref}`)
     if (why) lines.push(`（缘由：${why}）`)
     return { output: lines.join("\n"), data: { ok: true, ref: o.ref ?? null, summary: o.summary, ...(o.data ? { channelData: o.data } : {}) } }
@@ -309,3 +322,53 @@ export const globalTools: GlobalToolEntry[] = [
   { name: "observe", tool: observeTool },
   { name: "channels_list", tool: channelsListTool },
 ]
+
+/**
+ * 人格出站加工（只对**人格会话 + feishu send/reply** 生效）。
+ *
+ * 普通会话原样放行——用户自己在对话里让机器人发什么、怎么写，不该被系统改。
+ *
+ * 失败方向：加工本身抛错时**发原文**（不能因为锦上添花的功能把一条正常回复卡死）。
+ */
+async function shapeForPersona(
+  ctx: { sessionId?: string; user?: string; sessions?: unknown },
+  target: string,
+  verb: string,
+  payload: Record<string, unknown>,
+): Promise<{ payload: Record<string, unknown>; notes: string[] }> {
+  if (!target.startsWith("feishu:")) return { payload, notes: [] }
+  if (verb !== "send" && verb !== "reply") return { payload, notes: [] }
+  const text = typeof payload.text === "string" ? payload.text : ""
+  if (!text.trim()) return { payload, notes: [] }
+  try {
+    const personaId = await personaIdOfSession(ctx as never)
+    if (!personaId) return { payload, notes: [] }
+    const mode = outboundModeOf(personaId)
+    if (mode === "raw") return { payload, notes: [] }
+
+    const shaped = shapeOutbound({ text, channel: "feishu", mode, signature: signatureOf(personaId) })
+    const notes = [...shaped.changes]
+    let outText = shaped.text
+
+    if (mode === "polish") {
+      // 润色走主模型：模型实例从 ToolContext 取（与 resolveProvider 同一来源，
+      // 不在工具层自建 provider——否则模型配置会变三份）
+      const model = (ctx as { polishModel?: PolishModel }).polishModel
+      if (model) {
+        const polished = await polishOutbound({ text: outText, model, personaName: personaId })
+        if (polished.ok) {
+          outText = polished.text
+          notes.push("已润色")
+        } else {
+          notes.push(`润色失败已发原文（${polished.reason ?? "未知原因"}）`)
+        }
+      } else {
+        notes.push("润色未装配（无模型），已按整形结果发送")
+      }
+    }
+    return { payload: { ...payload, text: outText }, notes }
+  } catch {
+    // 加工环节异常：发原文（见注释：润色/整形是确定性的“更好”，不是“能不能发”的前提）
+    return { payload, notes: [] }
+  }
+}

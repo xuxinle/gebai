@@ -33,6 +33,7 @@
 import type { DriverDef, PersonaIdentity, PersonaLookup } from "./ports"
 import type { PersonaDef } from "./persona"
 import { DriverRegistry } from "./driver"
+import { renderTemplate, resolveActorFields } from "./identity"
 import { coordsOf, matchesAny } from "./subscription"
 import type { PersonaEvent } from "./event"
 
@@ -43,6 +44,13 @@ export interface PersonaCatalogOptions {
   drivers?: DriverRegistry
   /** 角色级并发额度缺省值（driver 未单独配置时继承）。 */
   defaultMaxConcurrent?: number
+  /**
+   * 身份模板的环境变量读取（白名单由人格自己声明，`catalog` 只负责调用）。
+   *
+   * 为何注入而不是直读 process.env：测试要能精确断言「某个变量没配时身份如何降级」，
+   * 多实例（多租户/多部署）也不该共享同一份环境。
+   */
+  envReader?: (name: string) => string | undefined
   log?: { info(msg: string): void; warn(msg: string): void }
 }
 
@@ -64,9 +72,18 @@ export interface PersonaCatalogDiff {
  * 两份人格定义是否相同（只比较**影响行为的字段**）。
  *
  * 不比 `description`：它只进面板不进提示词——改一句说明不该被当成“行为变了”而刷屏。
+ *
+ * 比 `agents`：它同时决定「会话装什么工具包」与「提示词写什么纪律」——改了却判“无变化”，
+ * 热加载就不会同步，表现是「改了 agents 要重启才生效」（与热加载的承诺相抵）。
+ *
+ * 同 `envVars`：身份模板引用的变量改变了，渲染结果会变（同一个 identity 文本可能
+ * 依赖不同的变量），因此它属于**行为**而不只是声明。
  */
 function samePersona(a: PersonaDef, b: PersonaDef): boolean {
   if (a.name !== b.name || a.role !== b.role || a.identity !== b.identity) return false
+  if (sameActor(a.actor, b.actor) === false) return false
+  if ((a.agents ?? []).join("\u0000") !== (b.agents ?? []).join("\u0000")) return false
+  if (envVarsSignature(a) !== envVarsSignature(b)) return false
   const da = a.drivers ?? []
   const db = b.drivers ?? []
   if (da.length !== db.length) return false
@@ -78,8 +95,27 @@ function samePersona(a: PersonaDef, b: PersonaDef): boolean {
     if (d.maxConcurrent !== o.maxConcurrent) return false
     if (d.subscriptions.length !== o.subscriptions.length) return false
     if (d.subscriptions.some((s, i) => s !== o.subscriptions[i])) return false
+    // 输出目标（部署注入）：改了它就要让新一轮重新读（否则改了目标还要重启）
+    const ta = (d.outputs ?? []).map((t) => `${t.channel}:${t.address}#${t.thread ?? ""}:${t.default ? 1 : 0}`).join(",")
+    const tb = (o.outputs ?? []).map((t) => `${t.channel}:${t.address}#${t.thread ?? ""}:${t.default ? 1 : 0}`).join(",")
+    if (ta !== tb) return false
   }
   return true
+}
+
+/** 身份（扮演者）是否相同：按**键值表**逐项比较（键顺序无意义）。 */
+function sameActor(a: PersonaDef["actor"], b: PersonaDef["actor"]): boolean {
+  const sig = (x: PersonaDef["actor"]): string => {
+    if (!x) return ""
+    const entries = Object.entries(x.fields ?? {}).sort(([k1], [k2]) => k1.localeCompare(k2))
+    return JSON.stringify(entries)
+  }
+  return sig(a) === sig(b)
+}
+
+/** envVars 声明的签名（键集合变化即行为变化：它决定身份模板能不能渲染）。 */
+function envVarsSignature(p: PersonaDef): string {
+  return (p.envVars ?? []).map((v) => v.name).sort().join(",")
 }
 
 /**
@@ -92,10 +128,14 @@ export class PersonaCatalog implements PersonaLookup {
   private personas: ReadonlyMap<string, PersonaDef>
   private readonly registry?: DriverRegistry
   private readonly defaultMaxConcurrent: number
+  private readonly envReader: (name: string) => string | undefined
+  private readonly log?: { info(msg: string): void; warn(msg: string): void }
 
   constructor(opts: PersonaCatalogOptions) {
     this.personas = opts.personas
     this.registry = opts.drivers
+    this.envReader = opts.envReader ?? ((n) => process.env[n])
+    this.log = opts.log
     // 整数化：非法配置（如 1.5）经 Math.max(1, x) 仍非整数，会在 PersonaScheduler
     // 构造时抛错并连带整次投递失败——在这里就夹到合法形态（防御性，与 driver 侧校验同口径）
     const dmc = opts.defaultMaxConcurrent
@@ -150,8 +190,46 @@ export class PersonaCatalog implements PersonaLookup {
   get(personaId: string): PersonaIdentity | null {
     const p = this.personas.get(personaId)
     if (!p) return null
-    // 只返回身份三件套：调用方（提示词构建）不该看到 drivers/description 等内部字段
-    return { id: p.id, name: p.name, identity: p.identity, role: p.role }
+    // 只返回身份四件套：调用方（提示词构建）不该看到 drivers/description 等内部字段。
+    //
+    // 身份文本走**模板渲染**（`${VAR}` 由部署环境提供）：这样“这个角色由谁扮演”
+    // 是部署事实而不是代码事实；未声明/未配置的变量原样保留（一眼能看出缺什么）。
+    const out: PersonaIdentity = {
+      id: p.id,
+      name: this.render(p.name),
+      identity: this.render(p.identity),
+      role: this.render(p.role),
+    }
+    if (p.actor) {
+      // 身份字段是一组**自由键值**（键由部署方定：姓名/工号/部门/邮箱…），
+      // 这里只做两件事：展开整组注入的 JSON、渲染 `${VAR}`。
+      // 不解释键的含义——那是部署方的领域知识，不是框架的猜测。
+      const { fields, problems } = resolveActorFields(p.actor.fields, this.envReader)
+      if (problems.length) {
+        for (const problem of problems) this.log?.warn(`[persona:${p.id}] ${problem}`)
+      }
+      if (Object.keys(fields).length) out.actor = { fields }
+    }
+    return out
+  }
+
+  /** 按该人格的 envVars 白名单渲染模板（未声明的变量读不到 → 保留原样）。 */
+  private render(template: string): string {
+    if (!template.includes("${")) return template
+    return renderTemplate(template, this.envReader)
+  }
+
+  /**
+   * 该人格的会话归属用户。
+   *
+   * 人格可以声明 `user`（支持 `${VAR}` 模板）：它在定义里表达的是“这个角色由谁扮演”，
+   * 是一个**部署事实**（也是会话归属/审计归属）。未声明时退回 `"admin"`
+   * ——本地形态的默认用户，与既有行为一致。
+   */
+  userOf(personaId: string): string {
+    const p = this.personas.get(personaId)
+    const declared = p && p.user !== undefined ? this.render(p.user).trim() : ""
+    return declared && !declared.includes("${") ? declared : "admin"
   }
 
   /**
@@ -211,17 +289,5 @@ export class PersonaCatalog implements PersonaLookup {
     // 保证整数与 >=1：PersonaScheduler 构造对非整数直接抛错，而本值来自外部配置
     const n = this.defaultMaxConcurrent
     return Number.isInteger(n) && n >= 1 ? n : 2
-  }
-
-  /**
-   * 该人格的会话归属用户。
-   *
-   * 当前所有人格都跑在本地默认用户下。多用户场景需要 `PersonaDef.owner`，
-   * 那时改这一处即可（`PersonaLookup.subscribers()` 已经带出 user 字段，
-   * 上层无需改动）。
-   */
-  private userOf(personaId: string): string {
-    void personaId
-    return "admin"
   }
 }

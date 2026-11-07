@@ -40,7 +40,9 @@
 
 import { readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
+import { validateTemplate } from "./identity"
 import type { DriverDef, PersonaIdentity } from "./ports"
+import { validateSessionMap } from "./session-map"
 import { validateSubscription } from "./subscription"
 
 /**
@@ -57,6 +59,13 @@ export interface PersonaDef extends PersonaIdentity {
   description?: string
   /** 本定义需要的环境变量（声明式白名单，与渠道/事件源同口径）。 */
   envVars?: Array<{ name: string; description: string; secret?: boolean }>
+  /**
+   * 该人格的会话归属用户（`${VAR}` 模板；缺省 `"admin"`）。
+   *
+   * 它同时是**审计归属**：谁发起的消息、谁的目录下建会话。多用户部署里
+   * 把“这个角色由哪个账号扮演”写在这里比藏在装配层可靠得多。
+   */
+  user?: string
   /**
    * 这个人格的会话默认装载哪些**子代理工具包**（如 `["cefu"]`）。
    *
@@ -120,7 +129,7 @@ const ID_RE = /^[a-z0-9_]+$/
 export function validatePersonaDef(raw: unknown, expectedId: string): string | null {
   if (!raw || typeof raw !== "object") return "persona 必须是对象"
   const o = raw as Record<string, unknown>
-  const allowed = new Set(["id", "name", "identity", "role", "drivers", "description", "envVars", "agents"])
+  const allowed = new Set(["id", "name", "identity", "role", "drivers", "description", "envVars", "agents", "actor", "user"])
   for (const k of Object.keys(o)) {
     if (!allowed.has(k)) return `含未知字段「${k}」（可用：${[...allowed].join(" / ")}）`
   }
@@ -129,6 +138,46 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
   for (const k of ["name", "identity", "role"] as const) {
     if (typeof o[k] !== "string" || !(o[k] as string).trim()) return `${k} 必须是非空字符串`
   }
+  // 环境变量白名单先收出来（后续字段的模板校验要它）
+  const declaredEnv = new Set<string>()
+  if (o.envVars !== undefined) {
+    if (!Array.isArray(o.envVars)) return "envVars 必须是数组"
+    for (const v of o.envVars) {
+      if (!v || typeof v !== "object") return "envVars 每项必须是对象"
+      const item = v as Record<string, unknown>
+      if (typeof item.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.name)) return `envVars.name 非法：${String(item.name)}`
+      if (typeof item.description !== "string") return `envVars「${item.name}」缺少 description`
+      declaredEnv.add(item.name)
+    }
+  }
+  // 身份模板校验：引用的变量必须在 envVars 里声明。
+  // 不校验的后果：运行期渲染成 `${FOO}` 原样（或空串），提示词里“你是谁”是残缺的，
+  // 而日志里没有任何异常——这是“配了但看不出错”的典型形态。
+  for (const k of ["name", "identity", "role"] as const) {
+    const bad = validateTemplate(o[k] as string, declaredEnv, k)
+    if (bad) return bad
+  }
+  if (o.user !== undefined) {
+    if (typeof o.user !== "string" || !o.user.trim()) return "user 若是提供必须是非空字符串"
+    const bad = validateTemplate(o.user, declaredEnv, "user")
+    if (bad) return bad
+  }
+  if (o.actor !== undefined) {
+    if (!o.actor || typeof o.actor !== "object") return "actor 必须是对象（{ fields: { 键: 值 } }）"
+    const a = o.actor as Record<string, unknown>
+    const aAllowed = new Set(["fields"])
+    for (const k of Object.keys(a)) {
+      if (!aAllowed.has(k)) return `actor 含未知字段「${k}」（只能写 fields：身份字段是一组自由键值）`
+    }
+    if (a.fields === undefined) return "actor 缺少 fields（身份字段的键值表，如 { 姓名: \"${ACTOR_NAME}\" }）"
+    if (!a.fields || typeof a.fields !== "object" || Array.isArray(a.fields)) return "actor.fields 必须是对象"
+    for (const [k, v] of Object.entries(a.fields as Record<string, unknown>)) {
+      if (typeof v !== "string") return `actor.fields「${k}」必须是字符串（值支持 \${VAR} 模板）`
+      // 整组注入的哨兵键（空串）值是 `${VAR}`——同样要走白名单校验
+      const bad = validateTemplate(v, declaredEnv, k ? `actor.fields「${k}」` : "actor.fields 整组注入")
+      if (bad) return bad
+    }
+  }
   if (o.description !== undefined && typeof o.description !== "string") return "description 若是提供必须是字符串"
   if (o.drivers !== undefined) {
     if (!Array.isArray(o.drivers)) return "drivers 必须是数组"
@@ -136,7 +185,7 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
     for (const d of o.drivers) {
       if (!d || typeof d !== "object") return "drivers 每项必须是对象"
       const dr = d as Record<string, unknown>
-      const dAllowed = new Set(["id", "focus", "subscriptions", "maxConcurrent", "sessionKeyOf"])
+      const dAllowed = new Set(["id", "focus", "subscriptions", "maxConcurrent", "sessionKeyOf", "sessionMap", "outputs"])
       for (const k of Object.keys(dr)) {
         if (!dAllowed.has(k)) return `drivers 项含未知字段「${k}」（可用：${[...dAllowed].join(" / ")}）`
       }
@@ -144,6 +193,26 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
       if (seen.has(dr.id)) return `drivers.id「${dr.id}」重复（同一人格内须唯一）`
       seen.add(dr.id)
       if (typeof dr.focus !== "string" || !dr.focus.trim()) return `drivers「${dr.id}」缺少 focus（这个分身在关注什么）`
+      const focusBad = validateTemplate(dr.focus, declaredEnv, `drivers「${dr.id}」的 focus`)
+      if (focusBad) return focusBad
+      // 接入工配置面注入的输出目标：它进提示词（模型据此发消息），
+      // 是一条**会改变行为**的声明——类型写错必须在加载期报。
+      if (dr.outputs !== undefined) {
+        if (!Array.isArray(dr.outputs)) return `drivers「${dr.id}」的 outputs 必须是数组`
+        for (const out of dr.outputs) {
+          if (!out || typeof out !== "object") return `drivers「${dr.id}」的 outputs 每项必须是对象`
+          const t = out as Record<string, unknown>
+          const tAllowed = new Set(["channel", "address", "thread", "label", "default"])
+          for (const k of Object.keys(t)) {
+            if (!tAllowed.has(k)) return `drivers「${dr.id}」的 outputs 项含未知字段「${k}」（可用：${[...tAllowed].join(" / ")}）`
+          }
+          if (typeof t.channel !== "string" || !t.channel.trim()) return `drivers「${dr.id}」的 outputs 项缺少 channel`
+          if (typeof t.address !== "string" || !t.address.trim()) return `drivers「${dr.id}」的 outputs 项缺少 address`
+          if (t.thread !== undefined && typeof t.thread !== "string") return `drivers「${dr.id}」的 outputs.thread 必须是字符串`
+          if (t.label !== undefined && typeof t.label !== "string") return `drivers「${dr.id}」的 outputs.label 必须是字符串`
+          if (t.default !== undefined && typeof t.default !== "boolean") return `drivers「${dr.id}」的 outputs.default 必须是布尔`
+        }
+      }
       if (!Array.isArray(dr.subscriptions) || dr.subscriptions.some((s) => typeof s !== "string" || !s.trim())) {
         return `drivers「${dr.id}」的 subscriptions 必须是非空字符串数组`
       }
@@ -156,6 +225,12 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
       }
       if (dr.maxConcurrent !== undefined && (typeof dr.maxConcurrent !== "number" || !Number.isInteger(dr.maxConcurrent) || dr.maxConcurrent < 1)) {
         return `drivers「${dr.id}」的 maxConcurrent 必须是 >=1 的整数（当前：${String(dr.maxConcurrent)}）`
+      }
+      // 会话映射规则表：写错一个占位符名 = 该规则永不命中（现象是“配置没生效”），
+      // 所以逐条在同口径下校验（与 sessionKeyOf 的试运行同一取向）。
+      if (dr.sessionMap !== undefined) {
+        const bad = validateSessionMap(dr.sessionMap)
+        if (bad) return `drivers「${dr.id}」的 ${bad}`
       }
       // 会话路由函数：类型 + 试运行（拿不到真事件，用最小形状验证可调用且返回字符串）。
       // 不能函数体内容——但它若不是函数/调用抛错/返回非字符串，运行期每条事件都会炸，
@@ -172,13 +247,8 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
     }
   }
   if (o.envVars !== undefined) {
+    // 已在上面声明并收进 declaredEnv（模板校验需要先看到它）；这里只守“不是数组”的旧口径。
     if (!Array.isArray(o.envVars)) return "envVars 必须是数组"
-    for (const v of o.envVars) {
-      if (!v || typeof v !== "object") return "envVars 每项必须是对象"
-      const item = v as Record<string, unknown>
-      if (typeof item.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.name)) return `envVars.name 非法：${String(item.name)}`
-      if (typeof item.description !== "string") return `envVars「${item.name}」缺少 description`
-    }
   }
   if (o.agents !== undefined) {
     if (!Array.isArray(o.agents)) return "agents 必须是数组"

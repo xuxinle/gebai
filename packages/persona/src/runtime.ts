@@ -26,6 +26,8 @@
  */
 
 import { EventDedupe } from "./dedupe"
+import { chatSessionKeyOf } from "./env-config"
+import { matchSessionMap } from "./session-map"
 import type { PersonaDispatchResult, PersonaEvent } from "./event"
 import type { DriverDef, PersonaDelivery, PersonaLogger, PersonaLookup, PersonaRunner, SessionResolver } from "./ports"
 import { PersonaScheduler, type PersonaSchedulerState } from "./scheduler"
@@ -44,6 +46,25 @@ export interface PersonaRuntimeOptions {
   now?: () => number
   /** 广播并发度（同时向多少个 driver 投递，默认 6）。 */
   fanoutConcurrency?: number
+  /**
+   * 会话关联规则。
+   *
+   * **缺省 `driver`**：一个分身一个常驻会话，**不同群的消息都注入这个上下文**。
+   * 会话面向的是上下文而不是群——把群当会话身份会把“一个人”拆成几份互不知情的助手
+   * （A 群排查一小时，B 群问同一件事时又从零开始）。
+   *
+   * `chat` 只是**可选**的群间隔离模式，需要部署方显式要求。
+   */
+  sessionRouting?: "driver" | "chat"
+  /**
+   * 会话解析缓存的有效期（毫秒，缺省 30 分钟）。
+   *
+   * 为何必须有：缓存把 `(persona, driver, sessionKey) → sessionId` 永久记住后，
+   * 会话一旦被用户删除 / 被 GC 归档，事件就会持续投给一个死 id——引擎抛「会话不存在」
+   * → 调度器重试 3 次后丢弃。表面症状是「这个分身从此再也不回消息」，日志里只有一条 warn。
+   * 过期后重新走解析（解析器自己会校验存活并重建）。
+   */
+  sessionCacheTtlMs?: number
 }
 
 /** 单 driver 运行时状态。 */
@@ -58,6 +79,7 @@ export interface DriverRuntimeState extends PersonaSchedulerState {
 
 const DEFAULT_DEDUPE_CAPACITY = 2048
 const DEFAULT_FANOUT_CONCURRENCY = 6
+const DEFAULT_SESSION_CACHE_TTL_MS = 30 * 60_000
 
 /** driver 的全局键（`personaId/driverId`）——调度器与幂等记账都按它区分。 */
  export function driverKey(personaId: string, driverId: string): string {
@@ -90,7 +112,8 @@ export class PersonaRuntime {
   private readonly schedulers = new Map<string, PersonaScheduler>()
   private readonly counters = new Map<string, { accepted: number; deduped: number; overflowed: number; failed: number }>()
   /** driverKey → 会话解析结果（Promise 缓存：并发也只解析一次）。 */
-  private readonly sessionCache = new Map<string, Promise<{ sessionId: string | null; error?: string }>>()
+  private readonly sessionCache = new Map<string, { at: number; value: Promise<{ sessionId: string | null; error?: string }> }>()  /** 会话解析缓存有效期（见 `sessionCacheTtlMs`）。 */
+  private readonly sessionCacheTtlMs: number
   /**
    * driverKey → 已解析到的 sessionId。
    *
@@ -101,12 +124,16 @@ export class PersonaRuntime {
   private readonly driverSessions = new Map<string, string>()
   private readonly log?: PersonaLogger
   private readonly fanoutConcurrency: number
+  private readonly sessionRouting: "driver" | "chat"
   private started = false
 
   constructor(private readonly opts: PersonaRuntimeOptions) {
     this.dedupe = new EventDedupe(opts.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY)
     this.log = opts.log
     this.fanoutConcurrency = Math.max(1, opts.fanoutConcurrency ?? DEFAULT_FANOUT_CONCURRENCY)
+    this.sessionRouting = opts.sessionRouting ?? "driver"
+    const ttl = opts.sessionCacheTtlMs
+    this.sessionCacheTtlMs = typeof ttl === "number" && Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_SESSION_CACHE_TTL_MS
   }
 
   start(): void {
@@ -129,6 +156,36 @@ export class PersonaRuntime {
     const targets = this.resolveTargets(event)
     if (targets.length === 0) return { status: "unrouted" }
     const deliveries = await this.mapLimit(targets, this.fanoutConcurrency, (t) => this.deliverTo(event, t))
+    return this.summarize(event, deliveries)
+  }
+
+  /**
+   * 按**指定的上下文**投递：把"这批消息属于同一个上下文"这个判断由调用方给定。
+   *
+   * ## 为何需要它（“不同群可以按需要注入一个会话”的落地口）
+   *
+   * 会话不面向群——但“归到哪个上下文”有时只有**调用方**知道：
+   * 定时任务把三个群的未答问题汇总成一个上下文（“今天这批支持求助”）、
+   * 运营把一个工单在多个群的讨论聚到一起（“这单的全部讨论”）。
+   * 靠 `sessionKeyOf` 推导不出来——它只看得到单个事件。
+   *
+   * ## 语义
+   *
+   * `scope` 就是会话键（与 `sessionKeyOf` 返回值同一个空间）。它**优先于**
+   * driver 声明的 `sessionKeyOf` 与部署的 `sessionRouting`：调用方显式指定了，
+   * 就不该被推导规则覆盖。
+   *
+   * `scope` 为空串 = 回到该 driver 的常驻会话（“归到默认上下文”）。
+   *
+   * 同样受 `sanitizeSessionKey` 清洗（非法字符压下划线、128 限长）——
+   * 调用方给的键同样会拼进会话名与盘上绑定键。
+   */
+  async dispatchInto(event: PersonaEvent, scope: string): Promise<PersonaDispatchResult> {
+    if (!this.started) return { status: "unavailable", reason: "人格运行时未启动" }
+    const targets = this.resolveTargets(event)
+    if (targets.length === 0) return { status: "unrouted" }
+    const key = sanitizeSessionKey(scope)
+    const deliveries = await this.mapLimit(targets, this.fanoutConcurrency, (t) => this.deliverTo(event, t, key))
     return this.summarize(event, deliveries)
   }
 
@@ -281,8 +338,13 @@ export class PersonaRuntime {
       if (s) s.stop()
       this.schedulers.delete(key)
       this.counters.delete(key)
-      this.sessionCache.delete(key)
-      this.driverSessions.delete(key)
+      // 会话缓存与绑定也要按**前缀**清：多会话键形态下键是
+      // `personaId/driverId#sessionKey`（不止一条），只删二元键会留下泄漏条目，
+      // 且已下线分身的死会话仍会被复用。
+      this.invalidateSession(personaId, driverId)
+      for (const k of [...this.driverSessions.keys()]) {
+        if (k === key) this.driverSessions.delete(k)
+      }
       return
     }
     // 上线：确保调度器存在（schedulerFor 惰性创建即可，这里显式触发一次）
@@ -327,7 +389,7 @@ export class PersonaRuntime {
    * 若只 admit 不撤回，一次瞬时故障（存储不可达、队列已满）就把该 id 永久占位，
    * 源按规范重投同一事件会被判 duplicate 静默丢弃——违反「FIFO 且不丢」。
    */
-  private async deliverTo(event: PersonaEvent, t: Target): Promise<PersonaDelivery> {
+  private async deliverTo(event: PersonaEvent, t: Target, scopeKey?: string): Promise<PersonaDelivery> {
     const key = driverKey(t.personaId, t.driver.id)
     const dedupeId = `${event.id}\u0000${key}`
     if (!this.dedupe.admit(dedupeId)) {
@@ -335,7 +397,7 @@ export class PersonaRuntime {
       return { personaId: t.personaId, driverId: t.driver.id, status: "duplicate", reason: `driver ${key} 已处理过事件 ${event.id}` }
     }
     try {
-      const delivery = await this.enqueueRound(key, t, [{ ...event, personaId: t.personaId }])
+      const delivery = await this.enqueueRound(key, t, [{ ...event, personaId: t.personaId }], scopeKey)
       // 只有「确实已接管」才算处理过；其余（队列满 / 会话解析失败 / driver 已停）一律撤回，
       // 让源的重投能真正被接住。
       if (delivery.status !== "accepted") this.dedupe.revoke(dedupeId)
@@ -352,48 +414,96 @@ export class PersonaRuntime {
     }
   }
 
-  /** 把一批事件投进某个 driver（同一轮）。 */
-  private async enqueueRound(key: string, t: Target, events: PersonaEvent[]): Promise<PersonaDelivery> {
+  /** 把一批事件投进某个 driver（同一轮）。`scopeKey` 非 undefined 时优先于推导。 */
+  private async enqueueRound(key: string, t: Target, events: PersonaEvent[], scopeKey?: string): Promise<PersonaDelivery> {
     const { personaId, driver } = t
     const scheduler = this.schedulerFor(personaId, driver)
     if (!scheduler) {
       return { personaId, driverId: driver.id, status: "unavailable", reason: "driver 已停止" }
     }
-    // 会话路由键：声明了 sessionKeyOf 的 driver 按事件推导（每键一会话）；
-    // 未声明/返回空 = 默认键（单一常驻会话，与历史行为逐字节一致）。
-    // 路由函数异常不能杀事件：降级默认键并记日志（与「读历史失败不阻断投递」同纪律）。
-    let sessionKey = DEFAULT_SESSION_KEY
-    if (typeof driver.sessionKeyOf === "function") {
-      try {
-        const derived = driver.sessionKeyOf(events[0]!)
-        if (derived && derived.trim()) sessionKey = sanitizeSessionKey(derived)
-      } catch (err) {
-        this.log?.warn(`[persona:${key}] sessionKeyOf 抛错（降级默认会话键）: ${String((err as Error)?.message || err)}`)
-      }
+    // 会话路由：先按事件推导键，再按**键分组**入队。
+    //
+    // 为何必须分组：`dispatchBatch` 会把同一批事件合成一轮，而一批里完全可能是
+    // “工单 A 一条 + 工单 B 一条”——全投进同一个上下文就等于把两个事务串在一起。
+    //
+    // `scopeKey` 非 undefined = 调用方显式指定了“归到哪个上下文”（`dispatchInto`）：
+    // 那种情况下不再推导（调用方比推导规则知道得更多）。
+    const groups = new Map<string, PersonaEvent[]>()
+    for (const e of events) {
+      const sessionKey = scopeKey !== undefined ? scopeKey : this.sessionKeyFor(key, driver, e)
+      const list = groups.get(sessionKey) ?? []
+      list.push(e)
+      groups.set(sessionKey, list)
     }
-    const resolved = await this.driverSession(personaId, driver.id, t.user, events[0]!, sessionKey)
-    if (!resolved.sessionId) {
-      this.bump(key, "failed")
-      // 如实转出根因：只说“会话解析失败”会让排查无从下手
-      // （底层可能是磁盘满/权限/存储不可达，处理方式完全不同）
-      return {
-        personaId,
-        driverId: driver.id,
-        status: "unavailable",
-        reason: `driver 会话解析失败${resolved.error ? `：${resolved.error}` : ""}`,
+
+    let firstSessionId: string | undefined
+    let maxAhead = 0
+    for (const [sessionKey, groupEvents] of groups) {
+      const resolved = await this.driverSession(personaId, driver.id, t.user, groupEvents[0]!, sessionKey)
+      if (!resolved.sessionId) {
+        this.bump(key, "failed")
+        // 如实转出根因：只说“会话解析失败”会让排查无从下手
+        // （底层可能是磁盘满/权限/存储不可达，处理方式完全不同）
+        return {
+          personaId,
+          driverId: driver.id,
+          status: "unavailable",
+          reason: `driver 会话解析失败${resolved.error ? `：${resolved.error}` : ""}`,
+        }
       }
-    }
-    const sessionId = resolved.sessionId
-    const aheads = scheduler.enqueueMany(
-      events.map((e) => ({ event: e, sessionId, user: t.user, threadKey: driver.id })),
-    )
-    if (aheads.some((a) => a < 0)) {
-      this.bump(key, "overflowed")
-      return { personaId, driverId: driver.id, status: "overflow", sessionId, reason: "待处理队列已满" }
+      const sessionId = resolved.sessionId
+      firstSessionId ??= sessionId
+      const aheads = scheduler.enqueueMany(
+        groupEvents.map((e) => ({ event: e, sessionId, user: t.user, threadKey: driver.id })),
+      )
+      if (aheads.some((a) => a < 0)) {
+        this.bump(key, "overflowed")
+        return { personaId, driverId: driver.id, status: "overflow", sessionId, reason: "待处理队列已满" }
+      }
+      maxAhead = Math.max(maxAhead, ...aheads)
     }
     this.bump(key, "accepted")
-    const ahead = aheads.length ? Math.max(...aheads) : 0
-    return { personaId, driverId: driver.id, status: "accepted", sessionId, ...(ahead > 0 ? { queued: ahead } : {}) }
+    return {
+      personaId,
+      driverId: driver.id,
+      status: "accepted",
+      ...(firstSessionId ? { sessionId: firstSessionId } : {}),
+      ...(maxAhead > 0 ? { queued: maxAhead } : {}),
+    }
+  }
+
+  /**
+ * 单个事件的会话路由键。
+ *
+ * 优先级（高 → 低）：`dispatchInto` 显式指定 > `sessionKeyOf` 函数 > `sessionMap` 规则表 >
+ * 部署规则 `sessionRouting`。
+ *
+ * 缺省（什么都没声明）返回空串 = 该分身的**单一常驻上下文**：会话面向上下文，不面向群。
+ *
+ * 任一环节抛错都不能杀事件：降级到下一级并记日志（与「读历史失败不阻断投递」同纪律）。
+ */
+  private sessionKeyFor(driverKeyStr: string, driver: DriverDef, event: PersonaEvent): string {
+    if (typeof driver.sessionKeyOf === "function") {
+      try {
+        const derived = driver.sessionKeyOf(event)
+        if (derived && derived.trim()) return sanitizeSessionKey(derived)
+      } catch (err) {
+        this.log?.warn(`[persona:${driverKeyStr}] sessionKeyOf 抛错（降级到规则表）: ${String((err as Error)?.message || err)}`)
+      }
+    }
+    if (driver.sessionMap?.length) {
+      const mapped = matchSessionMap(driver.sessionMap, {
+        channel: event.channel,
+        kind: event.kind,
+        ...(event.context.refs ? { refs: event.context.refs } : {}),
+      })
+      // undefined = 没有规则命中（→ 继续走部署规则）；"" = 命中且要求常驻上下文
+      if (mapped !== undefined) return mapped ? sanitizeSessionKey(mapped) : DEFAULT_SESSION_KEY
+    }
+    // 缺省（driver 模式）：不分→所有事件进同一常驻会话，不同群的消息共享上下文
+    if (this.sessionRouting === "driver") return DEFAULT_SESSION_KEY
+    const derived = chatSessionKeyOf(event)
+    return derived ? sanitizeSessionKey(derived) : DEFAULT_SESSION_KEY
   }
 
   private async driverSession(
@@ -405,9 +515,12 @@ export class PersonaRuntime {
   ): Promise<{ sessionId: string | null; error?: string }> {
     // 缓存：同一 driver（同一会话键）的会话是稳定的（resolveDriver 幂等），没必要每条事件都问一次。
     // 缓存住的是 **Promise**（不是结果）：并发投递时也只会真正解析一次。
+    //
+    // 有 TTL（而不是永久）：会话会被用户删除 / 被 GC 归档，而解析器内部的 memo
+    // 知道自己校验存活，本层不知道——永久缓存会把「已死的 sessionId」钉死在这里。
     const key = sessionDriverKey(personaId, driverId, sessionKey)
     const cached = this.sessionCache.get(key)
-    if (cached) return cached
+    if (cached && this.now() - cached.at < this.sessionCacheTtlMs) return cached.value
     const p = (async () => {
       try {
         const r = await this.opts.sessions.resolveDriver({ personaId, driverId, user, event, sessionKey })
@@ -423,8 +536,36 @@ export class PersonaRuntime {
         return { sessionId: null, error }
       }
     })()
-    this.sessionCache.set(key, p)
+    this.sessionCache.set(key, { at: this.now(), value: p })
     return p
+  }
+
+  /** 当前时间（可注入，便于测试 TTL）。 */
+  private now(): number {
+    return this.opts.now ? this.opts.now() : Date.now()
+  }
+
+  /**
+   * 使某个 driver 的会话解析缓存失效（下一事件重新解析）。
+   *
+   * 为何需要它：会话被删除 / 重建后，缓存里的 sessionId 就是死 id。引擎会抛
+   * 「会话不存在」，而调度器重试 3 次后丢弃——表面症状是「这个分身从此哑了」。
+   * 宿主（或引擎错误分类）可以调它立即恢复，而不必等 TTL 过期。
+   */
+  invalidateSession(personaId: string, driverId?: string): number {
+    // 缓存键形状：`personaId/driverId`（默认键）或 `personaId/driverId#sessionKey`（多会话）
+    const exact = driverId ? `${personaId}/${driverId}` : null
+    const prefix = exact ? `${exact}#` : `${personaId}/`
+    let n = 0
+    for (const key of [...this.sessionCache.keys()]) {
+      if (exact !== null ? key === exact || key.startsWith(prefix) : key.startsWith(prefix)) {
+        this.sessionCache.delete(key)
+        n++
+      }
+    }
+    if (driverId) this.driverSessions.delete(driverKey(personaId, driverId))
+    if (n) this.log?.info(`[persona:${personaId}${driverId ? `/${driverId}` : ""}] 会话解析缓存已失效 ${n} 条（下次事件重新解析）`)
+    return n
   }
 
   private summarize(event: PersonaEvent, deliveries: PersonaDelivery[]): PersonaDispatchResult {
@@ -488,6 +629,8 @@ export class PersonaRuntime {
         // 两半必须同源（见 `DriverTarget.agents` 的注释）：一分离就会出现
         // “装了工具不告诉它”或“提示它有却没装”两种错配，而且都不报错。
         const agents = this.opts.lookup.agents?.(personaId) ?? []
+        // 本轮的会话键：同一轮的 events 已按会话键分组入队，所以取首条的推导结果即可。
+        const sessionKey = this.sessionKeyFor(key, driver, first)
         await this.opts.runner.run({
           personaId,
           identity,
@@ -499,6 +642,7 @@ export class PersonaRuntime {
           user,
           signal,
           mailbox,
+          ...(sessionKey ? { sessionKey } : {}),
           ...(siblings.length ? { siblings } : {}),
           ...(agents.length ? { agents } : {}),
           ...(attachments ? { attachments } : {}),

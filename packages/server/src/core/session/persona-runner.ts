@@ -41,8 +41,16 @@ export interface PersonaEnginePort {
     opts?: {
       attachments?: Array<{ name: string; mime?: string; path?: string; data?: Uint8Array }>
       channelNote?: string
-      /** 无人值守：人格运行在无交互通道，需审批工具自动通过（部署方整体担责，与既有 bot 同姿态）。 */
+      /** auto 姿态：需审批工具自动通过（仅当 `approvalMode=auto`）。 */
       autoApprove?: boolean
+      /**
+       * 交互模式（**必须显式传**）。
+       *
+       * 引擎缺省是 `realtime`（假定有实时前端）。人格会话没有前端——不传的话：
+       * `ask` 每次推一张没人看的选择卡并阻塞 5 分钟，`show` 的 html 分支 / `page_capture`
+       * 被当成可用随后失败。`multi_turn` 才是“有交互但经卡片/后端适配”的真实形态。
+       */
+      interactionMode?: "none" | "multi_turn" | "realtime"
     },
   ): Promise<void>
 }
@@ -62,12 +70,20 @@ export interface EnginePersonaRunnerOptions {
    */
   refreshBeforeRun?: () => Promise<void>
   /**
-   * 人格运行是否自动通过审批。
+   * 审批姿态（`GEBAI_PERSONA_APPROVAL` 的解析结果）。
    *
-   * 默认 `true`：人格的典型场景是「群里来消息 → 它自己判断要不要回」，没有人在
-   * 审批卡前面等着。这与既有飞书 bot 的 `GEBAI_FEISHU_BOT_AUTO_APPROVE` 同一姿态
-   * （部署方整体担责）。需要人工把关时设为 `false`，此时需审批工具会**直接拒绝**
-   * （不空等超时）——人格会如实说"我需要确认"而不是卡死。
+   * 可以传**函数**以支持热改（推荐：读环境变量的解析函数）——人格进程常常跑几周，
+   * 而“临时放开审批”是个真实诉求（先把活干完再收回）；写死成构造时的快照就必须重启，
+   * 而重启会中断正在跑的人格任务。
+   *
+   * - `ask`（缺省）：需审批工具走引擎审批点 → 审批桥推相期卡问人。**不传 autoApprove**。
+   * - `auto`：直接自动通过（引擎 `autoApprove: true`）。
+   * - `deny`：一律拒绝（不传 autoApprove，同时 `interactionMode: none`）。
+   */
+  approvalMode?: "ask" | "auto" | "deny" | (() => "ask" | "auto" | "deny")
+  /**
+   * @deprecated 旧字段（等价 `approvalMode` 的 deny/ask 两态）。保留只为兼容既有装配代码，
+   * 新代码用 `approvalMode`：`autoApprove=false` 映射为 `deny`，未给则 `ask`。
    */
   autoApprove?: boolean
 }
@@ -97,6 +113,21 @@ export function personaNote(input: PersonaRunInput, now = Date.now()): string {
   lines.push(`- 角色：${identity.role}（${identity.name}）`)
   lines.push(`- 本次关注面：**${driver.focus}**（分身 \`${driver.id}\`）`)
   lines.push(`- 会话归属：${input.user}`)
+  // 扮演者（实际用户身份）：**不写这段，模型会把自己当机器人**，
+  // 于是说“我帮你转达”“请以您的名义发”——而它本来就该以这个人的名义说话。
+  // 扮演者（实际用户身份）：**不写这段，模型会把自己当机器人**，
+  // 于是说“我帮你转达”“请以您的名义发”——而它本来就该以这个人的名义说话。
+  //
+  // 字段是**自由键值**（部署方定：姓名/工号/部门/邮箱/花名…），这里不挑不筛：
+  // 有哪些就全列给模型（都是该部署认定“此人是谁”的事实，挑掉哪一条都是我们替部署做了决定）。
+  const actorFields = Object.entries(identity.actor?.fields ?? {}).filter(([, v]) => v.trim())
+  if (actorFields.length) {
+    lines.push(`- 你扮演的是：${actorFields.map(([k, v]) => `**${k}** ${v}`).join("｜")}`)
+    lines.push("  （你以这个人的身份在群里说话，别人看到的就是他；不要自称机器人或助手）")
+  }
+  if (input.sessionKey) {
+    lines.push(`- 当前会话：\`${input.sessionKey}\`（同一会话内的历史是连续上下文；不同群/话题的上下文互相隔离）`)
+  }
   lines.push("")
   lines.push("## 工作方式")
   lines.push("你在**无人值守**地处理外部事件，没有人会替你转达消息、也没有人实时看着你的输出。因此：")
@@ -111,6 +142,35 @@ export function personaNote(input: PersonaRunInput, now = Date.now()): string {
   lines.push("2. **不需要回复就什么都不做**：判断后直接结束是合法的，不要为了「有产出」而发消息。")
   lines.push("3. **不确定时宁可先说清楚**：需要人确认的时候，发消息问，不要自己猜测执行。")
   lines.push("4. 你只能看到**本轮**的这几个事件；更早的上下文在会话历史里。")
+  lines.push("")
+  // 输出目标：驱动层配置的"去哪儿发"。
+  //
+  // 为何这一段不能省：回来源消息时 refs 里有 chatId，但**主动**行为（定时巡检报群、
+  // 告警推运维群）没有入站 refs——模型只能猜一个 id，猜错就被白名单拒。
+  const outputs = driver.outputs ?? []
+  if (outputs.length) {
+    lines.push("## 你可以发到哪里（已配置）")
+    lines.push("")
+    for (const o of outputs) {
+      const to = `${o.channel}:${o.address}`
+      const label = o.label ? `（${o.label}）` : ""
+      const thread = o.thread ? `，发话题时传 args:{root:"${o.thread}"}` : ""
+      lines.push(`- ${o.default ? "**默认**：" : ""}\`${to}\`${label}${thread}`)
+    }
+    lines.push("")
+    lines.push("主动发消息（不是回某条事件）时用上面的地址；回某条事件时优先回它自带的 chatId。")
+    lines.push("**名单之外的目标一律会被拒**——不要尝试别的群。")
+    lines.push("")
+  }
+  // 审批姿态：模型必须知道“哪些事会被人卡住”，否则它会反复重试被拒的操作，
+  // 或者把“等审批”误当成“已失败”。
+  lines.push("## 遇到需要授权的操作")
+  lines.push("")
+  lines.push("跑命令、改删文件、提交单据这类操作可能需要**用户本人批准**（卡片会弹在他桌面上）。因此：")
+  lines.push("")
+  lines.push("- 被拒或超时后**不要重复试同一个操作**——先换方案，或在消息里说清需要人做什么。")
+  lines.push("- 需要主管决策、需要外部信息、需要人去某个地方动手时，不要硬猜也不要装成功：")
+  lines.push("  在你要发出去的回复里**直接把问题问出来**（“这个要你确认一下：……”），不要自言自语。")
   lines.push("")
   lines.push("## 你可以调整自己的分工")
   lines.push("遇到「这类事以后长期归我管」或「这次专项得单独盯」时，**不必等人改配置**：")
@@ -176,15 +236,28 @@ export function personaNote(input: PersonaRunInput, now = Date.now()): string {
 
 export class EnginePersonaRunner implements PersonaRunner {
   private readonly engine: PersonaEnginePort
-  private readonly autoApprove: boolean
+  private readonly approvalModeOf: () => "ask" | "auto" | "deny"
   private readonly log?: EnginePersonaRunnerOptions["log"]
   private readonly refreshBeforeRun?: () => Promise<void>
 
   constructor(opts: EnginePersonaRunnerOptions) {
     this.engine = opts.engine
-    this.autoApprove = opts.autoApprove !== false
+    // 兼容旧字段：显式给 autoApprove=false 的场景等价于 deny（不空等、直接拒），
+    // 但缺省（undefined）必须走 ask——不能再用“旧默认 true”。
+    const fixed = opts.approvalMode ?? (opts.autoApprove === false ? "deny" : "ask")
+    this.approvalModeOf = typeof fixed === "function" ? fixed : () => fixed
     this.log = opts.log
     this.refreshBeforeRun = opts.refreshBeforeRun
+  }
+
+  /** 当前审批姿态（每次现取，支持热改）。 */
+  get approvalMode(): "ask" | "auto" | "deny" {
+    try {
+      return this.approvalModeOf()
+    } catch {
+      // 解析函数抛错：回到最安全的一档（问人）而不是 auto
+      return "ask"
+    }
   }
 
   isRunning(sessionId: string): boolean {
@@ -205,8 +278,15 @@ export class EnginePersonaRunner implements PersonaRunner {
     const events: PersonaEvent[] = [...input.events, ...drained]
     if (events.length === 0) return // 防御：调度器不该传空轮
 
-    // ② 渲染成模型输入（多事件按到达顺序，带「谁说的/回到哪」上下文）
-    const prompt = renderBatch(events, { includeReplyHint: true })
+    // ② 渲染成模型输入（多事件按到达顺序，带「谁说的/回到哪」上下文 +
+    //    本轮会话键 + 已注入的输出目标）。输出目标是**驱动层配置**——
+    //    不告诉模型的话，它在“主动发消息”场景只能猜群 id（猜错就被白名单拒）。
+    const outputs = [...(input.driver.outputs ?? [])]
+    const prompt = renderBatch(events, {
+      includeReplyHint: true,
+      ...(input.sessionKey ? { sessionKey: input.sessionKey } : {}),
+      ...(outputs.length ? { outputs } : {}),
+    })
 
     // ③ 聚合附件（图片等：人格看到的和用户发的是同一份）
     const attachments = events.flatMap((e) => e.attachments ?? [])
@@ -233,10 +313,20 @@ export class EnginePersonaRunner implements PersonaRunner {
     }
     input.signal.addEventListener("abort", onAbort, { once: true })
     try {
+      // 审批姿态决定两个入参（缺一都会错）：
+      // - auto：显式 autoApprove=true（需审批工具直接过）
+      // - ask：不传 autoApprove（走引擎审批点 → 事件 → 审批桥推相期卡问人）
+      // - deny：不传 autoApprove + interactionMode=none（交互类工具直接不可用，需审批工具由引擎拒）
+      //
+      // interactionMode：`ask` / `deny` 都用 `multi_turn` / `none`，**绝不能用引擎缺省的 realtime**——
+      // 后者假定有实时前端，会让 ask 推没人看的卡并阻塞 5 分钟。
+      const mode = this.approvalMode
+      const interactionMode: "none" | "multi_turn" = mode === "deny" ? "none" : "multi_turn"
       await this.engine.run(input.sessionId, input.user, prompt, {
         channelNote: personaNote(input),
+        interactionMode,
         ...(attachments.length ? { attachments } : {}),
-        ...(this.autoApprove ? { autoApprove: true } : {}),
+        ...(mode === "auto" ? { autoApprove: true } : {}),
       })
     } finally {
       input.signal.removeEventListener("abort", onAbort)

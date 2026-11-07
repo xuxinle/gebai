@@ -20,6 +20,7 @@ import { ShTaskRunner } from "../exec/sh-tasks"
 import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, type SubSessionFinishOptions, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionFinishGraceMs, subSessionNoticeHead, requestSubSessionFinish } from "../session/subsessions"
 import { BackgroundJobRegistry, type BgJobStore } from "../session/jobs"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
+import { polishModelOf } from "../tools/persona-outbound-shape"
 import { basenameName, uniqueUploadName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
@@ -1806,8 +1807,11 @@ private activeSchemas(sessionId: string) {
       // 对外动作渠道（act/observe 工具）：进程级单例，父子会话/子代理共用（渠道连接不该每会话一份）。
       // 未装配时为 undefined，工具层给出明确的装配说明而不是静默失败。
       ...(this.opts.channels ? { channels: this.opts.channels } : {}),
-      // 人格出站治理依赖（act 的 feishu 发送审核用）：同 channels 为进程级注入。
-      ...(this.opts.personaOutboundDeps ? { personaOutboundDeps: this.opts.personaOutboundDeps } : {}),
+          // 人格出站治理依赖（act 的 feishu 发送审核用）：同 channels 为进程级注入。
+    ...(this.opts.personaOutboundDeps ? { personaOutboundDeps: this.opts.personaOutboundDeps } : {}),
+    // 人格出站润色模型（`GEBAI_PERSONA_<ID>_OUTBOUND=polish`）：用**当前任务的 provider**，
+    // 不在工具层另建（否则模型配置会有两份，且任务级 envOverride 覆盖的那份被绕过）。
+    polishModel: polishModelOf(this.opts.provider as never),
       // 会话管控服务（session 工具，DESIGN「会话管控」）：跨会话控制平面。store/engine 双柄注入公开面；
       // run 入口同 REST prompt 语义（脱管——不等待完成，会话事件循环自行驱动）。
       // 子会话/子代理上下文同注入（管控面不区分父子——只看目标会话与当前会话的自身保护，

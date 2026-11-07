@@ -106,3 +106,17 @@ export async function personaOutboundBlock(
   const d = await personOutboundDecision(ctx, target, env)
   return d.allowed ? null : d.reason ?? "出站目标不在该人格允许的群名单内"
 }
+
+/** 会话归属的人格 id（非人格会话返回 null）。 */
+export async function personaIdOfSession(
+  ctx: Pick<ToolContext, "sessionId" | "user" | "sessions">,
+): Promise<string | null> {
+  if (!ctx.sessionId) return null
+  try {
+    const session = await ctx.sessions?.store?.load(ctx.sessionId, ctx.user)
+    const p = (session as { persona?: { personaId?: string } } | null)?.persona
+    return p?.personaId ?? null
+  } catch {
+    return null
+  }
+}

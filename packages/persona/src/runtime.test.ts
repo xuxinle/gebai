@@ -27,9 +27,9 @@ function ev(id: string, over: Partial<PersonaEvent> = {}): PersonaEvent {
 
 const IDENT: PersonaIdentity = { id: "xiaoshuang", name: "小霜", identity: "你是小霜", role: "应答支持群" }
 
-function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimit?: number } = {}) {
+function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimit?: number; sessionRouting?: "driver" | "chat"; sessionKeyOf?: (e: PersonaEvent) => string; sessionMap?: import("./session-map").SessionMapRule[] } = {}) {
   const runs: PersonaRunInput[] = []
-  const resolvers: Array<{ personaId: string; driverId: string }> = []
+  const resolvers: Array<{ personaId: string; driverId: string; sessionKey?: string }> = []
   const sessionByThread = new Map<string, string>()
   let seq = 0
   /** 挂起中的 run（逐个放行，不共享一个 release——共享会让并发观察失真）。 */
@@ -38,7 +38,15 @@ function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimi
   const lookup: PersonaLookup = {
     get: (id) => (id === "xiaoshuang" ? IDENT : null),
     subscribers: () => (opts.routes === false ? [] : [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }]),
-    drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }],
+    drivers: () => [
+      {
+        id: "main",
+        focus: "主驱动",
+        subscriptions: ["*"],
+        ...(opts.sessionKeyOf ? { sessionKeyOf: opts.sessionKeyOf } : {}),
+        ...(opts.sessionMap ? { sessionMap: opts.sessionMap } : {}),
+      },
+    ],
     maxConcurrent: () => opts.maxConcurrent ?? 2,
   }
   /** 是否让 run 挂起（默认挂起，便于观察并发/排队）。 */
@@ -52,13 +60,14 @@ function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimi
     },
   }
   const sessions: SessionResolver = {
-    // 大脑/手模型：每人格只有一个 driver 会话（幂等，同一人格总是同一 id）
-    resolveDriver: async ({ personaId, driverId }: { personaId: string; driverId: string }) => {
-      resolvers.push({ personaId, driverId })
-      const existing = sessionByThread.get(`${personaId}/${driverId}`)
+    // 每 (人格, 分身, 会话键) 一个幂等会话（会话键缺省空串 = 单会话）
+    resolveDriver: async ({ personaId, driverId, sessionKey }: { personaId: string; driverId: string; sessionKey?: string }) => {
+      resolvers.push({ personaId, driverId, ...(sessionKey ? { sessionKey } : {}) })
+      const key = `${personaId}/${driverId}#${sessionKey ?? ""}`
+      const existing = sessionByThread.get(key)
       if (existing) return { sessionId: existing, created: false, name: "x" }
       const id = (++seq).toString(16).padStart(32, "0")
-      sessionByThread.set(`${personaId}/${driverId}`, id)
+      sessionByThread.set(key, id)
       return { sessionId: id, created: true, name: `${personaId}·${driverId}` }
     },
   }
@@ -67,6 +76,7 @@ function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimi
     runner,
     sessions,
     ...(opts.queueLimit !== undefined ? { queueLimit: opts.queueLimit } : {}),
+    ...(opts.sessionRouting !== undefined ? { sessionRouting: opts.sessionRouting } : {}),
   })
   const settle = async () => {
     for (let i = 0; i < 12; i++) await Promise.resolve()
@@ -168,10 +178,13 @@ describe("PersonaRuntime：幂等", () => {
 
 describe("PersonaRuntime：会话与线程", () => {
   /**
-   * 大脑/手模型：**不再按群分会话**。不同群的消息都进同一个 driver——
-   * 因为判断"这两件事要不要合并看"正是 driver 的职责，拆成不同会话就把判断力剥夺了。
+   * 缺省语义：**会话面向上下文，不面向群**。
+   *
+   * 不同群的消息注入**同一个** driver 会话——因为“我盯支持答疑”就是一个上下文，
+   * 而判断“这两件事要不要合并看”正是 driver 的职责。把群当会话身份会把“一个人”
+   * 拆成几份互不知情的助手（A 群排查一小时，B 群问同一件事时又从零开始）。
    */
-  test("不同群的消息进同一个 driver 会话（由 driver 统一判断）", async () => {
+  test("缺省：不同群的消息**注入同一会话**（上下文共享，不按群拆）", async () => {
     const h = makeHarness()
     h.runtime.start()
     const a = await h.runtime.dispatch(ev("e1"))
@@ -179,9 +192,53 @@ describe("PersonaRuntime：会话与线程", () => {
     expect(a.sessionId).toBe(b.sessionId!)
     // 会话解析只发生一次（缓存于 driver）
     expect(h.resolvers).toHaveLength(1)
+    expect(h.resolvers[0]!.sessionKey).toBeUndefined()
   })
 
-  test("定时任务也进同一个 driver（不单开 anchor 会话）", async () => {
+  test("同一群的连续消息本就是同一会话（键稳定，不按消息分岔）", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    const a = await h.runtime.dispatch(ev("e1"))
+    const b = await h.runtime.dispatch(ev("e2"))
+    expect(a.sessionId).toBe(b.sessionId!)
+    expect(h.resolvers).toHaveLength(1)
+  })
+
+  test("显式要求群间隔离（sessionRouting=chat）→ 每群一会话", async () => {
+    const h = makeHarness({ sessionRouting: "chat" })
+    h.runtime.start()
+    const a = await h.runtime.dispatch(ev("e1"))
+    const b = await h.runtime.dispatch(ev("e2", { context: { source: "群B", summary: "x", refs: { chatId: "oc_2" } } }))
+    expect(a.sessionId).not.toBe(b.sessionId!)
+    expect(h.resolvers.map((r) => r.sessionKey)).toEqual(["oc_1", "oc_2"])
+  })
+
+  test("按上下文分会话（sessionKeyOf 按工单号）：同一工单跨群进同一会话", async () => {
+    // 这是“会话面向上下文”的正向用法：分割依据是**事务**（工单），不是渠道
+    const h = makeHarness({ sessionKeyOf: (e) => e.context.refs?.extra?.ticket ?? "" })
+    h.runtime.start()
+    const a = await h.runtime.dispatch(
+      ev("e1", { context: { source: "群A", summary: "x", refs: { chatId: "oc_a", extra: { ticket: "T-1" } } } }),
+    )
+    const b = await h.runtime.dispatch(
+      ev("e2", { context: { source: "群B", summary: "y", refs: { chatId: "oc_b", extra: { ticket: "T-1" } } } }),
+    )
+    const c = await h.runtime.dispatch(
+      ev("e3", { context: { source: "群A", summary: "z", refs: { chatId: "oc_a", extra: { ticket: "T-2" } } } }),
+    )
+    expect(a.sessionId).toBe(b.sessionId!) // 同一工单：跨群共享上下文
+    expect(c.sessionId).not.toBe(a.sessionId!) // 不同工单：不同上下文
+  })
+
+  test("话题群：sessionRouting=chat 时不同话题不同会话", async () => {
+    const h = makeHarness({ sessionRouting: "chat" })
+    h.runtime.start()
+    const a = await h.runtime.dispatch(ev("e1", { context: { source: "话题1", summary: "x", refs: { chatId: "oc_1", threadId: "omt_1" } } }))
+    const b = await h.runtime.dispatch(ev("e2", { context: { source: "话题2", summary: "y", refs: { chatId: "oc_1", threadId: "omt_2" } } }))
+    expect(a.sessionId).not.toBe(b.sessionId!)
+  })
+
+  test("定时任务与群消息同会话（不单开 anchor 会话）", async () => {
     const h = makeHarness()
     h.runtime.start()
     const a = await h.runtime.dispatch(ev("e1"))
@@ -201,6 +258,111 @@ describe("PersonaRuntime：会话与线程", () => {
     const r = await runtime.dispatch(ev("e1"))
     expect(r.status).toBe("unavailable")
     expect(r.deliveries?.[0].reason).toContain("磁盘满了")
+  })
+})
+
+describe("PersonaRuntime：sessionMap（每话题一会话）", () => {
+  const per_thread = [
+    { when: "message", key: "{chat}__t_{thread}" },
+    { when: "message", key: "{chat}" },
+  ]
+
+  test("话题内追问共享上下文，话题之间隔离，普通群退回按群", async () => {
+    const h = makeHarness({ sessionMap: per_thread })
+    h.runtime.start()
+    const t1a = await h.runtime.dispatch(
+      ev("e1", { context: { source: "话题1", summary: "x", refs: { chatId: "oc_a", threadId: "omt_1", messageId: "om_1" } } }),
+    )
+    const t1b = await h.runtime.dispatch(
+      ev("e2", { context: { source: "话题1", summary: "y", refs: { chatId: "oc_a", threadId: "omt_1", messageId: "om_2" } } }),
+    )
+    const t2 = await h.runtime.dispatch(
+      ev("e3", { context: { source: "话题2", summary: "z", refs: { chatId: "oc_a", threadId: "omt_2" } } }),
+    )
+    const plain = await h.runtime.dispatch(
+      ev("e4", { context: { source: "普通群", summary: "w", refs: { chatId: "oc_b" } } }),
+    )
+    expect(t1a.sessionId).toBe(t1b.sessionId!) // 同一话题：接得上
+    expect(t1a.sessionId).not.toBe(t2.sessionId!) // 不同话题：隔离
+    expect(plain.sessionId).not.toBe(t1a.sessionId!) // 普通群走第二条规则
+    // 键形也好对：话题键带 __t_ 标记，普通群是裸 chat
+    expect(h.resolvers.map((r) => r.sessionKey)).toEqual(["oc_a__t_omt_1", "oc_a__t_omt_2", "oc_b"])
+  })
+
+  test("sessionKeyOf 优先于 sessionMap（函数比规则表更直接）", async () => {
+    const h = makeHarness({ sessionKeyOf: () => "from-fn", sessionMap: per_thread })
+    h.runtime.start()
+    const r = await h.runtime.dispatch(ev("e1"))
+    expect(r.status).toBe("accepted")
+    expect(h.resolvers[0]!.sessionKey).toBe("from-fn")
+  })
+
+  test("sessionMap 优先于部署 sessionRouting（规则表是更明确的声明）", async () => {
+    const h = makeHarness({ sessionRouting: "chat", sessionMap: [{ when: "*", key: "all-in-one" }] })
+    h.runtime.start()
+    const a = await h.runtime.dispatch(ev("e1"))
+    const b = await h.runtime.dispatch(ev("e2", { context: { source: "群B", summary: "x", refs: { chatId: "oc_2" } } }))
+    expect(a.sessionId).toBe(b.sessionId!)
+    expect(h.resolvers[0]!.sessionKey).toBe("all-in-one")
+  })
+
+  test("规则全不命中 → 回落部署规则（不把事件搞丢）", async () => {
+    const h = makeHarness({ sessionMap: [{ when: "webhook", key: "hook" }] })
+    h.runtime.start()
+    const r = await h.runtime.dispatch(ev("e1"))
+    expect(r.status).toBe("accepted")
+    expect(h.resolvers[0]!.sessionKey ?? "").toBe("")
+  })
+})
+
+describe("PersonaRuntime：dispatchInto（按需归到指定上下文）", () => {
+  /**
+   * 会话不面向群，但“归到哪个上下文”有时只有**调用方**知道：
+   * 把三个群的未答问题汇总成“今天这批支持求助”、把一单在多群的讨论聚到一起。
+   * `sessionKeyOf` 推导不出来（它只看得到单个事件）。
+   */
+  test("不同群的消息按调用方指定的 scope 注入**同一会话**", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    const a = await h.runtime.dispatchInto(ev("e1"), "digest:2026-11-07")
+    const b = await h.runtime.dispatchInto(
+      ev("e2", { context: { source: "群B", summary: "x", refs: { chatId: "oc_2" } } }),
+      "digest:2026-11-07",
+    )
+    expect(a.sessionId).toBe(b.sessionId!)
+    expect(h.resolvers[0]!.sessionKey).toBe("digest:2026-11-07")
+  })
+
+  test("scope 优先于 driver 的 sessionKeyOf 与部署规则", async () => {
+    const h = makeHarness({ sessionRouting: "chat", sessionKeyOf: (e) => e.context.refs?.chatId ?? "" })
+    h.runtime.start()
+    const a = await h.runtime.dispatchInto(ev("e1", { context: { source: "群A", summary: "x", refs: { chatId: "oc_a" } } }), "ticket:T-1")
+    const b = await h.runtime.dispatchInto(ev("e2", { context: { source: "群B", summary: "y", refs: { chatId: "oc_b" } } }), "ticket:T-1")
+    expect(a.sessionId).toBe(b.sessionId!) // 推导规则没把它拆开
+    expect(h.resolvers[0]!.sessionKey).toBe("ticket:T-1")
+  })
+
+  test("scope 为空串 → 回到该 driver 的常驻上下文", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    const r = await h.runtime.dispatchInto(ev("e1"), "")
+    expect(r.status).toBe("accepted")
+    expect(h.resolvers[0]!.sessionKey ?? "").toBe("")
+  })
+
+  test("scope 同样被清洗（非法字符/超长不污染会话名与盘上键）", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    await h.runtime.dispatchInto(ev("e1"), "客户 A/投诉 单 #12")
+    const key = h.resolvers[0]!.sessionKey!
+    expect(key).not.toContain("/")
+    expect(key).not.toContain(" ")
+  })
+
+  test("dispatchInto 未启动时如实返回 unavailable（不静默吞）", async () => {
+    const h = makeHarness()
+    const r = await h.runtime.dispatchInto(ev("e1"), "x")
+    expect(r.status).toBe("unavailable")
   })
 })
 
@@ -229,13 +391,12 @@ describe("PersonaRuntime：运行中插入（不排队，直接进下一轮）",
 })
 
 describe("PersonaRuntime：并发额度", () => {
-  test("新事件不堆到不同会话（都进同一 driver，走插入）", async () => {
-    const h = makeHarness({ maxConcurrent: 1 })
+  test("新事件进同一会话时走插入（单会话路由）", async () => {
+    const h = makeHarness({ maxConcurrent: 1, sessionRouting: "driver" })
     h.runtime.start()
     const a = await h.runtime.dispatch(ev("e1"))
     const b = await h.runtime.dispatch(ev("e2", { context: { source: "群B", summary: "x", refs: { chatId: "oc_2" } } }))
     await h.settle()
-    // 两条事件进同一个 driver 会话（不再按群分会话）
     expect(a.sessionId).toBe(b.sessionId!)
     expect(h.runs).toHaveLength(1) // 只跑一轮；e2 在信箱里等下一轮
     const st = h.runtime.state("xiaoshuang", "main")!

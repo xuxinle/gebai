@@ -124,7 +124,15 @@ export interface ServerConfig {
   /** 拟人模式（GEBAI_PERSONA=true）：渠道收到的入站事件交给人格分身处理。
    *  关闭时 persona 运行时**根本不实例化**，事件只记日志——既有行为零影响。 */
   personaEnabled: boolean
-  /** 人格运行自动通过审批（GEBAI_PERSONA_AUTO_APPROVE，默认 true）：无人值守时没人守审批卡。 */
+  /**
+   * @deprecated 已被 `GEBAI_PERSONA_APPROVAL`（ask/auto/deny，缺省 ask）取代。
+   * 保留字段只为不改 config 形状（旧部署设了 `GEBAI_PERSONA_AUTO_APPROVE=false` 时，
+   * 人格块的 approvalMode 会把 false 映射为自动拒绝——见 `readApprovalMode`）。
+   *
+   * 为何不能再让它决定行为：旧默认 `true` 等于“群里一条消息触发的轮次里
+   * `sh`/删文件自动执行”，没有任何人把关；而它的反面 `false` 又会让工具一律拒绝。
+   * 两者都不是生产形态——正确的是“推相期卡问人”。
+   */
   personaAutoApprove: boolean
   /** 事件源白名单（GEBAI_EVENT_SOURCES_ENABLE，逗号分隔）：非空时仅启用名单内的事件源。
    *  与 `GEBAI_TOOL_*` / `GEBAI_SUB_AGENTS_*` 同口径（先白后黑）；仅在 GEBAI_PERSONA=true 时生效。 */
@@ -373,7 +381,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     personaEnabled: bool("GEBAI_PERSONA", false),
     // 人格运行是否自动通过审批（默认 true：无人值守场景没有人守着审批卡；
     // 与 GEBAI_FEISHU_BOT_AUTO_APPROVE 同一姿态——部署方整体担责）
-    personaAutoApprove: bool("GEBAI_PERSONA_AUTO_APPROVE", true),
+    personaAutoApprove: bool("GEBAI_PERSONA_AUTO_APPROVE", false),
     // 事件源启停名单（GEBAI_EVENT_SOURCES_ENABLE / DISABLE）：与子Agent 同名机制同口径——
     // 白名单非空仅启用名单内，黑名单移除名单内（先白后黑）。只在拟人模式启用时才有意义。
     eventSourcesEnable: splitList(env("GEBAI_EVENT_SOURCES_ENABLE")),

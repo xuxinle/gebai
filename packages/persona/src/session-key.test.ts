@@ -68,7 +68,7 @@ function ev(id: string, chatId?: string): PersonaEvent {
 }
 
 describe("PersonaRuntime：sessionKeyOf 分流", () => {
-  function setup(sessionKeyOf?: (e: PersonaEvent) => string) {
+  function setup(sessionKeyOf?: (e: PersonaEvent) => string, opts: { sessionRouting?: "chat" | "driver" } = {}) {
     const resolvedKeys: Array<string | undefined> = []
     const sessionIds = new Map<string, string>()
     let seq = 0
@@ -87,7 +87,7 @@ describe("PersonaRuntime：sessionKeyOf 分流", () => {
       subscribers: (e: PersonaEvent) => (e.kind === "message" ? [{ personaId: "p1", driverIds: ["d"], user: "admin" }] : []),
     } as never
     const runner: PersonaRunner = { isRunning: () => false, run: async () => {} }
-    const rt = new PersonaRuntime({ lookup, runner, sessions })
+    const rt = new PersonaRuntime({ lookup, runner, sessions, ...(opts.sessionRouting ? { sessionRouting: opts.sessionRouting } : {}) })
     rt.start() // dispatch 前必须启动（未启动直接 unavailable，不进投递链）
     return { rt, resolvedKeys, sessionIds }
   }
@@ -101,11 +101,20 @@ describe("PersonaRuntime：sessionKeyOf 分流", () => {
     expect(resolvedKeys).toEqual(["oc_a", "oc_b"])
   })
 
-  test("路由函数返回空 → 默认键（单会话兼容路径）", async () => {
+  test("路由函数返回空 → 退回部署规则（缺省 = 单会话，不按群拆）", async () => {
     const { rt, resolvedKeys } = setup(() => "")
     await rt.dispatch(ev("m1", "oc_a"))
     await rt.dispatch(ev("m2", "oc_b"))
-    expect(resolvedKeys.every((k) => k === undefined || k === "")).toBe(true)
+    // 返回空串 = 声明方没有更特殊的判断 → 回到“一个分身一个上下文”，
+    // 不同群的消息注入同一会话（会话面向上下文，不面向群）
+    expect(resolvedKeys).toEqual([""])
+  })
+
+  test("路由函数返回空 + 显式群间隔离 → 按群分", async () => {
+    const { rt, resolvedKeys } = setup(() => "", { sessionRouting: "chat" })
+    await rt.dispatch(ev("m1", "oc_a"))
+    await rt.dispatch(ev("m2", "oc_b"))
+    expect(resolvedKeys).toEqual(["oc_a", "oc_b"])
   })
 
   test("路由函数抛错 → 降级默认键、事件不被丢弃（accepted）", async () => {
@@ -119,12 +128,18 @@ describe("PersonaRuntime：sessionKeyOf 分流", () => {
     expect(r.status).toBe("accepted")
   })
 
-  test("不声明 sessionKeyOf：行为与历史一致（键恒为默认）", async () => {
+  test("不声明 sessionKeyOf：缺省单会话（不同群也进同一上下文）", async () => {
     const { rt, resolvedKeys } = setup(undefined)
     await rt.dispatch(ev("m1", "oc_a"))
     await rt.dispatch(ev("m2", "oc_b"))
-    // 默认键下两事件共用同一缓存条目：resolver 只被调一次，键为空串（默认，
-    // runtime 传的是 DEFAULT_SESSION_KEY=""；旧绑定键形状兼容）
+    // 默认键下两事件共用同一缓存条目：键为空串（runtime 传 DEFAULT_SESSION_KEY=""）
     expect(resolvedKeys).toEqual([""])
+  })
+
+  test("不声明 sessionKeyOf + 显式群间隔离：按群分", async () => {
+    const { rt, resolvedKeys } = setup(undefined, { sessionRouting: "chat" })
+    await rt.dispatch(ev("m1", "oc_a"))
+    await rt.dispatch(ev("m2", "oc_b"))
+    expect(resolvedKeys).toEqual(["oc_a", "oc_b"])
   })
 })

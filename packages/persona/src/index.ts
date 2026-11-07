@@ -66,6 +66,9 @@ export { workerReportEvent } from "./worker"
 
 // ── 运行时与端口 ──
 export type {
+  DriverDef,
+  OutputTarget,
+  PersonaActor,
   PersonaDelivery,
   PersonaDeliveryStatus,
   PersonaIdentity,
@@ -98,6 +101,33 @@ export {
 } from "./discovery"
 export type { EventSourceManagerOptions, EventSourceState } from "./source-manager"
 export { EventSourceManager } from "./source-manager"
+
+// ── 会话映射（可配置规则表：按话题/群/发言者/工单切上下文）──
+export type { MissingPolicy, SessionMapContext, SessionMapRule } from "./session-map"
+export {
+  KNOWN_PLACEHOLDERS,
+  SESSION_MAP_PRESETS,
+  isKnownPlaceholder,
+  matchSessionMap,
+  parseSessionMap,
+  placeholdersOf,
+  renderSessionKey,
+  validateSessionMap,
+} from "./session-map"
+
+// ── 身份模板（角色身份由部署环境的白名单变量提供）──
+export { ACTOR_FIELDS_JSON_KEY, actorFieldsFromEnv, renderTemplate, resolveActorFields, templateVars, validateTemplate } from "./identity"
+
+// ── 部署配置面（启用名单/入站收窄/输出目标/审批姿态/会话路由）──
+export type { EnvView, PersonaApprovalMode, PersonaEnvReport } from "./env-config"
+export {
+  applyPersonaEnv,
+  chatSessionKeyOf,
+  narrowSubscriptions,
+  parseOutputTargets,
+  personaApprovalMode,
+  sessionRoutingMode,
+} from "./env-config"
 
 // ── 人格定义扩展规范（与事件源、子 Agent、渠道同款「丢文件即注册」）──
 export type { PersonaCatalogOptions, PersonaCatalogDiff } from "./catalog"
