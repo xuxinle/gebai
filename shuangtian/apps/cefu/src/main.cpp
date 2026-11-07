@@ -1068,6 +1068,7 @@ auto run_app(int argc, char** argv) -> int {
         labels.reserve(laid.nodes.size());
         for (const auto& node : laid.nodes) {
           st::ui::LabelAnchor anchor;
+          anchor.id = node.id;
           anchor.x = node.position.x;
           anchor.y = node.position.y;
           anchor.z = node.position.z;
@@ -1085,6 +1086,51 @@ auto run_app(int argc, char** argv) -> int {
           labels.push_back(std::move(anchor));
         }
         graph_labels->set_labels(std::move(labels));
+        // 连线：**在这里生成**（而非三维层）——理由见 LabelEdge 的注释。
+        //
+        // 颜色按边语义区分，但都比文字暗：连线是背景结构，
+        // 抢了文字的视觉重量就本末倒置。
+        const auto edge_argb = [](cefu::graph::EdgeKind kind) -> unsigned int {
+          switch (kind) {
+            case cefu::graph::EdgeKind::BelongsTo:
+              return 0xFFC9A250U;  // 从属：金（与分类同色系）
+            case cefu::graph::EdgeKind::Links:
+              return 0xFF5EAEFFU;  // 显式关联：蓝
+            case cefu::graph::EdgeKind::Supersedes:
+              return 0xFFE06A5AU;  // 取代：红
+            case cefu::graph::EdgeKind::OwnedBy:
+              return 0xFF4ED4A0U;  // 负责人：绿
+            case cefu::graph::EdgeKind::SharedFact:
+              return 0xFFB48CF0U;  // 共享硬事实：紫（推断出来的，最淡）
+            case cefu::graph::EdgeKind::ScopedTo:
+              return 0xFF8A9CE8U;  // 作用域：蓝紫
+          }
+          return 0xFF8593A5U;
+        };
+        std::vector<st::ui::LabelEdge> edges;
+        edges.reserve(laid.edges.size());
+        // ## 连线默认**不画**（用户拍板：“要么调好要么直接去掉”）
+        //
+        // 四轮调参都没解决：问题不在画法（粗细/颜色/虚线/避让），而在**布局**——
+        // 17 个节点在三维空间里分得很散，透视投影后连线必然横七竖八，
+        // 无论怎么调线条参数都治不好。而图谱的主要用途是
+        // “看清楚有哪些词条、怎么归类”，不是“看清那几根线”。
+        //
+        // 代码保留在这里（而不是删除）：关系数据本身是有价值的，
+        // 等布局改成“同册聚集”之后它可以一行开关打开。
+        constexpr bool kShowEdges = false;
+        if (kShowEdges) {
+          for (const auto& edge : laid.edges) {
+            if (edge.from >= laid.nodes.size() || edge.to >= laid.nodes.size()) continue;
+            st::ui::LabelEdge item;
+            item.from = laid.nodes[edge.from].id;
+            item.to = laid.nodes[edge.to].id;
+            item.argb = edge_argb(edge.kind);
+            item.width = edge.kind == cefu::graph::EdgeKind::SharedFact ? 1.1F : 1.7F;
+            edges.push_back(std::move(item));
+          }
+        }
+        graph_labels->set_edges(std::move(edges));
         // 投影参数与上面的相机保持一致（yaw/pitch/fov 来自场景相机、距离是刚算的）
         st::ui::LabelOverlay::Projection projection;
         projection.yaw = camera.yaw;

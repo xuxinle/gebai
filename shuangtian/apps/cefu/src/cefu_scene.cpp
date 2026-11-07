@@ -67,26 +67,6 @@ auto bounding_radius(const graph::Graph& graph) -> double {
   return max_radius;
 }
 
-/// 边色（按语义）。这些颜色刻意**互相区分但都偏暗**：
-/// 连线是背景结构，抢了节点的视觉重量就本末倒置。
-auto edge_color(graph::EdgeKind kind) -> std::string {
-  switch (kind) {
-    case graph::EdgeKind::BelongsTo:
-      return hex_rgb(0xC9, 0xA2, 0x50);  // 从属：亮金（与分类球同色系）
-    case graph::EdgeKind::Links:
-      return hex_rgb(0x5E, 0xAE, 0xFF);  // 显式关联：亮蓝
-    case graph::EdgeKind::Supersedes:
-      return hex_rgb(0xE0, 0x6A, 0x5A);  // 取代：亮红
-    case graph::EdgeKind::OwnedBy:
-      return hex_rgb(0x4E, 0xD4, 0xA0);  // 负责人：薄荷绿
-    case graph::EdgeKind::SharedFact:
-      return hex_rgb(0xB4, 0x8C, 0xF0);  // 共享硬事实：紫
-    case graph::EdgeKind::ScopedTo:
-      return hex_rgb(0x8A, 0x9C, 0xE8);  // 作用域：蓝紫
-  }
-  return hex_rgb(0x6B, 0x72, 0x80);
-}
-
 }  // namespace
 
 auto node_color(graph::NodeKind kind, const std::string& confidence) -> std::string {
@@ -113,7 +93,6 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   out.reserve(graph.nodes.size() * 420 + graph.edges.size() * 160 + 8192);
 
   const double radius = bounding_radius(graph);
-  const double edge_radius = radius * options.edge_radius_ratio;
   const double camera_distance = std::max(3.0, radius * 1.25);
 
   out += "// 册府知识图谱（本文件由 cefu_scene.cpp 生成，不要手改）\n";
@@ -149,39 +128,7 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
                      vec3(-camera_distance * 0.2, -camera_distance * 0.6, -camera_distance));
   out += "scene.add(rim);\n\n";
 
-  // ── 连线 ──
-  // 连线颜色调亮：之前的暗色在深背景上几乎看不见，而“谁连着谁”是图谱的核心信息
-  out += "function addEdge(from, to, color, thickness) {\n";
-  out += "  const a = new THREE.Vector3(from.x, from.y, from.z);\n";
-  out += "  const b = new THREE.Vector3(to.x, to.y, to.z);\n";
-  out += "  const dir = new THREE.Vector3().subVectors(b, a);\n";
-  out += "  const full = dir.length();\n";
-  out += "  if (full < 1e-6) return null;\n";
-  // 端点内缩：线不要画到节点中心（那里是文字），否则字被线穿过。
-  //
-  // 缩进量取 full 的 10%（上限 26%）：短边的线不能缩太多，否则中间那截消失；
-  // 长边缩 10% 已足够让出文字的宽度（文字宽约 100~300 世界单位）。
-  out += "  const trim = Math.min(full * 0.10, full * 0.26);\n";
-  out += "  if (full - trim * 2.0 < 1e-6) return null;\n";
-  out += "  dir.multiplyScalar(1.0 / full);\n";
-  // 不用 addScaledVector（three 精简版不一定有）：手动乘加，兼容面最宽
-  out += "  const ax = a.x + dir.x * trim, ay = a.y + dir.y * trim, az = a.z + dir.z * trim;\n";
-  out += "  const bx = b.x - dir.x * trim, by = b.y - dir.y * trim, bz = b.z - dir.z * trim;\n";
-  out += "  const len = full - trim * 2.0;\n";
-  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, len, 12, 1);\n";
-  // 连线颜色调亮、不透明度提满。
-  //
-  // 之前用 opacity 0.85：软件光栅器下细圆柱的抗锯齿会叠在半透明上，
-  // 结果是“颜色更淡 + 边缘更脏”双重变差。不透明反而更干净。
-  out += "  const mat = new THREE.MeshBasicMaterial({ color: color });\n";
-  out += "  const mesh = new THREE.Mesh(geo, mat);\n";
-  out += "  mesh.position.set((ax + bx) * 0.5, (ay + by) * 0.5, (az + bz) * 0.5);\n";
-  out += "  const up = new THREE.Vector3(0, 1, 0);\n";
-  out += "  mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(up, dir));\n";
-  out += "  return mesh;\n";
-  out += "}\n\n";
-
-  // 坐标先存成数组：供边与节点复用，脚本更小、也更好读
+  // 坐标先存成数组：供节点锚点复用
   out += "const P = [\n";
   for (const auto& node : graph.nodes) {
     out += std::format("  {{x: {:.3f}, y: {:.3f}, z: {:.3f}}},\n",
@@ -190,19 +137,14 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   }
   out += "];\n\n";
 
-  std::size_t edge_index = 0;
-  for (const auto& edge : graph.edges) {
-    if (edge.from >= graph.nodes.size() || edge.to >= graph.nodes.size()) continue;
-    // 共享硬事实边更细更淡：它是**推断出来的**关联，不该和显式声明一样重
-    const bool inferred = edge.kind == graph::EdgeKind::SharedFact;
-    const double thickness = inferred ? edge_radius * 0.7 : edge_radius;
-    // 同样用平铺语句（块会干扰 load_script 的语句边界扫描，见节点处的注释）
-    out += std::format("const e{} = addEdge(P[{}], P[{}], {}, {:.4f});\n"
-                       "if (e{} !== null) {{ e{}.name = 'edge_{}'; scene.add(e{}); }}\n",
-                       edge_index, edge.from, edge.to, edge_color(edge.kind), thickness, edge_index,
-                       edge_index, edge_index, edge_index);
-    ++edge_index;
-  }
+  // ── 连线：**不在三维层画**（已改到 LabelOverlay）──
+  //
+  // 为何改掉（换掉一版的关键）：三维画的是节点中心的投影点，
+  // 而文字被避让算法挪到了别处（右侧 4px、重叠时上下让出几十像素）。
+  // 两套坐标对不上，于是线永远“悬空”，调粗细/颜色/段数都治不好。
+  //
+  // 现在线由 LabelOverlay 画：它知道每个文字框的**精确屏幕矩形**，
+  // 从框边缘连出，二维画线还能抗锯齿。
   out += "\n";
 
   // ── 节点：**不画球**（只画连线，文字由二维叠层画）──
