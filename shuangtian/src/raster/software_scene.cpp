@@ -1153,10 +1153,28 @@ class SoftwareScene final : public Scene3D {
     }
     input.extra_lights = extra_light_scratch_.data();
     input.extra_light_count = static_cast<int>(extra_light_scratch_.size());
+    // ## 环境辐照度 = 标量环境项 + 半球光（按法线插值）
+    //
+    // three 的 `HemisphereLight` 是 `mix(ground, sky, n.y*0.5+0.5)`，
+    // 这运算是**逐像素的**（依赖法线），必须在 `shade_pixel` 里算，
+    // 不能像旧实现那样在准备阶段压成一个标量。
+    //
+    // 两者相加：three 里 `AmbientLight` 与 `HemisphereLight` 也是叠加的。
+    math::Vec3 hemisphere_irradiance{0.0f, 0.0f, 0.0f};
+    if (lighting_.hemisphere_intensity > 0.0f) {
+      // n.y ∈ [-1,1] → t ∈ [0,1]；t=1 时全取天空色
+      const float t = std::clamp(normal.y * 0.5f + 0.5f, 0.0f, 1.0f);
+      const math::Vec3& sky = lighting_.hemisphere_sky;
+      const math::Vec3& ground = lighting_.hemisphere_ground;
+      hemisphere_irradiance =
+          math::Vec3{lighting_.hemisphere_intensity * (ground.x + (sky.x - ground.x) * t),
+                     lighting_.hemisphere_intensity * (ground.y + (sky.y - ground.y) * t),
+                     lighting_.hemisphere_intensity * (ground.z + (sky.z - ground.z) * t)};
+    }
     input.ambient_irradiance =
-        math::Vec3{lighting_.ambient_color.x * lighting_.ambient,
-                   lighting_.ambient_color.y * lighting_.ambient,
-                   lighting_.ambient_color.z * lighting_.ambient};
+        math::Vec3{lighting_.ambient_color.x * lighting_.ambient + hemisphere_irradiance.x,
+                   lighting_.ambient_color.y * lighting_.ambient + hemisphere_irradiance.y,
+                   lighting_.ambient_color.z * lighting_.ambient + hemisphere_irradiance.z};
     // IBL：方向探针（环境反射/环境光照的统一形态）。
     input.ibl_dirs = ibl_dirs_.data();
     input.ibl_colors = ibl_colors_.data();

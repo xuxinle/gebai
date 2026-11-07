@@ -473,6 +473,31 @@ struct Lighting {
   math::Vec3 ambient_color{1.0f, 1.0f, 1.0f};
   /// 环境项：无光照处的底色亮度（0 = 背光面全黑）。
   float ambient{0.35f};
+
+  /// ## 半球环境光（three 的 `HemisphereLight`，2026-11-07）
+  ///
+  /// three 的半球光是**随法线方向插值**的：
+  ///
+  ///     irradiance = mix(groundColor, skyColor, n.y * 0.5 + 0.5)
+  ///
+  /// 而本框架原先只能把它压成一个标量 `ambient`。实测代价
+  /// （`tools/parity/shadow_parity.js`，球+盒+地面）：
+  ///
+  /// | 实现 | 单通道平均差 vs 浏览器 |
+  /// |---|---|
+  /// | 标量近似 | **6.77** |
+  /// | `AmbientLight`（无方向，本来就对）| **0.24** |
+  ///
+  /// 差 28 倍，全部集中在暗面：标量近似让背光面要么过亮要么过暗。
+  ///
+  /// ## 字段语义
+  ///
+  /// `hemisphere_intensity == 0` 时**完全关闭**（默认值），对存量零影响。
+  /// 开启时，辐照度按法线插值后再**与 `ambient` 相加**——这样两者可以共存
+  /// （three 里 `AmbientLight` 与 `HemisphereLight` 也是叠加的）。
+  math::Vec3 hemisphere_sky{0.0f, 0.0f, 0.0f};
+  math::Vec3 hemisphere_ground{0.0f, 0.0f, 0.0f};
+  float hemisphere_intensity{0.0f};
   /// 漫反射权重（与环境项相加，1.10 ≈ 原值 ambient 0.35 + diffuse 0.75）。
   float diffuse{0.75f};
   // ## `rim`（边缘光）已删除（2026-11-06）

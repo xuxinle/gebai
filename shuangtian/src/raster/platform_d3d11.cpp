@@ -3602,6 +3602,28 @@ cbuffer Scene : register(b0) {
   // 这条对回归很重要：没开阴影的场景必须一字节不变。
   float4x4 g_shadow_vp;
   float4 g_shadow_tune;
+  // ## 半球环境光（2026-11-07 新增）：与软件腿的 `Lighting::hemisphere_*` 同一语义
+  //
+  // three 的 `HemisphereLight` 是**逐像素按法线插值**的：
+  //
+  //     irradiance = mix(ground, sky, n.y * 0.5 + 0.5) * intensity
+  //
+  // 旧版 GPU 腿根本没有这个概念（软件腿也只是压成标量），实测与浏览器
+  // 差 6.77 级。现在两条腿都要做方向插值。
+  //
+  //   g_hemi_sky.xyz    = 天空色
+  //   g_hemi_sky.w      = 强度（**0 = 关闭**，与旧行为逐位相同）
+  //   g_hemi_ground.xyz = 地面色
+  float4 g_hemi_sky;
+  float4 g_hemi_ground;
+  // ## 环境光颜色（2026-11-07 新增）
+  //
+  // 软件腿一直有 `Lighting::ambient_color`（逐通道），而 GPU 腿把
+  // `g_light.w`（标量 ambient）直接乘基色——**颜色丢了**。
+  // 冷/暖环境光在两条腿上会长得不一样。
+  //
+  // 默认 (1,1,1)：不写颜色的场景逐位不变。
+  float4 g_ambient_color;
 };
 
 struct VsIn {
@@ -3801,7 +3823,18 @@ float4 ps_scene3d_body(VsOut input) : SV_Target {
     }
     // ## 均匀环境光（AmbientLight / Blender 的 world 均匀分量）
     // 走 irradiance × diffuseColor/π —— 不是 albedo × ambient（后者偏亮 π 倍）。
-    lit += g_light.w * diffuse_color * 0.31830988618;
+    //
+    // 加上半球光的**方向插值**（2026-11-07）：
+    //
+    //     hemi = mix(ground, sky, n.y * 0.5 + 0.5) * intensity
+    //
+    // `g_hemi_sky.w == 0` 时整段为 0，与旧行为**逐位相同**（那条对回归很重要）。
+    float3 hemi_irradiance = float3(0.0, 0.0, 0.0);
+    if (g_hemi_sky.w > 0.0) {
+      const float t = saturate(n.y * 0.5 + 0.5);
+      hemi_irradiance = lerp(g_hemi_ground.xyz, g_hemi_sky.xyz, t) * g_hemi_sky.w;
+    }
+    lit += (g_light.w * g_ambient_color.rgb + hemi_irradiance) * diffuse_color * 0.31830988618;
 
     // ## 额外灯光（2026-11-06）：**走同一个 BRDF**
     //
@@ -4177,6 +4210,15 @@ struct Scene3dParams {
   std::array<float, 16> shadow_vp{};
   /// x = strength（0 = 关闭）y = bias z = soft_radius w = 分辨率
   std::array<float, 4> shadow_tune{};
+  /// 半球环境光：xyz = 天空色，w = 强度（0 = 关闭）。
+  ///
+  /// 必须放在**末尾且顺序与 HLSL 一致**：常量缓冲是逐字节映射的，
+  /// 错一个字段后面全部错位（而症状是“颜色奇怪”而不是报错）。
+  std::array<float, 4> hemi_sky{};
+  /// xyz = 地面色，w 备用。
+  std::array<float, 4> hemi_ground{};
+  /// 环境光颜色（xyz；w 备用）。
+  std::array<float, 4> ambient_color{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -5056,6 +5098,13 @@ class GpuScene3d final : public st::raster::Scene3D {
       }
       params.extra_count = {static_cast<float>(count), 0.0f, 0.0f, 0.0f};
     }
+    // 半球环境光与环境光颜色（2026-11-07）：与软件腿口径一致
+    params.hemi_sky = {lighting_.hemisphere_sky.x, lighting_.hemisphere_sky.y,
+                       lighting_.hemisphere_sky.z, lighting_.hemisphere_intensity};
+    params.hemi_ground = {lighting_.hemisphere_ground.x, lighting_.hemisphere_ground.y,
+                          lighting_.hemisphere_ground.z, 0.0f};
+    params.ambient_color = {lighting_.ambient_color.x, lighting_.ambient_color.y,
+                            lighting_.ambient_color.z, 0.0f};
     // 自发光：与软件腿 `shade_surface` 的 emission 逻辑对齐。
     // 用**带符号**强度传递 `emission_unlit`（负值 = 纯发光体），
     // 避免再加一个 float4 —— 常量缓冲多一个字段就多一处错位可能。

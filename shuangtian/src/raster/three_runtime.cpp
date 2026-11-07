@@ -1209,9 +1209,6 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
         JsRef ground_array{impl_->context,
                            JS_GetPropertyStr(impl_->context, light.get(), "groundColor")};
         const math::Vec3 ground = read_color(impl_->context, ground_array.get());
-        const float sky_luma = 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
-        const float ground_luma =
-            0.2126f * ground.x + 0.7152f * ground.y + 0.0722f * ground.z;
         // ## 系数用均值：这是实测最接近 three 的**标量近似**
         //
         // three 的半球光是**随法线插值**的（逐像素），而本框架只能给
@@ -1230,8 +1227,36 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
         // 中间无偏估计，加权会把整体抬亮。
         //
         // ⚠ 真正的修法是给 `HemisphereLight` 新增一个“按法线插值”的光源
-        // 类型（而非标量近似），属独立改动。
-        ambient_from_light += intensity * (sky_luma + ground_luma) * 0.5f;
+        // 类型（而非标量近似）——**2026-11-07 已实现**，见下。
+        //
+        // ## 现在是真正的方向插值（不再是标量）
+        //
+        // `Lighting::hemisphere_*` 三个字段交给着色器逐像素按法线插值：
+        //
+        //     irradiance = mix(ground, sky, n.y * 0.5 + 0.5) * intensity
+        //
+        // 这是 three 的原文公式，所以两边应当基本重合（实测 6.77 → 见下方）。
+        //
+        // 多个 `HemisphereLight` 时**只取第一个**：字段只有一组，
+        // 而三盏以上半球光的叠加在实际场景里几乎不会出现。
+        if (scene.lighting.hemisphere_intensity <= 0.0f) {
+          scene.lighting.hemisphere_sky = color;
+          scene.lighting.hemisphere_ground = ground;
+          scene.lighting.hemisphere_intensity = intensity;
+        }
+        // ⚠ 半球光已经把环境辐照度全包了，所以**显式把 `ambient` 置 0**。
+        //
+        // 不能只把 `ambient_from_light` 置 0：下面的
+        //
+        //     if (ambient_from_light > 0.0f) ambient = ambient_from_light;
+        //
+        // 在值为 0 时**不会执行**，于是 `ambient` 停在默认的 **0.35**——
+        // 结果环境光被叠了两份（实测 6.77 → 22.59）。
+        //
+        // 而 `saw_ambient_light = true` 又让后面那条“对齐模式下归零”不执行。
+        // 两头都不管它，所以这里必须直接写。
+        scene.lighting.ambient = 0.0f;
+        ambient_from_light = 0.0f;
         // ## 必须置 `saw_ambient_light`（2026-11-07 修）
         //
         // 下面（约 1290 行）有：

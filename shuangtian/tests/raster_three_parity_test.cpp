@@ -300,10 +300,24 @@ ST_TEST(parity_compat_only_aligns_output_chain) {
 namespace {
 
 /// 渲一个 three 场景，返回指定像素（RGBA）。
+///
+/// ## 必须与 `tools/align_render` **完全同口径**
+///
+/// 数字是用 `align_render` 跑出来的，而它比本函数多做了两件事：
+///
+/// | 项 | `align_render` | 默认 `scene_spec_from_three` |
+/// |---|---|---|
+/// | 色调映射 | 显式 `ToneMap::None` | 跟随场景 |
+/// | 清屏色 | 命令行给的 | 调用方给的 |
+///
+/// 第一版这里没对齐，于是“内联脚本”与“磁盘脚本”同一份场景
+/// 却渲出不同像素，测试怎么都不对。
 auto render_pixel(const std::string& script, int width, int height, int x, int y)
     -> st::math::Color {
   auto spec = st::raster::scene_spec_from_three(script);
   if (!spec.has_value()) return st::math::Color{0, 0, 0, 0};
+  // 与 `align_render 1100 800 0` 同口径：tone_map = None
+  spec->lighting.tone_map = st::raster::ToneMap::None;
   st::raster::Canvas canvas{width, height, 1.0f};
   const auto status =
       st::raster::render_scene(*spec, canvas, st::math::Color::rgba(0, 0, 0, 255));
@@ -314,78 +328,31 @@ auto render_pixel(const std::string& script, int width, int height, int x, int y
   return st::math::unpremultiply(pixels[index]);
 }
 
-/// `tools/parity/shadow_parity.js` 的等价脚本（同一份场景，内联进来）。
+/// `tools/parity/shadow_parity.js` 的内容（**从磁盘读**，不内联）。
 ///
-/// ⚠ 与磁盘上那份必须**逐参数一致**。改一边就要改另一边——
-/// 数字是从那份脚本跑出来的。
+/// ## 为何从磁盘读而不是内联
+///
+/// 内联过一版：测试里写一份、磁盘上一份，两份“看着一样”但渲染结果
+/// 差 3 级（盒顶 164 vs 167）——而数字是从磁盘那份跑出来的，
+/// 于是测试永远红。
+///
+/// 两份文本不可能保证长期同步，所以直接读磁盘。失败时返回空串，
+/// 调用方会因渲染报错。
 auto shadow_parity_script() -> std::string {
-  return R"JS(
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0.05, 0.05, 0.05);
-
-const camera = new THREE.PerspectiveCamera(34, 1100 / 800, 0.05, 200);
-camera.position.set(0.4, -8.5, 4.6);
-camera.lookAt(0.0, 0.0, 0.6);
-scene.add(camera);
-
-const key = new THREE.DirectionalLight(0xffffff, 2.4);
-key.position.set(3.5, 4.5, 6.0);
-key.target.position.set(0, 0, 0);
-key.castShadow = true;
-key.shadow.mapSize.set(2048, 2048);
-key.shadow.camera.left = -6;
-key.shadow.camera.right = 6;
-key.shadow.camera.top = 6;
-key.shadow.camera.bottom = -6;
-key.shadow.camera.near = 0.5;
-key.shadow.camera.far = 40;
-key.shadow.bias = -0.0005;
-key.shadow.normalBias = 0.02;
-scene.add(key);
-scene.add(key.target);
-
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(20, 20),
-  new THREE.MeshStandardMaterial({ color: 0xbcb8b0, roughness: 0.85, metalness: 0.0 })
-);
-ground.rotation.x = -Math.PI / 2;
-ground.receiveShadow = true;
-ground.name = 'ground';
-scene.add(ground);
-
-const sphere = new THREE.Mesh(
-  new THREE.SphereGeometry(1.0, 48, 24),
-  new THREE.MeshStandardMaterial({ color: 0x4a6fa5, roughness: 0.45, metalness: 0.0 })
-);
-sphere.position.set(-1.6, 1.0, 0.2);
-sphere.castShadow = true;
-sphere.receiveShadow = true;
-sphere.name = 'sphere';
-scene.add(sphere);
-
-const box = new THREE.Mesh(
-  new THREE.BoxGeometry(1.5, 1.5, 1.5),
-  new THREE.MeshStandardMaterial({ color: 0xb8522e, roughness: 0.55, metalness: 0.0 })
-);
-box.position.set(1.7, 0.75, 0.0);
-box.rotation.set(0.0, 0.42, 0.0);
-box.castShadow = true;
-box.receiveShadow = true;
-box.name = 'box';
-scene.add(box);
-
-const ambient = new THREE.HemisphereLight(0x9aa8bc, 0x50493f, 0.55);
-scene.add(ambient);
-
-globalThis.renderer = {
-  toneMapping: 0,
-  toneMappingExposure: 1.0,
-  compat: 'three',
-  shadowMapEnabled: true,
-  shadowMapType: 'PCFSoft',
-};
-scene;
-)JS";
+  // 测试二进制的 cwd 是工程根（与 `st test` 一致），但为稳妥用相对路径尝试。
+  const char* candidates[] = {"tools/parity/shadow_parity.js",
+                              "../tools/parity/shadow_parity.js"};
+  for (const char* path : candidates) {
+    std::FILE* file = std::fopen(path, "rb");
+    if (file == nullptr) continue;
+    std::string out;
+    char buffer[4096];
+    std::size_t got = 0;
+    while ((got = std::fread(buffer, 1, sizeof(buffer), file)) > 0) out.append(buffer, got);
+    std::fclose(file);
+    if (!out.empty()) return out;
+  }
+  return {};
 }
 
 }  // namespace
@@ -399,6 +366,7 @@ ST_TEST(three_parity_shadow_lit_faces_match_browser) {
   //
   // 盒顶面：浏览器真值 rgb(167, 98, 82)
   const auto box_top = render_pixel(shadow_parity_script(), 1100, 800, 785, 300);
+  std::printf("## box_top = %d,%d,%d\n", int(box_top.r), int(box_top.g), int(box_top.b));
   ST_CHECK(std::abs(int(box_top.r) - 167) <= 2);
   ST_CHECK(std::abs(int(box_top.g) - 98) <= 2);
   ST_CHECK(std::abs(int(box_top.b) - 82) <= 2);
@@ -409,36 +377,139 @@ ST_TEST(three_parity_shadow_lit_faces_match_browser) {
   ST_CHECK(std::abs(int(sphere_top.g) - 81) <= 2);
   ST_CHECK(std::abs(int(sphere_top.b) - 113) <= 2);
 }
-
 ST_TEST(three_parity_shadow_dark_faces_keep_ambient) {
-  // 暗面：判据松（±14），只防灾难性回归。
+  // ## 暗面现在可以严比了（2026-11-07）
   //
-  // 若 `hemisphere` 分支再出现「忘了置 `saw_ambient_light`」那类 bug，
-  // 环境光会被归零、暗面变成 rgb(0,0,0)，这条立刻红。
-  // 实测未修时暗面是纯黑，修后是 18（浏览器 6）。
+  // 旧版这里只能写区间 `(3, 40)`——因为当时 `HemisphereLight` 被压成
+  // 标量，暗面误差 10~12 级，逐像素对不上。
+  //
+  // 换成真正的**方向插值**后，实测与浏览器**逐像素完全相同**：
+  //
+  // | 点 | 霜天 | 浏览器 |
+  // |---|---|---|
+  // | 球暗面 (355,480) | rgb(3,6,11) | rgb(3,6,11) |
+  // | 盒暗面 (700,450) | rgb(19,3,1) | rgb(19,3,1) |
+  //
+  // 所以容差收到 ±2（与受光面同档）。
   const auto sphere_dark = render_pixel(shadow_parity_script(), 1100, 800, 355, 480);
-  ST_CHECK(int(sphere_dark.r) > 3);   // 不能是纯黑
-  ST_CHECK(int(sphere_dark.r) < 40);  // 也不能被环境光糊白
+  ST_CHECK(std::abs(int(sphere_dark.r) - 3) <= 2);
+  ST_CHECK(std::abs(int(sphere_dark.g) - 6) <= 2);
+  ST_CHECK(std::abs(int(sphere_dark.b) - 11) <= 2);
 
   const auto box_dark = render_pixel(shadow_parity_script(), 1100, 800, 700, 450);
-  ST_CHECK(int(box_dark.r) > 3);
-  ST_CHECK(int(box_dark.r) < 40);
+  ST_CHECK(std::abs(int(box_dark.r) - 19) <= 2);
+  ST_CHECK(std::abs(int(box_dark.g) - 3) <= 2);
+  ST_CHECK(std::abs(int(box_dark.b) - 1) <= 2);
 }
 
 ST_TEST(three_parity_hemisphere_light_contributes_ambient) {
-  // ## 半球光必须真的产生环境项
+  // ## 半球光走**方向插值**，不再压成标量（2026-11-07）
   //
-  // 这条钉的是那个**极具迷惑性**的 bug：`hemisphere` 分支累加了
-  // `ambient_from_light` 却没置 `saw_ambient_light`，于是被后面的
-  // `if (aligned && !saw_ambient_light) ambient = 0.0f` 无条件抹掉。
+  // 旧实现累加到 `Lighting::ambient`（标量），实测与浏览器差 6.77。
+  // 现在填 `hemisphere_*` 三个字段，由 `shade_pixel` 逐像素按法线插值：
   //
-  // 症状：改系数、重编译、数字**一动不动**（两次实验都恰好是 7.79）。
+  //     irradiance = mix(ground, sky, n.y * 0.5 + 0.5) * intensity
+  //
+  // 这是 three 的原文公式，所以 `lighting.ambient` 必须为 **0**
+  // （半球光已包含全部环境光，叠标量会翻倍——实测 6.77 → 22.59）。
   auto spec = st::raster::scene_spec_from_three(shadow_parity_script());
   ST_CHECK(spec.has_value());
-  // 场景里 HemisphereLight(0x9aa8bc, 0x50493f, 0.55) →
-  //   sky_luma ≈ 0.2126*0.339 + 0.7152*0.404 + 0.0722*0.511 ≈ 0.396
-  //   ground_luma ≈ 0.2126*0.078 + 0.7152*0.070 + 0.0722*0.052 ≈ 0.071
-  //   ambient = 0.55 * (0.396 + 0.071) * 0.5 ≈ 0.128
-  ST_CHECK(spec->lighting.ambient > 0.05f);
-  ST_CHECK(spec->lighting.ambient < 0.25f);
+  // 半球光字段有值
+  ST_CHECK(spec->lighting.hemisphere_intensity > 0.0f);
+  // 天空色比地面色亮（0x9aa8bc vs 0x50493f）
+  const float sky_luma = 0.2126f * spec->lighting.hemisphere_sky.x +
+                         0.7152f * spec->lighting.hemisphere_sky.y +
+                         0.0722f * spec->lighting.hemisphere_sky.z;
+  const float ground_luma = 0.2126f * spec->lighting.hemisphere_ground.x +
+                            0.7152f * spec->lighting.hemisphere_ground.y +
+                            0.0722f * spec->lighting.hemisphere_ground.z;
+  ST_CHECK(sky_luma > ground_luma);
+  // 标量环境项必须为 0（否则环境光被叠两份）
+  ST_CHECK_EQ(spec->lighting.ambient, 0.0f);
+}
+
+// ── 7. 多光型场景（`tools/parity/shadow_lights.js`）──
+//
+// ## 与 shadow_parity 的分工
+//
+// | 场景 | 覆盖 |
+// |---|---|
+// | `shadow_parity.js` | 一盏平行光——查偏置/自遮挡/接触阴影 |
+// | `shadow_lights.js`（本节）| 平行光 + 聚光 + 点光——查光型语义 |
+//
+// ## 点光是一处**已知差异**，不是 bug
+//
+// 本框架两条腿的阴影贴图都是**单张**深度图。点光要六面 cubemap 才能
+// 投出正确阴影，所以两条腿都主动跳过（`build_shadow_map` 里
+// `if (light.kind == LightKind::Point) return;`）。
+//
+// 浏览器那边点光**有**影子。这个差异故意没有修——修它要引入 cubemap
+// 深度图，属于新特性而非缺陷。下面有一条用例把它的存在钉住。
+//
+// 实测：平均差 **1.13**、p50 **0.0**。点光的缺失在这个场景里贡献很小
+// （它强度 1.2，且被主光压过）。
+
+namespace {
+
+/// 读 `tools/parity/shadow_lights.js`（同 `shadow_parity_script`，从磁盘读）。
+auto shadow_lights_script() -> std::string {
+  const char* candidates[] = {"tools/parity/shadow_lights.js",
+                              "../tools/parity/shadow_lights.js"};
+  for (const char* path : candidates) {
+    std::FILE* file = std::fopen(path, "rb");
+    if (file == nullptr) continue;
+    std::string out;
+    char buffer[4096];
+    std::size_t got = 0;
+    while ((got = std::fread(buffer, 1, sizeof(buffer), file)) > 0) out.append(buffer, got);
+    std::fclose(file);
+    if (!out.empty()) return out;
+  }
+  return {};
+}
+
+}  // namespace
+
+ST_TEST(three_parity_multi_light_types_match_browser) {
+  const std::string script = shadow_lights_script();
+  ST_CHECK(!script.empty());
+
+  // 盒顶面：浏览器真值 rgb(151, 94, 81)
+  //
+  // 这个点同时受**三盏灯**影响（平行光 + 聚光 + 点光），所以任何
+  // 一盏的光型语义错了都会在这里显形。
+  const auto box_top = render_pixel(script, 1100, 800, 760, 330);
+  ST_CHECK(std::abs(int(box_top.r) - 151) <= 2);
+  ST_CHECK(std::abs(int(box_top.g) - 94) <= 2);
+  ST_CHECK(std::abs(int(box_top.b) - 81) <= 2);
+
+  // 盒暗面：浏览器真值 rgb(18, 3, 1)
+  const auto box_dark = render_pixel(script, 1100, 800, 760, 430);
+  ST_CHECK(std::abs(int(box_dark.r) - 18) <= 2);
+  ST_CHECK(std::abs(int(box_dark.g) - 3) <= 2);
+  ST_CHECK(std::abs(int(box_dark.b) - 1) <= 2);
+}
+
+ST_TEST(three_parity_point_light_shadow_is_known_gap) {
+  // ## 钉住那个**已知差异**：点光不投阴影
+  //
+  // 本框架的阴影贴图是单张深度图，点光需要 cubemap 六面。两条腿都
+  // 主动跳过（不是漏写）。浏览器那边点光是有影子的。
+  //
+  // 这条用例的用意是**防止有人以为全对齐了**：它只验证「我们确实
+  // 保留了这盏点光、只是不拿它投阴影」，而不是「我们对齐了点光」。
+  //
+  // 若将来实现了 cubemap 阴影，这条应当改成正向断言（点光影子也匹配），
+  // 而不是删掉——删掉就失去了「这里曾经有个已知缺口」的记录。
+  auto spec = st::raster::scene_spec_from_three(shadow_lights_script());
+  ST_CHECK(spec.has_value());
+  // ⚠ 不能断言 `objects`：three 脚本路径的几何在 `three_script` 里，
+  // 要渲染时才由运行时生成（与 `objects` 数组那条路不同）。
+  // 我第一版写了 `!spec->objects.empty()`，直接红。
+  ST_CHECK(!spec->three_script.empty());
+  bool has_point = false;
+  for (const auto& light : spec->lighting.extra_lights) {
+    if (light.kind == st::raster::LightKind::Point) has_point = true;
+  }
+  ST_CHECK(has_point);
 }
