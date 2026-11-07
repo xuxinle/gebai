@@ -337,6 +337,74 @@ void layout(Graph& graph, const LayoutOptions& options) {
   springs.reserve(graph.edges.size());
   for (const auto& e : graph.edges) springs.emplace_back(e.from, e.to);
 
+  // ── 分册聚簇：算出每个节点的簇 id 与该簇的锚点 ──
+  //
+  // 为何用「边的端点」而不是节点自带的字段：节点只知道自己是什么类型，
+  // 不知道属于哪册——归属信息在 `BelongsTo` 边上（词条 → 分类）。
+  // 这正是图的表达能力：关系存在边里，不在节点属性里。
+  //
+  // 优先级：分类 > 人 > 作用域。词条可能同时挂三个，
+  // 取「最能代表它位置」的：分类是人为的分册（读的人按它找东西），排最先。
+  const auto hub_rank = [](NodeKind kind) -> int {
+    switch (kind) {
+      case NodeKind::Category:
+        return 3;
+      case NodeKind::Person:
+        return 2;
+      case NodeKind::Scope:
+        return 1;
+      case NodeKind::Entry:
+        return 0;
+    }
+    return 0;
+  };
+  std::vector<std::string> cluster_of(count);
+  std::vector<int> cluster_rank(count, -1);
+  for (const auto& e : graph.edges) {
+    if (e.from >= count || e.to >= count) continue;
+    if (e.kind != EdgeKind::BelongsTo && e.kind != EdgeKind::OwnedBy &&
+        e.kind != EdgeKind::ScopedTo) {
+      continue;
+    }
+    const auto& hub = graph.nodes[e.to];
+    const int rank = hub_rank(hub.kind);
+    if (rank <= cluster_rank[e.from]) continue;  // 已有更高优先级归属
+    cluster_rank[e.from] = rank;
+    cluster_of[e.from] = hub.id;
+  }
+  // 兜底：没归属的节点各自成簇（用自身 id）。
+  // 若都归到同一个锚点，它们会堆成一团——图上看不出它们彼此无关。
+  for (std::size_t i = 0; i < count; ++i) {
+    if (cluster_of[i].empty()) cluster_of[i] = graph.nodes[i].id;
+  }
+
+  // 簇锚点：均匀铺在球面上（Fibonacci 球，分布均匀且确定）
+  std::vector<std::string> cluster_ids;
+  cluster_ids.reserve(count);
+  for (const auto& id : cluster_of) {
+    if (std::find(cluster_ids.begin(), cluster_ids.end(), id) == cluster_ids.end()) {
+      cluster_ids.push_back(id);
+    }
+  }
+  const auto cluster_count = static_cast<double>(cluster_ids.size());
+  std::vector<st::math::Vec3> cluster_anchor(cluster_ids.size());
+  // 锚点半径：簇多时铺得开一点（否则小簇叠在大簇上看不出是两团）
+  const double spread = options.scale * options.cluster_spread;
+  for (std::size_t c = 0; c < cluster_ids.size(); ++c) {
+    const double t = (static_cast<double>(c) + 0.5) / std::max(cluster_count, 1.0);
+    const double cy = 1.0 - 2.0 * t;                   // y 均匀分层
+    const double cr = std::sqrt(std::max(0.0, 1.0 - cy * cy));
+    const double phi = static_cast<double>(c) * 2.39996322972865332;  // 黄金角
+    cluster_anchor[c] = st::math::Vec3{static_cast<float>(std::cos(phi) * cr * spread),
+                                       static_cast<float>(cy * spread),
+                                       static_cast<float>(std::sin(phi) * cr * spread)};
+  }
+  std::vector<std::size_t> node_cluster(count, 0);
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto it = std::find(cluster_ids.begin(), cluster_ids.end(), cluster_of[i]);
+    node_cluster[i] = static_cast<std::size_t>(std::distance(cluster_ids.begin(), it));
+  }
+
   // 理想边长：节点越多，图越大，边长也要跟着长（否则挤成一团）
   const double k = 90.0 + std::sqrt(static_cast<double>(count)) * 26.0;
   const double clamp_max = options.max_step;
@@ -380,6 +448,20 @@ void layout(Graph& graph, const LayoutOptions& options) {
     // 中心聚拢（没有它，孤立节点会一路飞走）
     for (std::size_t i = 0; i < count; ++i) {
       force[i] = force[i] - position[i] * static_cast<float>(options.center_pull);
+    }
+
+    // 簇拉力：把同册的词条拉回自己那册的锚点。
+    //
+    // 这是本轮的**根本修复**。没有它时，同册词条会被斥力推到球的对面，
+    // 投影后连线横七竖八（前四轮调线条参数都治不了，因为问题在这里）。
+    //
+    // 为何是弹簧而不是硬约束：硬约束会让簇内没有布局空间（词条重叠），
+    // 弹簧则保留“簇内还按真实关系微调”的能力。
+    if (options.cluster_pull > 0.0) {
+      for (std::size_t i = 0; i < count; ++i) {
+        const st::math::Vec3 to_anchor = cluster_anchor[node_cluster[i]] - position[i];
+        force[i] = force[i] + to_anchor * static_cast<float>(options.cluster_pull);
+      }
     }
 
     // 积分（带阻尼与单步上限）

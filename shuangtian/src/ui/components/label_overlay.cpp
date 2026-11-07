@@ -210,9 +210,13 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
   std::vector<Placed> placed;
   placed.reserve(labels_.size());
 
-  // 字号：按视口高度定（缩放时文字跟着变），再乘用户缩放。
-  // 最小值 12：知识图谱的字是主角，再小中文横笔会糊成一团。
-  const float base_font = std::clamp(height * 0.026f, 12.0f, 30.0f) * font_scale_;
+  // 字号：按视口高度定，再乘用户缩放。
+  //
+  // 上限从 30 降到 18：这是**让标签不被推开**的关键一步。
+  // 实测：字号 26~30 时，同簇内几个长词条的框互相碰，避让算法
+  // 只能把它们推到半个行高之外，于是“点在那里、字在旁边很远”——
+  // 连线也就跟着变长、变乱。字号降到 18 以内，大多数标签能紧贴圆点排下。
+  const float base_font = std::clamp(height * 0.024f, 12.0f, 22.0f) * font_scale_;
 
   for (const auto& label : labels_) {
     if (label.text.empty()) continue;
@@ -304,12 +308,18 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
   //   （截图里顶部那几条）。
   // - 全不画：会丢掉**真实存在**的关系——而“谁连着谁”正是图谱要表达的。
   //
-  // 取中间：短线满强度（好看且归属清楚），长线按长度线性减淡。
-  // 这是信息图形里常规的“按重要度/可读性调制”做法。
+  // 取中间：短线满强度，长线按长度线性减淡。
+  //
+  // ## 阀值为何是 55/150（分簇后的实测调法）
+  //
+  // 分簇后簇内距离典型 40~100px、跨簇 200~800px。
+  // 目标：只让**真正的近邻**发亮，簇内稍远的与跨簇的都淡下去。
+  // 55px 开始变淡、150px 到底——于是画面上的线不再是“跨屏长条”，
+  // 而是几个贴着文字的小三角与短线，不抢文字的戏。
   constexpr float kMinEdgeLength = 12.0F;
-  constexpr float kFadeStart = 300.0F;  // 超过这个长度开始变淡
-  constexpr float kFadeEnd = 900.0F;    // 到这里淡到最低
-  constexpr float kMinAlpha = 0.28F;    // 最淡仍可见（完全不画会丢信息）
+  constexpr float kFadeStart = 55.0F;
+  constexpr float kFadeEnd = 150.0F;
+  constexpr float kMinAlpha = 0.10F;
   for (const auto& edge : edges_) {
     const auto it_from = anchors.find(edge.from);
     const auto it_to = anchors.find(edge.to);
@@ -350,11 +360,20 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
                      raster::Paint::solid(dot_color), r);
   }
 
-  // ── 标签：底板 + 文字 ──
+  // ── 标签：底板 + 文字（以及被推开时的引线）──
   for (const auto& item : placed) {
     if (item.dropped) continue;
     const float tx = item.box.x + 2.0F;
     const float ty = item.box.y + 1.0F;
+
+    // 引线：**不加**（实测反而更乱）。
+    //
+    // 试过：给被推开的标签画一条引线回圆点。结果画面上出现大量短短的小横线，
+    // 看不出哪个连哪个，反而加重了拥挤。根源是**标签不该被推开那么远**——
+    // 与其用引线去弥补，不如让标签一开始就贴着圆点。
+    //
+    // 具体做法在两处：① 字号上限降到 18（base_font 处）；
+    // ② 簇间距放大（cefu_graph.hpp 的 cluster_spread）。
     if (item.anchor->plate) {
       canvas.fill_rect(
           item.box,
