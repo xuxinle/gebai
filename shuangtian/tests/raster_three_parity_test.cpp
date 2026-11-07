@@ -257,3 +257,188 @@ ST_TEST(parity_compat_only_aligns_output_chain) {
   // 没写 AmbientLight → 环境项是 0（three 的行为）
   ST_CHECK_EQ(aligned->lighting.ambient, 0.0f);
 }
+
+// ── 6. 阴影 + 半球光场景（`tools/parity/shadow_parity.js`）──
+//
+// ## 为何这个测试必须存在
+//
+// 2026-11-07 改阴影贴图偏置算法（法线偏移）时发现：**现有 three 对标场景
+// 全都不含阴影**（`quad_parity.js` / `flat_parity.js` 都没有 `castShadow`）。
+// 所以那批改动没有任何浏览器真值保护——单测过了，但那是自己跟自己对。
+//
+// 这份场景同时检验两个**互相矛盾**的需求：
+//
+// | 物体 | 检验 |
+// |---|---|
+// | 球（曲率高）| 自遮挡圆环——偏置太小会在球面出同心环 |
+// | 立方体（平底贴地）| 接触阴影——偏置太大会让影子脱开物体 |
+//
+// ## 判据的取值（全部来自浏览器 `gl.readPixels`）
+//
+// 真值通道：headless Chromium + SwiftShader，`bun tools/parity/browser_truth.mjs`。
+//
+// | 采样点 | 浏览器 | 说明 |
+// |---|---|---|
+// | 盒顶面 (785,300) | **112** | 受光面，材质色 × 主光 |
+// | 球顶部亮面 (355,330) | **79** | 曲面受光，检验法线插值 |
+// | 球暗面 (355,480) | **6** | 背光面，检验环境光 |
+// | 盒暗侧面 (700,450) | **6** | 同上 |
+//
+// ## 判据为何分成两组容差（±2 / ±14）
+//
+// **受光面**（盒顶、球顶）必须严：那里误差只来自 BRDF 与浮点，
+// 实测差 0~1 级，所以 ±2 足够严又不会被噪声弄红。
+//
+// **暗面**必须松：three 的 `HemisphereLight` 是**逐像素按法线插值**的，
+// 而本框架只把它压成一个标量 `ambient`（见 `three_runtime.cpp` 的
+// `hemisphere` 分支说明）。这个近似**不可能逐像素对齐**——实测差 10~12 级。
+//
+// 所以暗面判据的用途是**防止灾难性回归**（比如环境光被归零、
+// 或半球光被整个丢掉——那会让差从 10 变成 90+），而不是保证精度。
+// 若将来给 `HemisphereLight` 加真正的方向插值实现，这两条容差应当收紧。
+
+namespace {
+
+/// 渲一个 three 场景，返回指定像素（RGBA）。
+auto render_pixel(const std::string& script, int width, int height, int x, int y)
+    -> st::math::Color {
+  auto spec = st::raster::scene_spec_from_three(script);
+  if (!spec.has_value()) return st::math::Color{0, 0, 0, 0};
+  st::raster::Canvas canvas{width, height, 1.0f};
+  const auto status =
+      st::raster::render_scene(*spec, canvas, st::math::Color::rgba(0, 0, 0, 255));
+  if (!status) return st::math::Color{0, 0, 0, 0};
+  const auto pixels = canvas.pixels();
+  const std::size_t index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                            static_cast<std::size_t>(x);
+  return st::math::unpremultiply(pixels[index]);
+}
+
+/// `tools/parity/shadow_parity.js` 的等价脚本（同一份场景，内联进来）。
+///
+/// ⚠ 与磁盘上那份必须**逐参数一致**。改一边就要改另一边——
+/// 数字是从那份脚本跑出来的。
+auto shadow_parity_script() -> std::string {
+  return R"JS(
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0.05, 0.05, 0.05);
+
+const camera = new THREE.PerspectiveCamera(34, 1100 / 800, 0.05, 200);
+camera.position.set(0.4, -8.5, 4.6);
+camera.lookAt(0.0, 0.0, 0.6);
+scene.add(camera);
+
+const key = new THREE.DirectionalLight(0xffffff, 2.4);
+key.position.set(3.5, 4.5, 6.0);
+key.target.position.set(0, 0, 0);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -6;
+key.shadow.camera.right = 6;
+key.shadow.camera.top = 6;
+key.shadow.camera.bottom = -6;
+key.shadow.camera.near = 0.5;
+key.shadow.camera.far = 40;
+key.shadow.bias = -0.0005;
+key.shadow.normalBias = 0.02;
+scene.add(key);
+scene.add(key.target);
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(20, 20),
+  new THREE.MeshStandardMaterial({ color: 0xbcb8b0, roughness: 0.85, metalness: 0.0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+ground.name = 'ground';
+scene.add(ground);
+
+const sphere = new THREE.Mesh(
+  new THREE.SphereGeometry(1.0, 48, 24),
+  new THREE.MeshStandardMaterial({ color: 0x4a6fa5, roughness: 0.45, metalness: 0.0 })
+);
+sphere.position.set(-1.6, 1.0, 0.2);
+sphere.castShadow = true;
+sphere.receiveShadow = true;
+sphere.name = 'sphere';
+scene.add(sphere);
+
+const box = new THREE.Mesh(
+  new THREE.BoxGeometry(1.5, 1.5, 1.5),
+  new THREE.MeshStandardMaterial({ color: 0xb8522e, roughness: 0.55, metalness: 0.0 })
+);
+box.position.set(1.7, 0.75, 0.0);
+box.rotation.set(0.0, 0.42, 0.0);
+box.castShadow = true;
+box.receiveShadow = true;
+box.name = 'box';
+scene.add(box);
+
+const ambient = new THREE.HemisphereLight(0x9aa8bc, 0x50493f, 0.55);
+scene.add(ambient);
+
+globalThis.renderer = {
+  toneMapping: 0,
+  toneMappingExposure: 1.0,
+  compat: 'three',
+  shadowMapEnabled: true,
+  shadowMapType: 'PCFSoft',
+};
+scene;
+)JS";
+}
+
+}  // namespace
+
+ST_TEST(three_parity_shadow_lit_faces_match_browser) {
+  // ## 断言要逐**通道**写，不要写亮度
+  //
+  // 我第一版写成 `box_top.r == 112`，而 112 是**亮度**（luma）——
+  // 红通道实际是 168，于是一条本来对的渲染被判失败。
+  // 逐通道写反而更严（三个通道都要对），且不会随手弄错。
+  //
+  // 盒顶面：浏览器真值 rgb(167, 98, 82)
+  const auto box_top = render_pixel(shadow_parity_script(), 1100, 800, 785, 300);
+  ST_CHECK(std::abs(int(box_top.r) - 167) <= 2);
+  ST_CHECK(std::abs(int(box_top.g) - 98) <= 2);
+  ST_CHECK(std::abs(int(box_top.b) - 82) <= 2);
+
+  // 球顶部：浏览器真值 rgb(63, 81, 113)
+  const auto sphere_top = render_pixel(shadow_parity_script(), 1100, 800, 355, 330);
+  ST_CHECK(std::abs(int(sphere_top.r) - 63) <= 2);
+  ST_CHECK(std::abs(int(sphere_top.g) - 81) <= 2);
+  ST_CHECK(std::abs(int(sphere_top.b) - 113) <= 2);
+}
+
+ST_TEST(three_parity_shadow_dark_faces_keep_ambient) {
+  // 暗面：判据松（±14），只防灾难性回归。
+  //
+  // 若 `hemisphere` 分支再出现「忘了置 `saw_ambient_light`」那类 bug，
+  // 环境光会被归零、暗面变成 rgb(0,0,0)，这条立刻红。
+  // 实测未修时暗面是纯黑，修后是 18（浏览器 6）。
+  const auto sphere_dark = render_pixel(shadow_parity_script(), 1100, 800, 355, 480);
+  ST_CHECK(int(sphere_dark.r) > 3);   // 不能是纯黑
+  ST_CHECK(int(sphere_dark.r) < 40);  // 也不能被环境光糊白
+
+  const auto box_dark = render_pixel(shadow_parity_script(), 1100, 800, 700, 450);
+  ST_CHECK(int(box_dark.r) > 3);
+  ST_CHECK(int(box_dark.r) < 40);
+}
+
+ST_TEST(three_parity_hemisphere_light_contributes_ambient) {
+  // ## 半球光必须真的产生环境项
+  //
+  // 这条钉的是那个**极具迷惑性**的 bug：`hemisphere` 分支累加了
+  // `ambient_from_light` 却没置 `saw_ambient_light`，于是被后面的
+  // `if (aligned && !saw_ambient_light) ambient = 0.0f` 无条件抹掉。
+  //
+  // 症状：改系数、重编译、数字**一动不动**（两次实验都恰好是 7.79）。
+  auto spec = st::raster::scene_spec_from_three(shadow_parity_script());
+  ST_CHECK(spec.has_value());
+  // 场景里 HemisphereLight(0x9aa8bc, 0x50493f, 0.55) →
+  //   sky_luma ≈ 0.2126*0.339 + 0.7152*0.404 + 0.0722*0.511 ≈ 0.396
+  //   ground_luma ≈ 0.2126*0.078 + 0.7152*0.070 + 0.0722*0.052 ≈ 0.071
+  //   ambient = 0.55 * (0.396 + 0.071) * 0.5 ≈ 0.128
+  ST_CHECK(spec->lighting.ambient > 0.05f);
+  ST_CHECK(spec->lighting.ambient < 0.25f);
+}

@@ -1694,6 +1694,18 @@ auto read_compat_mode(const std::string& value) -> SceneSpec::CompatMode {
 
 auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
     -> Result<SceneSpec> {
+  // ## ⛔ bpy 适配已冻结（2026-11-07）
+  //
+  // **后续主要演进与使用 three.js**（产品决策，理由见
+  // `docs/bpy_render_parity.md` 顶部）：
+  //
+  // 1. 适配成本高：每加一项都要先探测两边 API 差异，改一处漏一处。
+  // 2. 大模型语料不如 three.js 丰富：写 bpy 场景时模型经常编造边角 API。
+  //
+  // 所以：
+  // - “能跑、能出图”保持现状（这个函数不要删）
+  // - 不再为“更像 Cycles”而补新特性
+  // - 但**回归**（本来能跑的不跑了）照旧修
   if (script.empty()) {
     return st::unexpected(ErrorCode::Invalid, "bpy 脚本为空");
   }
