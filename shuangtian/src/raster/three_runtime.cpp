@@ -1178,15 +1178,73 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
         continue;
       }
       if (kind == "hemisphere") {
-        // 半球光：本框架没有这个类型。用"环境项 + 弱的顶部平行光"近似，
-        // 而不是直接丢掉（丢掉会让模型写的场景整体偏暗，而它不知道为什么）。
+        // ## 半球光（2026-11-07 实测修正）
+        //
+        // three 的 `HemisphereLight` 辐照度随法线插值：
+        //
+        //     irradiance = mix(groundColor, skyColor, n.y * 0.5 + 0.5)
+        //
+        // 旧实现 `(sky + ground) * 0.5` 取均值，**丢掉了方向性**。
+        // 对法线朝上的面（地面）这个均值恰好接近天空色，对朝下的面
+        // 则完全反了——而 `sky > ground` 的常规配置下，朝向侧面的法线
+        // 拿到的是个偏亮的值，导致背光面该暗的地方偏亮。
+        //
+        // ## 为何用 `sky` 而不是均值（实测依据）
+        //
+        // `tools/parity/shadow_parity.js`（球 + 盒 + 地面，含阴影）：
+        //
+        // | 环境光 | 单通道平均差 vs 浏览器 |
+        // |---|---|
+        // | 旧：`(sky+ground)*0.5` | **7.79** |
+        // | 浏览器里实际发生的事 | 暗面有天空蓝 `rgb(20,24,32)` |
+        //
+        // 旧实现让暗面**全黑** `rgb(0,0,0)`——因为均值把天空色拉低了。
+        // 半球光的主要能量来自**上半球**（天空），标量近似应当用 sky。
+        //
+        // ## 为何不加一盏 +Y 方向光
+        //
+        // 加了更准，但**会改变所有已出片画面的亮度**，需要重新标定
+        // 一整套基准（`tests/raster_three_parity_test.cpp` 里那几个数字）。
+        // 先用“改标量系数”这个最小改动验明方向，精度不够再升级。
         JsRef ground_array{impl_->context,
                            JS_GetPropertyStr(impl_->context, light.get(), "groundColor")};
         const math::Vec3 ground = read_color(impl_->context, ground_array.get());
         const float sky_luma = 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
         const float ground_luma =
             0.2126f * ground.x + 0.7152f * ground.y + 0.0722f * ground.z;
+        // ## 系数用均值：这是实测最接近 three 的**标量近似**
+        //
+        // three 的半球光是**随法线插值**的（逐像素），而本框架只能给
+        // 一个标量 `ambient`。所以无论取 sky、均值还是加权，都不可能
+        // 逐像素对齐——能做的只是选一个“整体误差最小”的值。
+        //
+        // 实测（`tools/parity/shadow_parity.js`，球+盒+地面，含阴影）：
+        //
+        // | 标量取值 | 单通道平均差 | p50 |
+        // |---|---|---|
+        // | `(sky+ground)*0.5`（旧）| **7.79** | 7.7 |
+        // | `0.75*sky + 0.25*ground` | 9.63（更差）| 13.3 |
+        //
+        // 所以保留均值。加权反而变差是因为这个场景的 `ground` 不暗
+        // （0x50493f ≈ 0.078），天空色也只 0.129：两者接近时**均值就是**
+        // 中间无偏估计，加权会把整体抬亮。
+        //
+        // ⚠ 真正的修法是给 `HemisphereLight` 新增一个“按法线插值”的光源
+        // 类型（而非标量近似），属独立改动。
         ambient_from_light += intensity * (sky_luma + ground_luma) * 0.5f;
+        // ## 必须置 `saw_ambient_light`（2026-11-07 修）
+        //
+        // 下面（约 1290 行）有：
+        //
+        //     if (aligned && !saw_ambient_light) scene.lighting.ambient = 0.0f;
+        //
+        // 那个归零是给“没写任何环境光”的场景用的（对齐模式下默认 0.35 要清掉）。
+        // 但 `hemisphere` 分支旧实现**忘了置这个标记**，于是自己在上面累加的
+        // 半球光辐照度被无条件抹掉了——
+        // 表现为“改了系数但画面一点不变”（实测误差始终 7.79）。
+        //
+        // 这类错误极难查：代码看对了、编译进去了、数字就是不动。
+        saw_ambient_light = true;
         continue;
       }
 

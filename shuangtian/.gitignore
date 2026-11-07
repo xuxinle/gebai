@@ -74,3 +74,8 @@ apps/caiyun/mtfilm/qa/*.log
 
 # 逆向验证的源码快照（进程被杀时靠它把回退代码写回去）
 .rv-snapshots/
+
+# 浏览器临时 profile（browser_truth.mjs 的产物）
+profile/
+# three 的 IIFE bundle（由 bun build 现场生成）
+tools/parity/three_browser.js
