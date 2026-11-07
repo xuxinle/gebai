@@ -13,6 +13,8 @@ import {
   AUTH_CARD_TTL_MS,
   authCardDeadline,
   decideExpiry,
+  isLoopbackRedirect,
+  loopbackRedirectHint,
   redirectUriProblems,
   shouldPushAuthCard,
   WARN_BEFORE_MS,
@@ -76,22 +78,29 @@ describe("authCardDeadline：宁早勿晚", () => {
   })
 })
 
-describe("回调地址预检：回环地址是结构性不可能成功", () => {
-  test("localhost / 127.0.0.1 / 0.0.0.0 都被判为问题", () => {
-    for (const host of ["localhost", "127.0.0.1", "0.0.0.0"]) {
-      const p = redirectUriProblems(`http://${host}:3000/api/v1/persona/feishu/callback`)
-      expect(p.length).toBe(1)
-      expect(p[0]).toContain("回环地址")
-      expect(p[0]).toContain("GEBAI_PUBLIC_URL") // 必须给出修复动作
-    }
+describe("回调地址预检：只判形态，不替用户假设会用哪台设备", () => {
+  test("localhost 不再被判死（本机浏览器授权完全可行）", () => {
+    // 上一版把回环地址判成“结构性不可能成功”，结果把本来能用的本地部署拦死了。
+    expect(redirectUriProblems("http://localhost:3000/api/v1/persona/feishu/callback")).toEqual([])
+    expect(redirectUriProblems("http://127.0.0.1:3000/api/v1/persona/feishu/callback")).toEqual([])
   })
 
-  test("公网/内网穿透地址 → 无问题", () => {
-    expect(redirectUriProblems("https://gebai.example.com/api/v1/persona/feishu/callback")).toEqual([])
-    expect(redirectUriProblems("http://192.168.1.10:3000/api/v1/persona/feishu/callback")).toEqual([])
+  test("回环地址被识别出来（供日志提醒，不参与放行）", () => {
+    expect(isLoopbackRedirect("http://localhost:3000/x")).toBe(true)
+    expect(isLoopbackRedirect("http://127.0.0.1:3000/x")).toBe(true)
+    expect(isLoopbackRedirect("https://gebai.example.com/x")).toBe(false)
   })
 
-  test("非法 URL → 单独报出（不能悄悄当成没问题）", () => {
+  test("提醒文案说清两种情形（本机可行 / 手机不可行）", () => {
+    const hint = loopbackRedirectHint("http://localhost:3000/x")
+    expect(hint).toBeTruthy()
+    expect(hint).toContain("本机")
+    expect(hint).toContain("手机")
+    // 公网地址没有提醒
+    expect(loopbackRedirectHint("https://example.com/x")).toBeNull()
+  })
+
+  test("非法 URL 仍要报（这是真问题）", () => {
     const p = redirectUriProblems("不是url")
     expect(p.length).toBe(1)
     expect(p[0]).toContain("不是合法 URL")

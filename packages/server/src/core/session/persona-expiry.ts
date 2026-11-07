@@ -95,36 +95,61 @@ export function shouldPushAuthCard(
 export const MAX_AUTO_PUSH_FAILURES = 3
 
 /**
- * 回调地址能不能真的收到飞书的重定向（提前判定，不让人白跑）。
+ * 回调地址的预检：只报**地址本身的形态问题**，不替用户判断“你会从哪里授权”。
  *
- * ## 为何这是“确定会失败”而不是“可能有问题”
+ * ## 为何不能把 localhost 一律判死（上一版这里错了）
  *
- * 飞书 OAuth 的授权页是在**用户的浏览器/手机飞书**里打开的。它的重定向于是
- * 指向**那台设备**——`http://localhost:3000/...` 会打到手机自己的 localhost，
- * 永远到不了跑歌白的这台机器。所以回环地址在“用户不在本机操作”的授权流里
- * 是**结构性不可能成功**，不是网络问题、不是登记问题。
+ * 上一版把回环地址直接当成“结构性不可能成功”。实测发现这个推断是**过度自信**：
  *
- * 实测后果（错误码 20029 之外更常见的那种）：用户在手机点完同意，页面跳到一个
- * 打不开的地址，服务端从头到尾收不到任何回调——凭据永远不刷新，而授权提醒
- * 每 10 分钟再来一次。用户看到的就是“一直弹、点了也没用”。
+ * 飞书 OAuth 的重定向发生在**发起授权的那台设备**上。如果用户就在本机浏览器里
+ * 点开授权链接（而不是手机扫码），`http://localhost:3000/...` 会回到**本机**——
+ * 完全可行，而且是本地部署最省事的形态。
  *
- * @returns 问题描述（空数组 = 看起来可行）
+ * 把 localhost 判死会导致更严重的后果：**把本来能用的部署拦死**（不推卡、
+ * 只说“必须配公网”——而用户根本不需要公网）。
+ *
+ * 所以现在的态度：地址合法就放行，只在**日志里**提醒一句
+ * “回环地址仅在你就用这台机器的浏览器授权时可行”，让人自己判断而不是被拦。
+ *
+ * @returns 真正的错误（空数组 = 可以用）；回环地址不再计为错误
  */
 export function redirectUriProblems(redirectUri: string): string[] {
-  let url: URL
   try {
-    url = new URL(redirectUri)
+    new URL(redirectUri)
   } catch {
     return [`回调地址不是合法 URL：${redirectUri}`]
   }
-  const host = url.hostname.toLowerCase()
-  const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0"
-  if (!loopback) return []
-  return [
-    `回调地址是回环地址（${url.host}）：飞书授权在手机/浏览器上完成，回调会打到**那台设备**的 ` +
-      `localhost，永远回不到本机。必须设 GEBAI_PUBLIC_URL 为可访问地址（内网穿透或域名），` +
-      `并在飞书后台「安全设置 → 重定向 URL」登记**同一串**。`,
-  ]
+  return []
+}
+
+/**
+ * 这个回调地址是不是回环（仅供日志提醒，**不参与放行判定**）。
+ *
+ * 回环地址能用，但有个前提：授权必须在**跑歌白的那台机器**上完成。
+ * 用户拿手机扫码就会跑到手机的 localhost 去（那里没有服务）——
+ * 这不是“配置错”，而是“用错了设备”，提示就该这么说。
+ */
+export function isLoopbackRedirect(redirectUri: string): boolean {
+  try {
+    const host = new URL(redirectUri).hostname.toLowerCase()
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0"
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 回环地址的用法提醒（只在日志里说，不拦）。
+ */
+export function loopbackRedirectHint(redirectUri: string): string | null {
+  if (!isLoopbackRedirect(redirectUri)) return null
+  const host = new URL(redirectUri).host
+  return (
+    `回调地址是回环地址（${host}）：**只能用这台机器的浏览器完成授权**` +
+    `（在相期卡片上点链接会用系统默认浏览器打开，那就在本机，可行）。` +
+    `若用手机飞书扫码，回调会打到手机自己的 localhost，那里没有服务——` +
+    `那种情况才需要设 GEBAI_PUBLIC_URL 为公网/穿透地址。`
+  )
 }
 
 /**

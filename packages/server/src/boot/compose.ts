@@ -52,7 +52,7 @@ import { ensureCorporateTrust } from "../core/trust/corporate"
 import { dataSubdir, log, setLogLevel } from "@gebai/sdk/node"
 import { FeishuConn } from "../feishu-bot/conn"
 import { ChannelRegistry, ChannelInputBridge, SentMessageRegistry, defaultChannelScanDirs } from "@gebai/channels"
-import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard, redirectUriProblems } from "../core/session/persona-expiry"
+import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard, redirectUriProblems, loopbackRedirectHint } from "../core/session/persona-expiry"
 import { HumanSpeechWindow, yieldWindowFromEnv } from "../core/session/human-speech-window"
 import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
 import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
@@ -455,23 +455,26 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           return
         }
         if (!status.authorizeUrl) return // 未配应用凭据：推了也是废链接
-        // 回调地址注定收不到重定向（回环地址）→ **不推卡**。
+        // 回调地址只做**形态**预检（非法 URL 才是真问题）。
         //
-        // 实测故障：令牌无 offline_access，2 小时必死；而回调指向 localhost，
-        // 用户在手机上点完永远回不到本机——于是每 10 分钟推一张卡、点一次报一次错。
-        // 这种“注定失败的重试”比不提醒更糟：用户学会无视所有弹卡。
-        // 改为：只记一次日志（带修复指引），不再推卡。
+        // 回环地址**不拦**：如果用户就在本机浏览器里完成授权，localhost 完全可行
+        //（上一版把它判死是错的——会把本来能用的部署拦掉）。只在日志里提醒一句。
         const problems = redirectUriProblems(callbackUrl())
         if (problems.length) {
           if (!authCardProblemLogged) {
             authCardProblemLogged = true
             log.error(
-              `[gebai] 飞书授权无法完成，已停止自动推卡：\n` +
+              `[gebai] 飞书授权回调地址配置有误，已停止自动推卡：\n` +
                 problems.map((p) => `  · ${p}`).join("\n") +
                 `\n  修好后在面板点「去授权」手动触发一次（或重启）。`,
             )
           }
           return
+        }
+        const hint = loopbackRedirectHint(callbackUrl())
+        if (hint && !authCardProblemLogged) {
+          authCardProblemLogged = true
+          log.info(`[gebai] ${hint}`)
         }
         // 已有卡在**且未过期** → 不重复推。
         //
