@@ -172,11 +172,11 @@ auto build(const std::vector<Entry>& entries, const BuildOptions& options) -> Gr
     const std::size_t from = entry_node[i];
     if (options.include_meta_nodes) {
       if (!e.category.empty()) {
-        connect_meta(std::string{kCategoryPrefix} + e.category, e.category, NodeKind::Category, 2.6,
+        connect_meta(std::string{kCategoryPrefix} + e.category, e.category, NodeKind::Category, 1.6,
                      EdgeKind::BelongsTo, from);
       }
       if (!e.owner.empty()) {
-        connect_meta(std::string{kPersonPrefix} + e.owner, e.owner, NodeKind::Person, 2.2,
+        connect_meta(std::string{kPersonPrefix} + e.owner, e.owner, NodeKind::Person, 1.4,
                      EdgeKind::OwnedBy, from);
       }
       // 作用域只对**非 global** 建节点：global 是缺省，人人都 global，建成节点等于
@@ -185,7 +185,7 @@ auto build(const std::vector<Entry>& entries, const BuildOptions& options) -> Gr
       if (kind != "global" && !kind.empty()) {
         const auto sid = scope_id_of(e.scope);
         const std::string label = sid.empty() ? kind : (kind + ":" + sid);
-        connect_meta(std::string{kScopePrefix} + label, label, NodeKind::Scope, 1.9,
+        connect_meta(std::string{kScopePrefix} + label, label, NodeKind::Scope, 1.3,
                      EdgeKind::ScopedTo, from);
       }
     }

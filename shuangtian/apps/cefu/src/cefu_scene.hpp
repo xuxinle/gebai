@@ -52,9 +52,9 @@ struct Options {
   /// 为何是比例而非绝对值：布局坐标归一化到 `scale`（默认 170），
   /// 而 three.js 的世界尺度完全由调用方定。写死绝对值会与坐标尺度脱节
   /// ——实测：坐标 ±145 配半径 0.11，球比场景小 1300 倍，截图上**一片背景色**。
-  double node_radius_ratio{0.024};
+  double node_radius_ratio{0.011};
   /// 连线半径比例。
-  double edge_radius_ratio{0.0016};
+  double edge_radius_ratio{0.0026};
   /// 背景（十六进制）。
   std::string background{"0x0B0E14"};
 };

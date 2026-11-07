@@ -49,6 +49,7 @@
 /// | `cefu.importText(text, category)` | 从 Markdown/文本按标题层级切词条草稿 |
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <optional>
@@ -68,6 +69,7 @@
 #include "st/core/time.hpp"
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
+#include "st/ui/components/label_overlay.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/three_view.hpp"
 #include "st/ui/components/window_frame.hpp"
@@ -896,6 +898,7 @@ auto run_app(int argc, char** argv) -> int {
   // 与其继续改框架的布局时序，不如走另一边：**视口本来就不该跟 XML 布局
   // 打架**。它是全屏覆盖层，自己控制显示时机。
   st::ui::ThreeView* graph_view = nullptr;
+  st::ui::LabelOverlay* graph_labels = nullptr;
   std::string graph_mount_error;
   const auto mount_graph_view = [&]() -> bool {
     if (graph_view != nullptr) return true;
@@ -959,7 +962,24 @@ auto run_app(int argc, char** argv) -> int {
     view->set_visible(false);
     st::ui::ThreeView* raw = view.get();
     graph_view = (host->add_child(std::move(view)) != nullptr) ? raw : nullptr;
-    return graph_view != nullptr;
+    if (graph_view == nullptr) return false;
+
+    // 标签层：**叠在视口之上**，用 `TextPort` 画词条文字。
+    //
+    // 为何必须另开一层（三维里为什么没字）：three.js 跑在 QuickJS 里，
+    // 而脚本宿主**没有 Canvas 2D**——「Canvas 画字 → 纹理 → Sprite」走不通。
+    // 所以结构交给三维、文字交给这一层（按同一套相机参数投影到屏幕）。
+    auto overlay = std::make_unique<st::ui::LabelOverlay>();
+    overlay->set_id("graph-labels");
+    overlay->style().absolute = true;
+    overlay->style().left = 0.0f;
+    overlay->style().top = 0.0f;
+    overlay->style().width = st::ui::kAuto;
+    overlay->style().height = st::ui::kAuto;
+    overlay->set_visible(false);
+    graph_labels = overlay.get();
+    if (host->add_child(std::move(overlay)) == nullptr) graph_labels = nullptr;
+    return true;
   };
   (void)mount_graph_view();
   // 装载图谱：生成 three.js 脚本 → 交给视口。
@@ -970,6 +990,105 @@ auto run_app(int argc, char** argv) -> int {
     cefu::graph::layout(laid);
     const auto script_text = cefu::scene::build_script(laid, cefu::scene::Options{});
     const bool ok = graph_view->load_script(script_text, "<cefu-graph>");
+    // 装载后把相机拉近。
+    //
+    // ## 为何不用 `frame_scene(1.02)`（试过，无效）
+    //
+    // 实测：包围盒 305×366×297（半径约 183），而 frame_scene 算出的
+    // 相机距离是 **600**（eye 到 target）——远了 3 倍，画面只占中间一小块。
+    //
+    // 根因在它的算法里：`render_size` 报的是 3533×1870（**物理像素**），
+    // 而取景公式里的视口高度按物理尺寸算，于是 fov 对应的高度缩放也翻了 1.5 倍
+    //（DPI scale）——距离被放大。不往里改（那是框架里另一处需要单独验证的修复），
+    // 这里直接按实际包围盒重算距离：让包围球恰好填满视口高度的一半 / tan(fov/2)。
+    if (ok && graph_view != nullptr) {
+      // 包围球半径：从**图本身**算，不靠硬编码（不同规模的库尺寸不同）。
+      double max_r = 1.0;
+      for (const auto& node : laid.nodes) {
+        const auto x = static_cast<double>(node.position.x);
+        const auto y = static_cast<double>(node.position.y);
+        const auto z = static_cast<double>(node.position.z);
+        max_r = std::max(max_r, std::sqrt(x * x + y * y + z * z));
+      }
+      // 节点自身的半径也要算进去，否则边缘球会被切。
+      max_r *= 1.0 + cefu::scene::Options{}.node_radius_ratio * 2.0;
+      constexpr double fov_deg = 46.0;
+      const double half = fov_deg * 3.14159265358979 / 360.0;
+      // 1.12 余量：留一点呼吸空间，但不至于大片空白
+      const double distance = max_r / std::tan(half) * 1.12;
+      auto camera = graph_view->camera_state();
+      camera.distance = static_cast<float>(distance);
+      graph_view->set_camera_state(camera);
+
+      // 把同一套相机参数交给标签层，并填上**词条文字**。
+      //
+      // 文字才是知识图谱的主体：一堆彩色球只能看出“有几个簇”，
+      // 看不出“这条是什么”。球只是位置标记。
+      if (graph_labels != nullptr) {
+        // 标签颜色跟随节点语义（与三维球同色系，便于对应）
+        const auto argb_of = [](cefu::graph::NodeKind kind,
+                                const std::string& confidence) -> unsigned int {
+          switch (kind) {
+            case cefu::graph::NodeKind::Category:
+              return 0xFFE8B54BU;  // 册：暖金
+            case cefu::graph::NodeKind::Person:
+              return 0xFF4ED4A0U;  // 人：薄荷绿
+            case cefu::graph::NodeKind::Scope:
+              return 0xFFB48CF0U;  // 作用域：紫
+            case cefu::graph::NodeKind::Entry:
+              break;
+          }
+          // 词条文字用**高亮近白**：它是主角，必须先读得到。
+          // 语义（已确认/待确认）改用底色微调体现（见下面的底板色），
+          // 而不是把字本身染成暗色——实测暗蓝/暗琥珀字在深底上读不清。
+          if (confidence == "verified") return 0xFFE8F2FFU;  // 略带蓝的白
+          if (confidence == "stale") return 0xFF9AA3ADU;     // 过期：灰白
+          return 0xFFFFE9C4U;                                 // 待确认：暖白
+        };
+        std::vector<st::ui::LabelAnchor> labels;
+        labels.reserve(laid.nodes.size());
+        for (const auto& node : laid.nodes) {
+          st::ui::LabelAnchor anchor;
+          anchor.x = node.position.x;
+          anchor.y = node.position.y;
+          anchor.z = node.position.z;
+          anchor.text = node.label;
+          // 权重：枢纽 > 词条；已验证 > 待确认（重要的先被读到）
+          float weight = node.kind == cefu::graph::NodeKind::Entry ? 0.35f : 0.9f;
+          if (node.confidence == "verified") weight += 0.15f;
+          if (node.confidence == "stale") weight -= 0.1f;
+          anchor.weight = std::clamp(weight, 0.0f, 1.0f);
+          anchor.argb = argb_of(node.kind, node.confidence);
+          labels.push_back(std::move(anchor));
+        }
+        graph_labels->set_labels(std::move(labels));
+        // 投影参数与上面的相机保持一致（yaw/pitch/fov 来自场景相机、距离是刚算的）
+        st::ui::LabelOverlay::Projection projection;
+        projection.yaw = camera.yaw;
+        projection.pitch = camera.pitch;
+        projection.distance = camera.distance;
+        projection.fov_degrees = camera.fov_y_degrees;
+        // target：布局的中心（相机/标签必须绕同一个点转，否则文字会偏离节点）
+        double cx = 0.0;
+        double cy = 0.0;
+        double cz = 0.0;
+        if (!laid.nodes.empty()) {
+          for (const auto& node : laid.nodes) {
+            cx += static_cast<double>(node.position.x);
+            cy += static_cast<double>(node.position.y);
+            cz += static_cast<double>(node.position.z);
+          }
+          const auto count = static_cast<double>(laid.nodes.size());
+          cx /= count;
+          cy /= count;
+          cz /= count;
+        }
+        projection.target_x = static_cast<float>(cx);
+        projection.target_y = static_cast<float>(cy);
+        projection.target_z = static_cast<float>(cz);
+        graph_labels->set_projection(projection);
+      }
+    }
     Json out = Json::object();
     out["ok"] = ok;
     out["nodes"] = static_cast<std::int64_t>(laid.nodes.size());
@@ -991,14 +1110,17 @@ auto run_app(int argc, char** argv) -> int {
     if (!mount_graph_view() || graph_view == nullptr) {
       return st::unexpected(st::ErrorCode::Unsupported,
                             graph_mount_error.empty() ? "三维视口未就绪" : graph_mount_error);
-    }    const bool want = args.empty() ? !graph_view->visible() : st::json_as_bool(args[0], true);
+    }
+    const bool want = args.empty() ? !graph_view->visible() : st::json_as_bool(args[0], true);
     if (want) {
       const auto info = load_graph();
       graph_view->set_visible(true);
+      if (graph_labels != nullptr) graph_labels->set_visible(true);
       app.request_repaint();
       return info;
     }
     graph_view->set_visible(false);
+    if (graph_labels != nullptr) graph_labels->set_visible(false);
     app.request_repaint();
     Json out = Json::object();
     out["ok"] = true;
@@ -1010,6 +1132,23 @@ auto run_app(int argc, char** argv) -> int {
     graph_view->reset_view();
     app.request_repaint();
     return Json(true);
+  });
+  // 诊断：视口的相机与取景信息。
+  //
+  // 为何走桥而不是 `get`：视口是 C++ 挂的**绝对定位元素**，不在声明式树里，
+  // 选择器找不到它（实测 `get(#graph-viewport)` 一律 not_found）。
+  (void)bridge.expose("cefu.graph_debug", [&](const std::vector<Json>&) -> st::Result<Json> {
+    Json out = Json::object();
+    if (graph_view == nullptr) {
+      out["mounted"] = false;
+      return out;
+    }
+    out["mounted"] = true;
+    for (const char* key : {"camera_state", "frame_bounds", "render_size", "object_count", "backend"}) {
+      const auto value = graph_view->get_property(key);
+      out[key] = value.has_value() ? *value : std::string{};
+    }
+    return out;
   });
   // 诊断用：把生成的脚本落盘，供外部检查坐标/相机是否合理。
   //
