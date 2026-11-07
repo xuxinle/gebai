@@ -430,6 +430,13 @@ class WaylandBackend final : public Backend {
     return math::Size{logical_width_exact_, logical_height_exact_};
   }
   auto set_device_scale(float scale) -> Status override;
+  /// Wayland 的**位置由合成器决定**（`xdg-shell` 没有“客户端指定全局坐标”的请求）：
+  /// 客户端只能说“我把窗口画多大”，不能说“放哪里”——这是协议设计而非缺失。
+  /// 所以如实报 `Unsupported`，让上层把它当成“此平台没有居中这个话题”，
+  /// 而不是偷偷装成做了（那样“为什么这个平台没居中”就变成谜）。
+  auto center_window() -> Status override {
+    return unexpected(ErrorCode::Unsupported, "Wayland 下窗口位置由合成器决定");
+  }
 
   // —— 协议调用与内部流程（实现见文件末；对外不可见）——
 

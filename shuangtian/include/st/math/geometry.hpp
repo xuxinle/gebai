@@ -23,6 +23,16 @@ struct Size {
   float height{0.0f};
 };
 
+/// 整数像素点（窗口原点/整数坐标用）。
+struct IntPoint {
+  int x{0};
+  int y{0};
+
+  friend constexpr auto operator==(IntPoint lhs, IntPoint rhs) noexcept -> bool {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+  }
+};
+
 /// 整数像素矩形（渲染缓冲/脏区用）。
 struct IntRect {
   int x{0};

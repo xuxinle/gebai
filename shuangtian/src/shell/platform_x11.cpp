@@ -333,12 +333,15 @@ struct XlibApi {
   XId (*root_window)(XDisplay*, int);
   void* (*default_visual)(XDisplay*, int);
   int (*default_depth)(XDisplay*, int);
+  int (*display_width)(XDisplay*, int);
+  int (*display_height)(XDisplay*, int);
   unsigned long (*black_pixel)(XDisplay*, int);
   XId (*create_window)(XDisplay*, XId, int, int, unsigned int, unsigned int, unsigned int, int,
                        unsigned int, void*, unsigned long, XSetWindowAttributes*);
   int (*destroy_window)(XDisplay*, XId);
   int (*map_window)(XDisplay*, XId);
   int (*resize_window)(XDisplay*, XId, unsigned int, unsigned int);
+  int (*move_window)(XDisplay*, XId, int, int);
   int (*flush)(XDisplay*);
   int (*sync)(XDisplay*, int);
   int (*pending)(XDisplay*);
@@ -403,11 +406,14 @@ template <typename Fn>
         load_symbol(handle, "XRootWindow", api.root_window) &&
         load_symbol(handle, "XDefaultVisual", api.default_visual) &&
         load_symbol(handle, "XDefaultDepth", api.default_depth) &&
+        load_symbol(handle, "XDisplayWidth", api.display_width) &&
+        load_symbol(handle, "XDisplayHeight", api.display_height) &&
         load_symbol(handle, "XBlackPixel", api.black_pixel) &&
         load_symbol(handle, "XCreateWindow", api.create_window) &&
         load_symbol(handle, "XDestroyWindow", api.destroy_window) &&
         load_symbol(handle, "XMapWindow", api.map_window) &&
         load_symbol(handle, "XResizeWindow", api.resize_window) &&
+        load_symbol(handle, "XMoveWindow", api.move_window) &&
         load_symbol(handle, "XFlush", api.flush) &&
         load_symbol(handle, "XSync", api.sync) &&
         load_symbol(handle, "XPending", api.pending) &&
@@ -702,6 +708,11 @@ class X11Backend final : public Backend {
     const int physical_height = static_cast<int>(
         std::lround(static_cast<double>(logical_height_) * static_cast<double>(scale_)));
 
+    // 屏幕（根窗）物理尺寸：建窗位置要按它居中。取不到就退回 0 →
+    // `centered_origin` 会把原点给成 (0,0)（等于不居中，而不是算出一个错位置）。
+    const int screen_w = x.display_width != nullptr ? x.display_width(display_, screen) : 0;
+    const int screen_h = x.display_height != nullptr ? x.display_height(display_, screen) : 0;
+
     // 建窗：用 `XCreateWindow`（而非 `XCreateSimpleWindow`）以便一次带上 event_mask 与
     // background_pixel——少一次往返，且避免"窗口已映射才选事件"的漏事件时序。
     const long event_mask = kKeyPressMask | kKeyReleaseMask | kButtonPressMask |
@@ -711,7 +722,15 @@ class X11Backend final : public Backend {
     XSetWindowAttributes attributes{};
     attributes.background_pixel = x.black_pixel(display_, screen);
     attributes.event_mask = event_mask;
-    window_ = x.create_window(display_, root_, 0, 0, static_cast<unsigned int>(physical_width),
+    // 建窗时就定在**屏幕中心**（而不是 (0,0) 等上层稍后再移）：
+    // 窗口会在首帧后才映射，但位置若一开始就是 (0,0)，某些 WM 会先把它
+    // 当“左上角贴边”布局一次（贴边吸附/任务栏避让按那个位置算），
+    // 之后我们再移会让用户看到窗口“跳一下”。这里直接建在目标位置。
+    const math::IntPoint origin = centered_origin(
+        math::IntRect{0, 0, physical_width, physical_height},
+        math::IntRect{0, 0, screen_w, screen_h});
+    window_ = x.create_window(display_, root_, origin.x, origin.y,
+                              static_cast<unsigned int>(physical_width),
                               static_cast<unsigned int>(physical_height), 0, depth_, 0, visual_,
                               kCWBackPixel | kCWEventMask, &attributes);
     if (window_ == 0) {
@@ -995,6 +1014,46 @@ class X11Backend final : public Backend {
       x.flush(display_);
     }
     return sync_buffers_to_client();
+  }
+
+  /// 把窗口移到**屏幕工作区的中心**（尺寸不动）。
+  ///
+  /// X11 没有“工作区”这个统一概念（任务栏/面板各 WM 自己画），所以这里按
+  /// **屏幕尺寸**居中，并夹在 `[0, 屏幕-窗口]` 内：不夹的话小屏上窗口会一部分落到屏外
+  /// （建窗时尺寸按请求值算，而屏幕可能更窄）。
+  ///
+  /// 坐标是**物理像素**（X 协议只认物理），所以逻辑值要乘 `scale_`。
+  /// 此方法只发 `XMoveWindow`，不动尺寸——与 Win32/headless 同一契约。
+  auto center_window() -> Status override {
+    if (window_ == 0 || display_ == nullptr) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    const XlibApi& x = x11_library();
+    const math::Size screen = screen_size_logical();
+    const math::Size current = logical_size();
+    if (screen.width <= 0.0f || screen.height <= 0.0f) {
+      return unexpected(ErrorCode::Unsupported, "拿不到屏幕尺寸");
+    }
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    const int window_w = static_cast<int>(std::lround(static_cast<double>(current.width) * s));
+    const int window_h = static_cast<int>(std::lround(static_cast<double>(current.height) * s));
+    const int screen_w = static_cast<int>(std::lround(static_cast<double>(screen.width) * s));
+    const int screen_h = static_cast<int>(std::lround(static_cast<double>(screen.height) * s));
+    // 居中数学与 Win32 共用一份纯函数（`shell::centered_origin`）。
+    const math::IntPoint origin = centered_origin(
+        math::IntRect{0, 0, window_w, window_h}, math::IntRect{0, 0, screen_w, screen_h});
+    x.move_window(display_, window_, origin.x, origin.y);
+    x.flush(display_);
+    return ok();
+  }
+
+  /// 屏幕（根窗）尺寸的逻辑值：物理值 ÷ `scale_`。
+  [[nodiscard]] auto screen_size_logical() const -> math::Size {
+    const XlibApi& x = x11_library();
+    if (display_ == nullptr || x.display_width == nullptr) return math::Size{};
+    const int screen = x.default_screen(display_);
+    const int width = x.display_width(display_, screen);
+    const int height = x.display_height(display_, screen);
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    return math::Size{static_cast<float>(width) / s, static_cast<float>(height) / s};
   }
 
  private:

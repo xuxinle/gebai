@@ -1217,6 +1217,22 @@ auto Application::start() -> Status {
     }
   }
 
+  // **新窗口一律居中**（与上面那个分支无关：铺不铺开都要居中）。
+  //
+  // 为何在“尺寸定下来之后”：居中要按窗口的**最终尺寸**算，先移后改尺寸会让
+  // 窗口偏到一边（长宽各差一半）。所以两条尺寸路径（铺开 / 只夹上限）都做完，
+  // 这里再一次性定位置。
+  //
+  // 为何不让各后端在建窗时自己居中：三个后端的做法不同（Win32 只能在
+  // `WM_*` 里改、X11 发一个请求、Wayland 根本没得选），而“居中”是**产品口径**，
+  // 不是平台细节。实测旧状态就是分家的：只有 Win32 在 `fit_window_to_work_area`
+  // 里顺手居中，于是 `fill_work_area = false` 的常驻面板与所有 X11 应用开局
+  // 都落在屏幕左上角（(0,0)）。
+  if (const auto centered = impl_->backend->center_window(); !centered) {
+    // 无头（没有屏幕）/Wayland（位置归合成器）不是错误，只记一句供排障。
+    ST_LOG_INFO("窗口未居中（{}）", centered.error().message);
+  }
+
   // 字体栈首次装配（实测 63.5 ms：要读多个 TTC 的表目录）——泵一次消息。
   impl_->backend->pump_events();
   auto stack = st::text::FontStack::system_default();

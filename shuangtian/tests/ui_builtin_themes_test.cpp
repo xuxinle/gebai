@@ -12,6 +12,8 @@ namespace {
 
 using st::ui::builtin_theme;
 using st::ui::builtin_theme_names;
+using st::ui::builtin_theme_names_by_popularity;
+using st::ui::sort_theme_names_by_popularity;
 
 /// 歌白移植过来的 10 个主题必须**全部**能加载。
 ///
@@ -71,6 +73,79 @@ ST_TEST(builtin_theme_names_are_complete_and_sorted) {
   for (const std::string_view must : {"light", "dark", "cyberpunk", "ink"}) {
     ST_CHECK(std::find(names.begin(), names.end(), must) != names.end());
   }
+}
+
+/// **常用性序**：默认两档必须打头，且集合与字母序完全一致（只是换了次序）。
+///
+/// 为何钌：主题选择器的色卡墙是 5 列 × 2 行。字母序时 `light` 排在第 6 位
+/// （`cny`/`cyberpunk`/`ink`/`matrix` 把它顶到右半边）——而绝大多数人只在这两档之间切，
+/// “默认项要第一眼看到”是选择器的基本形状。
+ST_TEST(builtin_theme_names_by_popularity_puts_light_and_dark_first) {
+  const auto sorted = builtin_theme_names_by_popularity();
+  ST_REQUIRE(sorted.size() >= 10U);
+  ST_CHECK_EQ(std::string(sorted[0]), std::string("light"));
+  ST_CHECK_EQ(std::string(sorted[1]), std::string("dark"));
+  // 集合必须与字母序那份**完全一致**（只是重排，不多不少）：
+  // 两边一旦分家，新增主题就会从选择器里消失（看着像“主题加载失败”）。
+  auto a = sorted;
+  auto b = builtin_theme_names();
+  std::sort(a.begin(), a.end());
+  std::sort(b.begin(), b.end());
+  ST_CHECK_EQ(a.size(), b.size());
+  ST_CHECK(a == b);
+  ST_CHECK(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());   // 无重复
+}
+
+/// 未登记在优先级表里的名字必须**接在末尾**（不能静默丢掉）。
+///
+/// 为何不拿真实主题集验：表里目前恰好包含全部 10 个名字，于是“尾部兼容循环”
+/// 什么也不加——删了它也测不出来（**实测踩过：第一版就是这种恒绿的护栏**）。
+/// 必须构造一份**含未登记名字**的输入，才能真验那条保底规则。
+ST_TEST(sort_theme_names_keeps_unlisted_entries_at_tail) {
+  // 输入是字母序（含三个表里没有的名字）：`future-theme` / `newone` / `zzz`。
+  const std::vector<std::string_view> input{"cny",   "cyberpunk", "dark",     "future-theme",
+                                            "ink",   "light",     "matrix",   "nebula",
+                                            "newone", "qinhan",   "synthwave", "tokyo-night",
+                                            "zzz"};
+  const std::vector<std::string_view> sorted = sort_theme_names_by_popularity(input);
+  // 集合必须完全一致（不多少、不丢）——这条是“新增主题不会从选择器里消失”的本体。
+  ST_CHECK_EQ(sorted.size(), input.size());
+  for (const std::string_view name : input) {
+    ST_CHECK(std::find(sorted.begin(), sorted.end(), name) != sorted.end());
+  }
+  ST_CHECK(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
+  // 已登记的名字按表排在前 10 位（light/dark 打头），未登记的接在后面。
+  ST_REQUIRE(sorted.size() >= 10U);
+  ST_CHECK_EQ(std::string(sorted[0]), std::string("light"));
+  ST_CHECK_EQ(std::string(sorted[1]), std::string("dark"));
+  const std::vector<std::string_view> tail(sorted.begin() + 10, sorted.end());
+  std::vector<std::string_view> expected_tail{"future-theme", "newone", "zzz"};   // 保持输入次序
+  ST_CHECK(tail == expected_tail);
+}
+
+/// 真实主题集上的两条断言：集合完整 + 抽样次序。
+ST_TEST(builtin_theme_names_by_popularity_keeps_unlisted_names) {
+  const auto sorted = builtin_theme_names_by_popularity();
+  const auto all = builtin_theme_names();
+  for (const std::string_view name : all) {
+    ST_CHECK(std::find(sorted.begin(), sorted.end(), name) != sorted.end());
+  }
+  // 已登记的那几个必须真的按表排（抽样验证表本身生效，而不是恒等于字母序）。
+  const std::size_t ink_at = static_cast<std::size_t>(
+      std::find(sorted.begin(), sorted.end(), "ink") - sorted.begin());
+  const std::size_t cyber_at = static_cast<std::size_t>(
+      std::find(sorted.begin(), sorted.end(), "cyberpunk") - sorted.begin());
+  const std::size_t tokyo_at = static_cast<std::size_t>(
+      std::find(sorted.begin(), sorted.end(), "tokyo-night") - sorted.begin());
+  const std::size_t matrix_at = static_cast<std::size_t>(
+      std::find(sorted.begin(), sorted.end(), "matrix") - sorted.begin());
+  const std::size_t qinhan_at = static_cast<std::size_t>(
+      std::find(sorted.begin(), sorted.end(), "qinhan") - sorted.begin());
+  const std::size_t synthwave_at = static_cast<std::size_t>(
+      std::find(sorted.begin(), sorted.end(), "synthwave") - sorted.begin());
+  ST_CHECK(ink_at < cyber_at);
+  ST_CHECK(tokyo_at < matrix_at);
+  ST_CHECK(qinhan_at < synthwave_at);
 }
 
 /// **层级不变式**：每套主题的 `surface_raised` 都必须比 `surface` 更亮。

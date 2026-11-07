@@ -298,6 +298,91 @@ ST_TEST(present_region_empty_means_full_canvas) {
   ST_CHECK(degenerate.width <= 0);
 }
 
+// ————————————————————————————————————————————————————————————————————————————
+// 居中摆放（`shell::centered_origin`）
+//
+// 为何是纯函数单测：位置错了只在**真窗口**上看得到，而 CI 跑的是无头后端。
+// 把数学抽成纯函数是唯一能在任何平台钌住它的办法（与 `resolve_present_area` 同一理由）。
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(centered_origin_centers_window_in_work_area) {
+  // 基线：1440×900 窗口在 2560×1392 工作区 ⇒ 偏移 (560, 246)。
+  const auto origin = st::shell::centered_origin(st::math::IntRect{0, 0, 1440, 900},
+                                                st::math::IntRect{0, 0, 2560, 1392});
+  ST_CHECK_EQ(origin.x, 560);
+  ST_CHECK_EQ(origin.y, 246);
+  // 剩余空间为奇数时向下取整（与 Win32 行为一致；半像素归左/上）。
+  // 1001 - 400 = 601 ⇒ 601/2 = 300（不是 301）。
+  const auto odd = st::shell::centered_origin(st::math::IntRect{0, 0, 400, 200},
+                                              st::math::IntRect{0, 0, 1001, 601});
+  ST_CHECK_EQ(odd.x, 300);
+  ST_CHECK_EQ(odd.y, 200);
+}
+
+/// 多显示器：工作区原点不在 (0,0) 时，居中必须加回那个偏移。
+///
+/// 为何值得单测：Win32 旧写法用 `SPI_GETWORKAREA`（**只给主屏**），窗口在副屏时
+/// 会被搬到主屏上。而“搬到另一块屏”在单屏开发机上**永远复现不出来**。
+ST_TEST(centered_origin_honors_secondary_monitor_offset) {
+  // 副屏：左上角 (1920, 0)，1920×1080 工作区；窗口 800×600 ⇒ 偏移 (560, 240)。
+  const auto origin = st::shell::centered_origin(st::math::IntRect{0, 0, 800, 600},
+                                                st::math::IntRect{1920, 0, 1920, 1080});
+  ST_CHECK_EQ(origin.x, 1920 + 560);
+  ST_CHECK_EQ(origin.y, 240);
+  // 副屏在工作区下方（任务栏在顶部）也一样按原点算。
+  const auto below = st::shell::centered_origin(st::math::IntRect{0, 0, 800, 600},
+                                               st::math::IntRect{0, 200, 1000, 800});
+  ST_CHECK_EQ(below.x, 100);
+  ST_CHECK_EQ(below.y, 200 + 100);
+}
+
+/// 窗口比工作区还大时，**夹到工作区左上角**（不能算出负坐标把窗口推到屏外）。
+///
+/// 为何必须钌：启动早期“先按请求尺寸建窗、再夹到工作区”是正常顺序，
+/// 中间那一瞬间窗口确实可能比屏幕大——那时应该贴齐左上角，
+/// 而不是得到一个负的、把标题栏推到屏幕外的位置。
+ST_TEST(centered_origin_clamps_oversized_window_into_work_area) {
+  const auto origin = st::shell::centered_origin(st::math::IntRect{0, 0, 3000, 2000},
+                                                st::math::IntRect{0, 0, 1920, 1080});
+  ST_CHECK_EQ(origin.x, 0);
+  ST_CHECK_EQ(origin.y, 0);
+  // 一个轴超出、另一个轴没超出：各自独立判断（不能“一个超了就两个都贴零”）。
+  const auto mixed = st::shell::centered_origin(st::math::IntRect{0, 0, 3000, 400},
+                                               st::math::IntRect{0, 0, 1920, 1000});
+  ST_CHECK_EQ(mixed.x, 0);
+  ST_CHECK_EQ(mixed.y, 300);
+}
+
+/// 退化输入：工作区为空 ⇒ 原点 (0,0)；不得除零、不得返回垃圾值。
+ST_TEST(centered_origin_handles_degenerate_work_area) {
+  const auto origin = st::shell::centered_origin(st::math::IntRect{0, 0, 800, 600},
+                                                st::math::IntRect{});
+  ST_CHECK_EQ(origin.x, 0);
+  ST_CHECK_EQ(origin.y, 0);
+}
+
+/// 无头后端**没有屏幕位置**：`center_window()` 必须如实报 `Unsupported`。
+///
+/// 为何钌这条：应用层现在对所有后端一律调 `center_window()`。若无头后端
+/// 假装成功（返回 ok），那么“无头到底有没有居中这个概念”就变得不可判断；
+/// 若它崩溃，则所有无头测试与应用都跑不起来。两者之间只有一个正确答案：
+/// 明确拒绝。
+ST_TEST(headless_backend_reports_no_window_position) {
+  auto backend = st::shell::create_backend("headless");
+  ST_CHECK(backend.has_value());
+  if (!backend.has_value()) return;
+  WindowOptions options;
+  options.width = 320;
+  options.height = 240;
+  options.renderer = "software";
+  if (auto status = (*backend)->create_window(options); !status) return;
+  const auto centered = (*backend)->center_window();
+  ST_CHECK(!centered.has_value());
+  // 拒绝了也不得捣乱：尺寸与逻辑视口原封不动。
+  ST_CHECK_EQ((*backend)->logical_size().width, 320.0f);
+  ST_CHECK_EQ((*backend)->logical_size().height, 240.0f);
+}
+
 ST_TEST(present_region_scales_outward_and_clamps) {
   // 逻辑 → 物理的换算规则：左/上向下取整、右/下**向上取整**（向外取整）。
   // 为什么这条值得单测：`round` 会把 100.4 的右缘收成 100——**漏掉半像素**，

@@ -261,8 +261,28 @@ class Backend {
   ///
   /// 为何是后端职责而非应用自己算：窗口客户区/边框/DPI 换算都在后端手里，
   /// 应用只知道“我希望能有多宽”。把换算放在应用里会变成两套坐标系。
+  ///
+  /// 本函数**只管尺寸**；位置由 `center_window` 单独负责。两者分开是因为
+  /// 调用时机不同：尺寸要按工作区算（主窗口铺开），而位置在任何尺寸下都该居中
+  /// （含 `fill_work_area = false` 的小窗口应用——它们跳过尺寸收敛，但仍要居中）。
   virtual auto fit_window_to_work_area() -> Status {
     return unexpected(ErrorCode::Unsupported, "后端不支持窗口自适应");
+  }
+  /// 把窗口**居中到它所在那块显示器的工作区**（尺寸不动）。
+  ///
+  /// 返回 `ok()` = 已经处理（可能本来就在中间）；`Unsupported` = 后端无法摆放窗口，
+  /// 调用方不该把它当错。
+  ///
+  /// 为何需要它（而不是让各后端在别处顺手居中）：位置这件事有三个**必须同时成立**
+  /// 的口径——① 基准是**窗口所在那块屏**的工作区（多显示器下不是主屏）；
+  /// ② 换算在**物理**像素里做，因为窗口系统只认物理坐标；
+  /// ③ 只移动不改大小。三者分散到各后端的建窗/改尺寸/自适应路径里，就必然分家。
+  /// 实测：X11/Wayland 建窗落在 (0,0)（屏幕左上角），只有 Win32 在
+  /// `fit_window_to_work_area` 里顺手居中过——于是同一个应用在不同平台开局位置不同。
+  ///
+  /// 默认实现返回 `Unsupported`：无头没有“屏幕”，居中是空操作。
+  virtual auto center_window() -> Status {
+    return unexpected(ErrorCode::Unsupported, "后端不支持窗口定位");
   }
   /// 窗口系统是否请求关闭（用户点关闭按钮）。
   ///
@@ -375,6 +395,20 @@ class Backend {
 /// 窗口系统后端专用：它比无头多一件事——**把画布像素搬进窗口系统的缓冲**。
 /// `st::shell::Backend` 已经是那个契约面（含 `set_present_region` / `present_note`），
 /// 这里不再另立一个接口。
+
+/// 可复用纯函数：**居中摆放的窗口原点**（物理像素）。
+///
+/// 为什么抽出来：两个平台后端（Win32 的 `SetWindowPos`、X11 的 `XMoveWindow`）
+/// 都要算它，而“居中偏了 1px / 偏到另一块屏”只在真窗口上看得到
+/// （与 `resolve_present_area` 同一理由：全自绘框架里没有系统合成器兜底，
+/// 纯函数 + 单测才钉得住）。
+///
+/// 语义：
+/// - 返回的是**窗口左上角**的全局坐标（相对那塊屏的工作区原点，含其偏移）；
+/// - 摆不下时**夹到工作区左上角**（`max(0, …)`）——不能把窗口推到屏外；
+/// - 两个轴的除法都**向下取整**（与 Win32 行为一致；奇差 1px 的那半像素归左/上）。
+[[nodiscard]] auto centered_origin(math::IntRect window, math::IntRect work_area) noexcept
+    -> math::IntPoint;
 
 /// 是否检测到显示服务（DISPLAY / WAYLAND_DISPLAY）。
 [[nodiscard]] auto has_display() noexcept -> bool;

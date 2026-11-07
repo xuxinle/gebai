@@ -303,7 +303,11 @@ ThemePicker::~ThemePicker() { flush_dismiss(); }
 
 void ThemePicker::populate_builtins(std::string_view current) {
   names_.clear();
-  for (const auto name : builtin_theme_names()) names_.emplace_back(name);
+  // 色卡墙用**常用性序**（`light`/`dark` 打头）：它是给人挑的网格，
+  // 而字典序会把默认两档推到右半边（5 列 × 2 行，`light` 落在第 6 位）。
+  // `options` 属性与控制通道的 `change` 动作都基于同一份 `names_`，
+  // 所以“选择器里看到的顺序”与“程序逐个取到的顺序”自动一致。
+  for (const auto name : builtin_theme_names_by_popularity()) names_.emplace_back(name);
   set_current(current);
 }
 

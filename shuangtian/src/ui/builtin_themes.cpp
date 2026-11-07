@@ -77,6 +77,48 @@ auto builtin_theme_names() -> std::vector<std::string_view> {
   return names;
 }
 
+namespace {
+
+/// 常用性优先次序表。只表达**次序**，不定义集合（集合仍由 `builtin_theme_names()`
+/// 唯一决定）——两张清单分家时会出现两种难查的失败形态：
+/// “忘了加进表→选择器里没它（看着像主题加载失败）”
+/// 与“表里写了但内置库没有→选中报错”。
+[[nodiscard]] auto popularity_order() -> const std::vector<std::string_view>& {
+  static const std::vector<std::string_view> order{
+      "light", "dark",        // 默认两档：经经大多数人在这一档之间切
+      "ink",                  // 亮色系的第二选择（唯一固定亮色的主题）
+      "tokyo-night",          // 暗色系里最接近“普通 IDE”的那一档
+      "nebula", "qinhan",      // 有色偏但克制（青绿 / 矿物色）
+      "cny", "cyberpunk",      // 强风格化，已是为特定场合选
+      "matrix", "synthwave",    // 极强风格（纯黑荧光 / 霓虹）
+  };
+  return order;
+}
+
+}  // namespace
+
+auto sort_theme_names_by_popularity(std::vector<std::string_view> names)
+    -> std::vector<std::string_view> {
+  const auto& order = popularity_order();
+  std::vector<std::string_view> sorted;
+  sorted.reserve(names.size() + order.size());
+  // ① 按优先级表取（只取输入里真实存在的那几个）；
+  for (const std::string_view name : order) {
+    if (std::find(names.begin(), names.end(), name) == names.end()) continue;
+    sorted.push_back(name);
+  }
+  // ② 未登记的保持输入原有次序，接在末尾——保住“新增主题不会从列表里消失”。
+  for (const std::string_view name : names) {
+    if (std::find(sorted.begin(), sorted.end(), name) != sorted.end()) continue;
+    sorted.push_back(name);
+  }
+  return sorted;
+}
+
+auto builtin_theme_names_by_popularity() -> std::vector<std::string_view> {
+  return sort_theme_names_by_popularity(builtin_theme_names());   // 字母序作保底次序
+}
+
 auto builtin_theme_display_name(std::string_view name) -> std::string_view {
   // 中文名登记表（英文名是稳定 id，中文名是给选择器 UI 看的意象名）。
   // ⚠ 轻量映射不触发主题解析：给 10 套内置主题查名字不需要解析 JSON。

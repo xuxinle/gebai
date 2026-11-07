@@ -142,6 +142,10 @@ class HeadlessBackend final : public Backend {
     surface_ = std::move(choice.surface);
     return ok();
   }
+  /// 无头没有“屏幕位置”这个概念：如实报 `Unsupported`（不假装做了）。
+  auto center_window() -> Status override {
+    return unexpected(ErrorCode::Unsupported, "无头后端没有屏幕位置");
+  }
   /// 工作区尺寸（由 Application 通过 WindowOptions 传入；0 = 等同逻辑尺寸）。
   void set_work_area(int w, int h) noexcept {
     work_area_w_ = w > 0 ? w : width_;
@@ -267,6 +271,18 @@ auto resolve_present_area(math::IntRect region, float scale, int width, int heig
       static_cast<int>(std::ceil(static_cast<double>(region.y + region.height) * factor)), height);
   if (right <= left || bottom <= top) return math::IntRect{};
   return math::IntRect{left, top, right - left, bottom - top};
+}
+
+auto centered_origin(math::IntRect window, math::IntRect work_area) noexcept -> math::IntPoint {
+  // 空或无效输入：退回工作区左上角（“至少不要把窗口推出去”）。
+  if (work_area.is_empty()) return math::IntPoint{0, 0};
+  // 剩余空间的一半；摆不下时为负 → 夹到 0（贴齐工作区左上角，不推到屏外）。
+  const int slack_x = (work_area.width - window.width) / 2;
+  const int slack_y = (work_area.height - window.height) / 2;
+  const int offset_x = slack_x > 0 ? slack_x : 0;
+  const int offset_y = slack_y > 0 ? slack_y : 0;
+  // 工作区本身的偏移要加上：多显示器下副屏的工作区原点不在 (0,0)。
+  return math::IntPoint{work_area.x + offset_x, work_area.y + offset_y};
 }
 
 auto create_backend(std::string_view name) -> Result<std::unique_ptr<Backend>> {

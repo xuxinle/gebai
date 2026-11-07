@@ -1286,6 +1286,45 @@ class Win32Backend final : public Backend {
   [[nodiscard]] auto min_logical_size() const noexcept -> math::Size override {
     return math::Size{640.0f, 400.0f};
   }
+  /// 把窗口移到**它所在那块显示器工作区的中心**（尺寸不动）。
+  ///
+  /// 为何单独成一个方法、且用 `MonitorFromWindow` 而不是主屏：多显示器下窗口可能落在
+  /// 副屏，拿主屏工作区算会把窗口搬到另一块屏上（实测口径错位那类最难查的缺陷）。
+  /// `rcWork` 已扣除任务栏，所以居中后四边都有余量——这也是外阴影可见的前提
+  /// （影子层要向外扩 `shadow_margin`，窗口贴边时那一侧的阴影就在屏外）。
+  auto center_window() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    MONITORINFO info{};
+    info.cbSize = sizeof(MONITORINFO);
+    const HMONITOR monitor = ::MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (monitor == nullptr || ::GetMonitorInfoW(monitor, &info) == 0) {
+      return unexpected(ErrorCode::Unsupported, "拿不到窗口所在显示器的工作区");
+    }
+    RECT current{};
+    if (::GetWindowRect(window_, &current) == 0) {
+      return unexpected(ErrorCode::Io, "GetWindowRect 失败");
+    }
+    const RECT& work = info.rcWork;
+    // 居中数学走**共享纯函数**（与 X11 同一份）：两边各写一遍就会差 1px，
+    // 而那种偏差只在真屏上看得到、很难归因。
+    const math::IntPoint origin = centered_origin(
+        math::IntRect{static_cast<int>(current.left), static_cast<int>(current.top),
+                      static_cast<int>(current.right - current.left),
+                      static_cast<int>(current.bottom - current.top)},
+        math::IntRect{static_cast<int>(work.left), static_cast<int>(work.top),
+                      static_cast<int>(work.right - work.left),
+                      static_cast<int>(work.bottom - work.top)});
+    // 已经居中就不动：避免启动时无意义的 SetWindowPos（会多一次重绘）。
+    if (origin.x == static_cast<int>(current.left) && origin.y == static_cast<int>(current.top)) {
+      return ok();
+    }
+    if (::SetWindowPos(window_, nullptr, origin.x, origin.y, 0, 0,
+                       SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) == 0) {
+      return unexpected(ErrorCode::Io, "SetWindowPos 失败");
+    }
+    return ok();
+  }
+
   /// 把窗口开到**屏幕工作区**（DPI 适配的主路径：不是“超屏才缩”，而是“按屏幕铺开”）。
   ///
   /// 为何不是“只夹上限”：实测用户场景——屏幕 3840×2160、DPI 1.5 ⇒ 工作区
@@ -1317,22 +1356,15 @@ class Win32Backend final : public Backend {
     const auto client_w = static_cast<int>(std::lround(target_w * s));
     const auto client_h = static_cast<int>(std::lround(target_h * s));
 
-    // **居中摆放，四周给阴影留余量**。
+    // **只改尺寸，不碰位置**。
     //
-    // 为何不能 `SWP_NOMOVE`（旧写法）：启动时窗口停在 (0,0)，而影子层还要向
-    // 外扩 `shadow_margin`——于是**左、上两侧的阴影整个落在屏幕外**。
-    // 用户看到的现象就是“阴影没有”（实测：启动后影子层在 (-27,-27)，
-    // 左侧与上侧不可见；拖动窗口离开边缘后周围才有余量，阴影就出现了）。
-    //
-    // 工作区本身已排除了任务栏/屏幕边缘，所以居中后四边都有余量。
-    RECT work_rect{};
-    ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_rect, 0);
-    const int work_w = work_rect.right - work_rect.left;
-    const int work_h = work_rect.bottom - work_rect.top;
-    const int x = work_rect.left + std::max(0, (work_w - client_w) / 2);
-    const int y = work_rect.top + std::max(0, (work_h - client_h) / 2);
-    if (!::SetWindowPos(window_, nullptr, x, y, client_w, client_h,
-                        SWP_NOZORDER | SWP_NOACTIVATE)) {
+    // 为何分开（旧写法在这里顺手居中）：居中在任何尺寸下都该做，包括走
+    // `fill_work_area = false` 跳过本函数的小窗口应用（相期那类常驻卡片）——
+    // 它们以前直接建在 (0,0)，即屏幕左上角。而 X11/Wayland 根本不进本函数，
+    // 同样只能靠 `center_window`。三处口径收成一处的判据：
+    // 位置只能由一个方法决定。
+    if (!::SetWindowPos(window_, nullptr, 0, 0, client_w, client_h,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)) {
       return unexpected(ErrorCode::Invalid, "SetWindowPos 失败");
     }
     // 改完必须重同步缓冲（与 WM_SIZE 同一条路径）。
