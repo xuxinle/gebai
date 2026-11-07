@@ -376,8 +376,26 @@ class SoftwareScene final : public Scene3D {
     if (shadow_map_.strength <= 0.0f) return;
     if (shadow_geometry_.empty()) return;
 
-    const int index = std::clamp(shadow_map_.light_index, 0, kMaxExtraLights - 1);
-    const Light& light = lighting_.extra_lights[static_cast<std::size_t>(index)];
+    // ## 取光源：`light_index < 0` 表示**主光**（2026-11-07）
+    //
+    // 主光的三个量分散在 `Lighting` 上（`light_from` 方向、`light_color` 颜色、
+    // `diffuse` 强度），不像 `extra_lights` 那样是现成的一个 `Light`。
+    // 这里现场拼一个等价物，后面的代码就不用分两支。
+    //
+    // ⚠ `light_from` 是**指向光源**的方向，而 `Light::direction` 的语义是
+    // **照射方向**（两者差一个负号）。直接拷会让阴影投到反方向，
+    // 而画面里“有影子”只是位置不对——极难查。
+    Light light{};
+    if (shadow_map_.light_index < 0) {
+      light.kind = LightKind::Directional;
+      light.direction = math::Vec3{-lighting_.light_from.x, -lighting_.light_from.y,
+                                   -lighting_.light_from.z};
+      light.color = lighting_.light_color;
+      light.intensity = lighting_.diffuse;
+    } else {
+      const int index = std::clamp(shadow_map_.light_index, 0, kMaxExtraLights - 1);
+      light = lighting_.extra_lights[static_cast<std::size_t>(index)];
+    }
     if (light.intensity <= 0.0f) return;
     // 点光不能用单张阴影贴图（需要立方体贴图），静默跳过。
     if (light.kind == LightKind::Point) return;
@@ -408,6 +426,8 @@ class SoftwareScene final : public Scene3D {
     const math::Mat4 proj =
         math::Mat4::orthographic(shadow_map_.extent * 2.0f, 1.0f, 0.01f, dist * 2.0f);
     shadow_vp_ = proj * view;
+    // 存一份光方向（指向光源）：斜率缩放偏置要用
+    light_dir_ = math::Vec3{-dir.x, -dir.y, -dir.z};
 
     // 光栅化：每个三角形投到贴图上，写最小深度
     const float half = static_cast<float>(res) * 0.5f;
@@ -474,7 +494,16 @@ class SoftwareScene final : public Scene3D {
   /// 某世界点是否在阴影里（PCF 柔化）。
   ///
   /// 返回 0（全亮）~ 1（全在阴影）。`soft_radius` 是纹素单位的采样半径。
-  [[nodiscard]] auto shadow_factor_at(math::Vec3 world) const -> float {
+  ///
+  /// ## 为何需要 `normal`（2026-11-07 修）
+  ///
+  /// 无**斜率缩放**（slope-scale bias）时，球面会出同心圆环：球面法线与
+  /// 光线夹角越小，一个纹素跨越的表面深度变化越大，固定偏置就压不住——
+  /// 结果是**自己遮自己**的一圈圈条纹。实测（`parity_showdown.py`
+  /// 的金属球）非常明显，而地板（法线与光几乎垂直）反而没有。
+  ///
+  /// 标准做法：偏置乘 `tan(acos(n·l))` 即 `sqrt(1-c²)/c`，再限幅。
+  [[nodiscard]] auto shadow_factor_at(math::Vec3 world, math::Vec3 normal) const -> float {
     if (!shadow_ready_) return 0.0f;
     const int res = std::clamp(shadow_map_.resolution, 64, 4096);
     const Vec4 clip = transform(shadow_vp_, world, 1.0f);
@@ -487,7 +516,26 @@ class SoftwareScene final : public Scene3D {
       return 0.0f;
     }
 
-    const float bias = shadow_map_.bias;
+    // ## 深度偏移必须随场景尺度缩放（2026-11-07 修）
+    //
+    // 原先是固定 `shadow_map_.bias`（默认 0.0015）。而正交投影的深度精度
+    // 是**与 extent 成反比**的：extent=9 时同样的 0.0015 只够覆盖
+    // 半个纹素左右，结果是满屏条纹（shadow acne）——实测。
+    //
+    // 正确的量级：一个纹素在深度上的跨度约 `2·extent/(res·dist)`，
+    // 取它的 2~4 倍就能压住 acne 而不至于让影子脱离物体（peter-panning）。
+    // 这里用 `max(用户给的 bias, 2.5 个纹素)`：用户写更大值时以他为准。
+    const float texel_depth =
+        (2.0f * shadow_map_.extent) /
+        (static_cast<float>(std::max(res, 1)) * std::max(shadow_map_.extent * 2.0f, 4.0f));
+    const float bias = [&] {
+      const float base = std::max(shadow_map_.bias, texel_depth * 2.5f);
+      // 斜率缩放：n·l → tan 因子（限幅 8 倍，避免掠射角时偏到天上）
+      const float ndl = std::clamp(normal.dot(light_dir_), 0.0f, 1.0f);
+      const float cos_theta = std::max(ndl, 0.05f);
+      const float tan_factor = std::sqrt(std::max(0.0f, 1.0f - cos_theta * cos_theta)) / cos_theta;
+      return base * std::min(1.0f + tan_factor, 8.0f);
+    }();
     const int center_x = static_cast<int>(nx * static_cast<float>(res));
     const int center_y = static_cast<int>(ny * static_cast<float>(res));
     const int radius = static_cast<int>(std::ceil(std::max(shadow_map_.soft_radius, 0.0f)));
@@ -1262,7 +1310,7 @@ class SoftwareScene final : public Scene3D {
         //（它自己发光，不需要外部光）。
         math::Vec3 shaded = lit;
         if (shadow_ready_ && !material_.emission_unlit) {
-          const float occl = shadow_factor_at(world);
+          const float occl = shadow_factor_at(world, normal);
           if (occl > 0.0f) {
             const float keep = 1.0f - occl * std::clamp(shadow_map_.strength, 0.0f, 1.0f);
             shaded = math::Vec3{lit.x * keep, lit.y * keep, lit.z * keep};
@@ -1488,6 +1536,12 @@ class SoftwareScene final : public Scene3D {
   std::vector<float> shadow_depth_{};
   /// 光源视角的 view-projection（世界 → 阴影贴图 NDC）。
   math::Mat4 shadow_vp_{math::Mat4::identity()};
+  /// 光方向（**指向光源**，世界空间，已归一化）。
+  ///
+  /// 斜率缩放偏置需要它：`bias *= 1 + tan(acos(n·l))`。
+  /// 不在 `shadow_factor_at` 里现算：那需要原始的 `Light`，
+  /// 而它在 `build_shadow_map` 结束后就丢了。
+  math::Vec3 light_dir_{0.0f, 1.0f, 0.0f};
   /// 本帧是否已构好阴影贴图。
   bool shadow_ready_{false};
 

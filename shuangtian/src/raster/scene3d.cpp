@@ -249,15 +249,34 @@ auto Lighting::make_ibl_probes(math::Vec3* out_dirs, math::Vec3* out_colors,
 
 auto ShadowMap::make_view_projection(const Lighting& lighting) const -> math::Mat4 {
   if (strength <= 0.0f) return math::Mat4::identity();
-  if (light_index < 0 || static_cast<std::size_t>(light_index) >= lighting.extra_lights.size()) {
-    return math::Mat4::identity();
+  // ## 取光源：`light_index < 0` = 主光（2026-11-07）
+  //
+  // 主光的量分散在 `Lighting` 上（`light_from` / `light_color` / `diffuse`），
+  // 不像 `extra_lights` 那样是现成的一个 `Light`。现场拼出三个必要量。
+  //
+  // ⚠ `light_from` 是**指向光源**，而后面算相机用的是**照射方向**（差一负号）。
+  math::Vec3 direction{};
+  float intensity = 0.0f;
+  bool is_spot = false;
+  math::Vec3 spot_position{};
+  if (light_index < 0) {
+    direction = math::Vec3{-lighting.light_from.x, -lighting.light_from.y,
+                           -lighting.light_from.z};
+    intensity = lighting.diffuse;
+  } else {
+    if (static_cast<std::size_t>(light_index) >= lighting.extra_lights.size()) {
+      return math::Mat4::identity();
+    }
+    const Light& light = lighting.extra_lights[static_cast<std::size_t>(light_index)];
+    direction = light.direction;
+    intensity = light.intensity;
+    // 点光需要立方体贴图（六面），单张正交图做不到——与软件腿一致地跳过。
+    if (light.kind == LightKind::Point) return math::Mat4::identity();
+    is_spot = light.kind == LightKind::Spot;
+    spot_position = light.position;
   }
-  const Light& light = lighting.extra_lights[static_cast<std::size_t>(light_index)];
-  if (light.intensity <= 0.0f) return math::Mat4::identity();
-  // 点光需要立方体贴图（六面），单张正交图做不到——与软件腿一致地跳过。
-  if (light.kind == LightKind::Point) return math::Mat4::identity();
+  if (intensity <= 0.0f) return math::Mat4::identity();
 
-  math::Vec3 direction = light.direction;
   const float length = direction.length();
   if (length <= 1e-6f) return math::Mat4::identity();
   direction = math::Vec3{direction.x / length, direction.y / length, direction.z / length};
@@ -266,8 +285,7 @@ auto ShadowMap::make_view_projection(const Lighting& lighting) const -> math::Ma
   // 聚光有位置，但从它的位置看与从远处看（同方向）在小锥角下几乎一致——
   // 这个取舍的代价是：大锥角聚光的阴影会偏小。
   const float dist = std::max(extent * 2.0f, 4.0f);
-  const bool spot = light.kind == LightKind::Spot;
-  const math::Vec3 origin = spot ? light.position : math::Vec3{0.0f, 0.0f, 0.0f};
+  const math::Vec3 origin = is_spot ? spot_position : math::Vec3{0.0f, 0.0f, 0.0f};
   const math::Vec3 eye{origin.x - direction.x * dist, origin.y - direction.y * dist,
                        origin.z - direction.z * dist};
   const math::Vec3 target{eye.x + direction.x, eye.y + direction.y, eye.z + direction.z};

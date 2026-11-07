@@ -1817,13 +1817,16 @@ auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
   // `strength` 缺省 0.7（真 Cycles 的阴影接近全黑，但本框架没有 GI
   // 补光，设 1.0 会让暗部死黑）；`extent` 按场景尺度给。
   if (extracted->bpy_shadow) {
-    st::log::info("[scene3d] bpy 声明阴影：strength={} extent={} res={}\n",
-                  static_cast<double>(extracted->bpy_shadow_strength),
-                  static_cast<double>(extracted->bpy_shadow_extent),
-                  extracted->bpy_shadow_resolution);
     spec.shadow_map.strength = extracted->bpy_shadow_strength;
     spec.shadow_map.extent = extracted->bpy_shadow_extent;
     spec.shadow_map.resolution = extracted->bpy_shadow_resolution;
+    // **用主光**做投影（`-1`）。
+    //
+    // 为何不是默认的 `extra_lights[0]`：bpy 脚本场景通常只写 `light_from`
+    // （主光），`extra_lights` 是空的。若用索引 0，`build_shadow_map`
+    // 会因“光强为 0”直接返回——声明了 `shadow_map` 却一个影子都没有，
+    // 而且不报错。实测就卡在这里。
+    spec.shadow_map.light_index = -1;
   }
   spec.bpy_script = std::string(script);
   spec.bpy_script_name = std::string(script_name);
@@ -2362,7 +2365,22 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     // 修法：用 `spec.lighting`（它已在 `scene_spec_from_bpy` /
     // `scene_spec_from_three` 里从脚本值初始化过，所以不丢信息）。
     scene.set_lighting(spec.lighting);
-    // 警告标记来源：三者组合时以 three.js 为准（它才是最终场景的权威）。
+    // ## 阴影/AO：脚本分支也必须设（2026-11-07 修）
+    //
+    // 这里曾漏掉：`set_shadow_map` 只在 JSON 分支（约 2788 行）调过，
+    // 而 bpy / three 脚本走的是本函数这条独立流程。后果是：
+    // 脚本声明 `__st_shadow__` 后被正确抽到 `spec.shadow_map`（日志可验），
+    // 然后**在渲染时被丢弃**——画面里一个影子都没有，而错误也不报。
+    //
+    // 这两个必须在**任何绘制之前**设（与 JSON 分支同一个理由：
+    // `draw_mesh` 时收集遮影几何，`end_frame` 时才建深度图）。
+    scene.set_shadow_map(spec.shadow_map);
+    scene.set_ambient_occlusion(spec.occlusion);
+    // ## 平面投影阴影：脚本场景保持关闭
+    //
+    // 它需要一个“哪个是地面”的约定（`set_planar_shadow` 之前画的是地面），
+    // 而脚本场景的绘制顺序是脚本作者决定的，没有这个语义。
+    // 所以脚本里若需要接触阴影，用 `shadow_map`（它不依赖顺序）。
     const char* source_label = spec.three_script.empty() ? "bpy"
                                  : (spec.bpy_script.empty() ? "three" : "bpy+three");
     for (const auto& warning : script_scene->warnings) {

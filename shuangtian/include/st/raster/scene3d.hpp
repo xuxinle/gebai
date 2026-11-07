@@ -382,7 +382,21 @@ struct AmbientOcclusion {
 struct ShadowMap {
   /// 阴影强度（0 = 关闭，1 = 全黑阴影）。
   float strength{0.0f};
-  /// 用 `extra_lights` 中哪一个光源做投影（仅 `Directional` / `Spot`）。
+  /// 用哪个光源做投影。
+  ///
+  /// | 值 | 含义 |
+  /// |---|---|
+  /// | `>= 0` | `Lighting::extra_lights` 中那一个（仅 `Directional` / `Spot`）|
+  /// | `-1` | **主光**（`Lighting::light_from` + `light_color` + `diffuse`）|
+  ///
+  /// ## 为何要有 `-1`（2026-11-07）
+  ///
+  /// 原来的实现只能从 `extra_lights` 取光源。而 bpy/three 脚本场景的灯在
+  /// **主光**里（`some_shot.py` 写 `light_from` 而不写 `extra_lights`），
+  /// 于是 `build_shadow_map` 因“光强为 0”直接返回——声明了 `shadow_map`
+  /// 却一个影子都没有，而且**不报错**。实测就卡在这里。
+  ///
+  /// 默认仍为 `0`（指向 `extra_lights[0]`），不改存量行为。
   int light_index{0};
   /// 阴影贴图分辨率（边长，正方形；512/1024 是常用档）。
   int resolution{512};
