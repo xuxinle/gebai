@@ -56,7 +56,9 @@
 #include <vector>
 
 #include "battery/embed.hpp"
+#include "cefu_graph.hpp"
 #include "cefu_index.hpp"
+#include "cefu_scene.hpp"
 #include "../../app_icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
@@ -67,6 +69,7 @@
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
 #include "st/ui/components/title_bar.hpp"
+#include "st/ui/components/three_view.hpp"
 #include "st/ui/components/window_frame.hpp"
 #include "st/ui/hot_reload.hpp"
 #include "st/ui/script_bridge.hpp"
@@ -117,6 +120,8 @@ class CeFu {
 
   [[nodiscard]] auto error() const -> const std::string& { return error_; }
   [[nodiscard]] auto entry_count() const -> std::size_t { return index_.size(); }
+  /// 全部词条（供图谱构建用；只读快照语义，不暴露索引本身）。
+  [[nodiscard]] auto entries() const -> const std::vector<cefu::Entry>& { return index_.entries(); }
 
   auto install(st::ui::ScriptBridge& bridge) -> void {
     (void)bridge.expose("cefu.stats", [this](const std::vector<Json>&) -> st::Result<Json> {
@@ -259,7 +264,26 @@ class CeFu {
         const auto it = obj.find(key);
         if (it == obj.end() || !it->is_array()) return;
         for (const auto& v : *it) {
-          if (v.is_string()) out.push_back(v.get<std::string>());
+          if (v.is_string()) {
+            out.push_back(v.get<std::string>());
+            continue;
+          }
+          // 对象形态 `{k,v}` → 统一存成 `"k=v"` 字符串。
+          //
+          // 为何要容这两种形态（实测踩到）：
+          // - 工具面（cefu_put）把 facts 声明为 `[{k,v}]` 对象数组，模型会照此传；
+          // - 而索引层 `Entry::facts` 一直是 `vector<string>`（导入与检索都按字符串）。
+          // 原来这里只收字符串，**对象形态被静默丢掉**——现象是“写了硬事实，
+          // 取回来却没有”，而调用方看不到任何报错。
+          // 存成 `k=v` 而不丢 k：检索时键名与值都是信号，图谱要用值判定
+          // “足够具体的事实”（端口/IP/路径）以建隐含关联边。
+          if (v.is_object()) {
+            const auto k = v.value("k", v.value("key", std::string{}));
+            const auto val = v.value("v", v.value("value", std::string{}));
+            if (!k.empty() || !val.empty()) {
+              out.push_back(k + "=" + val);
+            }
+          }
         }
       };
       list_of("aliases", entry.aliases);
@@ -361,8 +385,7 @@ class CeFu {
     });
 
     (void)bridge.expose("cefu.review", [this](const std::vector<Json>&) -> st::Result<Json> {
-      const auto items = index_.review(st::time::now_ms(), 30, 90, 0.6);
-      Json out = Json::array();
+      const auto items = index_.review(st::time::now_ms(), 30, 90, 0.6);      Json out = Json::array();
       for (const auto& it : items) {
         Json ids = Json::array();
         for (const auto& id : it.ids) ids.push_back(Json(id));
@@ -856,6 +879,72 @@ auto run_app(int argc, char** argv) -> int {
     std::fprintf(stderr, "界面装载失败：%s\n", status.error().message.c_str());
     return 1;
   }
+
+  // ⑤′ 三维图谱视口：**必须在 XML 建树之后**才能找到占位容器。
+  //
+  // 为何不放进 XML：声明式组件清单里没有三维件（`ThreeView` 需要 C++ 装配——
+  // 它要管 GPU/软件后端、拾取、相机，全不是声明式能表达的）。所以 XML 留一个
+  // 空 Column 占位，这里把视口塞进去。
+  //
+  // ## 为何用 `find` 而不是写死指针
+  //
+  // XML 会**热重载**（改文件即重建整棵树）——热重载后旧元素全被销毁，
+  // 写死的指针立刻是悬空的。所以每次都按 id 现查，查不到就这一次不装
+  // （下一次切回图谱模式时会再试）。
+  st::ui::ThreeView* graph_view = nullptr;
+  const auto mount_graph_view = [&]() -> bool {
+    if (graph_view != nullptr) return true;
+    auto* pane = app.root().find("#graph-pane");
+    if (pane == nullptr) return false;
+    auto view = std::make_unique<st::ui::ThreeView>();
+    view->set_id("graph-viewport");
+    view->set_background(st::math::Color{0x0D, 0x11, 0x17, 0xFF});
+    // 关掉自转：知识图谱的结构本身就是信息，自己动会干扰“看清哪里连哪里”
+    view->set_animation_enabled(false);
+    graph_view = view.get();
+    pane->add_child(std::move(view));
+    return true;
+  };
+  (void)mount_graph_view();
+
+  // 装载图谱：生成 three.js 脚本 → 交给视口。
+  //
+  // 返回的统计直接拼成一行文字给图例栏，这样“图里到底有什么”不用去翻日志。
+  const auto load_graph = [&](const std::string& background) -> Json {
+    if (!mount_graph_view() || graph_view == nullptr) return Json(false);
+    const auto graph = cefu::graph::build(knowledge.entries());
+    auto laid = graph;
+    cefu::graph::layout(laid);
+    cefu::scene::Options scene_options;
+    if (!background.empty()) scene_options.background = background;
+    const auto script_text = cefu::scene::build_script(laid, scene_options);
+    const bool ok = graph_view->load_script(script_text, "<cefu-graph>");
+    Json out = Json::object();
+    out["ok"] = ok;
+    out["nodes"] = static_cast<std::int64_t>(laid.nodes.size());
+    out["edges"] = static_cast<std::int64_t>(laid.edges.size());
+    out["entries"] = static_cast<std::int64_t>(laid.entry_count);
+    out["categories"] = static_cast<std::int64_t>(laid.category_count);
+    out["persons"] = static_cast<std::int64_t>(laid.person_count);
+    out["isolated"] = static_cast<std::int64_t>(laid.isolated_entries);
+    out["largest_cluster"] = static_cast<std::int64_t>(laid.largest_cluster);
+    out["error"] = graph_view->last_error();
+    return out;
+  };
+  (void)bridge.expose("cefu.graph", [&load_graph](const std::vector<Json>& args) -> st::Result<Json> {
+    const auto background = args.empty() ? std::string{} : st::json_as_string(args[0]);
+    return load_graph(background);
+  });
+  (void)bridge.expose("cefu.graph_reset", [&](const std::vector<Json>&) -> st::Result<Json> {
+    if (graph_view == nullptr) return Json(false);
+    graph_view->reset_view();
+    return Json(true);
+  });
+  // 热重载后 XML 树是新的：视口指针悬空。丢掉它、下次装图谱时重建。
+  (void)bridge.expose("cefu.graph_invalidate", [&](const std::vector<Json>&) -> st::Result<Json> {
+    graph_view = nullptr;
+    return Json(true);
+  });
   st::log::out("册府就绪：界面 {} · 桥 {} 个函数 · 词条 {} 条 · 库 {}\n", ui_dir,
             bridge.exposed().size(), knowledge.entry_count(), options.db_path);
   st::log::out("  {}\n", hot.last_summary());

@@ -77,6 +77,12 @@ const std::unordered_set<std::string>& box_prop_names() {
       "value",   "placeholder", "checked", "selected", "active",  "options",
       "columns", "items",    "variant",  "title",    "body",       "actions",
       "content", "hint",     "level",    "page",       "read_only", "password",
+      // 叠放（绝对定位）：`apply_properties` 一直支持它（见 dsl.cpp 的
+      // 「四个量一起落」注释），但**这张白名单漏了它**——于是 XML 里写
+      // `absolute="true"` 会被报“未生效的属性”并静默按排流处理。
+      // 实测代价：图谱覆盖层被 flex 排到 0 尺寸而遭剔除，现象是
+      // “这个容器从树里消失”，排查绕了一大圈。
+      "absolute", "left",     "top",       "right",      "bottom",
   };
   return names;
 }
