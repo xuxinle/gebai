@@ -309,7 +309,72 @@ $('#confirm').on('click', () => {
   }
 })
 
+/* ══════════ 三维知识图谱 ══════════ */
+
+// 图谱是**三维视口**（C++ 造的覆盖层），不在 XML 树里——所以它的显示/隐藏
+// 也由 C++ 管（`cefu.graph_toggle`），JS 只负责记状与读统计。
+//
+// 为何不在 JS 里 `set({{visible}})`：那个视口不在声明式树里，选不到。
+let graphMode = false
+
+function setGraphMode(on) {
+  let info = null
+  try {
+    info = app.cefu.graph_toggle(on)
+  } catch (err) {
+    setStatus('图谱切换失败：' + err)
+    return
+  }
+  graphMode = on
+  $('#graph-mode').set({ label: on ? '查阅' : '图谱' })
+  // 图例与提示仍由声明式树画（它们是二维文字，适合叠在三维图上）
+  $('#graph-legend').set({ visible: on })
+  // 三栏：图谱模式下隐藏（三维需要全部可用面积），切回时请回来。
+  //
+  // 为何只藏不删：视口是 C++ 挂的**绝对定位覆盖层**，只藏三栏就能让它
+  // 独占画面；而删/重建要走 XML 热重载，代价大且会丢当前选中。
+  $('#cat-pane').set({ visible: !on })
+  $('#list-pane').set({ visible: !on })
+  $('#detail-pane').set({ visible: !on })
+
+  if (!on) {
+    setStatus('已返回查阅')
+    return
+  }
+  if (!info || !info.ok) {
+    const reason = (info && info.error) || '未知'
+    $('#graph-info').set({ text: '视口装载失败：' + reason })
+    setStatus('视口装载失败：' + reason)
+    return
+  }
+  // 一行“图里到底有什么”：这是判断图是不是太稀/太密的唯一依据。
+  // 孤立词条数特别重要：它直接告诉你“有多少知识没挂上任何分类/人/关联”。
+  let text = `${info.entries} 词条 · ${info.categories} 册 · ${info.persons} 人 · ` +
+             `${info.nodes} 节点 / ${info.edges} 边 · 最大簇 ${info.largest_cluster}`
+  if (info.isolated > 0) text += ` · ${info.isolated} 条孤立`
+  $('#graph-info').set({ text })
+  setStatus('图谱已就绪（拖动旋转、滚轮缩放）')
+}
+
+$('#graph-mode').on('click', () => setGraphMode(!graphMode))
+$('#graph-reset').on('click', () => {
+  try {
+    app.cefu.graph_reset()
+    setStatus('视角已归位')
+  } catch (err) {
+    setStatus('归位失败：' + err)
+  }
+})
+
 /* ══════════ 启动 ══════════ */
+
+// 启动时隐藏图例栏（图谱模式才显示）。
+// 注意：三维视口本身默认就是隐的（C++ 侧 set_visible(false)），不靠这里。
+try {
+  $('#graph-legend').set({ visible: false })
+} catch (err) {
+  /* 图例栏不在也不应阻止界面起来 */
+}
 
 renderAll()
 setStatus('册府已就绪（' + app.cefu.stats().db_path + '）')

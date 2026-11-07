@@ -101,8 +101,15 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   out.reserve(graph.nodes.size() * 260 + graph.edges.size() * 130 + 2048);
 
   const double radius = bounding_radius(graph);
-  // 相机距离：包围球半径的 2.6 倍。太近会穿进图里，太远图变成一点。
-  const double camera_distance = std::max(3.0, radius * 2.6);
+  // 尺寸按包围半径缩放：布局坐标与 three.js 世界尺度是两套东西，
+  // 只有按比例算才能保证“无论图多大，球都能看见”。
+  const double node_radius = radius * options.node_radius_ratio;
+  const double edge_radius = radius * options.edge_radius_ratio;
+  // 相机距离：包围球半径的 1.12 倍——图占满视野而不是“中间一小团”。
+  //
+  // 为何不是 1.55（试过）：距离太远时整张图只占中间一块
+  // （实测截图里只有巴掌大）。1.12 留了一点余量给边缘节点。
+  const double camera_distance = std::max(3.0, radius * 1.12);
 
   out += "// 册府知识图谱（本文件由 cefu_scene.cpp 生成，不要手改）\n";
   out += std::format("// {} 个节点 · {} 条边 · 包围半径 {:.1f}\n", graph.nodes.size(),
@@ -113,7 +120,9 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
 
   // ── 相机 ──
   out += "const camera = new THREE.PerspectiveCamera(48, 16 / 9, 0.1, 10000);\n";
-  out += std::format("camera.position.set({});\n", vec3(0.0, camera_distance * 0.45, camera_distance));
+  // 相机位置：斜上方看（正向俯视会把三维压成二维，看不出层级）。
+  out += std::format("camera.position.set({});\n",
+                     vec3(camera_distance * 0.35, camera_distance * 0.42, camera_distance * 0.84));
   out += "camera.lookAt(0, 0, 0);\n";
   out += "scene.add(camera);\n\n";
 
@@ -185,8 +194,7 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   for (const auto& edge : graph.edges) {
     if (edge.from >= graph.nodes.size() || edge.to >= graph.nodes.size()) continue;
     // 共享硬事实边略细：它是"推断出来的关联"，不该和显式声明一样重
-    const double thickness = edge.kind == graph::EdgeKind::SharedFact ? options.edge_radius * 0.7
-                                                                     : options.edge_radius;
+    const double thickness = edge.kind == graph::EdgeKind::SharedFact ? edge_radius * 0.7 : edge_radius;
     out += std::format(
         "const e{} = addEdge(P[{}], P[{}], {}, {:.4f});\n"
         "if (e{} !== null) {{ e{}.name = 'edge_{}'; scene.add(e{}); }}\n",
@@ -199,8 +207,7 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   // ── 节点 ──
   out += "// ── 节点 ──\n";
   // 共享几何：几百个球共用一份顶点数据，内存与构建时间都省一半以上
-  out += std::format("const sphereGeo = new THREE.SphereGeometry({:.4f}, 20, 14);\n",
-                     options.node_radius);
+  out += std::format("const sphereGeo = new THREE.SphereGeometry({:.4f}, 20, 14);\n", node_radius);
   out += "const matCache = {};\n";
   out += "function matFor(color) {\n";
   out += "  if (!matCache[color]) {\n";

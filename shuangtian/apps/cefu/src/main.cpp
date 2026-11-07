@@ -880,44 +880,91 @@ auto run_app(int argc, char** argv) -> int {
     return 1;
   }
 
-  // ⑤′ 三维图谱视口：**必须在 XML 建树之后**才能找到占位容器。
+  // ⑤′ 三维图谱视口：**直接挂到窗口内容区**，不经过 XML。
   //
-  // 为何不放进 XML：声明式组件清单里没有三维件（`ThreeView` 需要 C++ 装配——
-  // 它要管 GPU/软件后端、拾取、相机，全不是声明式能表达的）。所以 XML 留一个
-  // 空 Column 占位，这里把视口塞进去。
+  // ## 为何不走 XML 占位（踩过的坑，记下来免得重蹈）
   //
-  // ## 为何用 `find` 而不是写死指针
+  // 最初在 main.xml 里放了一个 `<Column id="graph-pane" absolute="true">` 占位。
+  // 它**始终不出现在元素树里**（树里固定 92 个元素，没有它）。已逐个排除：
+  // XML 语法（逐标签扫描 depth=0）、注释里的 `--`、`visible="false"`、
+  // 热重载未生效（已改为重启验证）、`absolute` 属性未生效（已补进白名单）。
   //
-  // XML 会**热重载**（改文件即重建整棵树）——热重载后旧元素全被销毁，
-  // 写死的指针立刻是悬空的。所以每次都按 id 现查，查不到就这一次不装
-  // （下一次切回图谱模式时会再试）。
+  // 对照实验定位到：**根 Column 是排流的**，主区 `grow="true"` 把 684
+  // 高度吃满（54+580+50=684），跟排元素被布局到 **0 尺寸而遭剔除**——
+  // 而 `absolute` 本应豁免它却没生效（时序：先算尺寸后读属性）。
+  //
+  // 与其继续改框架的布局时序，不如走另一边：**视口本来就不该跟 XML 布局
+  // 打架**。它是全屏覆盖层，自己控制显示时机。
   st::ui::ThreeView* graph_view = nullptr;
+  std::string graph_mount_error;
   const auto mount_graph_view = [&]() -> bool {
     if (graph_view != nullptr) return true;
-    auto* pane = app.root().find("#graph-pane");
-    if (pane == nullptr) return false;
+    // ⚠ 不能捕 `frame`：它已经被 `set_content(std::move(frame))` 移走，
+    //    指针悬空（实测：直接用它就段错误 0xC0000005）。
+    //    从 app 的根按 id 现查才是对的，而且热重载后依然成立。
+    // `find` 收的是**裸 id**，不是 CSS 选择器（实测：传 `#content` 找不到）。
+    auto* host = app.root().find("content");
+    if (host == nullptr) {
+      graph_mount_error = "找不到 #content 容器";
+      return false;
+    }
+    // 无头模式不建三维视口。
+    //
+    // 为何：`ThreeView` 需要真的三维后端（离屏纹理 + 合成）；无头后端
+    // 下这条路径未验证且历史上有段错误（0xC0000005）记录。而核验通路
+    // 恰恰包含无头截图，所以要在核验时能明确知道“图谱在无头里不渲染”，
+    // 而不是让它静默消失或把进程带走。
+    if (app.headless()) {
+      graph_mount_error = "无头模式不提供三维视口（用有头窗口看图谱）";
+      return false;
+    }
     auto view = std::make_unique<st::ui::ThreeView>();
     view->set_id("graph-viewport");
     view->set_background(st::math::Color{0x0D, 0x11, 0x17, 0xFF});
+    // **必须用软件腿**。
+    //
+    // 实测：GPU 腿在交互式视口里把离屏纹理合成回画布那一步失效——
+    // 清屏色看得见（整块深蓝），而球体与连线完全不见（截图就是一片黑）。
+    // 这是 `three_view.hpp` 里 `backend_pref_` 注释已经记下的已知问题。
+    // 软件腿逐像素直写画布，行为确定。
+    view->set_backend("software");
     // 关掉自转：知识图谱的结构本身就是信息，自己动会干扰“看清哪里连哪里”
     view->set_animation_enabled(false);
-    graph_view = view.get();
-    pane->add_child(std::move(view));
-    return true;
+    // 绝对定位：**不参与父的 flex 分配**，铺满内容区、叠在三栏之上。
+    // 这是唯一能“跟排流同时存在”的形态（排流里没有位置给它）。
+    view->style().absolute = true;
+    view->style().left = 0.0f;
+    // 放在内容区顶部，高度 = 窗口高度的一半。
+    //
+    // ## 为何不追求“铺满”（试了四次，先收住）
+    //
+    // 铺满要同时满足：占位正确 + ThreeView 的软件腿按该尺寸重画。
+    // 实测四种写法：
+    // ① left+top+right+bottom → 高 320 贴底（right/bottom 需自身宽参与计算）
+    // ② 取父 bounds 当尺寸 → 拿到 0（布局时机）
+    // ③ kAuto → ThreeView 无自然尺寸，塌成 0
+    // ④ 取 app.viewport() 全尺寸 → 视口盖满但自身没画出内容（全白）
+    //
+    // 所以先取一个**确定能画出几何**的尺寸（半屏高），把它做对、做稳；
+    // 铺满作为后续优化（需要改 ThreeView 的尺寸跟随，不在本轮范围）。
+    const auto vp = app.viewport();
+    view->style().top = 34.0f;  // 让出标题栏
+    view->style().width = vp.width > 0.0f ? vp.width : 900.0f;
+    view->style().height = vp.height > 0.0f ? vp.height * 0.5f : 400.0f;
+    // 默认隐藏：图谱是“要看才看”的视图，一启动就盖住查阅界面是错的。
+    view->set_visible(false);
+    st::ui::ThreeView* raw = view.get();
+    graph_view = (host->add_child(std::move(view)) != nullptr) ? raw : nullptr;
+    return graph_view != nullptr;
   };
   (void)mount_graph_view();
-
   // 装载图谱：生成 three.js 脚本 → 交给视口。
-  //
-  // 返回的统计直接拼成一行文字给图例栏，这样“图里到底有什么”不用去翻日志。
-  const auto load_graph = [&](const std::string& background) -> Json {
+  const auto load_graph = [&]() -> Json {
     if (!mount_graph_view() || graph_view == nullptr) return Json(false);
     const auto graph = cefu::graph::build(knowledge.entries());
     auto laid = graph;
     cefu::graph::layout(laid);
-    cefu::scene::Options scene_options;
-    if (!background.empty()) scene_options.background = background;
-    const auto script_text = cefu::scene::build_script(laid, scene_options);
+    const auto script_text = cefu::scene::build_script(laid, cefu::scene::Options{});
     const bool ok = graph_view->load_script(script_text, "<cefu-graph>");
     Json out = Json::object();
     out["ok"] = ok;
@@ -931,19 +978,54 @@ auto run_app(int argc, char** argv) -> int {
     out["error"] = graph_view->last_error();
     return out;
   };
-  (void)bridge.expose("cefu.graph", [&load_graph](const std::vector<Json>& args) -> st::Result<Json> {
-    const auto background = args.empty() ? std::string{} : st::json_as_string(args[0]);
-    return load_graph(background);
+
+  // 图谱模式开关：脚本调这个切换，而不是自己在 JS 里控制可见性。
+  //
+  // 为何由 C++ 持有开关：视口是 C++ 造的元素，它的可见性属于“视图状态”；
+  // 让 JS 去 `set({visible})` 需要它在 XML 树里可寻址——而它恰恰不在。
+  (void)bridge.expose("cefu.graph_toggle", [&](const std::vector<Json>& args) -> st::Result<Json> {
+    if (!mount_graph_view() || graph_view == nullptr) {
+      return st::unexpected(st::ErrorCode::Unsupported,
+                            graph_mount_error.empty() ? "三维视口未就绪" : graph_mount_error);
+    }
+    const bool want = args.empty() ? !graph_view->visible() : st::json_as_bool(args[0], true);
+    if (want) {
+      const auto info = load_graph();
+      graph_view->set_visible(true);
+      app.request_repaint();
+      return info;
+    }
+    graph_view->set_visible(false);
+    app.request_repaint();
+    Json out = Json::object();
+    out["ok"] = true;
+    out["visible"] = false;
+    return out;
   });
   (void)bridge.expose("cefu.graph_reset", [&](const std::vector<Json>&) -> st::Result<Json> {
     if (graph_view == nullptr) return Json(false);
     graph_view->reset_view();
+    app.request_repaint();
     return Json(true);
   });
-  // 热重载后 XML 树是新的：视口指针悬空。丢掉它、下次装图谱时重建。
-  (void)bridge.expose("cefu.graph_invalidate", [&](const std::vector<Json>&) -> st::Result<Json> {
-    graph_view = nullptr;
-    return Json(true);
+  // 诊断用：把生成的脚本落盘，供外部检查坐标/相机是否合理。
+  //
+  // 为何需要它：三维画面“一片背景色”时，原因可能是相机太远/太近、
+  // 几何在视野外、或根本没生成——而截图只能告诉你“没有”。把脚本拿出来
+  // 数一数坐标范围，一秒就能分辨是哪一种。
+  (void)bridge.expose("cefu.graph_dump", [&](const std::vector<Json>& args) -> st::Result<Json> {
+    const std::string path = args.empty() ? std::string{"graph.js"} : st::json_as_string(args[0]);
+    const auto graph = cefu::graph::build(knowledge.entries());
+    auto laid = graph;
+    cefu::graph::layout(laid);
+    const auto text = cefu::scene::build_script(laid, cefu::scene::Options{});
+    auto written = st::fs::write_text(path, text);
+    if (!written) return st::unexpected(written.error().code, written.error().message);
+    Json out = Json::object();
+    out["path"] = path;
+    out["bytes"] = static_cast<std::int64_t>(text.size());
+    out["nodes"] = static_cast<std::int64_t>(laid.nodes.size());
+    return out;
   });
   st::log::out("册府就绪：界面 {} · 桥 {} 个函数 · 词条 {} 条 · 库 {}\n", ui_dir,
             bridge.exposed().size(), knowledge.entry_count(), options.db_path);

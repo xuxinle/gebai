@@ -26,6 +26,9 @@
     <!-- 竖直分隔线用 1px 面板：框架没有 vertical 这个属性（`Separator` 也只有横向） -->
     <Panel width="1" height="22" background="#3a3f47"/>
     <Button id="review" label="整理" icon="check"/>
+    <!-- 视图切换：三栏查阅 ↔ 三维知识图谱。
+         两个视图共享同一份数据（图是纯派生视图，不写库），切回不丢任何东西。-->
+    <Button id="graph-mode" label="图谱" variant="ghost"/>
     <Text id="stats" font_size="12" text_color="#8a8f98">——</Text>
   </Row>
 
@@ -52,6 +55,29 @@
       <Text id="detail-meta" font_size="12" text_color="#8a8f98"/>
       <Column id="detail-body" gap="10" grow="true"/>
     </Column>
+  </Row>
+
+  <!-- 三维图谱视图。内容由 C++ 塞进来的 ThreeView 填。
+       ⚠ **不能写 visible="false"**（实测）：XML 建树阶段会把带 `visible="false"` 的
+       元素**直接剔除**（而不是建成后隐藏），于是这个容器“从树里消失”，
+       后续 set({{visible:true}}) 也找不到它。隐藏由 app.js 启动时做（set 通道）。-->
+  <!-- 三维图谱视图**不在这里**：它是 C++ 直接挂在内容区上的绝对定位覆盖层
+       （不在声明式树里，见 main.cpp 的 mount_graph_view）。
+       曾经试过在这里放 `<Column absolute="true">` 占位，但它始终进不了元素树
+       （主区 grow 吃满高度后跟排元素被压到 0 尺寸遭剔除），见进度记录。-->
+
+  <!-- 图谱图例与提示（仅图谱模式可见；显隐由 app.js 控制）-->
+  <Row id="graph-legend" gap="14" padding="8" align_items="center" surface="alt">
+    <Text font_size="12" text_color="#8a8f98">节点：</Text>
+    <Text font_size="12" text_color="#c9a227">● 册</Text>
+    <Text font_size="12" text_color="#3fb98c">● 人</Text>
+    <Text font_size="12" text_color="#9b7bd8">● 作用域</Text>
+    <Text font_size="12" text_color="#58a6ff">● 已验证</Text>
+    <Text font_size="12" text_color="#f09b3e">● 待确认</Text>
+    <Text font_size="12" text_color="#6b7280">● 过期</Text>
+    <Text id="graph-info" font_size="12" text_color="#8a8f98" grow="true">——</Text>
+    <Button id="graph-reset" label="归位" variant="ghost"/>
+    <Button id="graph-back" label="返回查阅" variant="ghost"/>
   </Row>
 
   <!-- 底栏：整理提示 / 操作反馈 -->
