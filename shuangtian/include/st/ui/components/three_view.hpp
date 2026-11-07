@@ -292,6 +292,31 @@ class ThreeView : public Element {
   /// 将来的拖拽放置）都会需要它，而它依赖相机与视口尺寸两个私有状态。
   [[nodiscard]] auto ray_from_point(math::Point local) const noexcept -> math::Ray;
 
+  /// 把一个**世界坐标**投到屏幕（本元素的局部坐标）。
+  ///
+  /// ## 为何必须有这个接口（一条代价四轮的教训）
+  ///
+  /// 我曾在另一层（`LabelOverlay`）手写了一遍轨道相机的投影公式摆文字。
+  /// 公式本身对（同样的球坐标 → 视图 → 透视除法），但它是**另一套计算**：
+  /// 参数靠人工同步、精度不同、更新时机也不同。表现就是转过镜头后
+  /// 文字与几何开始错位，越转越多；而且靠屏幕距离猜出来的“淡出”
+  /// 完全不是三维意义上的远。
+  ///
+  /// 正确的做法：让视口自己回答“这个三维点现在在屏幕哪里”。
+  /// 它是唯一知道真实相机与视口尺寸的地方，投影只算一遍。
+  struct ScreenPoint {
+    math::Point point{};  ///< 局部坐标（与 `bounds()` 同一坐标系）
+    float depth{0.0f};    ///< 相机空间深度（越大越远）
+    bool visible{false};  ///< false = 在近平面后 / 视锥外，不该画
+  };
+  [[nodiscard]] auto project_to_screen(math::Vec3 world) const noexcept -> ScreenPoint;
+
+  /// 视口内容区在**本控件坐标系**里的左上角（叠层对齐用）。
+  [[nodiscard]] auto content_origin() const noexcept -> math::Point {
+    const math::Rect box = bounds().inset(style_.padding);
+    return math::Point{box.x, box.y};
+  }
+
   // ── Element ──
 
   void measure(const RenderContext& context, const Constraints& constraints) override;

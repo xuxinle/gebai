@@ -1043,6 +1043,15 @@ auto run_app(int argc, char** argv) -> int {
       //
       // 文字才是知识图谱的主体：一堆彩色球只能看出“有几个簇”，
       // 看不出“这条是什么”。球只是位置标记。
+      // 文字标签：**用视口自己的投影**，不用手算公式。
+      //
+      // 为何必须这样（代价四轮的教训）：`LabelOverlay` 里曾有一套
+      // 自己写的轨道相机投影（球坐标 → 视图 → 透视除法）。公式本身对，
+      // 但它是**另一套计算**：参数靠人工同步、更新时机不同。
+      // 表现就是转镜头后文字与几何逐渐错位，越转越多。
+      //
+      // 现在改用 `project_to_screen`：它和渲染走同一个相机，
+      // 所以文字永远贴在它那个三维点的正上方。
       if (graph_labels != nullptr) {
         // 标签颜色跟随节点语义（与三维球同色系，便于对应）
         const auto argb_of = [](cefu::graph::NodeKind kind,
@@ -1086,62 +1095,11 @@ auto run_app(int argc, char** argv) -> int {
           labels.push_back(std::move(anchor));
         }
         graph_labels->set_labels(std::move(labels));
-        // 连线：**在这里生成**（而非三维层）——理由见 LabelEdge 的注释。
+        // 连线：**不在这里画**——真实的三维线在场景脚本里，交给渲染器。
         //
-        // 颜色按边语义区分，但都比文字暗：连线是背景结构，
-        // 抢了文字的视觉重量就本末倒置。
-        // 连线颜色：**统一成低饱和灰蓝**，不按语义分色。
-        //
-        // 为何放弃语义色（实测）：三四种亮色（金/蓝/红/绿/紫）叠在密集区，
-        // 视觉上变成一团彩色乱麻，反而盖过了文字。而连线要表达的只有
-        // “这两个东西相关”——这不需要六种颜色去区分。
-        // 语义信息由圆点颜色（已按类型分色）+ 文字颜色（已按置信度分色）承担。
-        constexpr unsigned int kEdgeArgb = 0xFF64748BU;  // 石板灰蓝
-        std::vector<st::ui::LabelEdge> edges;
-        edges.reserve(laid.edges.size());
-        // ## 连线：布局已改成“分册聚簇”，所以重新打开
-        //
-        // 前四轮调线条参数治不好，因为问题在**布局**：同册词条被斥力推到球的对面，
-        // 投影后连线必然横七竖八。现在 `layout()` 里加了簇拉力（同册聚成一团），
-        // 连线变成“簇内短线 + 少数跨簇长线”，这才有意义。
-        constexpr bool kShowEdges = true;
-        if (kShowEdges) {
-          for (const auto& edge : laid.edges) {
-            if (edge.from >= laid.nodes.size() || edge.to >= laid.nodes.size()) continue;
-            st::ui::LabelEdge item;
-            item.from = laid.nodes[edge.from].id;
-            item.to = laid.nodes[edge.to].id;
-            item.argb = kEdgeArgb;
-            item.width = edge.kind == cefu::graph::EdgeKind::SharedFact ? 1.2F : 1.5F;
-            edges.push_back(std::move(item));
-          }
-        }
-        graph_labels->set_edges(std::move(edges));
-        // 投影参数与上面的相机保持一致（yaw/pitch/fov 来自场景相机、距离是刚算的）
-        st::ui::LabelOverlay::Projection projection;
-        projection.yaw = camera.yaw;
-        projection.pitch = camera.pitch;
-        projection.distance = camera.distance;
-        projection.fov_degrees = camera.fov_y_degrees;
-        // target：布局的中心（相机/标签必须绕同一个点转，否则文字会偏离节点）
-        double cx = 0.0;
-        double cy = 0.0;
-        double cz = 0.0;
-        if (!laid.nodes.empty()) {
-          for (const auto& node : laid.nodes) {
-            cx += static_cast<double>(node.position.x);
-            cy += static_cast<double>(node.position.y);
-            cz += static_cast<double>(node.position.z);
-          }
-          const auto count = static_cast<double>(laid.nodes.size());
-          cx /= count;
-          cy /= count;
-          cz /= count;
-        }
-        projection.target_x = static_cast<float>(cx);
-        projection.target_y = static_cast<float>(cy);
-        projection.target_z = static_cast<float>(cz);
-        graph_labels->set_projection(projection);
+        // 为何不在这里（这一版的核心修正）：二维叠层里画线，必须自己算投影，
+        // 于是深度调制、遮挡、旋转后的层次全丢，而且两套投影必然错位。
+        graph_labels->set_edges({});
       }
     }
     Json out = Json::object();
@@ -1251,6 +1209,22 @@ auto run_app(int argc, char** argv) -> int {
       out["labels_bounds"] =
           std::format("{:.0f}x{:.0f}", static_cast<double>(graph_labels->bounds().width),
                       static_cast<double>(graph_labels->bounds().height));
+      // 逐条边的诊断：两端 id + 是否都找到锚点。
+      //
+      // 为何要这个：截图里“线连向空白”只能看出有毛病，看不出是哪一端。
+      Json orphans = Json::array();
+      const auto snapshot = graph_labels->anchor_snapshot();
+      for (const auto& e : graph_labels->edge_snapshot()) {
+        const bool has_from = snapshot.count(e.first) > 0;
+        const bool has_to = snapshot.count(e.second) > 0;
+        if (!has_from || !has_to) {
+          orphans.push_back(
+              Json{{"from", e.first}, {"from_ok", has_from}, {"to", e.second}, {"to_ok", has_to}});
+        }
+      }
+      out["edge_orphans"] = std::move(orphans);
+      // 重复 id：同一个 id 被两个节点使用 → 线会连到错误的位置
+      out["duplicate_ids"] = graph_labels->duplicate_ids();
     }
     return out;
   });
@@ -1293,24 +1267,33 @@ auto run_app(int argc, char** argv) -> int {
     //
     // 开销：读相机状态是返回一个结构体，比较几个 float；只在变了时才 mark_dirty，
     // 所以静止时零额外重绘。
+    // 标签位置每帧重算：**直接用视口自己的投影**。
+    //
+    // 为何每帧（而不是装载时设一次）：拖拽/滚轮改的是 ThreeView 内部的相机，
+    // 标签层拿不到通知，只在装载时设一次就会「几何转了、字不转」。
+    //
+    // 为何用 project_to_screen（而不是自己算投影公式）：
+    // 自己算就是**两套计算**，参数靠人工同步、精度与更新时机都不同，
+    // 转镜头后文字与几何必然逐渐错位。视口是唯一知道真实相机的地方。
     if (graph_view != nullptr && graph_labels != nullptr && graph_view->visible()) {
       const auto live = graph_view->camera_state();
-      auto projection = graph_labels->projection();
-      const bool changed = projection.yaw != live.yaw || projection.pitch != live.pitch ||
-                           projection.distance != live.distance ||
-                           projection.fov_degrees != live.fov_y_degrees ||
-                           projection.target_x != live.target.x ||
-                           projection.target_y != live.target.y ||
-                           projection.target_z != live.target.z;
-      if (changed) {
-        projection.yaw = live.yaw;
-        projection.pitch = live.pitch;
-        projection.distance = live.distance;
-        projection.fov_degrees = live.fov_y_degrees;
-        projection.target_x = live.target.x;
-        projection.target_y = live.target.y;
-        projection.target_z = live.target.z;
-        graph_labels->set_projection(projection);
+      // 只在相机变了才重建投影器并重绘（静止时零开销）
+      static float last_yaw = 1e30F;
+      static float last_pitch = 1e30F;
+      static float last_distance = 1e30F;
+      const bool camera_changed = live.yaw != last_yaw || live.pitch != last_pitch ||
+                                 live.distance != last_distance;
+      if (camera_changed) {
+        last_yaw = live.yaw;
+        last_pitch = live.pitch;
+        last_distance = live.distance;
+        // 投影器捕获视口指针：每次调用都读**当前**相机与视口尺寸，
+        // 所以窗口缩放、拖拽旋转都会自动正确。
+        st::ui::ThreeView* view = graph_view;
+        graph_labels->set_projector([view](float x, float y, float z) {
+          const auto p = view->project_to_screen(st::math::Vec3{x, y, z});
+          return std::make_pair(std::make_pair(p.point.x, p.point.y), p.depth);
+        });
         app.request_repaint();
       }
     }

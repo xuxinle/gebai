@@ -398,6 +398,41 @@ auto ThreeView::ray_from_point(math::Point local) const noexcept -> math::Ray {
   return ray;
 }
 
+auto ThreeView::project_to_screen(math::Vec3 world) const noexcept -> ScreenPoint {
+  const math::Rect box = bounds().inset(style_.padding);
+  const float width = std::max(box.width, 1.0f);
+  const float height = std::max(box.height, 1.0f);
+
+  const raster::Camera camera = orbit_.to_camera();
+  // 与 `ray_from_point` **一模一样**地取基向量（取行，不取列）。
+  //
+  // 这里刻意重复那三行而不抽公共函数：两者方向相反（一个屏幕→世界，
+  // 一个世界→屏幕），共享一段“取基向量”的小代码反而让两边的可读性都变差。
+  // 但**必须同步修改**——写在这里是为了让下一个改的人看见这个约束。
+  const math::Mat4 view = math::Mat4::look_at(camera.eye, camera.target, camera.up);
+  const math::Vec3 right{view.value(0, 0), view.value(0, 1), view.value(0, 2)};
+  const math::Vec3 up{view.value(1, 0), view.value(1, 1), view.value(1, 2)};
+  const math::Vec3 forward{-view.value(2, 0), -view.value(2, 1), -view.value(2, 2)};
+
+  const math::Vec3 rel = world - camera.eye;
+  const float depth = rel.dot(forward);
+  ScreenPoint result;
+  result.depth = depth;
+  if (depth < 0.01f) return result;  // 在相机后面
+
+  const float aspect = width / height;
+  const float tan_half = std::tan(std::max(camera.fov_y_degrees, 1.0f) * 0.5f * kPi / 180.0f);
+  // 视空间横/纵偏移 → NDC（与 `ray_from_point` 的逆运算）
+  const float ndc_x = rel.dot(right) / (depth * tan_half * aspect);
+  const float ndc_y = rel.dot(up) / (depth * tan_half);
+
+  result.point = math::Point{box.x + (ndc_x * 0.5f + 0.5f) * width,
+                             box.y + (0.5f - ndc_y * 0.5f) * height};
+  // 可见：NDC 在 ±1 内（略放宽，让边上刚出去的点仍能参与布局判断）
+  result.visible = ndc_x >= -1.2f && ndc_x <= 1.2f && ndc_y >= -1.2f && ndc_y <= 1.2f;
+  return result;
+}
+
 auto ThreeView::pick(math::Point point) const -> std::optional<ThreeHit> {
   if (pick_cache_.empty()) return std::nullopt;
   const math::Ray ray = ray_from_point(point);

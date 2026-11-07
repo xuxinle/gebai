@@ -67,6 +67,25 @@ auto bounding_radius(const graph::Graph& graph) -> double {
   return max_radius;
 }
 
+/// 边色（按语义）。颜色偏离而都亮：连线是背景结构，但仍要能区分。
+auto edge_color(graph::EdgeKind kind) -> std::string {
+  switch (kind) {
+    case graph::EdgeKind::BelongsTo:
+      return hex_rgb(0xB8, 0x94, 0x48);  // 从属：金
+    case graph::EdgeKind::Links:
+      return hex_rgb(0x4E, 0x96, 0xE0);  // 显式关联：蓝
+    case graph::EdgeKind::Supersedes:
+      return hex_rgb(0xD0, 0x5C, 0x4C);  // 取代：红
+    case graph::EdgeKind::OwnedBy:
+      return hex_rgb(0x42, 0xB8, 0x8C);  // 负责人：绿
+    case graph::EdgeKind::SharedFact:
+      return hex_rgb(0x9A, 0x78, 0xD0);  // 共享硬事实：紫
+    case graph::EdgeKind::ScopedTo:
+      return hex_rgb(0x74, 0x84, 0xC8);  // 作用域：蓝紫
+  }
+  return hex_rgb(0x64, 0x74, 0x8B);
+}
+
 }  // namespace
 
 auto node_color(graph::NodeKind kind, const std::string& confidence) -> std::string {
@@ -93,6 +112,7 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   out.reserve(graph.nodes.size() * 420 + graph.edges.size() * 160 + 8192);
 
   const double radius = bounding_radius(graph);
+  const double edge_radius = radius * options.edge_radius_ratio;
   const double camera_distance = std::max(3.0, radius * 1.25);
 
   out += "// 册府知识图谱（本文件由 cefu_scene.cpp 生成，不要手改）\n";
@@ -128,7 +148,35 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
                      vec3(-camera_distance * 0.2, -camera_distance * 0.6, -camera_distance));
   out += "scene.add(rim);\n\n";
 
-  // 坐标先存成数组：供节点锚点复用
+  // ── 连线：**在三维里画**（真正的三维线条）──
+  //
+  // ## 为何必须回到三维（这一版的核心修正）
+  //
+  // 我曾在二维叠层里“自己算投影 + 画直线”，理由是透视投影保持直线性、
+  // 位置等价。**位置确实等价，但三维语义丢了**：
+  // - 深度调制（远的线该更细更淡）——二维版靠屏幕长度猜，完全不对；
+  // - 遮挡（线该被近处的字挡住）——二维叠层里做不到；
+  // - 转视角时的层次——两套投影各算一遍，错位与滞后无法避免。
+  //
+  // 而且 three.js 自己就会做这些事：给一段几何、一个材质，
+  // 深度缓冲、透视、光照全由渲染器管。人为在 CPU 上重做一遍只会更差。
+  out += "function addEdge(from, to, color, thickness) {\n";
+  out += "  const a = new THREE.Vector3(from.x, from.y, from.z);\n";
+  out += "  const b = new THREE.Vector3(to.x, to.y, to.z);\n";
+  out += "  const dir = new THREE.Vector3().subVectors(b, a);\n";
+  out += "  const full = dir.length();\n";
+  out += "  if (full < 1e-6) return null;\n";
+  out += "  dir.multiplyScalar(1.0 / full);\n";
+  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, full, 10, 1);\n";
+  out += "  const mat = new THREE.MeshBasicMaterial({ color: color });\n";
+  out += "  const mesh = new THREE.Mesh(geo, mat);\n";
+  out += "  mesh.position.set((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);\n";
+  out += "  const up = new THREE.Vector3(0, 1, 0);\n";
+  out += "  mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(up, dir));\n";
+  out += "  return mesh;\n";
+  out += "}\n\n";
+
+  // 坐标数组
   out += "const P = [\n";
   for (const auto& node : graph.nodes) {
     out += std::format("  {{x: {:.3f}, y: {:.3f}, z: {:.3f}}},\n",
@@ -137,14 +185,20 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   }
   out += "];\n\n";
 
-  // ── 连线：**不在三维层画**（已改到 LabelOverlay）──
-  //
-  // 为何改掉（换掉一版的关键）：三维画的是节点中心的投影点，
-  // 而文字被避让算法挪到了别处（右侧 4px、重叠时上下让出几十像素）。
-  // 两套坐标对不上，于是线永远“悬空”，调粗细/颜色/段数都治不好。
-  //
-  // 现在线由 LabelOverlay 画：它知道每个文字框的**精确屏幕矩形**，
-  // 从框边缘连出，二维画线还能抗锯齿。
+  // 逐条边：颜色由边语义决定（这些颜色偏离但都亮，在深底上看得见）
+  {
+    std::size_t edge_index = 0;
+    for (const auto& edge : graph.edges) {
+      if (edge.from >= graph.nodes.size() || edge.to >= graph.nodes.size()) continue;
+      const bool inferred = edge.kind == graph::EdgeKind::SharedFact;
+      const double thickness = inferred ? edge_radius * 0.75 : edge_radius;
+      out += std::format("const e{} = addEdge(P[{}], P[{}], {}, {:.4f});\n"
+                         "if (e{} !== null) {{ e{}.name = 'edge_{}'; scene.add(e{}); }}\n",
+                         edge_index, edge.from, edge.to, edge_color(edge.kind), thickness,
+                         edge_index, edge_index, edge_index, edge_index);
+      ++edge_index;
+    }
+  }
   out += "\n";
 
   // ── 节点：**不画球**（只画连线，文字由二维叠层画）──

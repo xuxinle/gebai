@@ -34,17 +34,27 @@
 
 #include <cstddef>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "st/ui/element.hpp"
 
 namespace st::ui {
 
-/// 一个待绘制的标签（世界坐标 → 由本组件投影）。
+/// 一个待绘制的标签。
+///
+/// ## 为何存的是「世界坐标 + 投影器」而不是屏幕坐标
+///
+/// 屏幕坐标由**视口自己算**（`ThreeView::project_to_screen`），
+/// 不在这里重算一遍。曾在这里手写轨道相机公式，结果是两套计算，
+/// 转镜头后文字与几何逐渐错位。
+///
+/// 现在本类只负责“摆文字”（避让、底板、字号），投影交给视口。
 struct LabelAnchor {
   /// 稳定标识（连线靠它指向本标签）。空 = 不参与连线。
   std::string id;
-  /// 世界坐标。
+  /// 世界坐标（交给投影器换算）。
   float x{0.0f};
   float y{0.0f};
   float z{0.0f};
@@ -104,22 +114,12 @@ class LabelOverlay : public Element {
   /// 换连线集（两端用标签 id 指向）。
   void set_edges(std::vector<LabelEdge> edges);
 
-  /// 投影参数：与 `ThreeView` 的相机保持一致。
+  /// 投影器：把世界坐标换成屏幕坐标 + 深度。
   ///
-  /// 为什么不用 ThreeView 内部的投影：它暴露的是字符串（`camera_state`）——
-  /// 解析字符串再算一遍比在这里重算公式更不可靠。这里用同一套公式
-  /// （球坐标 → 视图 → 透视除法），参数由调用方一次给全，纯函数、可单测。
-  struct Projection {
-    float yaw{0.6f};         ///< 与 ThreeView 一致的方位角（弧度）
-    float pitch{0.42f};      ///< 俯仰角
-    float distance{600.0f};  ///< 相机到目标距离
-    float fov_degrees{46.0f};
-    float target_x{0.0f};    ///< 观察目标（布局中心）
-    float target_y{0.0f};
-    float target_z{0.0f};
-  };
-  void set_projection(const Projection& projection);
-  [[nodiscard]] auto projection() const noexcept -> const Projection& { return projection_; }
+  /// 由调用方提供（通常是 `ThreeView::project_to_screen`）。
+  /// 返回 `visible=false` 的标签不画。
+  using Projector = std::function<std::pair<std::pair<float, float>, float>(float, float, float)>;
+  void set_projector(Projector projector);
 
   /// 字体缩放（提高可读性；缺省按元素高度自适应）。
   void set_font_scale(float scale);
@@ -136,16 +136,32 @@ class LabelOverlay : public Element {
   [[nodiscard]] auto painted_labels() const noexcept -> std::size_t { return painted_; }
   /// 诊断：本帧画了几条连线（两端都在场的才算）。
   [[nodiscard]] auto painted_edges() const noexcept -> std::size_t { return painted_edges_; }
+  /// 诊断：本帧真正做出锚点的标签 id → 屏幕位置。
+  ///
+  /// 为何要暴露：截图里“线连向空白”只能看出有毛病，看不出是哪一端。
+  /// 有这个就能直接断言「每一条线的两端都在锚点里」——
+  /// 而不是靠看截图猜。
+  [[nodiscard]] auto anchor_snapshot() const
+      -> const std::unordered_map<std::string, std::pair<float, float>>& {
+    return anchors_;
+  }
+  /// 诊断：同 id 的重复标签数量（重复会让线连到错的位置）。
+  [[nodiscard]] auto duplicate_ids() const -> std::size_t { return duplicate_ids_; }
+  /// 诊断：边列表（两端 id）。
+  [[nodiscard]] auto edge_snapshot() const -> std::vector<std::pair<std::string, std::string>>;
 
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::vector<LabelAnchor> labels_;
   std::vector<LabelEdge> edges_;
-  Projection projection_{};
+  Projector projector_{};
   float font_scale_{1.0f};
   mutable std::size_t painted_{0};
   mutable std::size_t painted_edges_{0};
+  /// 本帧的锚点（id → 屏幕坐标），供诊断用。`mutable`：`paint_content` 是 const。
+  mutable std::unordered_map<std::string, std::pair<float, float>> anchors_{};
+  mutable std::size_t duplicate_ids_{0};
 };
 
 }  // namespace st::ui
