@@ -1794,6 +1794,37 @@ auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
     spec.lighting.tone_map = ToneMap::None;
     spec.compat = compat;
   }
+
+  // ## 阴影：bpy 脚本可以声明，但**默认不开**（2026-11-07）
+  //
+  // ## 为何默认不开
+  //
+  // 与上面三项同一个原则：**默认不改，声明了才切**。存量 bpy 场景
+  //（`bpy_watch.py`、`shop_asset.py` 等）已出过片子，突然给它们加阴影
+  // 会改变画面。
+  //
+  // ## 为何需要有这个开关
+  //
+  // Blender 场景**默认就有阴影**（Cycles 是路径追踪，遮挡是自然的）。
+  // 所以拿同一份 bpy 脚本两边对比时，不声明阴影就等于"一边有一边没有"——
+  // 实测：霜天图里球没有任何投影，而 Blender 里影子很长，
+  // 直方图重叠度只有 0.92（其中大半差异来自阴影而不是着色）。
+  //
+  // 声明方式（与 `__st_compat__` 同一个风格）：
+  //
+  //     bpy.context.scene.__st_shadow__ = {"strength": 0.7, "extent": 9.0}
+  //
+  // `strength` 缺省 0.7（真 Cycles 的阴影接近全黑，但本框架没有 GI
+  // 补光，设 1.0 会让暗部死黑）；`extent` 按场景尺度给。
+  if (extracted->bpy_shadow) {
+    st::log::info("[scene3d] bpy 声明阴影：strength={} extent={} res={}\n",
+                  static_cast<double>(extracted->bpy_shadow_strength),
+                  static_cast<double>(extracted->bpy_shadow_extent),
+                  extracted->bpy_shadow_resolution);
+    spec.shadow_map.strength = extracted->bpy_shadow_strength;
+    spec.shadow_map.extent = extracted->bpy_shadow_extent;
+    spec.shadow_map.resolution = extracted->bpy_shadow_resolution;
+  }
   spec.bpy_script = std::string(script);
   spec.bpy_script_name = std::string(script_name);
   return spec;

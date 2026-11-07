@@ -427,6 +427,18 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
   }
   scene.world_set = json_get_bool(root, "world_set", false);
 
+  // 脚本声明的阴影（`__st_shadow__`）。
+  //
+  // Python 侧给出的是 `[strength, extent, resolution]` 三元组（或者 null）。
+  // 用数组而不是对象：C++ 侧只需一次按下标取值，不必按名查三个字段。
+  const Json& shadow = json_at(root, "shadow");
+  if (shadow.is_array() && shadow.size() >= 3) {
+    scene.bpy_shadow = true;
+    scene.bpy_shadow_strength = static_cast<float>(shadow[0].get<double>());
+    scene.bpy_shadow_extent = static_cast<float>(shadow[1].get<double>());
+    scene.bpy_shadow_resolution = shadow[2].get<int>();
+  }
+
   const Json& warnings = json_at(root, "warnings");
   if (warnings.is_array()) {
     for (const auto& item : warnings) {

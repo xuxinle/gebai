@@ -699,6 +699,48 @@ def _extract_compat():
     return mode.lower()
 
 
+def _extract_shadow():
+    """脚本声明的阴影参数（`bpy.context.scene.__st_shadow__`）。
+
+    ## 写法
+
+        bpy.context.scene.__st_shadow__ = {"strength": 0.7, "extent": 9.0}
+
+    ## 为何需要它（2026-11-07）
+
+    Blender 场景**默认就有阴影**（Cycles 的遮挡是自然结果），而本框架的
+    bpy 路径默认不开（为了不改存量出片）。拿同一份脚本两边对比时，
+    不声明就差一整层投影——实测直方图重叠度只有 0.92，
+    而其中大半差异来自阴影而不是着色。
+
+    ## 返回
+
+    `None` = 未声明（保持关闭，存量场景不受影响）。
+    否则返回 `(strength, extent, resolution)`；缺省 0.7 / 6.0 / 512。
+    """
+    context = _host.get('context')
+    if context is None:
+        return None
+    scene = getattr(context, 'scene', None)
+    if scene is None:
+        return None
+    declared = getattr(scene, '__st_shadow__', None)
+    if declared is None:
+        return None
+    # 允许直接写数字（视为 strength）
+    if isinstance(declared, (int, float)):
+        return (float(declared), 6.0, 512)
+    if not isinstance(declared, dict):
+        return None
+    try:
+        strength = float(declared.get('strength', 0.7))
+        extent = float(declared.get('extent', 6.0))
+        resolution = int(declared.get('resolution', 512))
+    except (TypeError, ValueError):
+        return None
+    return (strength, extent, resolution)
+
+
 def _extract_world():
     """场景的世界背景色 → `[r, g, b]` 线性值（取不到时返回 None）。
 
@@ -857,6 +899,9 @@ def extract():
         # 脚本声明的「对标」模式（`bpy.context.scene.__st_compat__`）。
         # 空串 = 没声明。C++ 侧按它决定是否切到对标口径。
         'compat': _extract_compat(),
+        # 脚本声明的阴影（`bpy.context.scene.__st_shadow__`）。
+        # None = 没声明 → 保持关闭（存量场景不受影响）。
+        'shadow': _extract_shadow(),
         'warnings': warnings,
     }
 

@@ -182,6 +182,26 @@ struct ThreeScene {
   /// 空串 = 脚本没声明（普通出片）。
   std::string bpy_compat{};
 
+  /// 脚本声明的阴影（`bpy.context.scene.__st_shadow__`）。
+  ///
+  /// ## 为何需要它（2026-11-07）
+  ///
+  /// Blender 场景**默认就有阴影**（Cycles 的遮挡是自然结果），而本框架的
+  /// bpy 路径默认不开（为了不改存量出片）。拿同一份脚本两边对比时，
+  /// 不声明就差一整层投影。
+  ///
+  /// 实测（`apps/jianmu/scenes/parity_showdown.py`）：不声明时直方图
+  /// 重叠度 0.920，而其中大半差异来自阴影而不是着色。
+  ///
+  /// `false` = 未声明（保持关闭，存量场景不受影响）。
+  bool bpy_shadow{false};
+  /// 阴影强度（`bpy_shadow` 为真时有效）
+  float bpy_shadow_strength{0.7f};
+  /// 投影相机包络半径（世界单位；它是场景尺度相关的，必须由脚本给）
+  float bpy_shadow_extent{6.0f};
+  /// 阴影贴图分辨率
+  int bpy_shadow_resolution{512};
+
   /// 脚本是否**显式设了 world**。
   ///
   /// 为何要单独抽：真 Blender 里「没设 world」= 零环境光，而「设了 0.05 灰

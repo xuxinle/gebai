@@ -39,14 +39,27 @@ class MeshPolygon:
     这个分离与 Blender 一致，也意味着抽取时必须把两者放在一起看。
     """
 
-    __slots__ = ('vertices', 'material_index')
+    __slots__ = ('vertices', 'material_index', 'use_smooth')
 
-    def __init__(self, indices, material_index=0):
+    def __init__(self, indices, material_index=0, use_smooth=False):
         self.vertices = list(indices)
         self.material_index = material_index
+        # ## `use_smooth`（2026-11-07 补）
+        #
+        # 真 bpy 里它是**逐面**的开关：立方体默认 False（棱角锋利）、
+        # 球默认 True（平滑）。两个真渲染器都尊重它
+        #（Blender 的 shade_flat/smooth、three 的 flatShading）。
+        #
+        # 抽取层（`extract.py`）早就读它了，但**之前没有任何地方能设它**——
+        # `bpy.ops.object.shade_smooth()` 在兼容层根本不存在。
+        # 后果：脚本写 `shade_smooth()` 会在解析阶段就报
+        # `AttributeError: no such attribute`（不说哪个属性），
+        # 而即使过了，球也会渲成多面体（块状高光）——对标里直接是硬伤。
+        self.use_smooth = use_smooth
 
     def __repr__(self):
-        return 'MeshPolygon(%r, mat=%d)' % (self.vertices, self.material_index)
+        return 'MeshPolygon(%r, mat=%d, smooth=%r)' % (
+            self.vertices, self.material_index, self.use_smooth)
 
 
 class Mesh:
@@ -197,6 +210,30 @@ class Camera:
         import math
         return 2.0 * math.atan(self.sensor_width * 0.5 / self.lens)
 
+    @angle_y.setter
+    def angle_y(self, radians):
+        """反推 `lens`（2026-11-07 补的 setter）。
+
+        ## 为何必须有 setter
+
+        真 bpy 里设定垂直视角的标准写法就是
+        `cam_data.angle_y = math.radians(40)`。兼容层原先只有 getter，
+        于是这种写法报 `AttributeError: no such attribute`
+        （且不说是哪个属性，极难定位）。
+
+        ## 反推公式与 getter **严格互逆**
+
+        getter 是 `angle_y = 2·atan(sensor_width/2 / lens)`，
+        所以 `lens = (sensor_width/2) / tan(angle_y/2)`。
+
+        ⚠ getter 那段长注释说的“本框架把 lens 当**水平** fov 用”
+        这个口径**不能改**——那是对比实测定标过的。
+        所以这里只做互逆反推，不引入任何宽高比修正。
+        """
+        import math
+        half = max(float(radians), 1.0e-6) * 0.5
+        self.lens = (self.sensor_width * 0.5) / math.tan(half)
+
     @property
     def angle(self):
         """水平视野角（弧度）。与 `angle_y` 同值（见上：口径未分离）。"""
@@ -270,6 +307,63 @@ class Object:
         s = Matrix.Scale(self.scale)
         return t.matmul(r).matmul(s)
 
+    @matrix_world.setter
+    def matrix_world(self, m):
+        """把世界矩阵**分解**回 location / rotation_euler / scale（2026-11-07 补）。
+
+        ## 为何必须有 setter
+
+        真 bpy 里“直接给相机/物体定位”的标准写法是
+        `obj.matrix_world = Matrix.Translation(eye) @ rot`——
+        这是把相机摆到任意朝向上**最不会出错**的做法（不必推欧拉角）。
+        兼容层原先只有 getter，于是这种写法报
+        `AttributeError: no such attribute`。
+
+        ## 分解假设（写成字面，不假装通用）
+
+        本框架的 `matrix_world` 是 `T × R × S`（见 getter）。所以分解时：
+        · 平移 = 第 4 列
+        · 缩放 = 前三列各自的长度
+        · 旋转 = 前三列分别除以缩放后的矩阵
+
+        ⚠ 不处理**斜切**（shear）：真 Blender 的 `matrix_world` 可以是任意
+        4×4，而本框架的物体表示里没有斜切这个自由度。带斜切的矩阵会被
+        投影成最接近的无斜切形式——差异只出现在人为构造非仿射旋转的场合，
+        正常建模遇不到。
+        """
+        import math
+        if m is None:
+            return
+        # ⚠ 本框架的 `Matrix` 只支持 `m[row][col]`，**没有** `value(r, c)`。
+        # （真 bpy 两者都有；这里用两边都有的下标访问。）
+        def at(row, col):
+            return m[row][col]
+        # 平移：第 4 列
+        self.location = Vector((at(0, 3), at(1, 3), at(2, 3)))
+        # 缩放：前三列的长度
+        sx = math.sqrt(at(0, 0) ** 2 + at(1, 0) ** 2 + at(2, 0) ** 2)
+        sy = math.sqrt(at(0, 1) ** 2 + at(1, 1) ** 2 + at(2, 1) ** 2)
+        sz = math.sqrt(at(0, 2) ** 2 + at(1, 2) ** 2 + at(2, 2) ** 2)
+        self.scale = Vector((sx, sy, sz))
+        # 旋转：去掉缩放后的 3×3 → 提取欧拉角（XYZ，与 Blender 默认顺序一致）
+        r00 = at(0, 0) / sx if sx > 1e-12 else 1.0
+        r10 = at(1, 0) / sx if sx > 1e-12 else 0.0
+        r20 = at(2, 0) / sx if sx > 1e-12 else 0.0
+        r21 = at(2, 1) / sy if sy > 1e-12 else 0.0
+        r22 = at(2, 2) / sz if sz > 1e-12 else 1.0
+        # 标准 XYZ 欧拉提取：
+        #   y = asin(-r20)；cos(y) != 0 时 x = atan2(r21, r22)、z = atan2(r10, r00)
+        sy_angle = math.asin(max(-1.0, min(1.0, -r20)))
+        cos_y = math.cos(sy_angle)
+        if abs(cos_y) > 1e-6:
+            sx_angle = math.atan2(r21, r22)
+            sz_angle = math.atan2(r10, r00)
+        else:
+            # 万向锁：x 与 z 只能确定一个，令 x = 0
+            sx_angle = 0.0
+            sz_angle = math.atan2(-at(0, 1), at(1, 1))
+        self.rotation_euler = Euler((sx_angle, sy_angle, sz_angle))
+
     @property
     def active_material(self):
         return self.material_slots[0] if self.material_slots else None
@@ -329,6 +423,25 @@ class _Collection:
                 kwargs['type_specified'] = True
         item = self._factory(unique, *args, **kwargs)
         self._items.append(item)
+        return item
+
+    def add(self, item):
+        """直接加入一个**已存在**的数据块（不新建）。
+
+        ## 为何需要它（2026-11-07）
+
+        真 bpy 里把已建好的对象放进场景是：
+
+            obj = bpy.data.objects.new("cam", cam_data)   # 已进 bpy.data
+            scene.collection.objects.link(obj)             # 只需要“可见”
+
+        而本框架把“创建”与“入场景”合并成了 `new`，所以 `link` 需要一个
+        “把已存在项加回集合”的入口。幂等：已在集合里就不重复加。
+        """
+        if item is None:
+            return None
+        if not any(existing is item for existing in self._items):
+            self._items.append(item)
         return item
 
     def remove(self, item):

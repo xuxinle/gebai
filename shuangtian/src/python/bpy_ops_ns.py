@@ -61,8 +61,21 @@ class _MeshOps:
         return None
 
 
+def _smooth_targets():
+    """`shade_smooth` / `shade_flat` 的作用对象集。
+
+    真 bpy 作用于**所有选中的**对象；选中集为空时取 `active_object`
+    ——后者是“刚 add 完就 shade_smooth”这个最常见写法的实际情形。
+    """
+    targets = list(_context.selected_objects)
+    if targets:
+        return targets
+    active = getattr(_context, 'active_object', None)
+    return [active] if active is not None else []
+
+
 class _ObjectOps:
-    """`bpy.ops.object.*`（选择 / 删除 / 变换）"""
+    """`bpy.ops.object.*`（选择 / 删除 / 变换 / 着色）"""
 
     @staticmethod
     def select_all(action='SELECT'):
@@ -90,6 +103,36 @@ class _ObjectOps:
             if obj in _data.objects:
                 _data.objects.remove(obj)
         _context._set_active(None)
+        return None
+
+    @staticmethod
+    def shade_smooth():
+        """把选中对象的**所有面**标为平滑着色（真 bpy 同语义）。
+
+        ## 为何这个 op 必须有（2026-11-07）
+
+        球/柱类几何不开平滑时，高光是**块状**的（每个四边形一个色阶），
+        与真 Blender 的球完全不是一个东西。而兼容层原先没有它：
+        脚本只要写 `shade_smooth()` 就会在解析阶段报
+        `AttributeError: no such attribute`（而且不说是哪个属性）。
+
+        ## 作用对象
+
+        真 bpy 作用于**所有选中的**对象。本兼容层同样；若选中集为空，
+        则作用于 `active_object`——那是“刚 add 完就 shade_smooth”
+        这个最常见写法的实际情形。
+        """
+        for obj in _smooth_targets():
+            for poly in getattr(obj.data, 'polygons', []):
+                poly.use_smooth = True
+        return None
+
+    @staticmethod
+    def shade_flat():
+        """把选中对象的**所有面**标为平面着色（真 bpy 同语义）。"""
+        for obj in _smooth_targets():
+            for poly in getattr(obj.data, 'polygons', []):
+                poly.use_smooth = False
         return None
 
     @staticmethod

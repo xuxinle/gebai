@@ -209,6 +209,58 @@ _context.scene = _Module('Scene')
 _context.scene.name = 'Scene'
 
 
+# ---- `scene.collection.objects.link(obj)` ----
+#
+# ## 为何要补这个（2026-11-07）
+#
+# 这是真 bpy 里**最标准**的“把对象放进场景”的写法：
+#
+#     cam = bpy.data.objects.new("cam", cam_data)
+#     scene.collection.objects.link(cam)
+#
+# 兼容层原先没有它，于是这种写法报
+# `AttributeError: no such attribute`（而且不说是哪个属性），
+# 脚本只能改用 `bpy.ops.*` 建对象——那又避开了 `matrix_world` 等能力。
+#
+# ## 语义
+#
+# `link` = 把对象加进 `bpy.data.objects`（本框架只有一个场景，
+# 没有多 collection 互斥的概念）。`unlink` = 移除。
+class _SceneObjectsProxy:
+    """`scene.collection.objects` 的代理（只做 link / unlink / 遍历）。"""
+
+    def link(self, obj):
+        if obj is None:
+            return None
+        # `_data.objects` 是 `_Collection`，它没有 `append`，用 `add`。
+        if not any(o is obj for o in _data.objects):
+            _data.objects.add(obj)
+        _context._set_active(obj)
+        return None
+
+    def unlink(self, obj):
+        if obj is None:
+            return None
+        _data.objects.remove(obj)
+        return None
+
+    def __len__(self):
+        return len(_data.objects)
+
+    def __iter__(self):
+        return iter(_data.objects)
+
+
+class _SceneCollectionProxy:
+    """`scene.collection` 的代理。"""
+
+    def __init__(self):
+        self.objects = _SceneObjectsProxy()
+
+
+_context.scene.collection = _SceneCollectionProxy()
+
+
 # 场景上的自定义属性（脚本挂的，不在任何 collection 里）。
 #
 # ## 为何要单独记一份
@@ -219,7 +271,13 @@ _context.scene.name = 'Scene'
 #
 # 用一份白名单不行（无法预知脚本会挂什么），所以重置时直接重建一个
 # 干净的 `_Module`，只保留 `name` 与 `world`。
-_SCENE_RESERVED = ('name', 'world')
+#
+# ⚠ `collection` 必须在这里保留（2026-11-07）：它是个**代理对象**，
+# 不是脚本写的数据。不保留的话 `reset()` 一调，`scene.collection` 就没了，
+# 而脚本照常写 `scene.collection.objects.link(...)` → 报
+# `AttributeError: no such attribute`（看起来像“这个 API 不存在”，
+# 实际是“被 reset 清掉了”）。
+_SCENE_RESERVED = ('name', 'world', 'collection')
 
 
 def _reset_scene_attributes():
