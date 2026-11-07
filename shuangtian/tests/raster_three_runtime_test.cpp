@@ -436,3 +436,38 @@ ST_TEST(three_runtime_supports_generative_geometry) {
   }
   ST_CHECK(sphere_count == 8);
 }
+
+ST_TEST(three_runtime_last_statement_after_comment) {
+  // ## 这组用例钉的是「最后一条语句前有一行注释」这个坑
+  //
+  // 曾经：`load_script` 要给最后一条顶层语句加 `return`，它靠扫描分号/花括号
+  // 找语句边界，而**行注释退出时没有推进语句游标**。于是
+  //
+  //     const scene = new THREE.Scene();
+  //     // 一行注释
+  //     scene;
+  //
+  // 的"最后一条语句"被截成 `// 一行注释\nscene`，首字符是 `/`（不在关键字表），
+  // 被当成表达式 → 生成 `return // 一行注释\nscene;` → 返回值是 undefined
+  // → 报"脚本没有产出三维场景"。
+  //
+  // 现实代价：任何带注释的 three 脚本都可能整块失效，而错误信息完全指不到注释。
+  auto& runtime = ThreeRuntime::instance();
+  if (!ThreeRuntime::available()) {
+    ST_SKIP("three 不可用");
+    return;
+  }
+
+  const std::string with_comment =
+      "const scene = new THREE.Scene();\n"
+      "scene.add(new THREE.AmbientLight(0xffffff, 1.0));\n"
+      "// ⚠ 这一行注释曾经让整份脚本失效\n"
+      "const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1),\n"
+      "  new THREE.MeshStandardMaterial({color: 0x808080}));\n"
+      "scene.add(m);\n"
+      "// 中文注释：括号（）与破折号——都不能干扰语句扫描\n"
+      "scene;\n";
+  auto result = runtime.evaluate(with_comment, "comment.js");
+  ST_REQUIRE(result.has_value());
+  ST_CHECK_EQ(result->objects.size(), std::size_t{1});
+}

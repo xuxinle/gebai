@@ -635,9 +635,47 @@ auto ThreeRuntime::evaluate(std::string_view script, std::string_view filename)
       char quote = '\0';
       for (std::size_t i = 0; i < source.size(); ++i) {
         const char ch = source[i];
+        // **非 ASCII 字节必须整段跳过。**
+        //
+        // 这里的循环是按 `char`（字节）走的，而中文/符号的 UTF-8 序列
+        // 里经常出现跟语法同形的字节（实测：`：` = E7 BC 9A、`—` = E2 80 94、
+        // `→` = E2 86 92，它们的尾字节里就有 0x9A / 0x94 这类与引号、
+        // 斜杠相邻后能凑出状态的组合）。一旦把某个尾字节当成 `'` / `"` / `/`，
+        // 状态机就会掉进“字符串”或“注释”态，**把后面的真代码全吞掉**。
+        // 现象：脚本完全正确，却报“没有产出三维场景”——注释里有中文所致。
+        //
+        // 正确做法：按 UTF-8 前导字节算出这个码点占几字节，整段跳过。
+        // 语法字符全是 ASCII，所以跳过非 ASCII 不会漏掉任何语法。
+        if (static_cast<unsigned char>(ch) >= 0x80U) {
+          const auto lead = static_cast<unsigned char>(ch);
+          std::size_t step = 1;
+          if ((lead & 0xE0U) == 0xC0U) {
+            step = 2;
+          } else if ((lead & 0xF0U) == 0xE0U) {
+            step = 3;
+          } else if ((lead & 0xF8U) == 0xF0U) {
+            step = 4;
+          }
+          i += step - 1;  // 循环头会再 +1
+          continue;
+        }
         const char next = i + 1 < source.size() ? source[i + 1] : '\0';
         if (in_line_comment) {
-          if (ch == '\n') in_line_comment = false;
+          if (ch == '\n') {
+            in_line_comment = false;
+            // 注释**不算语句**：退出时把游标推到注释之后。
+            //
+            // 为何必须这样做（实测踩到，代价很大）：原来这里只把
+            // `in_line_comment` 置 false 就 continue，`statement_start`
+            // 仍停在**注释开头**。于是下一句 `scene;` 的分号把
+            // `last_completed_statement` 设成“注释开始处”，截出来的
+            // “最后一条顶层语句”是 `// 注释\nscene`——首字符是 `/`，
+            // 不在关键字表里，于是被当成表达式加 `return`，
+            // 变成 `return // 注释\nscene;` —— **`return` 后面直接跟注释，
+            // 返回值成了 undefined**，报“脚本没有产出三维场景”。
+            // 现象：脚本完全正确，只因最后一条语句前有一行注释就失效。
+            statement_start = i + 1;
+          }
           continue;
         }
         if (in_block_comment) {

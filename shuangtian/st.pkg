@@ -502,6 +502,11 @@
       "sources": ["tools/deferred_ctx_probe.cpp"],
       "//": "GPU 导出的时间去向（回读 / 转换 / 拷贝各占多少）"
     },
+    "probe_three_eval": {
+      "kind": "executable",
+      "sources": ["tools/probe_three_eval.cpp"],
+      "//": "离线求值一份 three.js 脚本，打印真实错误。为何要它：走 GUI 验一轮要 1~2 分钟（起窗口→切视图→截图），而这个纯属求值语义、与画面无关"
+    },
     "gpu_export_cost_probe": {
       "kind": "executable",
       "sources": ["tools/gpu_export_cost_probe.cpp"],

@@ -921,6 +921,16 @@ auto run_app(int argc, char** argv) -> int {
     auto view = std::make_unique<st::ui::ThreeView>();
     view->set_id("graph-viewport");
     view->set_background(st::math::Color{0x0D, 0x11, 0x17, 0xFF});
+    // **吃满可用高度**——这就是“视口为什么总是 320 高”的答案。
+    //
+    // `ThreeView::measure` 的缺省逻辑是：高度 = `preferred_height_`（320），
+    // 只有 `fill_height_` 为真时才用 `available_height`。而我上一轮不知道
+    // 有这个开关，在外面硬设 style.width/height 去凑——那既绕又不对
+    // （absolute 元素的尺寸不走 flex 分配，设多少是多少，与父区无关）。
+    view->set_fill_height(true);
+    // 宽度同理：吃满可用宽度（`fill_width` 在 measure 里已经是这个语义）。
+    view->style().width = st::ui::kAuto;
+    view->style().height = st::ui::kAuto;
     // **必须用软件腿**。
     //
     // 实测：GPU 腿在交互式视口里把离屏纹理合成回画布那一步失效——
@@ -934,23 +944,17 @@ auto run_app(int argc, char** argv) -> int {
     // 这是唯一能“跟排流同时存在”的形态（排流里没有位置给它）。
     view->style().absolute = true;
     view->style().left = 0.0f;
-    // 放在内容区顶部，高度 = 窗口高度的一半。
+    view->style().top = 0.0f;
+    // 尺寸交给 `set_fill_height` + `fill_width`（见上）。
     //
-    // ## 为何不追求“铺满”（试了四次，先收住）
+    // ## 为什么不再自己算尺寸（四次试错的结论）
     //
-    // 铺满要同时满足：占位正确 + ThreeView 的软件腿按该尺寸重画。
-    // 实测四种写法：
-    // ① left+top+right+bottom → 高 320 贴底（right/bottom 需自身宽参与计算）
-    // ② 取父 bounds 当尺寸 → 拿到 0（布局时机）
-    // ③ kAuto → ThreeView 无自然尺寸，塌成 0
-    // ④ 取 app.viewport() 全尺寸 → 视口盖满但自身没画出内容（全白）
+    // ① left+top+right+bottom → 高 320（right/bottom 需“自身宽”参与，而它还是 auto）
+    // ② 取父 bounds → 拿到 0（布局时机还未算完）
+    // ③ kAuto → 塌成 0（ThreeView 无自然尺寸）
+    // ④ 取 app.viewport() 全尺寸 → 盖满但自身没画出内容（全白）
     //
-    // 所以先取一个**确定能画出几何**的尺寸（半屏高），把它做对、做稳；
-    // 铺满作为后续优化（需要改 ThreeView 的尺寸跟随，不在本轮范围）。
-    const auto vp = app.viewport();
-    view->style().top = 34.0f;  // 让出标题栏
-    view->style().width = vp.width > 0.0f ? vp.width : 900.0f;
-    view->style().height = vp.height > 0.0f ? vp.height * 0.5f : 400.0f;
+    // 真正的开关是 `set_fill_height(true)`（组件自己的接口），不在这四个里。
     // 默认隐藏：图谱是“要看才看”的视图，一启动就盖住查阅界面是错的。
     view->set_visible(false);
     st::ui::ThreeView* raw = view.get();
@@ -987,8 +991,7 @@ auto run_app(int argc, char** argv) -> int {
     if (!mount_graph_view() || graph_view == nullptr) {
       return st::unexpected(st::ErrorCode::Unsupported,
                             graph_mount_error.empty() ? "三维视口未就绪" : graph_mount_error);
-    }
-    const bool want = args.empty() ? !graph_view->visible() : st::json_as_bool(args[0], true);
+    }    const bool want = args.empty() ? !graph_view->visible() : st::json_as_bool(args[0], true);
     if (want) {
       const auto info = load_graph();
       graph_view->set_visible(true);

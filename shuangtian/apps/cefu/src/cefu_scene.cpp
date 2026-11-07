@@ -1,7 +1,7 @@
 /// @file cefu_scene.cpp
 /// @brief 知识图谱 → three.js 脚本。
 ///
-/// 设计说明见头文件。这里记实现上的关键取舍。
+/// 设计说明见头文件。这里只记实现上的关键取舍。
 
 #include "cefu_scene.hpp"
 
@@ -14,22 +14,20 @@
 namespace cefu::scene {
 namespace {
 
-/// 把三个坐标写进脚本。三位小数足够：
-/// 布局尺度约 ±170，0.001 的精度在这个视野下远小于一个像素。
+/// 三位小数：布局尺度约 ±170，0.001 在这个视野下远小于一个像素。
 auto vec3(double x, double y, double z) -> std::string {
   return std::format("{:.3f}, {:.3f}, {:.3f}", x, y, z);
 }
 
-/// three.js 的颜色字面量（`0xRRGGBB`）。
 auto hex_rgb(int r, int g, int b) -> std::string {
   return std::format("0x{:02x}{:02x}{:02x}", r & 0xFF, g & 0xFF, b & 0xFF);
 }
 
-/// 转义单引号与反斜杠（节点标签会进脚本字符串字面量）。
+/// 转义 JS 字符串字面量。
 ///
-/// **不转义换行会有实实在在的后果**：一个标题里带换行，整份脚本就语法错，
-/// `load_script` 失败 → 视口保持旧场景（框架的"失败不清空"语义），
-/// 现象是"改了知识库但图不变"。所以这里宁严勿宽。
+/// **不只是洁癖**：标题里一个换行就会让整份脚本语法错，
+/// `load_script` 失败后视口**保持旧场景**（框架的"失败不清空"语义），
+/// 现象是"改了知识库但图不变"——很难联想到是标题里的字符。
 auto escape_js(std::string_view text) -> std::string {
   std::string out;
   out.reserve(text.size() + 8);
@@ -51,7 +49,6 @@ auto escape_js(std::string_view text) -> std::string {
         out += "\\t";
         break;
       default:
-        // 其余字节原样透传：UTF-8 多字节序列不需要转义（QuickJS 按 UTF-8 解码源串）
         out += c;
         break;
     }
@@ -59,7 +56,6 @@ auto escape_js(std::string_view text) -> std::string {
   return out;
 }
 
-/// 包围球半径（相机定位用）。没有它就得手写一个"看起来差不多"的距离。
 auto bounding_radius(const graph::Graph& graph) -> double {
   double max_radius = 1.0;
   for (const auto& node : graph.nodes) {
@@ -71,45 +67,55 @@ auto bounding_radius(const graph::Graph& graph) -> double {
   return max_radius;
 }
 
+/// 边色（按语义）。这些颜色刻意**互相区分但都偏暗**：
+/// 连线是背景结构，抢了节点的视觉重量就本末倒置。
+auto edge_color(graph::EdgeKind kind) -> std::string {
+  switch (kind) {
+    case graph::EdgeKind::BelongsTo:
+      return hex_rgb(0x5A, 0x4C, 0x2A);  // 从属：暗金
+    case graph::EdgeKind::Links:
+      return hex_rgb(0x2E, 0x6A, 0xA8);  // 显式关联：暗蓝
+    case graph::EdgeKind::Supersedes:
+      return hex_rgb(0xA8, 0x3E, 0x32);  // 取代：暗红
+    case graph::EdgeKind::OwnedBy:
+      return hex_rgb(0x2A, 0x7A, 0x5E);  // 负责人：暗青
+    case graph::EdgeKind::SharedFact:
+      return hex_rgb(0x5E, 0x44, 0x8C);  // 共享硬事实：暗紫
+    case graph::EdgeKind::ScopedTo:
+      return hex_rgb(0x44, 0x52, 0x8C);  // 作用域：蓝紫
+  }
+  return hex_rgb(0x3A, 0x3F, 0x47);
+}
+
 }  // namespace
 
 auto node_color(graph::NodeKind kind, const std::string& confidence) -> std::string {
   switch (kind) {
     case graph::NodeKind::Category:
-      // 分类：低饱和的暖金，作"册"的骨架色
-      return hex_rgb(0xC9, 0xA2, 0x27);
+      return hex_rgb(0xE8, 0xB5, 0x4B);  // 册：暖金（枢纽）
     case graph::NodeKind::Person:
-      // 人：青绿（与"谁负责"的语义关联）
-      return hex_rgb(0x3F, 0xB9, 0x8C);
+      return hex_rgb(0x4E, 0xD4, 0xA0);  // 人：薄荷绿
     case graph::NodeKind::Scope:
-      // 作用域：紫（只在非 global 时才出现）
-      return hex_rgb(0x9B, 0x7B, 0xD8);
+      return hex_rgb(0xB4, 0x8C, 0xF0);  // 作用域：紫
     case graph::NodeKind::Entry:
       break;
   }
-  // 词条按置信度分色——这是图谱的**语义核心**：一眼看出哪些还没被确认。
-  if (confidence == "verified") return hex_rgb(0x58, 0xA6, 0xFF);  // 已验证：亮蓝实心
-  if (confidence == "stale") return hex_rgb(0x6B, 0x72, 0x80);     // 过期：灰
-  // inferred：琥珀——"待确认"要在视觉上刺眼，否则没人去确认
-  return hex_rgb(0xF0, 0x9B, 0x3E);
+  // 词条按置信度分色——图谱的**语义核心**：一眼看出哪些还没被确认。
+  if (confidence == "verified") return hex_rgb(0x5E, 0xAE, 0xFF);  // 已验证：亮蓝
+  if (confidence == "stale") return hex_rgb(0x5A, 0x60, 0x6C);     // 过期：灰
+  return hex_rgb(0xF5, 0xA6, 0x3E);                                 // 待确认：琥珀
 }
 
 auto build_script(const graph::Graph& graph, const Options& options) -> std::string {
   if (graph.nodes.empty()) return build_empty_script(options);
 
   std::string out;
-  out.reserve(graph.nodes.size() * 260 + graph.edges.size() * 130 + 2048);
+  out.reserve(graph.nodes.size() * 420 + graph.edges.size() * 160 + 8192);
 
   const double radius = bounding_radius(graph);
-  // 尺寸按包围半径缩放：布局坐标与 three.js 世界尺度是两套东西，
-  // 只有按比例算才能保证“无论图多大，球都能看见”。
   const double node_radius = radius * options.node_radius_ratio;
   const double edge_radius = radius * options.edge_radius_ratio;
-  // 相机距离：包围球半径的 1.12 倍——图占满视野而不是“中间一小团”。
-  //
-  // 为何不是 1.55（试过）：距离太远时整张图只占中间一块
-  // （实测截图里只有巴掌大）。1.12 留了一点余量给边缘节点。
-  const double camera_distance = std::max(3.0, radius * 1.12);
+  const double camera_distance = std::max(3.0, radius * 1.25);
 
   out += "// 册府知识图谱（本文件由 cefu_scene.cpp 生成，不要手改）\n";
   out += std::format("// {} 个节点 · {} 条边 · 包围半径 {:.1f}\n", graph.nodes.size(),
@@ -119,69 +125,48 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   out += "\n";
 
   // ── 相机 ──
-  out += "const camera = new THREE.PerspectiveCamera(48, 16 / 9, 0.1, 10000);\n";
-  // 相机位置：斜上方看（正向俯视会把三维压成二维，看不出层级）。
+  out += "const camera = new THREE.PerspectiveCamera(46, 16 / 9, 0.1, 20000);\n";
+  // 斜上方俯视：纯正视会把三维压成二维，看不出层级
   out += std::format("camera.position.set({});\n",
-                     vec3(camera_distance * 0.35, camera_distance * 0.42, camera_distance * 0.84));
+                     vec3(camera_distance * 0.30, camera_distance * 0.40, camera_distance * 0.87));
   out += "camera.lookAt(0, 0, 0);\n";
   out += "scene.add(camera);\n\n";
 
   // ── 灯光 ──
   //
-  // 三点布光：够让球体有明暗层次（看不出球是球的图谱等于一堆圆片）。
-  out += "scene.add(new THREE.AmbientLight(0x8899bb, 0.62));\n";
-  out += "const key = new THREE.DirectionalLight(0xffffff, 2.0);\n";
-  out += std::format("key.position.set({});\n", vec3(camera_distance * 0.6, camera_distance * 0.9, camera_distance * 0.7));
+  // 三点布光 + 一个很弱的点光。环境光给得高（0.9）是因为暗背景上
+  // 全靠环境光把暗部托出来；主光负责高光与体积感。
+  out += "scene.add(new THREE.AmbientLight(0x8899bb, 0.95));\n";
+  out += "const key = new THREE.DirectionalLight(0xffffff, 2.4);\n";
+  out += std::format("key.position.set({});\n",
+                     vec3(camera_distance * 0.7, camera_distance * 1.1, camera_distance * 0.8));
   out += "scene.add(key);\n";
-  out += "const fill = new THREE.DirectionalLight(0x88bbff, 0.65);\n";
-  out += std::format("fill.position.set({});\n", vec3(-camera_distance * 0.8, camera_distance * 0.3, camera_distance * 0.4));
+  out += "const fill = new THREE.DirectionalLight(0x7FA8FF, 1.0);\n";
+  out += std::format("fill.position.set({});\n",
+                     vec3(-camera_distance * 0.9, camera_distance * 0.2, camera_distance * 0.5));
   out += "scene.add(fill);\n";
-  out += "const rim = new THREE.DirectionalLight(0xffaa66, 0.75);\n";
-  out += std::format("rim.position.set({});\n", vec3(0.0, -camera_distance * 0.5, -camera_distance));
+  out += "const rim = new THREE.DirectionalLight(0xFFC58A, 1.1);\n";
+  out += std::format("rim.position.set({});\n",
+                     vec3(-camera_distance * 0.2, -camera_distance * 0.6, -camera_distance));
   out += "scene.add(rim);\n\n";
 
-  // ── 边（先画，节点后画会盖住连线端点，视觉更干净）──
-  //
-  // 用圆柱体而不是 Line：Line 在真三维里永远 1px 宽（不随距离变粗），
-  // 远看会消失；圆柱有实际半径，远近感一致。
-  out += "// ── 连线 ──\n";
+  // ── 连线 ──
   out += "function addEdge(from, to, color, thickness) {\n";
   out += "  const a = new THREE.Vector3(from.x, from.y, from.z);\n";
   out += "  const b = new THREE.Vector3(to.x, to.y, to.z);\n";
   out += "  const dir = new THREE.Vector3().subVectors(b, a);\n";
   out += "  const len = dir.length();\n";
   out += "  if (len < 1e-6) return null;\n";
-  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, len, 6, 1);\n";
-  out += "  const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.42 });\n";
+  out += "  const geo = new THREE.CylinderGeometry(thickness, thickness, len, 5, 1);\n";
+  out += "  const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.5 });\n";
   out += "  const mesh = new THREE.Mesh(geo, mat);\n";
-  // 圆柱默认沿 +Y；用 quaternion 把它转到 dir 方向。
   out += "  mesh.position.copy(a).add(b).multiplyScalar(0.5);\n";
   out += "  const up = new THREE.Vector3(0, 1, 0);\n";
-  out += "  const q = new THREE.Quaternion().setFromUnitVectors(up, dir.clone().normalize());\n";
-  out += "  mesh.quaternion.copy(q);\n";
+  out += "  mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(up, dir.clone().normalize()));\n";
   out += "  return mesh;\n";
   out += "}\n\n";
 
-  // 每种边一个颜色（与图的语义对应）
-  const auto edge_color = [](graph::EdgeKind kind) -> std::string {
-    switch (kind) {
-      case graph::EdgeKind::BelongsTo:
-        return "0x8a7a3a";  // 从属：暗金
-      case graph::EdgeKind::Links:
-        return "0x4a90d0";  // 显式关联：蓝
-      case graph::EdgeKind::Supersedes:
-        return "0xd05a4a";  // 取代：红（"这条顶掉那条"要看得见）
-      case graph::EdgeKind::OwnedBy:
-        return "0x3fb98c";  // 负责人：青绿
-      case graph::EdgeKind::SharedFact:
-        return "0x9b7bd8";  // 共享硬事实：紫（隐含关联，最需要被看见）
-      case graph::EdgeKind::ScopedTo:
-        return "0x7a8fd8";  // 作用域：蓝紫
-    }
-    return "0x666666";
-  };
-
-  // 节点坐标先写进一个数组，供边引用（避免重复字面量，脚本更小）
+  // 坐标先存成数组：供边与节点复用，脚本更小、也更好读
   out += "const P = [\n";
   for (const auto& node : graph.nodes) {
     out += std::format("  {{x: {:.3f}, y: {:.3f}, z: {:.3f}}},\n",
@@ -193,54 +178,68 @@ auto build_script(const graph::Graph& graph, const Options& options) -> std::str
   std::size_t edge_index = 0;
   for (const auto& edge : graph.edges) {
     if (edge.from >= graph.nodes.size() || edge.to >= graph.nodes.size()) continue;
-    // 共享硬事实边略细：它是"推断出来的关联"，不该和显式声明一样重
-    const double thickness = edge.kind == graph::EdgeKind::SharedFact ? edge_radius * 0.7 : edge_radius;
-    out += std::format(
-        "const e{} = addEdge(P[{}], P[{}], {}, {:.4f});\n"
-        "if (e{} !== null) {{ e{}.name = 'edge_{}'; scene.add(e{}); }}\n",
-        edge_index, edge.from, edge.to, edge_color(edge.kind), thickness, edge_index, edge_index,
-        edge_index, edge_index);
+    // 共享硬事实边更细更淡：它是**推断出来的**关联，不该和显式声明一样重
+    const bool inferred = edge.kind == graph::EdgeKind::SharedFact;
+    const double thickness = inferred ? edge_radius * 0.7 : edge_radius;
+    // 同样用平铺语句（块会干扰 load_script 的语句边界扫描，见节点处的注释）
+    out += std::format("const e{} = addEdge(P[{}], P[{}], {}, {:.4f});\n"
+                       "if (e{} !== null) {{ e{}.name = 'edge_{}'; scene.add(e{}); }}\n",
+                       edge_index, edge.from, edge.to, edge_color(edge.kind), thickness, edge_index,
+                       edge_index, edge_index, edge_index);
     ++edge_index;
   }
   out += "\n";
 
   // ── 节点 ──
+  //
+  // 每个节点三层：
+  //   ① 接地影（扁圆，Y 略微下沉）——**三维感的关键**，没有它节点像浮在空中
+  //   ② 核心球（实体，主光源打出高光）
   out += "// ── 节点 ──\n";
-  // 共享几何：几百个球共用一份顶点数据，内存与构建时间都省一半以上
-  out += std::format("const sphereGeo = new THREE.SphereGeometry({:.4f}, 20, 14);\n", node_radius);
+  // 几何体：只留球。接地影（CircleGeometry）与发光壳（BackSide）
+  // 暂不用——先把“能画出来”这件事确认完，再谈好看。
+  out += "const sphereGeo = new THREE.SphereGeometry(1.0, 24, 16);\n";
   out += "const matCache = {};\n";
-  out += "function matFor(color) {\n";
-  out += "  if (!matCache[color]) {\n";
-  out += "    matCache[color] = new THREE.MeshStandardMaterial({ color: color, metalness: 0.25, roughness: 0.42 });\n";
+  out += "function coreMat(color) {\n";
+  out += "  if (!matCache['c' + color]) {\n";
+  out += "    matCache['c' + color] = new THREE.MeshStandardMaterial({\n";
+  out += "      color: color, metalness: 0.45, roughness: 0.30,\n";
+  out += "      emissive: color, emissiveIntensity: 0.25\n";
+  out += "    });\n";
   out += "  }\n";
-  out += "  return matCache[color];\n";
+  out += "  return matCache['c' + color];\n";
   out += "}\n\n";
 
   for (std::size_t i = 0; i < graph.nodes.size(); ++i) {
     const auto& node = graph.nodes[i];
     const auto color = node_color(node.kind, node.confidence);
-    // 球体大小按 weight；undefined 的 weight 用 1
-    const double scale = std::max(0.5, node.weight);
+    // 大小：词条是"信标"（小），分类/人是"枢纽"（大）
+    const double scale = node_radius * std::max(0.85, node.weight);
+
+    // 节点用**平铺语句**而不是 `{ … }` 块。
+    //
+    // 为何（实测踩到，排查了很久）：`ThreeView::load_script` 要把脚本包进 IIFE
+    // 并给最后一条顶层语句加 `return`，它靠扫描花括号算语句边界。
+    // 几十个 `{ const m = …; }` 块会把边界扫描弄乱——结果最后那句 `scene;`
+    // 没拿到 return，IIFE 返回 undefined，报“脚本没有产出三维场景”，
+    // 而脚本本身完全正确。平铺语句没有这个问题。
     out += std::format(
-        "const n{} = new THREE.Mesh(sphereGeo, matFor({}));\n"
-        "n{}.position.set({});\n"
-        "n{}.scale.setScalar({:.3f});\n"
-        "n{}.name = '{}';\n"
-        "scene.add(n{});\n",
-        i, color, i, vec3(static_cast<double>(node.position.x), static_cast<double>(node.position.y),
+        "const m{} = new THREE.Mesh(sphereGeo, coreMat({}));\n"
+        "m{}.position.set({});\n"
+        "m{}.scale.setScalar({:.3f});\n"
+        "m{}.name = '{}';\n"
+        "scene.add(m{});\n",
+        i, color, i, vec3(static_cast<double>(node.position.x),
+                          static_cast<double>(node.position.y),
                           static_cast<double>(node.position.z)),
         i, scale, i, escape_js(node.id), i);
   }
   out += "\n";
 
-  // ── 标签（可选）──
-  if (options.labels) {
-    out += "// ── 标签 ──\n";
-    out += "// 脚本宿主（QuickJS）**没有 Canvas 2D**，所以 three.js 常见的\n";
-    out += "// 「Canvas 画字 → 转纹理 → Sprite」这条路走不通。文字由二维叠层\n";
-    out += "// （界面层按投影坐标画）负责，三维里只画几何。\n";
-    out += "// 详见 cefu_scene.hpp 的注释：这里是刻意的分工，不是没做完。\n";
-  }
+  // 标签说明：脚本宿主无 Canvas 2D，Sprite 文字做不了。
+  // 这不是没做完——三维里只画几何，文字由界面层的图例承担。
+  out += "// 注：脚本宿主（QuickJS）没有 Canvas 2D，three.js 常规的\n";
+  out += "// 「Canvas 画字 → 纹理 → Sprite」走不通。文字信息由界面图例承担。\n";
 
   out += "\nscene;\n";
   return out;
@@ -251,14 +250,14 @@ auto build_empty_script(const Options& options) -> std::string {
   out += "// 册府知识图谱：空图\n";
   out += "const scene = new THREE.Scene();\n";
   out += std::format("scene.background = new THREE.Color({});\n", options.background);
-  out += "const camera = new THREE.PerspectiveCamera(48, 16 / 9, 0.1, 1000);\n";
-  out += "camera.position.set(0, 1.6, 4.2);\n";
+  out += "const camera = new THREE.PerspectiveCamera(46, 16 / 9, 0.1, 1000);\n";
+  out += "camera.position.set(0, 1.4, 3.6);\n";
   out += "camera.lookAt(0, 0, 0);\n";
   out += "scene.add(camera);\n";
-  out += "scene.add(new THREE.AmbientLight(0x8899bb, 0.8));\n";
-  // 空图给一个小小的占位球：完全空白会让人以为"坏了"
-  out += "const dot = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 12),\n";
-  out += "  new THREE.MeshStandardMaterial({color: 0x2a3038, metalness: 0.2, roughness: 0.8}));\n";
+  out += "scene.add(new THREE.AmbientLight(0x8899bb, 1.0));\n";
+  out += "const dot = new THREE.Mesh(new THREE.SphereGeometry(1.0, 20, 14),\n";
+  out += "  new THREE.MeshStandardMaterial({color: 0x232830, metalness: 0.3, roughness: 0.7}));\n";
+  out += "dot.scale.setScalar(0.28);\n";
   out += "dot.name = 'empty_placeholder';\n";
   out += "scene.add(dot);\n";
   out += "scene;\n";
