@@ -403,6 +403,39 @@ describe("PersonaCredentials：编排（状态机）", () => {
     return { store, creds }
   }
 
+  /**
+   * 授权链接**过期后不得继续被展示**。
+   *
+   * 对应一条真实故障链：授权卡 TTL 10 分钟 → 过期后定时器重推卡 →
+   * 重推的 `authorizeUrl` 仍是 10 分钟前那条链接（state 已被 OAuth 侧 GC）→
+   * 用户点开、在飞书里点完同意、回来报到「授权会话已过期」。服务端日志全绿，
+   * 现象是"怎么授权都授权不成功"。
+   */
+  test("授权链接过期后：下次取状态会**重新生成**（不能继续给死链接）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pc-exp-"))
+    const clock = { t: NOW }
+    const store = makeStore(home, { now: () => clock.t })
+    const creds = new PersonaCredentials({
+      store,
+      oauth: new PersonaOAuth({ now: () => clock.t }),
+      appId: () => "cli_test",
+      appSecret: () => "secret_test",
+      redirectUri: () => "http://localhost:3002/cb",
+      now: () => clock.t,
+    })
+    const first = await creds.status()
+    const url1 = first.authorizeUrl!
+    expect(url1).toContain("accounts.feishu.cn")
+
+    clock.t = NOW + 11 * 60_000 // 走过 10 分钟 TTL
+    const second = await creds.status()
+    console.log(`    实测：过期后是否换了新链接 = ${second.authorizeUrl !== url1}`)
+    expect(second.authorizeUrl).toBeDefined()
+    expect(second.authorizeUrl).not.toBe(url1) // 必须是新链接（新 state）
+    expect(new URL(second.authorizeUrl!).searchParams.get("state")).toBeTruthy()
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("无令牌 → needsAuth=true 且**自带授权链接**（前端可直接渲染按钮）", async () => {
     const home = mkdtempSync(join(tmpdir(), "pc-"))
     const { creds } = makeCreds(home)

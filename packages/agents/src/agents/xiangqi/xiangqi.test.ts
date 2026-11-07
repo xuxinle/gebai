@@ -808,6 +808,96 @@ describe("宿主注入形态：主服务把 /xiangqi 升级后的连接交给控
     return []
   }
 
+  /**
+   * 半开连接：相期被强杀（无 Close 帧）时不能继续报“已连接”。
+   *
+   * 为何这是真问题：Bun 的 `close` 回调要等 TCP 超时（可能几分钟）才到。
+   * 这期间若 `isConnected()` 仍为 true，审批桥/出站审核会认为
+   * “卡已经推到他眼前了”，而实际上没人看得见——人以为在等审批，
+   * 模型以为提醒已送达，两边都卡死。
+   */
+  it("半开连接：send 抛错时立即摘掉 peer（不等 close 回调）", async () => {
+    let clock = 1_000_000
+    const ctl = createController({
+      port: 0,
+      homeDir: mkdtempSync(join(tmpdir(), "xq-half-")),
+      now: () => clock,
+    })
+    let sends = 0
+    const deadPeer = {
+      send(_s: string) {
+        sends += 1
+        throw new Error("connection reset")   // 模拟对端已死
+      },
+      close() {},
+    }
+    ctl.acceptPeer(deadPeer)
+    expect(ctl.isConnected()).toBe(true) // 刚接上：活的
+
+    ctl.push({ kind: "notice", title: "推给死连接" }) // send 抛错
+    expect(sends).toBeGreaterThan(0)
+    // 关键：立刻就知道它死了（而不是“等 TCP 超时”的几分钟里一直说谎）
+    expect(ctl.isConnected()).toBe(false)
+    ctl.close()
+    void clock
+  })
+
+  it("半开连接：长时间无任何往来 → 不再报已连接（即使 send 不报错）", async () => {
+    let clock = 1_000_000
+    const ctl = createController({
+      port: 0,
+      homeDir: mkdtempSync(join(tmpdir(), "xq-stale-")),
+      now: () => clock,
+    })
+    // 一个“能 send 但从不回话”的 peer：send 不抛，所以只能靠静默时长判死
+    const silent = { sent: [] as string[], send(s: string) { this.sent.push(s) }, close() {} }
+    ctl.acceptPeer(silent)
+    expect(ctl.isConnected()).toBe(true)
+
+    clock += 60_000 // 60 秒没动静：还在容忍窗口内
+    expect(ctl.isConnected()).toBe(true)
+
+    clock += 40_000 // 累计 100 秒 > 90 秒阈值
+    expect(ctl.isConnected()).toBe(false)
+    ctl.close()
+  })
+
+  it("有心跳往来就能续命（不能把活着的连接误判为丧尸）", async () => {
+    let clock = 1_000_000
+    const ctl = createController({
+      port: 0,
+      homeDir: mkdtempSync(join(tmpdir(), "xq-alive-")),
+      now: () => clock,
+    })
+    const peer = { sent: [] as string[], send(s: string) { this.sent.push(s) }, close() {} }
+    ctl.acceptPeer(peer)
+    for (let i = 0; i < 5; i += 1) {
+      clock += 60_000
+      // 每次推卡都是一次成功 send → 刷新活跃时刻
+      ctl.push({ kind: "notice", title: `心跳 ${i}` })
+      expect(ctl.isConnected()).toBe(true)
+    }
+    ctl.close()
+  })
+
+  /**
+   * 先到答复缓存必须有上限：人格常驻几周，每次“审批超时后又卡被撤”
+   * 就会多一条永不取走的记录——真实的缓慢泄漏，且无任何日志痕迹。
+   */
+  it("先到答复缓存不会无限增长（超出上限淘汰最旧）", async () => {
+    const ctl = createController({ port: 0, homeDir: mkdtempSync(join(tmpdir(), "xq-cap-")) })
+    const peer = { sent: [] as string[], send(s: string) { this.sent.push(s) }, close() {} }
+    ctl.acceptPeer(peer)
+    // 造 300 条“先到但没人等”的答复（走 peerMessage → deliver → arrivedEarly）
+    for (let i = 0; i < 300; i += 1) {
+      ctl.peerMessage(JSON.stringify({ type: "answer", id: `c${i}`, kind: "notice", answer: { acknowledged: true } }))
+    }
+    // 最早那批已被淘汰 → 不再能取回（超时 30ms 内返回 null）；最近的仍在
+    expect(await ctl.waitForAnswer("c0", 30)).toBeNull()
+    expect(await ctl.waitForAnswer("c299", 30)).not.toBeNull()
+    ctl.close()
+  })
+
   it("acceptPeer 后 isConnected() 变 true，push 能实时送达", async () => {
     const ctl = fresh()
     expect(ctl.isConnected()).toBe(false)

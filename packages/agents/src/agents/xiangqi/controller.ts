@@ -182,6 +182,15 @@ export interface XiangqiController {
 const DEFAULT_PORT = 7717
 const DEFAULT_HOST = "127.0.0.1"
 
+/**
+ * 多久没有确认过对端活着，就认为这条连接已死（毫秒）。
+ *
+ * 取值依据：相期侧每 20 秒一次心跳日志、空闲 30 秒发一次 ping（连续 3 次无响应判死）。
+ * 服务端这边比它宽松一些（90 秒）：只要相期还在周期性地“有所动作”（答卡/重连/领卡），
+ * 就能续命；真的静默 90 秒无任何往来，按死处理比假装连着安全得多。
+ */
+const STALE_PEER_MS = 90_000
+
 /** 从环境读端口（`XIANGQI_PORT`）；非法值回落缺省。 */
 function portFromEnv(): number {
   const raw = process.env.XIANGQI_PORT
@@ -234,6 +243,13 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
 
   /** 当前连着的相期窗口（多个同时连只认最后一个——窗口本就该只有一个）。 */
   let peer: PeerSocket | null = null
+  /**
+   * 相期最近一次被确认活着的时刻（收到消息或发送成功）。
+   *
+   * 半开连接（对端被强杀）没有 Close 帧，只能靠“多久没动静”判定。
+   * 初值取 0 不影响：`peer` 为 null 时 `isConnected` 直接返回 false。
+   */
+  let lastPeerActivityMs = 0
   let server: { port?: number; stop(force?: boolean): void } | null = null
   /** 已投递、仍等答复的卡（id → pending）。 */
   const waiting = new Map<string, PendingCard>()
@@ -267,8 +283,33 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
     return `ws://${hostname}:${actual}/xiangqi`
   }
 
+  /**
+   * 当前是否有相期连着。
+   *
+   * ## 为何不能只看 `peer !== null`（半开连接）
+   *
+   * 相期被**强杀**（任务管理器结束进程 / 崩溃）时不会发 WS Close 帧，
+   * Bun 的 `close` 回调要等 TCP 超时（可能几分钟）才到。这期间 `peer` 仍非 null，
+   * `isConnected()` 会报“已连”——而卡片根本送不到人眼前。
+   * 上层（审批桥、出站审核）据此做的判断会全错：以为提醒已送达，实际没人看得见。
+   *
+   * 判据：`peer` 存在 **且** 距上次成功发送/收消息不超过 `STALE_PEER_MS`。
+   * 超时就当作没有 peer（但**不主动 close**：若它其实活着，重连会自然恢复；
+   * 若真死了，它的 close 回调会把它清掉）。
+   */
   function isConnected(): boolean {
-    return peer !== null
+    if (peer === null) return false
+    return now() - lastPeerActivityMs <= STALE_PEER_MS
+  }
+
+  /**
+   * 标记相期最近一次被确认“活着”（收到消息 / 发送成功）。
+   *
+   * 抽成函数而不是在四处写 `lastPeerActivityMs = now()`：漏一处就会让
+   * 一个活着的连接被误判为丧尸，而症状是“卡片偶尔不推”——极难归因。
+   */
+  function touchPeer(): void {
+    lastPeerActivityMs = now()
   }
 
   function sendCards(): void {
@@ -283,8 +324,15 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
   }
   try {
     peer.send(JSON.stringify({ type: "cards", cards: [...live.values()] }))
+    // 发送成功 = 对端确实收下了（Bun 的 send 在连接已断时会抛）：
+    // 这是比“有没有 close 回调”更早、更准的存活证迹。
+    touchPeer()
   } catch {
-    // 发送失败：连接已坏，等它 close。卡片仍在 `live` 里，重连后会重推。
+    // 发送失败：连接已坏。**立即摘掉 peer**（而不是“等它 close”）——
+    // 半开连接下 close 回调要等 TCP 超时（几分钟），这期间
+    // isConnected() 会持续撒谎，审批/授权提醒会以为“已经送到人眼前”。
+    // 卡片仍在 `live` 里，重连后会重推。
+    peer = null
   }
 }
 
@@ -299,6 +347,8 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
     if (typeof parsed !== "object" || parsed === null) return
     const message = parsed as Record<string, unknown>
     if (message.type !== "answer") return
+    // 能收到消息 = 对端活着（最硬的证迹）
+    touchPeer()
     const id = typeof message.id === "string" ? message.id : ""
     if (id === "") return
     const kind = (message.kind as CardKind) ?? "notice"
@@ -307,13 +357,23 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
   }
 
   /**
-   * 已到达但**当时没人在等**的答复（先到先存）。
-   *
-   * 为何需要：用户可能点得很快（一拍完按钮就点），而 `card_ask` 还没开始等。
-   * 没有这个缓存的话，那条答复会在 `pollOutbox` 里因为“`live`/`waiting` 都没有它”
-   * 而被当成陈旧文件丢掉，然后 `waitForAnswer` 白等满整个超时。
-   */
-  const arrivedEarly = new Map<string, CardAnswer>()
+ * 已到达但**当时没人在等**的答复（先到先存）。
+ *
+ * 为何需要：用户可能点得很快（一拍完按钮就点），而 `card_ask` 还没开始等。
+ * 没有这个缓存的话，那条答复会在 `pollOutbox` 里因为“`live`/`waiting` 都没有它”
+ * 而被当成陈旧文件丢掉，然后 `waitForAnswer` 白等满整个超时。
+ *
+ * ## 为何必须有容量上限（它原来是无界的）
+ *
+ * 写入它的是 `deliver`，而当**没人在等**且**卡已被回收**（审批超时后 dismiss）时，
+ * 这条记录永远不会被取走（`waitForAnswer` 只取对应 id）。人格常驻几周，
+ * 每超时一次就多一条——是真实的缓慢泄漏，且症状极隐蔽（内存缓慢涨、无日志）。
+ *
+ * 上限 200：正常“先到先存”的窗口是秒级，同时存在几十条已很宽松。
+ */
+const arrivedEarly = new Map<string, CardAnswer>()
+/** 先到答复的缓存上限（超过后按到达时间淘汰最旧的）。 */
+const ARRIVED_EARLY_MAX = 200
 
   /** 收到答复：从 live 摘掉、唤醒等待者。WS 与 outbox 两条路都走这里。 */
   function deliver(record: CardAnswer): void {
@@ -326,6 +386,12 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
     }
     // 没人在等（可能还没开始等）→ 存起来，等 `waitForAnswer` 来取
     arrivedEarly.set(record.id, record)
+    // 限容：Map 保持插入序，超出就删最早那条（不要 O(n) 排序）
+    while (arrivedEarly.size > ARRIVED_EARLY_MAX) {
+      const oldest = arrivedEarly.keys().next()
+      if (oldest.done) break
+      arrivedEarly.delete(oldest.value)
+    }
   }
 
   /**
@@ -489,6 +555,9 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
             // 只认一个窗口：已经有一个连着时，新连接取代旧的。
             // 反过来的话（旧的留着、新的被拒）用户重启相期后就再也推不动卡片了。
             peer = ws as unknown as PeerSocket
+            // 建连即刷新活跃时刻：不刷的话，刚连上就会被 `isConnected`
+            // 按“多久没动静”判成死的（初值 0 意味着“从来没活过”）。
+            touchPeer()
             if (live.size > 0) sendCards()
           },
           message(_ws, data) {
@@ -660,6 +729,7 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
       }
     }
     peer = ws
+    touchPeer()   // 同 `open`：建连即算活着
     if (live.size > 0) sendCards()
   }
 

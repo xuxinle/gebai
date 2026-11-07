@@ -56,16 +56,21 @@
 /// win32 `Shell_NotifyIcon` + `st::ui` 平台无关抽象。
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
+#include <iterator>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "battery/embed.hpp"
@@ -177,6 +182,51 @@ class TcpStreamAdapter : public st::net::ws::WsSession::Stream {
   std::string pending_{};
 };
 
+/// 断线重连的退避节奏（毫秒）。
+///
+/// 为何要退避而不是固定间隔重试：歌白可能因为重启/升级而停几分钟，
+/// 固定 1 秒重试会在那期间白刷上千次日志与 TCP 连接。退避上限 30 秒：
+/// 足够稀，人回来时也不用等太久。
+constexpr std::int64_t RECONNECT_BACKOFF_MS[] = {1'000, 2'000, 5'000, 10'000, 30'000};
+
+/// 重连调度：只看时间，不碰连接（连接由主线程通过后台线程建）。
+///
+/// 为何单独一个类而不是塞进 `AgentLink`：`AgentLink` 的约定是“只在主线程被调用”，
+/// 而重连的**建连**必须在后台线程跑（连一个没监听的端口要 ~450ms，
+/// 放主线程会让窗口“卡一下”）。把这个时序策略单独提出来，可以在 e2e 里
+/// 用假时钟验证退避曲线，而不需要真去连。
+class ReconnectScheduler {
+ public:
+  /// 记录一次失败（推进退避）或一次成功（重置）。
+  void on_failure(std::int64_t now_ms) {
+    ++attempts_;
+    const auto index = std::min<std::size_t>(attempts_ - 1, std::size(RECONNECT_BACKOFF_MS) - 1);
+    next_at_ms_ = now_ms + RECONNECT_BACKOFF_MS[index];
+  }
+
+  void on_success() {
+    attempts_ = 0;
+    next_at_ms_ = 0;
+  }
+
+  /// 现在要不要发起重连（只有“已失败过”且“到了退避时刻”才 true）。
+  [[nodiscard]] auto due(std::int64_t now_ms) const -> bool {
+    return attempts_ > 0 && now_ms >= next_at_ms_;
+  }
+
+  /// 已连续失败次数（界面展示“重试中（第 N 次）”靠它）。
+  [[nodiscard]] auto attempts() const -> int { return attempts_; }
+
+  /// 距下次重试还有多久（毫秒；未安排时为 0）。
+  [[nodiscard]] auto remaining_ms(std::int64_t now_ms) const -> std::int64_t {
+    return attempts_ == 0 ? 0 : std::max<std::int64_t>(0, next_at_ms_ - now_ms);
+  }
+
+ private:
+  int attempts_{0};
+  std::int64_t next_at_ms_{0};
+};
+
 /// agent 控制器连接（WebSocket 客户端）。
 ///
 /// 线程模型：**全部在主循环里跑**（`try_read_message` 非阻塞）。
@@ -193,8 +243,12 @@ class AgentLink {
   [[nodiscard]] auto connected() const -> bool { return session_ != nullptr; }
 
   /// 连接状态的一句话描述（界面直接显示——这是"它还在不在"的唯一来源）。
-  [[nodiscard]] auto status_text() const -> std::string {
+  ///
+  /// `retry` 不为空时优先展示它：断线后正在重连与“从未连上”是两回事，
+  /// 都显示“未连接”会让用户以为窗口坏了、去手动重启。
+  [[nodiscard]] auto status_text(const std::string& retry = {}) const -> std::string {
     if (connected()) return conn_name_;
+    if (!retry.empty()) return retry;
     return last_error_.empty() ? "未连接（agent 未运行）" : last_error_;
   }
 
@@ -527,6 +581,11 @@ struct CardStore {
   std::string home;
   AgentLink* link{nullptr};
   st::app::Application* app{nullptr};   ///< 窗口尺寸切换用（可为空：无头/测试）
+  /// 重连提示文本（由主循环每帧维护；空 = 未在重连）。
+  ///
+  /// 为何放在这里而不是问 `AgentLink`：重连时序归 `ReconnectScheduler` 管，
+  /// `AgentLink` 不该知道自己“正在被重连”——它只负责一条连接。
+  std::string link_retry_hint{};
   std::uint64_t seq{0};
 
   auto inbox_dir() const -> std::string { return st::fs::join(home, "inbox"); }
@@ -668,9 +727,10 @@ struct CardStore {
       // 文件降级路径：WS 没连上时才读（连上了以 WS 为准，避免两路打架）
       if (link == nullptr || !link->connected()) poll_inbox();
 
-      Json peer{{"connected", link != nullptr && link->connected()},
-                {"name", link != nullptr && link->connected() ? "agent 控制器" : ""},
-                {"detail", link != nullptr ? link->status_text() : "未初始化"}};
+       Json peer{{"connected", link != nullptr && link->connected()},
+ {"name", link != nullptr && link->connected() ? "agent 控制器" : ""},
+ // status_text 带上重连提示：断线重连中 vs 从未连上，对用户是两件事
+ {"detail", link != nullptr ? link->status_text(link_retry_hint) : "未初始化"}};
       Json out{{"cards", as_json()}, {"peer", peer}};
       return out;
     });
@@ -717,10 +777,12 @@ struct CardStore {
       return Json{{{"ok", ok}, {"url", url}}};
     });
 
-    (void)bridge.expose("link.status", [this](const std::vector<Json>&) -> st::Result<Json> {
-      return Json{{"connected", link != nullptr && link->connected()},
-                  {"detail", link != nullptr ? link->status_text() : "未初始化"}};
-    });
+     (void)bridge.expose("link.status", [this](const std::vector<Json>&) -> st::Result<Json> {
+ return Json{{"connected", link != nullptr && link->connected()},
+ {"detail", link != nullptr ? link->status_text(link_retry_hint) : "未初始化"},
+ // 重连进度：界面据此显示“重试中”，而不是默默改成“未连接”
+ {"retrying", !link_retry_hint.empty()}};
+ });
 
     // 窗口尺寸：轻提示形态需要把窗口缩到小尺寸。
     //
@@ -759,8 +821,62 @@ struct Options {
   /// 于是 GPU 初始化又回到窗口露出之前的同步路径上。
   std::string renderer{};
   /// agent 控制器地址（`--agent` 或环境变量 `ST_XIANGQI_AGENT` 覆盖）。
-  std::string agent_url{"ws://127.0.0.1:7717/xiangqi"};
+  ///
+  /// **空串 = 自动探测本地歌白**（见 `resolve_agent_url()`）。
+  ///
+  /// 为何不能把 `ws://127.0.0.1:7717/xiangqi` 硬编码当缺省：那是“控制器自己
+  /// listen 一个独立端口”时代的地址（方案 B 之前）。之后相期窗口改成连
+  /// **主服务同一个端口** 的 `/xiangqi`（默认 3000，可被 `GEBAI_PORT` 改），
+  /// 7717 已经没有任何人在听——手动启动相期时永远连不上，而现象是
+  /// “窗口开着、一直显示未连接”，看起来像服务挂了一样。
+  std::string agent_url{};
 };
+
+/**
+ * 本地歌白的候选端口（按序探测）。
+ *
+ * 为何要一串而不是一个：`GEBAI_PORT` 可改，而相期是被**手动启动**的
+ * （双击 exe / `st run xiangqi`）——它拿不到宿主进程的环境变量，只能猜。
+ * 3000 是缺省；后面两个是常见的本地实例（`.gebai-local` / 调试实例）。
+ *
+ * 顺序有意义：先试缺省端口，命中就停——避免“三个端口都在跑时连到错的那个”。
+ */
+constexpr int LOCAL_GEBAI_PORTS[] = {3000, 3001, 3100};
+
+/**
+ * 解析 agent 地址。
+ *
+ * 优先级：`--agent` / `ST_XIANGQI_AGENT`（显式给）> `GEBAI_PORT`（在同一个
+ * 环境里被拉起时能读到，最准）> 候选端口逐个探测 > 缺省 3000。
+ *
+ * ## 为何“探测”而不是直接拼 `localhost:3000`
+ *
+ * 端口不通时 `build_connection` 要等满连接超时（本机防火墙会静默丢 SYN，
+ * 实测 ~450ms）——三个端口全不通就是 1.3 秒白等，而那是**启动第一帧**之后的
+ * 后台线程，用户已经看到窗口了，只是卡一下。可以接受。
+ *
+ * 但更重要的是：探测能把“连到了哪个端口”写进日志。手动启动时最常见的困惑是
+ * “我明明开着歌白”——不知道它跑在 3001 还是 3100。
+ */
+auto resolve_agent_url(const std::string& explicit_url) -> std::string {
+  if (!explicit_url.empty()) return explicit_url;
+  // 宿主拉起时传了端口变量：最准，不必探测
+  if (const char* port = std::getenv("GEBAI_PORT"); port != nullptr && *port != '\0') {
+    return std::format("ws://127.0.0.1:{}/xiangqi", port);
+  }
+  for (const int candidate : LOCAL_GEBAI_PORTS) {
+    // 只做 TCP 可达性判定（不做 WS 握手）：握手失败也算“有东西在听”，
+    // 让后续真正的建连过程去报具体错误（如路径不对/非歌白服务）。
+    auto probe = st::net::connect_tcp("127.0.0.1", static_cast<std::uint16_t>(candidate), 200);
+    if (probe.has_value()) {
+      auto stream = std::move(*probe);
+      stream.close();
+      return std::format("ws://127.0.0.1:{}/xiangqi", candidate);
+    }
+  }
+  // 一个都没起来：给缺省地址（建连失败会在界面上如实显示，不假装）
+  return "ws://127.0.0.1:3000/xiangqi";
+}
 
 auto parse_options(int argc, char** argv) -> Options {
   Options options;
@@ -796,10 +912,13 @@ auto parse_options(int argc, char** argv) -> Options {
       options.home = next();
     } else if (arg == "--renderer") {
       options.renderer = next();
-    } else if (arg == "--agent") {
-      options.agent_url = next();
-    }
+      } else if (arg == "--agent") {
+    options.agent_url = next();
   }
+  }
+  // 解析完参数才知道有没有显式给：未给则自动探测本地歌白（端口从缺省开始试）。
+  // 放在这里而不是成员缺省值里：探测要连 TCP，不该在构造 Options 时隐式做。
+  options.agent_url = resolve_agent_url(options.agent_url);
   return options;
 }
 
@@ -1432,23 +1551,33 @@ auto run_app(int argc, char** argv) -> int {
   // 现在：后台线程只碰自己拥有的局部对象（`Built`），主线程等到
   // `agent_connect_done` 后才 `adopt()` 装进成员——中间无共享可变状态。
   AgentLink link;
-  /// 后台线程建连的产物 + 把“结果已就绪”与数据放在**同一把锁**下。
-  ///
-  /// 为何不只靠一个 atomic 标志：`Built` 里是 `unique_ptr` 与 `std::string`，
-  /// 它们本身没有原子性。仅用 `done` 做同步也能对（release/acquire 能建立
-  /// happens-before），但那要求两边都严格不遗漏内存序——把数据与标志放在
-  /// 同一把锁下，下个人改这块时不需要重新推一遍时序是否正确。
-  std::mutex agent_mutex{};
-  AgentLink::Built agent_built{};
-  bool agent_connect_done = false;
-  /// 主循环侧：是否已把连接结果落位并汇报（只做一次）。
-  bool agent_connect_reported = false;
-  std::thread agent_worker([&options, &agent_mutex, &agent_built, &agent_connect_done] {
-    auto built = AgentLink::build_connection(options.agent_url);
-    const std::lock_guard<std::mutex> guard(agent_mutex);
-    agent_built = std::move(built);
-    agent_connect_done = true;
-  });
+  /// 断线重连调度（退避曲线）。
+  ReconnectScheduler reconnect{};
+
+  /// 后台建连所需的**长寿命**上下文（同样为了 detach 线程的安全）。
+  struct ConnectCtx {
+    std::mutex mutex{};
+    AgentLink::Built built{};
+    std::atomic<bool> done{false};
+    std::atomic<bool> busy{false};
+    std::string url{};
+  };
+  auto connect_ctx = std::make_shared<ConnectCtx>();
+  connect_ctx->url = options.agent_url;
+
+  /// 在后台线程发起一次建连（主线程只调这个，不直接连）。
+  auto start_connect = [connect_ctx]() {
+    if (connect_ctx->busy.exchange(true)) return;   // 已在建：不重复发
+    std::thread([connect_ctx] {
+      auto built = AgentLink::build_connection(connect_ctx->url);
+      {
+        const std::lock_guard<std::mutex> guard(connect_ctx->mutex);
+        connect_ctx->built = std::move(built);
+      }
+      connect_ctx->done.store(true);
+    }).detach();   // 结果经 done 回传，不 join（否则又卡主线程）
+  };
+  start_connect();
 
   // ⑤ 暴露能力 + 装载 JS
   CardStore store;
@@ -1512,25 +1641,35 @@ auto run_app(int argc, char** argv) -> int {
   while (!app.quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
 
-    // 首帧已出：汇报 agent 连接结果（连接本身在后台线程做的，见第 ④ 步）。
-    if (!agent_connect_reported) {
-      std::unique_lock<std::mutex> guard(agent_mutex, std::try_to_lock);
-      if (guard.owns_lock() && agent_connect_done) {
-        guard.unlock();
-        agent_connect_reported = true;   // 只落位/汇报一次
-        // 落位仍然要拿锁（`Built` 里是 move-only 资源）
-        AgentLink::Built built;
-        {
-          const std::lock_guard<std::mutex> relock(agent_mutex);
-          built = std::move(agent_built);
-        }
-        if (built.ok) {
-          link.adopt(std::move(built));
-          st::log::out("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
+    // 建连结果落位（初始连接与断线重连共用）：后台线程建好、主线程装进来。
+    if (connect_ctx->busy.load() && connect_ctx->done.load()) {
+      // 落位要拿锁（`Built` 里是 move-only 资源）
+      AgentLink::Built built;
+      {
+        const std::lock_guard<std::mutex> guard(connect_ctx->mutex);
+        built = std::move(connect_ctx->built);
+      }
+      connect_ctx->done.store(false);   // 为下一轮重连就绪
+      connect_ctx->busy.store(false);   // 线程已把结果交出，可以再建
+      if (built.ok) {
+        link.adopt(std::move(built));
+        const int prev_attempts = reconnect.attempts();
+        reconnect.on_success();
+        store.link_retry_hint.clear();
+        if (prev_attempts > 0) {
+          st::log::out("[相期] 已重新连上 agent 控制器（此前失败 {} 次）：{}\n", prev_attempts,
+                    options.agent_url);
         } else {
-          st::log::out("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n",
-                    built.error);
+          st::log::out("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
         }
+        // 重连后必须重拉一次卡片：断线期间 agent 可能推过新卡，
+        // 而窗口侧只在“收到整批同步”时替换——不拉就会长期停在旧列表上。
+        store.poll_inbox();
+      } else {
+        reconnect.on_failure(st::time::now_ms());
+        st::log::out(
+            "[相期] 未能连接 agent 控制器（{}）——降级为文件投递，{}ms 后重试（第 {} 次）\n",
+            built.error, reconnect.remaining_ms(st::time::now_ms()), reconnect.attempts());
       }
     }
 
@@ -1590,6 +1729,32 @@ auto run_app(int argc, char** argv) -> int {
     // 保活：长时间无消息时主动 ping，确认对端活着；无响应则断开（半开死链现形）。
     link.keepalive();
 
+    // 断线监护 + 自动重连。
+    //
+    // ## 为何要自动重连（而不是维持“断线不自动重连”的旧约定）
+    //
+    // 旧约定担心的是“看起来连着其实早就断了”——那个诉求是对的，但它靠
+    // **不重连**来实现是错的：常驻面板断开后只能靠人注意到图标变红再去重启，
+    // 而歌白重启/升级是**常态**（每次改代码都要重启）。结果是助手静默失效。
+    //
+    // 正解是“重连，但**如实显示**”：`link_retry_hint` 写清“重连中（第 N 次，X 秒后）”，
+    // 用户看到的是一个**在努力恢复**的状态，而不是一个假装正常的状态。
+    if (link.connected()) {
+      // 连接正常：清掉重连痕迹（刚重连成功时也可能走到这里，无影响）
+      if (!store.link_retry_hint.empty()) store.link_retry_hint.clear();
+    } else if (!connect_ctx->busy.load()) {
+      const auto now_ms = st::time::now_ms();
+      // 首次断线：安排重连（下一帧起开始算退避）
+      if (reconnect.attempts() == 0) reconnect.on_failure(now_ms);
+      store.link_retry_hint = std::format("重连中（第 {} 次，{} 秒后）", reconnect.attempts(),
+                                      std::max<std::int64_t>(1, (reconnect.remaining_ms(now_ms) + 999) / 1000));
+      if (reconnect.due(now_ms)) {
+        st::log::out("[相期] 连接已断开，发起重连（第 {} 次）：{}\n", reconnect.attempts(),
+                  options.agent_url);
+        start_connect();
+      }
+    }
+
     // 热重载：`--watch` 时每帧判一次文件内容指纹（未开时是常数级判断）。
     //
     // 为何必须在主循环里调：`HotReload` 只是“比指纹 + 重建”，**推进它是调用方的事**。
@@ -1611,7 +1776,18 @@ auto run_app(int argc, char** argv) -> int {
   }
   // 后台连接线程必须收尾——它持有 `link` 的引用，而 `link` 是本函数局部变量。
   // 连接超时最多 400 ms，所以这里最多等那么久（正常情况下早已完成）。
-  if (agent_worker.joinable()) agent_worker.join();
+  //
+  // 重连线程是 detach 的（结果经 `connect_ctx->done` 回传），所以退出时要**等它落地**：
+  // 否则它会往已销毁的 `connect_ctx` 里写（`shared_ptr` 已经在那边保命，但主循环
+  // 还在用 `link`，两边的生命期仍需对齐）。
+  // 上限 2 秒：建连超时是 400ms，正常远小于此；超时就不等了（宁可丢掉一次建连，
+  // 不能卡死用户关窗口）。
+  {
+    const auto deadline = st::time::now_ms() + 2'000;
+    while (connect_ctx->busy.load() && st::time::now_ms() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
   link.disconnect();
   st::log::out("相期退出：{} 帧，处理消息 {} 条（未处理的卡片留在 {}，下次启动会重新出现）", frames,
             handled, store.inbox_dir());

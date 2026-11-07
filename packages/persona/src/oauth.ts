@@ -118,6 +118,13 @@ export interface AuthorizeTicket {
   redirectUri: string
   /** 链接有效期（毫秒）——前端据此提示「请尽快授权」。 */
   expiresInMs: number
+  /**
+   * 生成时刻（ms）。
+   *
+   * 有了它，持有链接的一方（授权卡/前端横幅）才能自己判断“还能用多久”，
+   * 而不是盲信一个可能已失效的 URL——那会把用户送去白跑一趟授权页。
+   */
+  issuedAtMs: number
 }
 
 export interface ExchangeOptions {
@@ -175,7 +182,7 @@ export class PersonaOAuth {
     url.searchParams.set("state", state)
     url.searchParams.set("prompt", "consent") // 强制显示授权页（否则已授权过的用户会直接跳回，看不到权限变化）
 
-    return { url: url.toString(), state, scopes, redirectUri: opts.redirectUri, expiresInMs: PENDING_TTL_MS }
+    return { url: url.toString(), state, scopes, redirectUri: opts.redirectUri, expiresInMs: PENDING_TTL_MS, issuedAtMs: now }
   }
 
   /** 最近一次 pending（诊断/手动兑换时的默认值）。 */

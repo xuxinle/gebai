@@ -71,6 +71,8 @@ export interface PersonaCredentialsOptions {
   /** 覆盖 scopes（缺省 PERSONA_SCOPES）。 */
   scopes?: string
   log?: (level: "info" | "warn", msg: string) => void
+  /** 当前时刻（测试注入；缺省 `Date.now`）。授权链接的保质期判定靠它。 */
+  now?: () => number
   /**
    * 凭据状态变化时回调（授权完成 / 撤销 / 失效）。
    *
@@ -208,9 +210,31 @@ export class PersonaCredentials {
     this.opts.onChange?.(await this.status())
   }
 
-  /** 最近一次生成的授权链接（未发起过为 null）。 */
+  /**
+   * 最近一次生成的授权链接（**未过期**；已过期返回 null）。
+   *
+   * 为何要看保质期：链接里的 `state` 在 OAuth 侧只有 10 分钟（`PENDING_TTL_MS`，
+   * 过时即从 pending 里 GC 掉）。而上层（授权卡）会在过期后**重推**卡片——
+   * 若这里无脑返回 `lastTicket`，重推出去的是一张“10 分钟前就没用了”的链接：
+   * 用户点开、走完飞书授权页，回来报到“授权会话已过期”。
+   *
+   * 实测路径：相期未运行 → 启动时推卡失败/无人看见 → 5 分钟定时器发现卡过期 →
+   * 重推 → 用户点了一个死链接。现象是“一直授权不成功”，但服务端日志全绿。
+   */
   authorizeUrl(): string | null {
-    return this.lastTicket?.url ?? null
+    if (this.lastTicket === null) return null
+    if (this.ticketExpired(this.lastTicket)) {
+      this.lastTicket = null
+      return null
+    }
+    return this.lastTicket.url
+  }
+
+  /** 链接是否已过期（`issuedAt` 缺省时视为不过期：兼容旧票据形态）。 */
+  private ticketExpired(ticket: AuthorizeTicket): boolean {
+    const issuedAt = (ticket as { issuedAtMs?: number }).issuedAtMs
+    if (issuedAt === undefined) return false
+    return this.now() - issuedAt >= ticket.expiresInMs
   }
 
   /**
@@ -218,15 +242,26 @@ export class PersonaCredentials {
    *
    * 没有配置应用凭据时返回 null——此时前端显示「需要配置应用凭据」而不是
    * 给一个必然报错的授权链接。
+   *
+   * **过期即重新生成**（而不是继续用旧的）：上层拿到 null 就会以“没有链接”处理，
+   * 而拿到一个死链接会把它展示给用户并让人白跑一趟授权页。
    */
   private ensureTicket(): AuthorizeTicket | null {
-    if (this.lastTicket) return this.lastTicket
+    if (this.lastTicket !== null) {
+      if (!this.ticketExpired(this.lastTicket)) return this.lastTicket
+      this.lastTicket = null
+    }
     if (!this.opts.appId() || !this.opts.appSecret()) return null
     try {
       return this.startAuthorize()
     } catch {
       return null
     }
+  }
+
+  /** 当前时刻（可用测试注入）。 */
+  private now(): number {
+    return this.opts.now?.() ?? Date.now()
   }
 }
 
