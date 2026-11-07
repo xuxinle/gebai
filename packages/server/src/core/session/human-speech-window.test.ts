@@ -141,8 +141,9 @@ describe("SentMessageRegistry 落盘：跨重启仍能认出自己发的消息",
     const path = join(dir, "m.jsonl")
     const ok = new SentMessageRegistry({ storePath: path })
     ok.record("om_good")
-    // 追加一行垃圾
-    Bun.write(path, readFileSync(path, "utf-8") + "这不是合法行\n\u0000乱码")
+    // 追加一行垃圾（**必须 await**：Bun.write 是异步的，不等它就构造新实例会读到旧内容，
+    // 于是这条测试会“碰巧通过”而实际什么都没验证到）
+    await Bun.write(path, readFileSync(path, "utf-8") + "这不是合法行\n\u0000乱码")
     const next = new SentMessageRegistry({ storePath: path })
     expect(next.hit("om_good")).toBe(true) // 好的那条仍在
     rmSync(dir, { recursive: true, force: true })

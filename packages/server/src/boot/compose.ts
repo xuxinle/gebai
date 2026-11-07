@@ -52,7 +52,7 @@ import { ensureCorporateTrust } from "../core/trust/corporate"
 import { dataSubdir, log, setLogLevel } from "@gebai/sdk/node"
 import { FeishuConn } from "../feishu-bot/conn"
 import { ChannelRegistry, ChannelInputBridge, SentMessageRegistry, defaultChannelScanDirs } from "@gebai/channels"
-import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard } from "../core/session/persona-expiry"
+import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard, redirectUriProblems } from "../core/session/persona-expiry"
 import { HumanSpeechWindow, yieldWindowFromEnv } from "../core/session/human-speech-window"
 import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
 import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
@@ -392,6 +392,13 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
    * 查这个 bug 前先看到的现象就是“到期了它也没弹窗”。
    */
   let personaAuthCardExpiresAt = 0
+  /**
+   * 回调地址问题的告警是否已经记过（只记一次）。
+   *
+   * 为何去重：这个判定每 5 分钟跑一次，不记就会把同一段长文案刷满日志——
+   * 真正的问题反而被埋掉（与 persona:token 的 needsAuth 只记一次同款纪律）。
+   */
+  let authCardProblemLogged = false
   /** 启动后（子Agent 已发现）再推卡：凭据创建时相期还可能没被发现。 */
   let personaAuthCardSync: ((status: import("@gebai/persona").PersonaCredentialStatus) => Promise<void>) | null = null
   /** 面板点「去授权」时的主动推送通路（令牌请求主通路）；未启用时为 null。 */
@@ -412,6 +419,17 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     const { PersonaTokenStore, PersonaOAuth, PersonaCredentials, scopesFromEnv } = await import("@gebai/persona")
     const personaAppId = () => process.env.GEBAI_CHANNELS_FEISHU_APP_ID || process.env.GEBAI_FEISHU_APP_ID
     const personaAppSecret = () => process.env.GEBAI_CHANNELS_FEISHU_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET
+    /**
+     * 飞书授权回调地址（**唯一真源**）。
+     *
+     * 为何要抽成函数而不是在两处各拼一遍：这个字符串必须与飞书后台登记的
+     * **逐字一致**（差一个字符就 20029），而它同时被三处用到（生成链接、日志提示、
+     * 预检判定）。分散拼写必然出现“修了一处、另一处还是旧的”。
+     */
+    const callbackUrl = (): string => {
+      const base = (process.env.GEBAI_PUBLIC_URL ?? "").replace(/\/+$/, "")
+      return `${base || `http://localhost:${config.port}`}/api/v1/persona/feishu/callback`
+    }
 
     /**
      * 按凭据状态维护相期上的授权卡（推/撤）。
@@ -437,6 +455,24 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           return
         }
         if (!status.authorizeUrl) return // 未配应用凭据：推了也是废链接
+        // 回调地址注定收不到重定向（回环地址）→ **不推卡**。
+        //
+        // 实测故障：令牌无 offline_access，2 小时必死；而回调指向 localhost，
+        // 用户在手机上点完永远回不到本机——于是每 10 分钟推一张卡、点一次报一次错。
+        // 这种“注定失败的重试”比不提醒更糟：用户学会无视所有弹卡。
+        // 改为：只记一次日志（带修复指引），不再推卡。
+        const problems = redirectUriProblems(callbackUrl())
+        if (problems.length) {
+          if (!authCardProblemLogged) {
+            authCardProblemLogged = true
+            log.error(
+              `[gebai] 飞书授权无法完成，已停止自动推卡：\n` +
+                problems.map((p) => `  · ${p}`).join("\n") +
+                `\n  修好后在面板点「去授权」手动触发一次（或重启）。`,
+            )
+          }
+          return
+        }
         // 已有卡在**且未过期** → 不重复推。
         //
         // 过期判断不能省（`shouldPushAuthCard`，单测钉住）：卡 TTL 10 分钟，
@@ -494,10 +530,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       // 部署方在后台开通后可经 GEBAI_PERSONA_SCOPES 追加。
       scopes: scopesFromEnv(),
       // 回调走拟人专用端点（与会话级 /api/v1/oauth/feishu/callback 分开）
-      redirectUri: () => {
-        const base = (process.env.GEBAI_PUBLIC_URL ?? "").replace(/\/+$/, "")
-        return `${base || `http://localhost:${config.port}`}/api/v1/persona/feishu/callback`
-      },
+      redirectUri: callbackUrl,
       log: (level, msg) => log[level](msg),
       // 授权完成/撤销 → 同步相期上的卡
       onChange: (status) => void syncAuthCard(status),
@@ -584,7 +617,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     } else if (cred.authorizeUrl) {
       log.warn(`[gebai] 飞书凭据不可用：${cred.message}`)
       log.warn(`[gebai] 授权链接：${cred.authorizeUrl}`)
-      log.warn(`[gebai] 回调地址需已在飞书后台登记：${process.env.GEBAI_PUBLIC_URL || `http://localhost:${config.port}`}/api/v1/persona/feishu/callback`)
+      log.warn(`[gebai] 回调地址需已在飞书后台登记：${callbackUrl()}`)
     } else {
       log.warn(`[gebai] 飞书凭据不可用：${cred.message}（未配置 GEBAI_CHANNELS_FEISHU_APP_ID / _APP_SECRET，无法发起授权）`)
     }

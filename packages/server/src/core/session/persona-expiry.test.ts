@@ -13,6 +13,7 @@ import {
   AUTH_CARD_TTL_MS,
   authCardDeadline,
   decideExpiry,
+  redirectUriProblems,
   shouldPushAuthCard,
   WARN_BEFORE_MS,
 } from "./persona-expiry"
@@ -72,5 +73,44 @@ describe("authCardDeadline：宁早勿晚", () => {
 
   test("宽限期确实比 TTL 短（否则刚推就算过期，会连环重推）", () => {
     expect(AUTH_CARD_SKEW_MS).toBeLessThan(AUTH_CARD_TTL_MS)
+  })
+})
+
+describe("回调地址预检：回环地址是结构性不可能成功", () => {
+  test("localhost / 127.0.0.1 / 0.0.0.0 都被判为问题", () => {
+    for (const host of ["localhost", "127.0.0.1", "0.0.0.0"]) {
+      const p = redirectUriProblems(`http://${host}:3000/api/v1/persona/feishu/callback`)
+      expect(p.length).toBe(1)
+      expect(p[0]).toContain("回环地址")
+      expect(p[0]).toContain("GEBAI_PUBLIC_URL") // 必须给出修复动作
+    }
+  })
+
+  test("公网/内网穿透地址 → 无问题", () => {
+    expect(redirectUriProblems("https://gebai.example.com/api/v1/persona/feishu/callback")).toEqual([])
+    expect(redirectUriProblems("http://192.168.1.10:3000/api/v1/persona/feishu/callback")).toEqual([])
+  })
+
+  test("非法 URL → 单独报出（不能悄悄当成没问题）", () => {
+    const p = redirectUriProblems("不是url")
+    expect(p.length).toBe(1)
+    expect(p[0]).toContain("不是合法 URL")
+  })
+})
+
+describe("授权卡重推上限：注定失败时不再骚扰", () => {
+  test("连续失败达 3 次 → 不再自动推（即使卡已过期）", () => {
+    expect(shouldPushAuthCard(null, 0, 1000, 3)).toBe(false)
+    expect(shouldPushAuthCard("card-1", 500, 10_000, 3)).toBe(false)
+  })
+
+  test("失败 2 次仍可重推（给用户留出反应机会）", () => {
+    expect(shouldPushAuthCard("card-1", 500, 10_000, 2)).toBe(true)
+  })
+
+  test("没失败过 → 旧语义不变（卡在且未过期不重推，过期就推）", () => {
+    expect(shouldPushAuthCard("card-1", 5000, 1000, 0)).toBe(false)
+    expect(shouldPushAuthCard("card-1", 500, 1000, 0)).toBe(true)
+    expect(shouldPushAuthCard(null, 0, 1000, 0)).toBe(true)
   })
 })
