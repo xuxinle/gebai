@@ -265,6 +265,22 @@ export const source: EventSourceDef = {
               ...(history ? { extra: { historyCount: String(historyLimit), readIdentity: history ? (useUser ? "user" : "app") : "none" } } : {}),
             },
           }
+          // 标“这条是不是用户亲手打的”。
+          //
+          // 为何需要这个标注：人格以 `as_user` 发言后，那条消息回灌时
+          // sender_type=user、open_id 与用户本人**完全相同**——字段上无从区分。
+          // 而两者的处置应该完全不同：
+          // - 用户亲手打的 = 本人当场介入（最高优先级，可打断当前工作）
+          // - 人格自己刚发的 = 自己的话（绝不应当新指令重答）
+          //
+          // `sentMessages.hit` 已在上面把它们挡掉了；能走到这里的
+          // **就是用户亲手发的**（或是其他成员）。所以这里写的是一个
+          // 正面事实而不是猜测：“能到此 = 不是我自己说的”。
+          ingress.refs!.extra = {
+            ...(ingress.refs!.extra ?? {}),
+            by: "human",
+          }
+          if (!senderName?.trim()) ingress.refs!.extra.senderUnresolved = "1"
           const r = await ctx.emit(ingress)
           if (r.status !== "accepted") {
             ctx.log("warn", `消息 ${msg.messageId} 未被接管（${r.status}${"reason" in r && r.reason ? `：${r.reason}` : ""}）`)

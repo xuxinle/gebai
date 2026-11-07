@@ -259,3 +259,57 @@ describe("ensureXiangqiReady 恢复闭环", () => {
     expect(r.review).toBe("approved")
   })
 })
+describe("让位窗口（C）：用户刚亲手发过言时人格不抢话", () => {
+  /** 一个“用户刚说过话”的窗口。 */
+  function windowWith(chatId: string, ms = 60_000) {
+    const w = new (require("../session/human-speech-window").HumanSpeechWindow)({ windowMs: ms })
+    w.note(chatId)
+    return w
+  }
+
+  test("窗口内 → 拒绝发送，且理由说清「这不是失败、多久后恢复」", async () => {
+    const w = windowWith("oc_x")
+    const r = await personaOutboundGate(
+      ctxWithPersona("xiaoshuang") as never,
+      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi" } },
+      { askCard: askCardOf("deliver-approve"), humanSpeech: w },
+    )
+    expect(r.allowed).toBe(false)
+    expect(r.reason).toContain("让位窗口")
+    // 关键：不能只说“拒绝”，否则模型会当成失败并反复重试
+    expect(r.reason).toContain("不是失败")
+    // 也不该先弹卡（注定被拒的事不该浪费人一次点击）
+    expect(r.cardPushed).toBeFalsy()
+  })
+
+  test("窗口内但用户明确要求（explicit:true）→ 正常走审核", async () => {
+    const w = windowWith("oc_x")
+    const r = await personaOutboundGate(
+      ctxWithPersona("xiaoshuang") as never,
+      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi", explicit: true } },
+      { askCard: askCardOf("deliver-approve"), humanSpeech: w },
+    )
+    expect(r.allowed).toBe(true)
+    expect(r.review).toBe("approved")
+  })
+
+  test("别的群说话不影响本群发送（让位是按群的礼貌）", async () => {
+    const w = windowWith("oc_other")
+    const r = await personaOutboundGate(
+      ctxWithPersona("xiaoshuang") as never,
+      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi" } },
+      { askCard: askCardOf("deliver-approve"), humanSpeech: w },
+    )
+    expect(r.allowed).toBe(true)
+    expect(r.review).toBe("approved")
+  })
+
+  test("未注入让位窗口 → 保持旧行为（不能被“缺省当成在窗口内”全堵死）", async () => {
+    const r = await personaOutboundGate(
+      ctxWithPersona("xiaoshuang") as never,
+      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi" } },
+      { askCard: askCardOf("deliver-approve") },
+    )
+    expect(r.allowed).toBe(true)
+  })
+})

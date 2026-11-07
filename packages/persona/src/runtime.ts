@@ -36,6 +36,25 @@ export interface PersonaRuntimeOptions {
   lookup: PersonaLookup
   runner: PersonaRunner
   sessions: SessionResolver
+  /**
+   * 收到「用户亲手发言」时的回调（可选）。
+   *
+   * 用来驱动**让位窗口**：用户在一个群里当场说话了，人格在短时间内不该抢话。
+   * 只对 `refs.extra.by === "human"`（事件源打的标）的事件触发——
+   * 人格自己发出去的回灌已经在事件源被拦下，不会走到这里。
+   */
+  onHumanSpeech?: (event: PersonaEvent) => void
+  /**
+   * 用户亲手发言时是否**硬打断**正在跑的轮次（缺省 false）。
+   *
+   * 缺省不打断：用户插一句话不等于“你现在这个活别干了”——硬打断会丢掉
+   * 已经算到一半的成果（包括已发出的消息）。默认只把它当**高优先级插话**
+   * （下一轮边界吸收），这已足够“立即响应”。
+   *
+   * 确实需要“一说话就抢方向盘”的场景（客服坐席类）显式开启：
+   * `GEBAI_PERSONA_HUMAN_INTERRUPT=1`。
+   */
+  interruptOnHumanSpeech?: boolean
   /** 全局幂等环容量（默认 2048；按「事件×driver」计条目）。 */
   dedupeCapacity?: number
   /** 每 driver 待跑队列上限（默认 64）。 */
@@ -153,6 +172,11 @@ export class PersonaRuntime {
   /** 统一事件入口：广播给所有关注该事件的 driver（跨角色、跨 driver）。 */
   async dispatch(event: PersonaEvent): Promise<PersonaDispatchResult> {
     if (!this.started) return { status: "unavailable", reason: "人格运行时未启动" }
+    // 先记一笔「用户亲手发言」：让位窗口（C）与优先级判断（B）都靠它。
+    //
+    // 放在路由**之前**：即使 unrouted（无 driver 关注），用户说过话这个事实
+    // 仍然成立——人格可能正从别的分身往这个群发东西。
+    this.opts.onHumanSpeech?.(event)
     const targets = this.resolveTargets(event)
     if (targets.length === 0) return { status: "unrouted" }
     const deliveries = await this.mapLimit(targets, this.fanoutConcurrency, (t) => this.deliverTo(event, t))
@@ -453,12 +477,25 @@ export class PersonaRuntime {
       }
       const sessionId = resolved.sessionId
       firstSessionId ??= sessionId
+      // 用户亲手打的 = 高优先级（B）：走 `insert` 插话（会话在跑则被下一轮边界吸收，
+      // 而不是排在几十个待办后面），而不是默认排队。
+      //
+      // 为何不无条件 `cancelRunning`：硬打断会丢掉正在做的活（包括已发出的部分成果），
+      // 而“用户发言”大多数时候并不需要那么急（他说完一句，人格下一轮就能读到）。
+      // 真是急切场景用 `GEBAI_PERSONA_HUMAN_INTERRUPT=1` 显式开启硬打断。
+      const human = groupEvents.some((e) => e.context.refs?.extra?.by === "human")
+      const strategy: "insert" | "queue" | undefined = human ? "insert" : undefined
       const aheads = scheduler.enqueueMany(
-        groupEvents.map((e) => ({ event: e, sessionId, user: t.user, threadKey: driver.id })),
+        groupEvents.map((e) => ({ event: e, sessionId, user: t.user, threadKey: driver.id, ...(strategy ? { strategy } : {}) })),
       )
       if (aheads.some((a) => a < 0)) {
         this.bump(key, "overflowed")
         return { personaId, driverId: driver.id, status: "overflow", sessionId, reason: "待处理队列已满" }
+      }
+      // 硬打断（可选）：只对人亲手发言、且显式开启时生效。
+      if (human && this.opts.interruptOnHumanSpeech && scheduler.isRunning(sessionId)) {
+        this.log?.info(`[persona:${key}] 用户亲手发言 → 打断正在跑的轮次（${sessionId}）`)
+        scheduler.cancelRunning(sessionId)
       }
       maxAhead = Math.max(maxAhead, ...aheads)
     }

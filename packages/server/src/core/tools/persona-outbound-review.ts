@@ -84,6 +84,18 @@ export interface OutboundGateResult {
 export interface OutboundGateDeps {
   /** 相期 card_ask 工具（compose 注入；缺省 = 审核环节跳过并记日志——不能因装配缺失把发送全堵死）。 */
   askCard?: AskCardTool
+  /**
+   * 用户亲手发言的让位窗口（compose 注入）。
+   *
+   * 缺省不注入 = 不启用让位（保持旧行为），而不是“静默当成在窗口内”——
+   * 后者会让所有发送被莫名其妙地拒。
+   */
+  humanSpeech?: { inWindow(chatId: string): boolean; remainingMs(chatId: string): number }
+  /**
+   * 让位窗口的例外：明确是用户本人要求的发送（如他说“你回复他”）。
+   * 由调用方传入（`args.__explicit`）；缺省 false。
+   */
+  isExplicitRequest?: (args: Record<string, unknown>) => boolean
   /** 授权卡推送（compose 注入 syncAuthCard；缺省跳过弹卡）。 */
   pushAuthCard?: () => Promise<void>
   /** 相期重启（compose 注入 launchXiangqi；缺省不重启）。 */
@@ -190,7 +202,28 @@ export async function personaOutboundGate(
     }
   }
 
-  // ② 出站审核（默认开）：推 card_ask 等批准
+  // ② 让位窗口（C）：用户刚在这个群亲手说过话 → 人格不抢话。
+  //
+  // 放在审核之前：既然注定要拒，就不应该先弹一张卡浪费人一次点击。
+  // 例外：用户**明确要求**的发送不受限（否则“你回他”之后人格还会静默，荒谬）。
+  const chatId = input.target.startsWith("feishu:") ? input.target.slice("feishu:".length).split(/[#=]/)[0]! : ""
+  // 例外：`args.explicit === true`（模型声明“这是用户本人要求的”）。
+  // 为何由模型声明而不是我猜：判定逻辑看不懂语义；而“用户说了‘你回他’”这件事
+  // 只有模型读得到。风险是模型滥用它——但那与它本就有的自由天平相当
+  // （审核卡仍是最后一道关，用户会在卡上看到并驳回）。
+  const explicit = input.args.explicit === true || deps.isExplicitRequest?.(input.args) === true
+  if (chatId && !explicit && deps.humanSpeech?.inWindow(chatId)) {
+    const seconds = Math.max(1, Math.ceil(deps.humanSpeech.remainingMs(chatId) / 1000))
+    return {
+      allowed: false,
+      reason:
+        `用户本人在这个群刚亲手发过言（还有约 ${seconds} 秒的让位窗口）——此刻发言会看着像抢话。` +
+        `**这不是失败**：你已经处理完了就不必再发；确实需要回复就等窗口过去，` +
+        `或在消息里注明这是用户本人要求的（传 \`explicit: true\`）。`,
+    }
+  }
+
+  // ③ 出站审核（默认开）：推 card_ask 等批准
   if (!outboundReviewEnabled(env)) return { allowed: true, review: "disabled" }
 
   // 送卡前确保相期通道就绪：不在 → 自动重启 + 等重连（防抖/single-flight 在 ensureXiangqiReady 内）

@@ -80,4 +80,4 @@ export type { ChannelInputBridgeOptions, InputCounters, PersonaDispatchPort } fr
 export { ChannelInputBridge, eventIdFor, hash32 } from "./bridge"
 
 // ── 自发送消息记账（入站侧防回灌） ──
-export { SentMessageRegistry } from "./outbox"
+export { SentMessageRegistry, DEFAULT_TTL_MS } from "./outbox"

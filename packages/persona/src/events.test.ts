@@ -109,3 +109,46 @@ describe("hash32", () => {
     expect(hash32("abc")).toHaveLength(8)
   })
 })
+
+describe("用户亲手发言的身份标注（D）：模型必须知道这条不是它自己说的", () => {
+  /** 构造一条事件（context 是元信息容器，body 是正文）。 */
+  function ev(extra?: Record<string, string>): import("./event").PersonaEvent {
+    return {
+      id: "msg:om_1",
+      personaId: "xiaoshuang",
+      channel: "feishu",
+      kind: "message" as const,
+      body: "帮我看下这个告警",
+      receivedAt: 1_700_000_000_000,
+      context: {
+        source: "飞书群 oc_a",
+        summary: "张三：帮我看下这个告警",
+        refs: { chatId: "oc_a", messageId: "om_1", senderName: "张三", ...(extra ? { extra } : {}) },
+      },
+    }
+  }
+
+  test("by=human → 渲染出明确身份声明（防两种误解）", async () => {
+    const { renderBatch } = await import("./render")
+    const text = renderBatch([ev({ by: "human" })])
+    // 正面事实：人亲手打的
+    expect(text).toContain("人亲手打的")
+    // 两个具体防误解：不是自己发的 + 按最高优先级
+    expect(text).toContain("不是你自己发出去的话")
+    expect(text).toContain("最高优先级")
+  })
+
+  test("by=human 不渲染成普通键值（它是身份事实，混在 a=b 里会被漏看）", async () => {
+    const { renderBatch } = await import("./render")
+    const text = renderBatch([ev({ by: "human", ticket: "T-1" })])
+    expect(text).not.toContain("by=human")
+    // 但其它 extra 照常渲染
+    expect(text).toContain("ticket=T-1")
+  })
+
+  test("没有 by 标注（定时任务/webhook）→ 不出现身份声明（不能乱贴标签）", async () => {
+    const { renderBatch } = await import("./render")
+    const text = renderBatch([ev(undefined)])
+    expect(text).not.toContain("人亲手打的")
+  })
+})

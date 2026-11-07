@@ -53,6 +53,7 @@ import { dataSubdir, log, setLogLevel } from "@gebai/sdk/node"
 import { FeishuConn } from "../feishu-bot/conn"
 import { ChannelRegistry, ChannelInputBridge, SentMessageRegistry, defaultChannelScanDirs } from "@gebai/channels"
 import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard } from "../core/session/persona-expiry"
+import { HumanSpeechWindow, yieldWindowFromEnv } from "../core/session/human-speech-window"
 import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
 import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
 
@@ -401,6 +402,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 用可变容器桥接（persona 块就绪后填充；未启用拟人时保持空——未注入时审核环节
   // 如实拒绝，与「拟人未启用则无人格会话」自洽）。
   const personaOutboundDeps: import("../core/tools/persona-outbound-review").OutboundGateDeps = {}
+  /** 用户亲手发言的让位窗口（C）：入站记、出站查；未启用拟人时为 null。 */
+  let personaHumanSpeech: import("../core/session/human-speech-window").HumanSpeechWindow | null = null
   // launchXiangqi 的反向引用（定义在函数尾 return 前；出站审核自动重启用它）：
   // persona 块先于其定义，故用可变引用桥接，launchXiangqi 定义后填充。
   let launchXiangqiRef: ((port: number) => Promise<void>) | null = null
@@ -561,13 +564,19 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         log.warn(`[gebai] 出站审核自动重启相期失败：${String((err as Error)?.message || err)}`)
       }
     }
-    personaOutboundDeps.isXiangqiConnected = () => {
-      try {
-        return xiangqiController().isConnected()
-      } catch {
-        return false
-      }
+      personaOutboundDeps.isXiangqiConnected = () => {
+    try {
+      return xiangqiController().isConnected()
+    } catch {
+      return false
     }
+  }
+  // 用户亲手发言的让位窗口（C）：入站侧记、出站侧查。
+  //
+  // 为何挂在出站而不是入站：用户说话时人格仍应该能读、能答（那是它的工作），
+  // 只是不该**抢话**。所以限的是“主动发言”这一动作，不是“处理事件”。
+  personaHumanSpeech = new HumanSpeechWindow({ windowMs: yieldWindowFromEnv(process.env) })
+  personaOutboundDeps.humanSpeech = personaHumanSpeech
     // 启动检查（不吐令牌明文，只报状态）
     const cred = await creds.status()
     if (cred.ready) {
@@ -656,7 +665,15 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 自发送消息记账（防回灌）：渠道 act 成功登记 message_id，两端飞书入站（渠道长连接 +
   // 人格事件源）共享同一实例按 id 过滤——自己发的消息不会被当新消息再处理一轮。
   // 单例必须在此处（渠道与人格源装配之前）创建，且两个注入面拿到同一个实例。
-  const sentMessages = new SentMessageRegistry()
+  //
+  // **落盘 + 7 天 TTL**（不是早期那个 10 分钟内存表）：人格以 `as_user` 发言后，
+  // 那条消息与用户本人发言在飞书事件里**完全同形**（sender_type=user、同一个 open_id），
+  // 唯一依据就是这里的记录。飞书重投可能远超 10 分钟，进程重启也会清空——
+  // 两者任一发生，人格就会把自己说过的话当用户的新指令再答一遍。
+  // 落点放 data/persona/ 下（与人格其余状态同级，迁移时一起带走）。
+  const sentMessages = new SentMessageRegistry({
+    storePath: join(dataSubdir(config.gebaiHome, "persona"), "sent-messages.jsonl"),
+  })
   // 对外动作渠道（act/observe 工具，DESIGN「对外动作：渠道抽象」）：与子Agent/事件源同款
   // 「丢文件即注册」——内置 packages/channels/src/channels/ + 二开 custom/channels/。
   // 发现/启动失败只记 loadErrors 不阻断启动（单渠道坏不能连带整个服务起不来）。
@@ -966,9 +983,20 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       log: { info: log.info, warn: log.warn },
     })
 
-    personaRuntime = new PersonaRuntime({
-      lookup: personaCatalog,
-      sessions: personaSessions,
+      personaRuntime = new PersonaRuntime({
+    lookup: personaCatalog,
+    sessions: personaSessions,
+    // 用户亲手发言 → 记入让位窗口（C）。
+    //
+    // 为何在运行时入口记而不是在出站里推：出站只看得到“我要发到哪里”，
+    // 看不到“那个群刚刚有人说话”；而入站事件里带着 `refs.extra.by=human`
+    // （事件源打的标：能走到那里的**就是人亲手发的**——人格自己的回灌已被挡掉）。
+    onHumanSpeech: (event) => {
+      if (event.context.refs?.extra?.by !== "human") return
+      personaHumanSpeech?.note(event.context.refs?.chatId)
+    },
+    // 硬打断（缺省关）：用户说话就抢方向盘，仅适合坐席类场景。
+    interruptOnHumanSpeech: /^(1|true|on|yes)$/i.test((process.env.GEBAI_PERSONA_HUMAN_INTERRUPT ?? "").trim()),
       // 会话关联规则（`GEBAI_PERSONA_SESSION_ROUTING`）：**缺省 driver = 一个分身一个上下文**，
       // 不同群的消息都注入同一会话（会话面向上下文，不面向群）。
       // `chat` 只是可选的群间隔离模式，需部署方显式要求。

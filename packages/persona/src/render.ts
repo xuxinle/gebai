@@ -152,6 +152,15 @@ function renderEventBlock(
   }
   lines.push("【正文】")
   lines.push(truncate(e.body.trim(), opts.maxBody))
+  // 身份声明：**用户亲手发的** vs 其他。
+  //
+  // 为何必须说：人格以 `as_user` 发言后，回灌的自发言与用户手打在事件里完全同形。
+  // 回灌已被 `sentMessages` 挡掉（所以能走到这里的确实是人发的），但模型
+  // 自己不知道这个前提——它会本能地把“以用户名义的话”当成自己上次说的话，
+  // 或者把自己的旧输出当成用户的反馈。一句事实能同时防住两种误解。
+  if (e.context.refs?.extra?.by === "human") {
+    lines.push("（这条是**人亲手打的**，不是你自己发出去的话。它是用户的当场发言：按最高优先级处理；若与你正在做的事冲突，以它为准）")
+  }
   if (opts.includeHint) {
     const hint = replyHint(e)
     if (hint) lines.push(`（${hint}）`)
@@ -187,6 +196,10 @@ function metaLine(e: PersonaEvent): string {
   if (refs?.taskId) parts.push(`任务=${refs.taskId}`)
   if (refs?.extra) {
     for (const [k, v] of Object.entries(refs.extra)) {
+      // `by=human` 不当作普通键值渲染：它是**身份事实**，会在下面单独说清楚。
+      // 混在 `a=b` 一串里模型会漏看，而它恰好是“要不要把这句当新指令”的依据。
+      if (k === "by") continue
+      if (k === "senderUnresolved") continue
       if (v !== undefined && v !== "") parts.push(`${k}=${v}`)
     }
   }

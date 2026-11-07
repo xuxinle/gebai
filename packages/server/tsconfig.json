@@ -6,6 +6,8 @@
       "@gebai/sdk": ["../sdk/src"],
       "@gebai/sdk/node": ["../sdk/src/node.ts"],
       "@gebai/agents": ["../agents/src"],
+      "@gebai/channels": ["../channels/src"],
+      "@gebai/persona": ["../persona/src"],
       "@gebai/server/credential-sources": ["./credential-sources.ts"]
     }
   },
