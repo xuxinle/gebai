@@ -886,6 +886,22 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "两腿 AgX 一致性：同一份受控平面在软件腿与 GPU 腿上取中心像素。受控平面只有一个数，两腿之差只可能来自色调映射链"
     },
+    "sweep_shadow_extent": {
+      "kind": "executable",
+      "sources": ["tools/sweep_shadow_extent.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "扫描 shadow_map.extent，用暗部质心与 Cycles 的距离选最优"
+    },
+    "light_dir_semantics": {
+      "kind": "executable",
+      "sources": ["tools/light_dir_semantics.cpp", "src/python/mp_bridge.c",
+                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
+                  "src/raster/bpy_runtime.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "判定 Light::direction 的语义（指向光源 vs 照射方向）：头文件与 software_scene 注释相反，用几何判据实测定夺"
+    },
     "bpy_render": {
       "kind": "executable",
       "sources": ["tools/bpy_render.cpp", "src/python/mp_bridge.c",
@@ -1304,6 +1320,8 @@
     "system": ["pthread", "dl", "m"]
   }
 }
+
+
 
 
 

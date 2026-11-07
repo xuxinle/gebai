@@ -3641,9 +3641,18 @@ SamplerComparisonState g_shadow_sampler : register(s1);
 /// ## 为何用比较式采样而不是手动比较
 ///
 /// `SampleCmpLevelZero` 让硬件做“采样值 vs 参考值”的比较并返回 0/1，
-/// 配合线性过滤就是免费的 2×2 PCF。手写比较要自已做多次采样与双线性插值，
+/// 配合线性过滤就是免费的 2×2 PCF。手写比较要自己做多次采样与双线性插值，
 /// 而且无法利用硬件的 PCF 单元。
-float shadow_factor(float3 world) {
+///
+/// ## 为何需要 `normal`：斜率缩放偏置（slope-scale bias，2026-11-07）
+///
+/// 固定偏置下，球面会出现**同心圆环**：球面法线与光线夹角小时，单个纹素
+/// 跨越的表面深度变化大，固定偏置压不住 → 自己遮自己。而地板（法线与光
+/// 几乎垂直）反而没事。实测（`parity_showdown.py` 的金属球）非常明显。
+///
+/// 标准做法：`bias *= 1 + tan(acos(n·l))`。其中 `n·l` 用 `g_light.xyz`
+/// （它是指向光源的方向）与法线点积。
+float shadow_factor(float3 world, float3 normal) {
   if (g_shadow_tune.x <= 0.0) return 0.0;
   const float4 clip = mul(g_shadow_vp, float4(world, 1.0));
   if (clip.w <= 0.0) return 0.0;
@@ -3651,7 +3660,16 @@ float shadow_factor(float3 world) {
   // NDC [-1,1] → 纹理 [0,1]，且 y 翻一下（D3D 的 NDC y 向上，纹理 v 向下）
   const float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
-  const float reference = ndc.z - g_shadow_tune.y;
+  // ## 斜率缩放偏置
+  //
+  // `g_light.xyz` 是**指向光源**的方向（与软件腿的 `light_dir_` 同义），
+  // 所以 n·l > 0 表示面向光源。掠射角（n·l → 0）时 tan 爆炸，限幅 8 倍。
+  const float3 light_dir = normalize(g_light.xyz);
+  const float ndl = clamp(dot(normalize(normal), light_dir), 0.0, 1.0);
+  const float cos_theta = max(ndl, 0.05);
+  const float tan_factor = sqrt(max(0.0, 1.0 - cos_theta * cos_theta)) / cos_theta;
+  const float slope_scale = min(1.0 + tan_factor, 8.0);
+  const float reference = ndc.z - g_shadow_tune.y * slope_scale;
   const float radius = g_shadow_tune.z;
   // ## 为何是四参数重载
   //
@@ -4021,7 +4039,7 @@ float4 ps_scene3d_body(VsOut input) : SV_Target {
   // 自发光不受影响：`emission_unlit` 的物体（霓虹灯管）不该因为被挡住就变暗。
   // 用 `g_emissive.w < 0` 判定纯发光体（与 C++ 侧同一个约定）。
   if (g_shadow_tune.x > 0.0 && g_emissive.w >= 0.0) {
-    const float occl = shadow_factor(input.world);
+    const float occl = shadow_factor(input.world, normalize(input.normal));
     if (occl > 0.0) {
       hdr *= (1.0 - occl * g_shadow_tune.x);
     }
@@ -5068,7 +5086,18 @@ class GpuScene3d final : public st::raster::Scene3D {
                              static_cast<std::size_t>(row)] = shadow_vp.value(row, column);
           }
         }
-        params.shadow_tune = {shadow_map_.strength, shadow_map_.bias,
+        // ## 偏置要随 extent 缩放（2026-11-07，与软件腿同一修法）
+        //
+        // 正交投影的深度精度与 extent 成反比。固定的 0.0015 在 extent=9
+        // 时只够覆盖半个纹素——实测满屏条纹。
+        //
+        // 公式与软件腿（`software_scene.cpp` 的 `texel_depth`）一致：
+        // 一个纹素跨越的深度 ≈ 2·extent / (res · 2·extent) = 1/res，
+        // 取 2.5 倍。两边用**同一个式子**，否则修了一边另一边还是条。
+        const float gpu_texel_depth =
+            1.0f / static_cast<float>(std::max(shadow_resolution_, 1));
+        const float gpu_bias = std::max(shadow_map_.bias, gpu_texel_depth * 2.5f);
+        params.shadow_tune = {shadow_map_.strength, gpu_bias,
                               shadow_map_.soft_radius,
                               static_cast<float>(shadow_resolution_)};
       }

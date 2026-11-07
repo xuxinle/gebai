@@ -380,16 +380,21 @@ class SoftwareScene final : public Scene3D {
     //
     // 主光的三个量分散在 `Lighting` 上（`light_from` 方向、`light_color` 颜色、
     // `diffuse` 强度），不像 `extra_lights` 那样是现成的一个 `Light`。
-    // 这里现场拼一个等价物，后面的代码就不用分两支。
     //
-    // ⚠ `light_from` 是**指向光源**的方向，而 `Light::direction` 的语义是
-    // **照射方向**（两者差一个负号）。直接拷会让阴影投到反方向，
-    // 而画面里“有影子”只是位置不对——极难查。
+    // ## `light_from` 与 `Light::direction` **同义**，不要取负
+    //
+    // 两者都是「**指向光源**」的方向（`scene3d.hpp` 的 `Light::direction`
+    // 注释与 `pbr_sample_light` 的参数名 `direction_toward_light` 都是这个
+    // 口径；`extra_lights` 也是直接传 `light.direction`）。
+    //
+    // 我一度以为 `Light::direction` 是「照射方向」并在这里加了三个负号，
+    // 后果是影子整体投到**反侧**——画面里“有影子”、只是位置全错。
+    // 判据：看 `pbr_sample_light` 的调用点（`extra_lights` 直接传），
+    // 而不是看某个注释的字面。
     Light light{};
     if (shadow_map_.light_index < 0) {
       light.kind = LightKind::Directional;
-      light.direction = math::Vec3{-lighting_.light_from.x, -lighting_.light_from.y,
-                                   -lighting_.light_from.z};
+      light.direction = lighting_.light_from;
       light.color = lighting_.light_color;
       light.intensity = lighting_.diffuse;
     } else {
@@ -403,31 +408,42 @@ class SoftwareScene final : public Scene3D {
     const int res = std::clamp(shadow_map_.resolution, 64, 4096);
     shadow_depth_.assign(static_cast<std::size_t>(res) * static_cast<std::size_t>(res), 1.0f);
 
-    // 光源朝向：平行光用 `direction`，聚光同。`direction` 是**照射方向**。
+    // 光源朝向：`direction` 是「**指向光源**」（与 `Light::direction` 同义）。
     math::Vec3 dir = light.direction;
     const float dir_len = dir.length();
     if (dir_len <= 1e-6f) return;
     dir = math::Vec3{dir.x / dir_len, dir.y / dir_len, dir.z / dir_len};
 
-    // 光源相机：从“逆向远处”看向原点（平行光无位置）。
-    // 聚光有位置，但从它的位置看与从远处看（同方向）在小锥角下几乎一致。
+    // 光源相机：站在**光源一侧**看向原点（平行光无位置，沿方向后退 dist）。
+    //
+    // `dir` 是「指向光源」，所以 eye 往**正方向**退：
+    //
+    //     eye = origin + dir * dist
+    //     target = eye - dir        ← 往回看
+    //
+    // 与 `scene3d.cpp::ShadowMap::make_view_projection` **逐字同构**。
     const float dist = std::max(shadow_map_.extent * 2.0f, 4.0f);
-    const math::Vec3 eye{light.kind == LightKind::Spot ? light.position.x - dir.x * dist
-                                                      : -dir.x * dist,
-                         light.kind == LightKind::Spot ? light.position.y - dir.y * dist
-                                                      : -dir.y * dist,
-                         light.kind == LightKind::Spot ? light.position.z - dir.z * dist
-                                                      : -dir.z * dist};
-    const math::Vec3 target{eye.x + dir.x, eye.y + dir.y, eye.z + dir.z};
+    const math::Vec3 origin = light.kind == LightKind::Spot ? light.position
+                                                            : math::Vec3{0.0f, 0.0f, 0.0f};
+    const math::Vec3 eye{origin.x + dir.x * dist, origin.y + dir.y * dist,
+                         origin.z + dir.z * dist};
+    const math::Vec3 target{eye.x - dir.x, eye.y - dir.y, eye.z - dir.z};
     // up 不能与 dir 平行：|dir.y| 接近 1 时改用 X 轴做 up
     const math::Vec3 up = std::abs(dir.y) > 0.99f ? math::Vec3{1.0f, 0.0f, 0.0f}
                                                  : math::Vec3{0.0f, 1.0f, 0.0f};
     const math::Mat4 view = math::Mat4::look_at(eye, target, up);
+    // 投影参数顺序：`orthographic(height, aspect, near, far)`
+    //
+    // 与 `scene3d.cpp::ShadowMap::make_view_projection` 保持**逐字一致**——
+    // 两边算出来的阴影矩阵必须完全相同，否则两腿的阴影会不一样。
     const math::Mat4 proj =
         math::Mat4::orthographic(shadow_map_.extent * 2.0f, 1.0f, 0.01f, dist * 2.0f);
     shadow_vp_ = proj * view;
-    // 存一份光方向（指向光源）：斜率缩放偏置要用
-    light_dir_ = math::Vec3{-dir.x, -dir.y, -dir.z};
+    // 存一份光方向（**指向光源**）：斜率缩放偏置要用
+    //
+    // 直接就是 `dir`：上面的 `dir` 已是「照射方向」（与 `Light::direction`
+    // 同义，即指向光源），所以这里**不能再取负**。
+    light_dir_ = dir;
 
     // 光栅化：每个三角形投到贴图上，写最小深度
     const float half = static_cast<float>(res) * 0.5f;

@@ -253,15 +253,19 @@ auto ShadowMap::make_view_projection(const Lighting& lighting) const -> math::Ma
   //
   // 主光的量分散在 `Lighting` 上（`light_from` / `light_color` / `diffuse`），
   // 不像 `extra_lights` 那样是现成的一个 `Light`。现场拼出三个必要量。
+  // ## 统一口径：`direction` 始终是「**指向光源**」
   //
-  // ⚠ `light_from` 是**指向光源**，而后面算相机用的是**照射方向**（差一负号）。
+  // 这是 `Light::direction` 与 `pbr_sample_light(direction_toward_light)` 的
+  // 官方语义，`light_from` 也是这个口径——所以两边**直接赋值，都不取负**。
+  //
+  // 我一度把它当「照射方向」用（主光取负、`eye = origin - direction*dist`），
+  // 结果影子整体投到**反侧**，而画面里“有影子”、只是位置全错。
   math::Vec3 direction{};
   float intensity = 0.0f;
   bool is_spot = false;
   math::Vec3 spot_position{};
   if (light_index < 0) {
-    direction = math::Vec3{-lighting.light_from.x, -lighting.light_from.y,
-                           -lighting.light_from.z};
+    direction = lighting.light_from;
     intensity = lighting.diffuse;
   } else {
     if (static_cast<std::size_t>(light_index) >= lighting.extra_lights.size()) {
@@ -281,18 +285,40 @@ auto ShadowMap::make_view_projection(const Lighting& lighting) const -> math::Ma
   if (length <= 1e-6f) return math::Mat4::identity();
   direction = math::Vec3{direction.x / length, direction.y / length, direction.z / length};
 
-  // 光源相机：从「逆向远处」看向原点（平行光无位置）。
-  // 聚光有位置，但从它的位置看与从远处看（同方向）在小锥角下几乎一致——
-  // 这个取舍的代价是：大锥角聚光的阴影会偏小。
+  // 光源相机：站在**光源一侧**看向原点（平行光无位置，沿方向后退 dist）。
+  //
+  // `direction` 是「指向光源」，所以 eye 要往**正方向**退：
+  //
+  //     eye = origin + direction * dist    ← 在光源那一侧
+  //     target = eye - direction           ← 往回看（朝 -direction）
+  //
+  // 旧代码写的是 `eye = origin - direction*dist`（当时以为 direction 是
+  // 照射方向）。符号错了就会从**背光侧**看出去，影子当然整个不对。
   const float dist = std::max(extent * 2.0f, 4.0f);
   const math::Vec3 origin = is_spot ? spot_position : math::Vec3{0.0f, 0.0f, 0.0f};
-  const math::Vec3 eye{origin.x - direction.x * dist, origin.y - direction.y * dist,
-                       origin.z - direction.z * dist};
-  const math::Vec3 target{eye.x + direction.x, eye.y + direction.y, eye.z + direction.z};
+  const math::Vec3 eye{origin.x + direction.x * dist, origin.y + direction.y * dist,
+                       origin.z + direction.z * dist};
+  const math::Vec3 target{eye.x - direction.x, eye.y - direction.y, eye.z - direction.z};
   // up 不能与 direction 平行：|direction.y| 接近 1 时改用 X 轴
   const math::Vec3 up = std::abs(direction.y) > 0.99f ? math::Vec3{1.0f, 0.0f, 0.0f}
                                                      : math::Vec3{0.0f, 1.0f, 0.0f};
   const math::Mat4 view = math::Mat4::look_at(eye, target, up);
+  // ## 投影参数顺序：`orthographic(height, aspect, near, far)`
+  //
+  // 这个坑值得记下来（2026-11-07，我自己踩了）：
+  //
+  // 签名是 `orthographic(height, aspect, near, far)`，内部：
+  //
+  //     half_h = height * 0.5
+  //     half_w = half_h * aspect
+  //
+  // 所以 `orthographic(extent * 2, 1.0, ...)` → half_h = extent、
+  // half_w = extent —— **正方形，本来就对**。
+  //
+  // 我一度以为第一个参数是 aspect，改成 `(1.0, extent * 2)`，得
+  // half_h = 0.5、half_w = extent 的扁条——球的地面投影当场消失。
+  // 教训：判断参数语义要看**函数体**和**另一个调用点**（相机那里传的是
+  // `ortho_scale` = 垂直可视高度），不能凭「宽在前还是高在前」的直觉。
   const math::Mat4 proj = math::Mat4::orthographic(extent * 2.0f, 1.0f, 0.01f, dist * 2.0f);
   return proj * view;
 }

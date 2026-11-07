@@ -346,22 +346,72 @@ class Object:
         sz = math.sqrt(at(0, 2) ** 2 + at(1, 2) ** 2 + at(2, 2) ** 2)
         self.scale = Vector((sx, sy, sz))
         # 旋转：去掉缩放后的 3×3 → 提取欧拉角（XYZ，与 Blender 默认顺序一致）
+        #
+        # ## 下半三角要用「对称位置」而不是「同行/同列」
+        #
+        # XYZ 欧拉（R = Rz·Ry·Rx，行主序）的旋转矩阵是：
+        #
+        #     R[2][0] = -sin(y)            → y = asin(-R[2][0])
+        #     R[2][1] =  cos(y)·sin(x)     → x = atan2(R[2][1], R[2][2])
+        #     R[1][0] =  cos(y)·sin(z)     → z = atan2(R[1][0], R[0][0])
+        #
+        # 旧代码把中间两个写成了 `at(2,1)` 和 `at(1,0)` 以外的对称位
+        # （`r21 = at(2,1)` 配 `atan2(r21, r22)` 其实对，但 `r10` 用了
+        #  `at(1,0)` 而下面 `atan2(r10, r00)` 期望的是 R[1][0]）——
+        # 真正错的是：分解出来的三个角再合成时，结果矩阵被**转置**。
+        #
+        # 实测（`tmp/rt7.py`，用异常把数值带出来）：
+        #
+        #   setter 存的 col2 = 0.3909, 0.8687, 0.3041
+        #   getter 读回 col2 = 0.7894, 0.5334, 0.3041   ← 行列对调
+        #   setter 存的 row2 = -0.7894, -0.5334, 0.3041
+        #   getter 读回 row2 = -0.3909, -0.8687, 0.3041  ← 同上
+        #
+        # 后果：任何用 `matrix_world = ...` 定向的东西（相机、灯光）都会
+        # 被旋转错位。阴影因此投到错误方向（实测光方向取到 (0.789,0.533)，
+        # 正确应为 (0.391,0.869)——差约 40°）。
+        # ## 提取公式必须与 `Euler.to_matrix()` **互逆**
+        #
+        # `Euler.to_matrix()` 写的是：
+        #
+        #     m = Rx(x).matmul(Ry(y)).matmul(Rz(z))     ← 即 R = Rx·Ry·Rz
+        #
+        # 而旧提取公式用的是标准 XYZ 欧拉（R = Rz·Ry·Rx）。两者**不是**
+        # 同一个旋转的两种写法，而是两个不同的旋转空间——所以往返必然错位。
+        #
+        # 实测（`tmp/rt7.py`，用异常把数值带出）：
+        #
+        #   setter 存的 col2 = 0.3909, 0.8687, 0.3041
+        #   getter 读回 col2 = 0.7894, 0.5334, 0.3041   ← 行列对调
+        #
+        # 后果：用 `matrix_world = ...` 定向的相机/灯光全被旋转错位。
+        # 阴影因此投到错误方向（光方向实测 (0.789,0.533)，应为 (0.391,0.869)）。
+        #
+        # ## R = Rx·Ry·Rz 的显式元素（行主序）
+        #
+        #     R = |  cy·cz            -cy·sz           sy     |
+        #         |  sx·sy·cz+cx·sz    -sx·sy·sz+cx·cz  -sx·cy |
+        #         | -cx·sy·cz+sx·sz     cx·sy·sz+sx·cz   cx·cy |
+        #
+        # 所以提取（cos(y) ≠ 0 时）：
+        #
+        #     y = asin( R[0][2])
+        #     x = atan2(-R[1][2], R[2][2])
+        #     z = atan2(-R[0][1], R[0][0])
         r00 = at(0, 0) / sx if sx > 1e-12 else 1.0
-        r10 = at(1, 0) / sx if sx > 1e-12 else 0.0
-        r20 = at(2, 0) / sx if sx > 1e-12 else 0.0
-        r21 = at(2, 1) / sy if sy > 1e-12 else 0.0
+        r01 = at(0, 1) / sy if sy > 1e-12 else 0.0
+        r02 = at(0, 2) / sz if sz > 1e-12 else 0.0
+        r12 = at(1, 2) / sz if sz > 1e-12 else 0.0
         r22 = at(2, 2) / sz if sz > 1e-12 else 1.0
-        # 标准 XYZ 欧拉提取：
-        #   y = asin(-r20)；cos(y) != 0 时 x = atan2(r21, r22)、z = atan2(r10, r00)
-        sy_angle = math.asin(max(-1.0, min(1.0, -r20)))
+        sy_angle = math.asin(max(-1.0, min(1.0, r02)))
         cos_y = math.cos(sy_angle)
         if abs(cos_y) > 1e-6:
-            sx_angle = math.atan2(r21, r22)
-            sz_angle = math.atan2(r10, r00)
+            sx_angle = math.atan2(-r12, r22)
+            sz_angle = math.atan2(-r01, r00)
         else:
-            # 万向锁：x 与 z 只能确定一个，令 x = 0
+            # 万向锁：x 与 z 只能确定一个，令 x = 0，全给 z
             sx_angle = 0.0
-            sz_angle = math.atan2(-at(0, 1), at(1, 1))
+            sz_angle = math.atan2(at(1, 0), at(1, 1))
         self.rotation_euler = Euler((sx_angle, sy_angle, sz_angle))
 
     @property
