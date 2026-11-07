@@ -297,6 +297,31 @@ export class GebaiClient {
     return this.connected
   }
 
+  /**
+   * 主动判死当前连接并进入自动重连退避。
+   *
+   * 为何需要它：浏览器发出 `offline` 时，WS 对象往往仍是 `OPEN`、心跳定时器也照跑，
+   * 不会自己触发 `onclose`——这种「半死连接」只能靠主动断开把状态机推到退避重连；
+   * 否则界面会持续谎报「已连接」，还得等心跳超时（默认 10s）才被采到。
+   *
+   * **与 `closeWs()` 的区别**：那个把 `manualClose = true`（登录/登出/换令牌，不再重连）；
+   * 这里必须保留重连意图——网络恢复后要靠退避重连接回。
+   *
+   * 幂等：未连接时无操作。
+   */
+  dropConnection(): void {
+    if (!this.ws && !this.connected) return
+    this.stopHeartbeat()
+    // 不置 manualClose：让 onclose 走自动重连退避
+    try {
+      this.ws?.close()
+    } catch {
+      /* 已关闭 */
+    }
+    // 不等 onclose（某些环境关闭是异步的）：立即如实上报断开，界面不谎报
+    this.setConnected("disconnected")
+  }
+
   /** 订阅连接状态变化（"connected"/"disconnected"）；返回退订函数。 */
   onStatusChange(handler: (status: "connected" | "disconnected") => void): () => void {
     this.statusHandlers.push(handler)

@@ -79,8 +79,13 @@ describe("手机后台半死连接：回前台/定时自检必需接线", () => 
   })
 
   test("回前台信号覆盖 pageshow 与定时自检（visibilitychange 在冻结场景不可靠）", () => {
+    // 取整个函数体（按下一个 export 开头截止）：原先写死 900 字符窗口，
+    // 函数一变长就把尾部的断言挤掉——那不是行为回归，是断言自己脆了。
     const s = attachSrc()
-    const fn = s.slice(s.indexOf("export function bindConnectionVerify"), s.indexOf("export function bindConnectionVerify") + 900)
+    const start = s.indexOf("export function bindConnectionVerify")
+    const rest = s.slice(start + 1)
+    const end = rest.search(/\nexport /)
+    const fn = end < 0 ? rest : rest.slice(0, end)
     expect(fn).toContain('addEventListener("pageshow"')
     expect(fn).toContain('addEventListener("visibilitychange"')
     expect(fn).toContain("setInterval(trigger, VERIFY_INTERVAL_MS)")

@@ -1,8 +1,9 @@
 /** 运行中会话附加恢复（自 main.ts 拆分）：attach 快照应用与待决交互卡重渲染。 */
 import { renderPendingInteraction, renderPendingToolCalls } from "./pending-interactions"
 import { attachRunningIfNeeded, loadMessages, markSessionRunning, setRunningAttach } from "./sessions"
-import { attaching, client, getCurrentSession, runs } from "./state"
+import { attaching, client, getCurrentSession, runs, setConn } from "./state"
 import { consumeTaskStream, discardRunBubble } from "./stream"
+import { actionForNetEvent, bindNetworkEvents, type NetEvent } from "./net-status"
 
 /** 附加运行中会话（DESIGN「运行中会话恢复」，loadMessages 尾部钩子调用）：
  *  页面刷新/切换进入运行中会话时——快照（在途流 + 待决交互）→ 待决卡片重建（审批/选择/填值/
@@ -111,7 +112,38 @@ export function bindConnectionVerify(): void {
     if (!document.hidden) trigger()
   })
   window.addEventListener("pageshow", trigger)
+  /*
+   * 网络连通性：浏览器自己尽最快给出的信号（早于任何定时器）。
+   *
+   * 挂在 **window** 上，不是 navigator：`online`/`offline` 是 window 的事件，
+   * `navigator` 只有 `onLine` 这个只读属性、**没有 addEventListener**（实测：
+   * `typeof navigator.addEventListener === "undefined"`）。挂错对象会被降级成 no-op，
+   * 而 no-op 不会报错——断网时界面照旧显示已连接，看起来像“改了没生效”。
+   */
+  bindNetworkEvents(typeof window !== "undefined" ? (window as unknown as Parameters<typeof bindNetworkEvents>[0]) : null, (ev: NetEvent) => {
+    handleNetEvent(ev)
+  })
   // 定时自检：手机后台冻结时 visibilitychange 不触发、定时器也会停摆，
   // 恢复后的首拍是最可靠的信号——以此兜底（不可见时不跑，省电省流量）。
   setInterval(trigger, VERIFY_INTERVAL_MS)
+}
+
+/**
+ * 网络事件处理：把「网没了 / 网回来了」变成具体动作（判据见 net-status.ts 的 actionForNetEvent）。
+ *
+ * 为何不能只靠定时自检：它每 10 秒跑一拍，网络恢复后**最长白等 10 秒**，而这段时间界面
+ * 持续显示旧的运行态（用户看到的就是“网回来了但还卡着”）；断网时更是持续谎报“已连接”。
+ */
+function handleNetEvent(ev: NetEvent): void {
+  const action = actionForNetEvent(ev)
+  // 先改文案（断网时用户应立即看到原因，而不是干等心跳超时）
+  if (action.label) setConn(action.label, !action.warn)
+  if (action.dropConnection) {
+    // 半死连接：WS 对象往往仍 OPEN、心跳照跑但服务端早已收不到，不会自己 close。
+    // 主动判死 → onclose → 退避重连（不置 manualClose，保留重连意图）
+    client.dropConnection()
+    return
+  }
+  // 恢复：立即核对服务端真值（不等下一拍定时器）。不可见时也跑——网络恢复正是该补的时候
+  if (action.verify) void verifyConnection()
 }
