@@ -286,6 +286,32 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
   划分口径按「乱序会造成什么后果」而非按代码目录；未知消息类型落 `default`（仍保序，不阻塞其余域）。
 - **REST HTTP（`/api/*`，同步通道）**：会话管理/文件/审批决策等；`POST /api/v1/sessions/:id/prompt` 为**非流式 JSON**（同步等待任务完成，返回 `{ message: 最终 assistant 消息, error?: 任务错误 }`），供业务系统与无 WS 环境集成；**流式输出统一走 WebSocket**（`/ws`）
 
+#### 连接状态与运行态收敛（前端以后端为准）
+
+前端对「会话在不跑、跑到哪了」一律**以服务端为真值**，不凭本地标志位猜。收敛靠四条信号，
+各管一段延迟（`web/src/attach.ts` + `net-status.ts` + `sdk/client.ts`）：
+
+| 信号 | 延迟 | 作用 |
+|---|---|---|
+| WS `state.snapshot`（建连/登录自动推送） | 即时 | 快照基线：当前会话/列表/`running`/`runtime`/`lastSeq` |
+| `sync.request` 重放 | 即时 | 按 `seq` 补发断线期错过的 `event.*`（缺口过大回 `overrun` → 全量重同步） |
+| `visibilitychange` / `pageshow` | 回前台即时 | 手机后台冻结后“半死连接”的真相核对 |
+| 定时自检（默认 10s） | ≤ 10s | 冻结期事件不可靠时的兵底 |
+| **`online` / `offline`（新增）** | **即时** | 断网与恢复的最快信号（早于任何定时器） |
+
+**为何必须单列网络事件**（它补的正是上表最后一行）：
+- **断网瞬间**：WS 对象往往仍是 `OPEN`、心跳定时器照跑，但服务端早已收不到——这种**半死连接不会自己 close**。
+  不主动断开就只能等心跳超时（默认 10s），这期间界面持续谎报「已连接」，用户发的消息石沉大海。
+  所以 `offline` → 立即标断开 + `client.dropConnection()`（**保留重连意图**，与登录/登出用的
+  `closeWs()` 相反——后者置 `manualClose` 不再重连）。
+- **恢复瞬间**：只能靠下一拍定时自检的话，最长**白等 10 秒**才被采到，用户看到的就是
+  “网回来了但界面还卡着”。所以 `online` → **立即自检**（不等定时器）。
+
+**挂事件的对象**：`online`/`offline` 是 **window** 的事件；`navigator` 只有只读的 `onLine`、
+**没有 `addEventListener`**。挂错对象会静默降级成 no-op——不报错、测试全绿，但断网时界面照旧显示已连接
+（已出现过的实际错误，现由 `net-wiring.test.ts` 静态盯住）。`navigator.onLine` 只作提前量：
+它为 true 只说明有网络接口，不代表能连到服务端（公司网需认证/代理挂了/服务端重启中）。
+
 消息发送与流式输出**统一走 WebSocket 单通道**：`sendPrompt`（SDK）经 WS `session.prompt` 发起任务，引擎事件（`event.message.delta`/`tool_call`/`tool_result`/`approval`/`task.done` 等）由连接级订阅推送，SDK 将事件流转换为 `ChatChunk` 迭代返回（`wsEventToChunk`，字段与原 SSE 契约一致）。
 
 #### 反向代理支持
