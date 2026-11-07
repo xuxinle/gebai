@@ -1,7 +1,14 @@
 """在**真 Blender** 里执行一份 bpy 场景脚本，并出图。
 
 用法：
-  blender --background --factory-startup --python tools/run_bpy_scene.py -- <scene.py> <out.png> [cycles|eevee] [samples]
+  blender --background --factory-startup --python tools/run_bpy_scene.py -- \
+      <scene.py> <out.png> [cycles|eevee] [samples] [width] [height]
+
+## 分辨率必须显式传（与霜天侧同源）
+
+不传时缺省 1100×800。早期把它**硬编码**成 1100×800，于是在跑
+800×600 的轮廓对照时，霜天按 800×600 渲、Cycles 按 1100×800 渲——
+两边取景尺度差 37%，测出的「边界差 122 像素」全是这个，与渲染器无关。
 
 ## 这个工具的意义（对比方法的正确性）
 
@@ -42,6 +49,9 @@ scene_path = rest[0]
 out_path = rest[1]
 engine = rest[2] if len(rest) > 2 else "cycles"
 samples = int(rest[3]) if len(rest) > 3 else 256
+# 分辨率：与霜天侧严格同源。用法里第 4/5 个数字参数就是 width/height。
+WIDTH = int(rest[4]) if len(rest) > 4 else 1100
+HEIGHT = int(rest[5]) if len(rest) > 5 else 800
 
 scene_path = os.path.abspath(scene_path)
 print("## 执行场景脚本:", scene_path)
@@ -63,9 +73,16 @@ if engine == "cycles":
 else:
     sc.eevee.taa_render_samples = samples
 
-# 分辨率：与霜天侧一致（1100×800，与其他对比图同口径）
-sc.render.resolution_x = 1100
-sc.render.resolution_y = 800
+# ## 分辨率：从命令行取，**不能再硬编码**（2026-11-07 修）
+#
+# 第一版写死 1100×800。而我在跑 800×600 的轮廓对照时，霜天按 800×600
+# 渲染、Cycles 却按 1100×800 渲染——两边取景尺度差了 37%，测出的
+# 边界差 122 像素全是这个原因，与渲染器毫无关系。
+#
+# 这类错误最隐：图能出、数字看着“有规律”，实际是拿两个不同尺度的
+# 图在比。现在从 `--` 之后的参数取，与霜天侧同源。
+sc.render.resolution_x = WIDTH
+sc.render.resolution_y = HEIGHT
 sc.render.resolution_percentage = 100
 sc.render.dither_intensity = 0.0
 # `filter_size = 0.01`：几乎关掉像素过滤。霜天那边没有 resolution filter，

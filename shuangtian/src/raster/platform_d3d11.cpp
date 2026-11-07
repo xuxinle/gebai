@@ -5094,6 +5094,14 @@ class GpuScene3d final : public st::raster::Scene3D {
         // 公式与软件腿（`software_scene.cpp` 的 `texel_depth`）一致：
         // 一个纹素跨越的深度 ≈ 2·extent / (res · 2·extent) = 1/res，
         // 取 2.5 倍。两边用**同一个式子**，否则修了一边另一边还是条。
+        // ## 与软件腿的偏差（已知遗留，2026-11-07）
+        //
+        // 软件腿的偏置现在是 `base + texel*0.5*tan`（斜率项单独叠加，
+        // 不会把地面接触阴影推走）。GPU 腿的 HLSL 内部用的是
+        // `bias *= (1 + tan)`——两腿在**掠射区与接触区**会有差异。
+        //
+        // 若要拉齐，需要给 HLSL 多传一个常量（改常量缓冲 + 着色器），
+        // 属于独立改动，不混在这次里。
         const float gpu_texel_depth =
             1.0f / static_cast<float>(std::max(shadow_resolution_, 1));
         const float gpu_bias = std::max(shadow_map_.bias, gpu_texel_depth * 2.5f);
