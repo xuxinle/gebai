@@ -439,6 +439,14 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
     scene.bpy_shadow_resolution = shadow[2].get<int>();
   }
 
+  // 脚本声明的 AO（`__st_ao__`）→ `[strength, radius, samples]` 或 null。
+  const Json& ao = json_at(root, "ao");
+  if (ao.is_array() && ao.size() >= 2) {
+    scene.bpy_ao = true;
+    scene.bpy_ao_strength = static_cast<float>(ao[0].get<double>());
+    scene.bpy_ao_radius = static_cast<float>(ao[1].get<double>());
+  }
+
   const Json& warnings = json_at(root, "warnings");
   if (warnings.is_array()) {
     for (const auto& item : warnings) {

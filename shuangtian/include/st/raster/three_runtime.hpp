@@ -202,6 +202,19 @@ struct ThreeScene {
   /// 阴影贴图分辨率
   int bpy_shadow_resolution{512};
 
+  /// 脚本声明的环境光遮蔽（`bpy.context.scene.__st_ao__`）。
+  ///
+  /// ## 为何需要它
+  ///
+  /// 路径追踪器（Cycles）**天然有间接光的接触遮蔽**——两个面交界处的
+  /// 犄角会比开阔处暗。光栅化器没有，必须显式开 AO 才近似。
+  ///
+  /// 实测（`parity_showdown.py` vs Cycles）就卡在这里：差异全集中在
+  /// **盒盒棱边一条窄带**上，不是整体偏移——那就是 AO 缺失的典型形状。
+  bool bpy_ao{false};
+  float bpy_ao_strength{0.8f};
+  float bpy_ao_radius{1.0f};
+
   /// 脚本是否**显式设了 world**。
   ///
   /// 为何要单独抽：真 Blender 里「没设 world」= 零环境光，而「设了 0.05 灰

@@ -1828,6 +1828,18 @@ auto scene_spec_from_bpy(std::string_view script, std::string_view script_name)
     // 而且不报错。实测就卡在这里。
     spec.shadow_map.light_index = -1;
   }
+
+  // ## AO：与阴影同一个原则（**默认不改，声明了才切**）
+  //
+  // Cycles 是路径追踪器，棱角处的间接光**天然**被遮住——那不需要任何开关。
+  // 而本框架是光栅化器，不开 AO 就一点接触遮蔽都没有。
+  //
+  // 实测（`parity_showdown.py`）：盒盒棱边的差异是一条**窄带**，
+  // 而不是整体偏移——那就是 AO 缺失的形状。
+  if (extracted->bpy_ao) {
+    spec.occlusion.strength = extracted->bpy_ao_strength;
+    spec.occlusion.radius = extracted->bpy_ao_radius;
+  }
   spec.bpy_script = std::string(script);
   spec.bpy_script_name = std::string(script_name);
   return spec;

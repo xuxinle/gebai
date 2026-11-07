@@ -741,6 +741,49 @@ def _extract_shadow():
     return (strength, extent, resolution)
 
 
+def _extract_ao():
+    """脚本声明的环境光遮蔽（`bpy.context.scene.__st_ao__`）。
+
+    ## 写法
+
+        bpy.context.scene.__st_ao__ = {"strength": 0.8, "radius": 1.2}
+
+    ## 为何需要它（2026-11-07）
+
+    路径追踪器（Cycles）**天然有间接光的接触遮蔽**——两个面交界处的
+    犄角会比开阔处暗。光栅化器没有，必须显式开 AO 才近似。
+
+    实测就卡在这里：盒子棱角处 Cycles 是 `rgb(46,52,66)`，而本框架是
+    `rgb(132,130,129)`（背景）或亮面——差异全集中在**棱边一条窄带**上，
+    不是整体偏移。那种分布就是 AO 缺失的典型形状。
+
+    ## 返回
+
+    `None` = 未声明（保持关闭，存量场景不受影响）；
+    否则 `(strength, radius)`，缺省 0.8 / 1.0。
+    """
+    context = _host.get('context')
+    if context is None:
+        return None
+    scene = getattr(context, 'scene', None)
+    if scene is None:
+        return None
+    declared = getattr(scene, '__st_ao__', None)
+    if declared is None:
+        return None
+    # 允许直接写数字（视为 strength）
+    if isinstance(declared, (int, float)):
+        return (float(declared), 1.0)
+    if not isinstance(declared, dict):
+        return None
+    try:
+        strength = float(declared.get('strength', 0.8))
+        radius = float(declared.get('radius', 1.0))
+    except (TypeError, ValueError):
+        return None
+    return (strength, radius)
+
+
 def _extract_world():
     """场景的世界背景色 → `[r, g, b]` 线性值（取不到时返回 None）。
 
@@ -902,6 +945,9 @@ def extract():
         # 脚本声明的阴影（`bpy.context.scene.__st_shadow__`）。
         # None = 没声明 → 保持关闭（存量场景不受影响）。
         'shadow': _extract_shadow(),
+        # 脚本声明的 AO（`bpy.context.scene.__st_ao__`）。
+        # None = 没声明 → 保持关闭。
+        'ao': _extract_ao(),
         'warnings': warnings,
     }
 

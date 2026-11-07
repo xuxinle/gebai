@@ -218,3 +218,24 @@ try:
     bpy.context.scene.__st_shadow__ = {"strength": 0.7, "extent": 9.0, "resolution": 1024}
 except AttributeError:
     pass
+
+# ── AO：**实测无效，已停用**（2026-11-07）
+#
+# 我曾开了 AO 想补上棱角处的接触遮蔽（那是 Cycles 有而光栅化器没有的）。
+# 实测否定：
+#
+# | | 平均差 vs Cycles |
+# |---|---|
+# | 不开 AO | 8.35 |
+# | 开 AO（0.8 / 1.2）| **9.13**（反而变差）|
+#
+# 根因：那个位置的差异**不是**「棱角暗了一点点」，而是霜天“盒顶面根本
+# 没覆盖到 x=660~666”（那里是背景色 132,130,129，而 Cycles 是盒面的
+# 46,52,66）。AO 只能把已有的表面调暗，**变不出不存在的表面**。
+#
+# 保留能力（`__st_ao__` 已接通），但在参数标定好之前不在这份场景里开——
+# 开了反而把已有基准整体拉暗。
+# try:
+#     bpy.context.scene.__st_ao__ = {"strength": 0.8, "radius": 1.2}
+# except AttributeError:
+#     pass
