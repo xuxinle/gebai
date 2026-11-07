@@ -1137,32 +1137,14 @@ class SoftwareScene final : public Scene3D {
       return found->second;
     }
 
-    // ② 未命中：真算
-    int hits = 0;
-    for (int i = 0; i < kOcclusionSamples; ++i) {
-      const float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(kOcclusionSamples);
-      // 余弦加权：sqrt 让样本向法线附近聚拢（与真实 AO 的积分权重一致）
-      const float sin_theta = std::sqrt(t);
-      const float cos_theta = std::sqrt(1.0f - t);
-      const float phi = static_cast<float>(i) * 2.399963f;   // 黄金角
-      // 以 n 为极轴构建局部坐标系
-      const math::Vec3 up = std::abs(n.y) > 0.99f ? math::Vec3{1.0f, 0.0f, 0.0f}
-                                                  : math::Vec3{0.0f, 1.0f, 0.0f};
-      const math::Vec3 tangent = up.cross(n).normalized();
-      const math::Vec3 bitangent = n.cross(tangent);
-      const float cos_phi = std::cos(phi);
-      const float sin_phi = std::sin(phi);
-      const math::Vec3 dir{tangent.x * (sin_theta * cos_phi) +
-                               bitangent.x * (sin_theta * sin_phi) + n.x * cos_theta,
-                           tangent.y * (sin_theta * cos_phi) +
-                               bitangent.y * (sin_theta * sin_phi) + n.y * cos_theta,
-                           tangent.z * (sin_theta * cos_phi) +
-                               bitangent.z * (sin_theta * sin_phi) + n.z * cos_theta};
-      if (ray_hits_geometry(world, dir)) ++hits;
-    }
-    const float occluded =
-        static_cast<float>(hits) / static_cast<float>(kOcclusionSamples);
-    const float value = std::clamp(1.0f - occluded * occlusion_strength_, 0.0f, 1.0f);
+    // ② 未命中：调共享内核（`pbr_ambient_occlusion`，两条腿用同一个）
+    OcclusionParams params{};
+    params.strength = occlusion_strength_;
+    params.radius = occlusion_radius_;
+    params.samples = kOcclusionSamples;
+    const float value =
+        pbr_ambient_occlusion(world, normal, shadow_geometry_.data(),
+                              shadow_geometry_.size(), params);
     // 有界：防止病态场景（超大坐标 + 小半径）把缓存垛爆。
     // 满了就清空重填——比无限增长安全（内存是硬约束）。
     if (occlusion_cache_.size() > kOcclusionCacheLimit) occlusion_cache_.clear();
@@ -1172,34 +1154,9 @@ class SoftwareScene final : public Scene3D {
 
   /// 从 `origin` 沿 `dir` 发一根长度为 `occlusion_radius_` 的射线，是否撞上几何。
   ///
-  /// 用 Möller–Trumbore。起点沿法线抬一点（`kOcclusionBias`）避开自相交——
-  /// 否则每个像素都会“撞到自己所在的那个三角形”，AO 全黑。
-  [[nodiscard]] auto ray_hits_geometry(math::Vec3 origin, math::Vec3 dir) const -> bool {
-    const math::Vec3 start{origin.x + dir.x * kOcclusionBias,
-                           origin.y + dir.y * kOcclusionBias,
-                           origin.z + dir.z * kOcclusionBias};
-    for (const ShadowTriangle& tri : shadow_geometry_) {
-      const math::Vec3 e1{tri.v[1].x - tri.v[0].x, tri.v[1].y - tri.v[0].y,
-                          tri.v[1].z - tri.v[0].z};
-      const math::Vec3 e2{tri.v[2].x - tri.v[0].x, tri.v[2].y - tri.v[0].y,
-                          tri.v[2].z - tri.v[0].z};
-      const math::Vec3 pvec{dir.y * e2.z - dir.z * e2.y, dir.z * e2.x - dir.x * e2.z,
-                            dir.x * e2.y - dir.y * e2.x};
-      const float det = e1.x * pvec.x + e1.y * pvec.y + e1.z * pvec.z;
-      if (std::abs(det) < 1e-8f) continue;   // 与三角形平行
-      const float inv_det = 1.0f / det;
-      const math::Vec3 tvec{start.x - tri.v[0].x, start.y - tri.v[0].y, start.z - tri.v[0].z};
-      const float u = (tvec.x * pvec.x + tvec.y * pvec.y + tvec.z * pvec.z) * inv_det;
-      if (u < 0.0f || u > 1.0f) continue;
-      const math::Vec3 qvec{tvec.y * e1.z - tvec.z * e1.y, tvec.z * e1.x - tvec.x * e1.z,
-                            tvec.x * e1.y - tvec.y * e1.x};
-      const float v = (dir.x * qvec.x + dir.y * qvec.y + dir.z * qvec.z) * inv_det;
-      if (v < 0.0f || u + v > 1.0f) continue;
-      const float dist = (e2.x * qvec.x + e2.y * qvec.y + e2.z * qvec.z) * inv_det;
-      if (dist > kOcclusionBias && dist < occlusion_radius_) return true;
-    }
-    return false;
-  }
+  /// （旧版这里有一个 `ray_hits_geometry`，AO 改走共享内核后零调用，
+  /// 已删除——本仓不养死代码。）
+
 
  private:
   /// 屏幕空间三角形光栅化：重心坐标 + z-buffer + 透视校正插值 + 逐像素光照。
@@ -1499,9 +1456,12 @@ class SoftwareScene final : public Scene3D {
   // ── 阴影贴图（shadow mapping，2026-10-24）──
 
   /// 世界空间三角形（阴影贴图的几何源）。
-  struct ShadowTriangle {
-    math::Vec3 v[3];
-  };
+  /// 世界空间三角形（阴影贴图与 AO 共用的几何源）。
+  ///
+  /// 直接用内核层的 `WorldTriangle`，不再自定义一个同构的 `ShadowTriangle`：
+  /// 两个同构结构并存会逼出 `reinterpret_cast`（lint L6），而那正是
+  /// “布局碰巧相同”的隐患——今天相同，明天某人给其中一个加个字段就静默错位。
+  using ShadowTriangle = WorldTriangle;
 
   /// 延迟绘制的网格（阴影贴图开启时）。
   ///

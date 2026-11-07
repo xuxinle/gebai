@@ -125,6 +125,12 @@ namespace st::raster {
 // 那是实现细节，换编译器/换 SDK 就断（本文件在 MinGW 上曾因缺它而编译不过）。
 #include <cstring>
 #include <format>
+// `<map>`：AO 的世界位置量化缓存用 `std::map`。
+//
+// 与上面 `<cstring>` 同一道理：**不能靠别的头间接带入**。
+// 实测过：本地全量构建能过，而 `independent_project_builds_links_and_runs`
+// 编不过（那个测试从零构建一个独立工程）——依赖间接包含就会这样分成两派。
+#include <map>
 #include <mutex>
 #include <span>
 #include <string>
@@ -139,6 +145,7 @@ namespace st::raster {
 #include "st/raster/glyph_atlas_content.hpp"
 #include "st/raster/color_pipeline.hpp"
 #include "st/raster/agx_lut.hpp"
+#include "st/raster/pbr.hpp"
 #include "st/raster/scene3d.hpp"
 
 namespace st::raster::gpu {
@@ -3586,6 +3593,15 @@ cbuffer Scene : register(b0) {
   float4 g_extra_colors[3];
   float4 g_extra_params[3];
   float4 g_extra_count;
+  // ## 阴影贴图（2026-11-07 新增）：与软件腿的 `ShadowMap` 同一语义
+  //
+  // g_shadow_vp：光源视角的 view-projection（世界 → 阴影贴图 NDC）
+  // g_shadow_tune：x = strength（0 = 关闭）、y = bias、z = soft_radius、w = 分辨率
+  //
+  // `g_shadow_tune.x == 0` 时 HLSL 整段跳过 → 与旧行为逐位相同。
+  // 这条对回归很重要：没开阴影的场景必须一字节不变。
+  float4x4 g_shadow_vp;
+  float4 g_shadow_tune;
 };
 
 struct VsIn {
@@ -3606,6 +3622,64 @@ struct VsOut {
 // 纹理（RGBA8，非预乘）：无 UV 的网格不采它，行为与以前完全一致
 Texture2D g_scene_texture : register(t0);
 SamplerState g_scene_sampler : register(s0);
+// 阴影贴图（R32_FLOAT 深度）。
+//
+// ⚠ 即使不采样也必须声明：寄存器 t1 绑定的是**纹理对象**，没开阴影时
+// 它是一张 1×1 的全 1 占位图（不是 nullptr）——绑 nullptr 会在部分驱动上
+// 让采样返回 0，而那会被当成“全部在阴影里”。
+Texture2D<float> g_shadow_map : register(t1);
+/// ⚠ 必须是 `SamplerComparisonState` 而不是 `SamplerState`。
+///
+/// `SampleCmpLevelZero` 的重载只接受 `SamplerComparisonState`。写成
+/// `SamplerState` 时报 `X3013: no matching ... intrinsic method`，
+/// 而那在运行时只表现为**GPU 腿静默不可用、退回软件腿**——
+/// 实测就这样骗了一个小时：两腿“完全一致”，实际上 GPU 腿从未跑起来。
+SamplerComparisonState g_shadow_sampler : register(s1);
+
+/// 某世界点是否在阴影里（PCF 柔化），返回 0（全亮）~ 1（全黑）。
+///
+/// ## 为何用比较式采样而不是手动比较
+///
+/// `SampleCmpLevelZero` 让硬件做“采样值 vs 参考值”的比较并返回 0/1，
+/// 配合线性过滤就是免费的 2×2 PCF。手写比较要自已做多次采样与双线性插值，
+/// 而且无法利用硬件的 PCF 单元。
+float shadow_factor(float3 world) {
+  if (g_shadow_tune.x <= 0.0) return 0.0;
+  const float4 clip = mul(g_shadow_vp, float4(world, 1.0));
+  if (clip.w <= 0.0) return 0.0;
+  const float3 ndc = clip.xyz / clip.w;
+  // NDC [-1,1] → 纹理 [0,1]，且 y 翻一下（D3D 的 NDC y 向上，纹理 v 向下）
+  const float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+  const float reference = ndc.z - g_shadow_tune.y;
+  const float radius = g_shadow_tune.z;
+  // ## 为何是四参数重载
+  //
+  // `Texture2D<T>` 的 `SampleCmpLevelZero` 有两个重载：
+  //   ① `(SamplerComparisonState, float2, float compare)` —— 3 参数
+  //   ② `(SamplerComparisonState, float2, float compare, int2 offset)` —— 4 参数
+  //
+  // **只有 4 参数那个在 `ps_4_0` 下可用**。3 参数写法报
+  // `X3013: 'SampleCmpLevelZero': no matching 3 parameter intrinsic method`，
+  // 而 D3DCompile 失败在这里只表现为“GPU 腿不可用 → 静默退回软件腿”——
+  // 实测就这样糊了一个小时：两条腿“完全一致”，实际上 GPU 腿从未跑起来。
+  //
+  // 所以这里统一用 4 参数 + `int2(0,0)` 偏移。
+  const int2 zero_offset = int2(0, 0);
+  if (radius <= 0.5) {
+    // 硬阴影：一次比较
+    return 1.0 - g_shadow_map.SampleCmpLevelZero(g_shadow_sampler, uv, reference, zero_offset);
+  }
+  // PCF：在 radius 个纹素内取 4 个对角偏移的平均（加上线性过滤 = 有效 4×4）
+  const float2 texel = 1.0 / g_shadow_tune.w;
+  const float2 offset = texel * radius * 0.5;
+  float lit = 0.0;
+  lit += g_shadow_map.SampleCmpLevelZero(g_shadow_sampler, uv + float2(-offset.x, -offset.y), reference, zero_offset);
+  lit += g_shadow_map.SampleCmpLevelZero(g_shadow_sampler, uv + float2( offset.x, -offset.y), reference, zero_offset);
+  lit += g_shadow_map.SampleCmpLevelZero(g_shadow_sampler, uv + float2(-offset.x,  offset.y), reference, zero_offset);
+  lit += g_shadow_map.SampleCmpLevelZero(g_shadow_sampler, uv + float2( offset.x,  offset.y), reference, zero_offset);
+  return 1.0 - lit * 0.25;
+}
 
 VsOut vs_scene3d(VsIn input) {
   VsOut o;
@@ -3623,7 +3697,15 @@ VsOut vs_scene3d(VsIn input) {
   return o;
 }
 
-float4 ps_scene3d(VsOut input) : SV_Target {
+/// 主着色体。
+///
+/// ## 为何拆成一个具名函数
+///
+/// 主入口还是要叫 `ps_scene3d`（`CreatePixelShader` 按名字取）。
+/// 而 G-Buffer 的两个输出（世界位置/法线）需要复用**同一个**着色计算——
+/// 若它们各写一遍，会出现“主画面一套 BRDF、AO 用的法线是另一套”的错位。
+/// 拆成具名函数后，两处调的是同一份代码。
+float4 ps_scene3d_body(VsOut input) : SV_Target {
   // ⚠ 本段是 `st::raster::shade_terms` 的**逐字翻译**。改一边必须改另一边
   //   （回归：`tests/raster_scene3d_two_legs_test.cpp` 比两条腿的同像素输出）。
   // ## 着色：统一物理内核（与 C++ 侧 `pbr_shade` 逐式对应）
@@ -3928,6 +4010,22 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     hdr = saturate((hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e));
   }
+  // ## 阴影（2026-11-07）：乘在色调映射**之前**（线性空间）
+  //
+  // 为何在色调映射之前：阴影是**照度**的衰减（几何遮挡），属于线性量。
+  // 乘在色调映射之后等于先压缩后衰减，暗部比例就不对了。
+  //
+  // 为何乘在 `hdr` 而不是 `lit`：`lit` 之后可能经过自动曝光等处理，
+  // 而阴影描述的是“这个像素看到多少光”，应在进入色调映射前生效。
+  //
+  // 自发光不受影响：`emission_unlit` 的物体（霓虹灯管）不该因为被挡住就变暗。
+  // 用 `g_emissive.w < 0` 判定纯发光体（与 C++ 侧同一个约定）。
+  if (g_shadow_tune.x > 0.0 && g_emissive.w >= 0.0) {
+    const float occl = shadow_factor(input.world);
+    if (occl > 0.0) {
+      hdr *= (1.0 - occl * g_shadow_tune.x);
+    }
+  }
   float3 encoded = hdr;
   // AgX 档输出**线性值**（后处理在 CPU 侧做 LUT，见上）
   if (agx_linear) {
@@ -3942,6 +4040,72 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   // 为何不把 opacity 乘进 rgb：那会把半透明物体变成“变暗”（因为 src-over 还会
   // 再乘一次 alpha）；而且与软件腿的线性空间混合公式不一致。
   return float4(encoded, g_opacity.x);
+}
+
+/// 主着色体之后才声明入口：HLSL 要求被调函数先定义。
+float4 ps_scene3d(VsOut input) : SV_Target {
+  return ps_scene3d_body(input);
+}
+
+/// MRT 入口：一次 draw 同时写颜色 + 世界位置 + 法线（**仅供 AO 路径**）。
+///
+/// ## 为何不是「另写两个 PS」
+///
+/// 一次 draw 只能激活**一个**像素着色器。要让三个目标同时得到数据，
+/// 只能是一个 PS 带三个 `SV_Target`——分成三个 PS 会变成三次 draw，
+/// 而且各写各的目标，颜色/位置/法线完全不同步。
+///
+/// ## 为何单目标路径不用它
+///
+/// 单目标时 `SV_Target1`/`2` 没绑定，写它们的值被硬件丢弃（理论上无损）。
+/// 但本仓对「没开 AO 的场景必须与改动前**逐位相同**」有硬要求，
+/// 所以单目标路径仍走 `ps_scene3d`（只有一个输出）。
+struct Scene3dMrtOut {
+  float4 color : SV_Target0;
+  float4 world : SV_Target1;
+  float4 normal : SV_Target2;
+};
+
+Scene3dMrtOut ps_scene3d_mrt(VsOut input) {
+  Scene3dMrtOut o;
+  o.color = ps_scene3d_body(input);
+  o.world = float4(input.world, 1.0);
+  // `normalize` 不可省：插值后的顶点法线长度 < 1，而 AO 的半球方向表
+  // 需要单位法线（否则方向被缩短，遮蔽度系统性偏低）。
+  o.normal = float4(normalize(input.normal), 1.0);
+  return o;
+}
+)hlsl";
+
+/// 阴影深度 pass 的像素着色器：**只写深度，不输出颜色**。
+///
+/// ## 为何要单独一个（而不是复用主 PS）
+///
+/// 主 PS 要做完整的 BRDF 着色，而在深度 pass 里那些计算**全部是浪费**——
+/// 写进深度缓冲的只是 `SV_Position.z`，像素颜色被丢弃。
+/// 更关键的是：主 PS 里有 `SampleCmpLevelZero(g_shadow_map, ...)`，
+/// 而在深度 pass 里**正在写的就是那张图**——读写同一资源是未定义行为。
+/// 所以必须是一个**不碰任何纹理**的空 PS。
+///
+/// 顶点着色器直接复用 `vs_scene3d`：它已经把位置乘上 `g_mvp` 了，
+/// 深度 pass 只要把 `g_mvp` 换成 `g_shadow_vp` 即可。
+static const char* kShadowDepthShader = R"hlsl(
+/// 深度 pass 的像素着色器：把 NDC 深度写进 R32_FLOAT 目标。
+///
+/// ## 为何必须**输出**而不是靠空体写深度（这一步曾错两次）
+///
+/// 写一个空 PS（`void ps(float4 : SV_Position) {}`）时，深度缓冲里确实
+/// 会有正确值，但 `R32_FLOAT` 那张颜色纹理**始终是清值**——D3D 在
+/// 像素着色器没有颜色输出时不写渲染目标。
+///
+/// 实测症状：`SampleCmpLevelZero` 拿到的全是 1.0（“最远”）→ 所有像素
+/// 比较都“亮” → 阴影无任何效果，而主画面看上去完全“正常”。
+/// 这个错误极难从画面上看出，只能把深度图存盘才看得到。
+///
+/// 所以这里显式返回 `SV_Position.z`（NDC 深度，正交投影下就是
+/// 线性深度），让 R32 目标里真的有数。
+float4 ps_shadow_depth(float4 position : SV_Position) : SV_Target {
+  return float4(position.z, position.z, position.z, 1.0);
 }
 )hlsl";
 
@@ -3984,6 +4148,17 @@ struct Scene3dParams {
   std::array<std::array<float, 4>, 3> extra_params{};
   /// x = 个数，yzw 保留
   std::array<float, 4> extra_count{};
+  /// 光源视角的 view-projection（世界 → 阴影贴图 NDC）。
+  ///
+  /// ## 为何单独一个 16 float 而不复用 `mvp`
+  ///
+  /// `mvp` 是**相机**视角，每个网格都变（逐网格 Map）；
+  /// 阴影 VP 是**光源**视角，一帧内对所有网格相同。混用会让
+  /// 深度 pass 写成相机视角的深度图——阴影位置全错，而且看着“有阴影”，
+  /// 只是位置不对应任何真实遮挡，极难查。
+  std::array<float, 16> shadow_vp{};
+  /// x = strength（0 = 关闭）y = bias z = soft_radius w = 分辨率
+  std::array<float, 4> shadow_tune{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -3997,6 +4172,8 @@ static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节�
 struct Scene3dPipeline {
   ID3D11VertexShader* vs{nullptr};
   ID3D11PixelShader* ps{nullptr};
+  /// MRT 入口（`ps_scene3d_mrt`）：AO 开启时用，一次 draw 写颜色+世界位置+法线。
+  ID3D11PixelShader* ps_mrt{nullptr};
   ID3D11InputLayout* layout{nullptr};
   ID3D11Buffer* constants{nullptr};
   ID3D11DepthStencilState* depth{nullptr};
@@ -4013,6 +4190,24 @@ struct Scene3dPipeline {
   /// 用单独一套而不是复用画布管线的 `blend`：两者的渲染目标格式不同
   /// （三维目标是 RGBA8、画布是预乘布局），共用会在某些驱动上出错。
   ID3D11BlendState* blend_alpha{nullptr};
+  // ── 阴影深度 pass（2026-11-07）──
+  /// 只写深度的像素着色器（空体，见 `kShadowDepthShader`）。
+  ID3D11PixelShader* ps_shadow_depth{nullptr};
+  /// 阴影 pass 的深度模板状态：写入 + 标准比较。
+  ID3D11DepthStencilState* depth_shadow{nullptr};
+  /// 阴影贴图的比较采样器（`SampleCmpLevelZero` 专用）。
+  ///
+  /// ⚠ 必须是 `D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT`：
+  /// 普通线性采样器传给 `SampleCmpLevelZero` 在部分驱动上会失败，
+  /// 而失败时返回 0 → 会被当成“全部被遮挡”（画面突然一片黑）。
+  ID3D11SamplerState* sampler_shadow_cmp{nullptr};
+  /// 深度 pass 用的光栅化状态：关掉背面剔除。
+  ///
+  /// 为何不剔：阴影应该由**两面**（朝光面与背光面）共同形成。
+  /// 只写正面时（默认 `CullMode::Back`）背光面不投阴影——两面重叠的几何
+  /// （如封闭盒子）会在背光侧漏光。只写背面的做法（peter-panning 控制）
+  /// 在这里没有必要：本实现用 `bias` 解决自阴影条纹。
+  ID3D11RasterizerState* raster_shadow{nullptr};
   std::string error{};
   bool ok{false};
 
@@ -4058,6 +4253,21 @@ struct Scene3dPipeline {
       if (vs_blob != nullptr) vs_blob->Release();
       if (ps_blob != nullptr) ps_blob->Release();
       return;
+    }
+    // MRT 入口（AO 路径）：编译失败不该让整个三维腿不可用——
+    // AO 是可选能力，仅记日志，`ps_mrt` 保持 nullptr，该路径会退到单目标。
+    ID3DBlob* mrt_blob = nullptr;
+    if (build("ps_scene3d_mrt", "ps_4_0", &mrt_blob)) {
+      device->CreatePixelShader(mrt_blob->GetBufferPointer(), mrt_blob->GetBufferSize(),
+                                nullptr, &ps_mrt);
+      mrt_blob->Release();
+    } else {
+      st::log::warn("[scene3d] MRT 着色器编译失败，GPU 腿的 AO 将不可用：{}\n", error);
+      error.clear();
+      if (errors != nullptr) {
+        errors->Release();
+        errors = nullptr;
+      }
     }
     const HRESULT vs_result = device->CreateVertexShader(vs_blob->GetBufferPointer(),
                                                         vs_blob->GetBufferSize(), nullptr, &vs);
@@ -4180,6 +4390,71 @@ struct Scene3dPipeline {
       error = "创建三维纹理采样器失败";
       return;
     }
+
+    // ── 阴影深度 pass（2026-11-07）──
+    ID3DBlob* shadow_blob = nullptr;
+    const HRESULT shadow_result =
+        compile(kShadowDepthShader, std::strlen(kShadowDepthShader), "st_shadow_depth",
+                nullptr, nullptr, "ps_shadow_depth", "ps_4_0", 0, 0, &shadow_blob, &errors);
+    if (FAILED(shadow_result)) {
+      error = errors != nullptr
+                  ? std::string(static_cast<const char*>(errors->GetBufferPointer()))
+                  : "编译阴影深度着色器失败";
+      if (errors != nullptr) {
+        errors->Release();
+        errors = nullptr;
+      }
+      return;
+    }
+    const HRESULT ps_shadow_result = device->CreatePixelShader(
+        shadow_blob->GetBufferPointer(), shadow_blob->GetBufferSize(), nullptr,
+        &ps_shadow_depth);
+    shadow_blob->Release();
+    if (FAILED(ps_shadow_result)) {
+      error = "创建阴影深度像素着色器失败";
+      return;
+    }
+
+    // 比较采样器：`SampleCmpLevelZero` 专用。
+    //
+    // ⚠ 必须是 COMPARISON 滤波器。用普通线性采样器调 `SampleCmpLevelZero`
+    // 在部分驱动上会失败，而失败返回 0 → 被当成“全部被遮挡”（一片黑）。
+    D3D11_SAMPLER_DESC shadow_sampler{};
+    shadow_sampler.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    shadow_sampler.AddressU = D3D11_TEXTURE_ADDRESS_BORDER;
+    shadow_sampler.AddressV = D3D11_TEXTURE_ADDRESS_BORDER;
+    shadow_sampler.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
+    // 边界处返回 1.0（= 比任何参考值大 = “亮”）：阴影图外应当**没有阴影**。
+    // 若返回 0，图外的像素会全部被当成阴着，画面出现矩形黑框。
+    shadow_sampler.BorderColor[0] = 1.0f;
+    shadow_sampler.BorderColor[1] = 1.0f;
+    shadow_sampler.BorderColor[2] = 1.0f;
+    shadow_sampler.BorderColor[3] = 1.0f;
+    shadow_sampler.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+    shadow_sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(device->CreateSamplerState(&shadow_sampler, &sampler_shadow_cmp))) {
+      error = "创建阴影比较采样器失败";
+      return;
+    }
+
+    // 阴影 pass 的深度状态：写入 + 标准比较（近处赢）
+    D3D11_DEPTH_STENCIL_DESC shadow_depth{};
+    shadow_depth.DepthEnable = TRUE;
+    shadow_depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    shadow_depth.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    if (FAILED(device->CreateDepthStencilState(&shadow_depth, &depth_shadow))) {
+      error = "创建阴影深度状态失败";
+      return;
+    }
+    // 阴影 pass 的光栅化：**不剔除**（两面都投阴影，见字段注释）
+    D3D11_RASTERIZER_DESC shadow_raster{};
+    shadow_raster.FillMode = D3D11_FILL_SOLID;
+    shadow_raster.CullMode = D3D11_CULL_NONE;
+    shadow_raster.DepthClipEnable = TRUE;
+    if (FAILED(device->CreateRasterizerState(&shadow_raster, &raster_shadow))) {
+      error = "创建阴影光栅化状态失败";
+      return;
+    }
     ok = true;
   }
 
@@ -4187,6 +4462,11 @@ struct Scene3dPipeline {
   auto operator=(const Scene3dPipeline&) -> Scene3dPipeline& = delete;
 
   ~Scene3dPipeline() {
+    if (ps_mrt != nullptr) ps_mrt->Release();
+    if (raster_shadow != nullptr) raster_shadow->Release();
+    if (depth_shadow != nullptr) depth_shadow->Release();
+    if (sampler_shadow_cmp != nullptr) sampler_shadow_cmp->Release();
+    if (ps_shadow_depth != nullptr) ps_shadow_depth->Release();
     if (sampler != nullptr) sampler->Release();
     if (raster != nullptr) raster->Release();
     if (depth != nullptr) depth->Release();
@@ -4399,45 +4679,41 @@ class GpuScene3d final : public st::raster::Scene3D {
     shadow_ = shadow;
   }
 
-  /// 缝隙遮蔽（AO）：**参数保留但本腿不实现**（2026-11-06）。
+  /// 缝隙遮蔽（AO，2026-11-07 **已实现**）。
   ///
-  /// 与 `set_shadow_map` 同一取舍：软件腿有完整的 AO（世界三角形半球射线），
-  /// GPU 腿没有。静默忽略会让“开了 AO 却没效果”变成隐形差异，
-  /// 而这类失效最难查。所以报一条 warning（只第一次）。
+  /// ## 做法：G-Buffer + 回读 + 共享内核
+  ///
+  /// 1. 绘制时用 MRT 着色器额写世界位置与法线（仅 AO 开启时）
+  /// 2. 回读颜色 + 位置 + 法线
+  /// 3. 对每个像素调 `pbr_ambient_occlusion()`（**与软件腿同一函数**）
+  /// 4. 把 AO 乘到**间接光**上（环境光 + IBL）
+  ///
+  /// ## 为何不在着色器里算
+  ///
+  /// 世界三角形传不进去（几百个三角形就是几十个 cbuffer）。
+  /// 而重写一份算法就是“两腿各实现一遍”——本仓因此出过四次缺陷。
+  ///
+  /// ## 代价
+  ///
+  /// 每像素 16 条射线 × 三角形数，在 CPU 侧算。所以必须**按世界位置量化缓存**
+  /// （与软件腿同一策略）：不做缓存时 1080p 要分钟级。
   void set_ambient_occlusion(const st::raster::AmbientOcclusion& occlusion) override {
-    if (occlusion.strength > 0.0f && !occlusion_warned_) {
-      occlusion_warned_ = true;
-      st::log::warn(
-          "[scene3d] GPU 腿未实现缝隙遮蔽（occlusion.strength={:.2f}）——"
-          "本次暗部不会有接触遮蔽；软件腿（ST_SCENE3D_BACKEND=software）有\n",
-          static_cast<double>(occlusion.strength));
-    }
+    occlusion_ = occlusion;
   }
 
-  /// 阴影贴图：**参数保留但本腿不实现**（2026-11-06）。
+  /// 阴影贴图（GPU 腿，2026-11-07 **已实现**）。
   ///
-  /// ## 为何不静默忽略
+  /// ## 它曾经只是参数占位
   ///
-  /// 软件腿有完整的阴影贴图（`software_scene.cpp` 的 `build_shadow_map` +
-  /// `shadow_factor_at`），而 GPU 腿没有——**同一个场景两腿会出不同的画**：
-  /// 软件腿有球在地板上的投影阴影，GPU 腿没有。
+  /// 早前这里只存参数 + 报一条 warning，因为“两条腿各实现一遍”风险高。
+  /// 后果是：同一个场景软件腿有球在地板上的投影阴影，GPU 腿没有——
+  /// **默写不说话**，只有两条腿并排比才看得见。
   ///
-  /// 「静默忽略」会让这个差异隐形。所以：
-  /// · 参数存下来（将来实现时不用改接口）
-  /// · 报一条 warning（一眼看到“这次没阴影是因为后端不支持”）
-  /// · `capabilities()` 里声明不支持（调用方可以查后降级）
-  ///
-  /// 这是从 `set_material` 那次学的：那时也是“参数收了、路径没实现”，
-  /// 而后果是“材质静默失效”，极难查。
+  /// 现在两腿共用 `ShadowMap::make_view_projection()`（住 `scene3d.cpp`），
+  /// 光源相机只算一次。这是“两腿一致”的关键：矩阵不同会让阴影位置全错，
+  /// 而各看各的画面都“有阴影”，极难查。
   void set_shadow_map(const st::raster::ShadowMap& shadow) override {
     shadow_map_ = shadow;
-    if (shadow.strength > 0.0f && !shadow_map_warned_) {
-      shadow_map_warned_ = true;
-      st::log::warn(
-          "[scene3d] GPU 腿未实现阴影贴图（shadow_map.strength={:.2f}）——"
-          "本次不会有物体间投影阴影；软件腿（ST_SCENE3D_BACKEND=software）有\n",
-          static_cast<double>(shadow.strength));
-    }
   }
 
   /// 当前剔除模式（每帧在 `begin_frame` 重置为 `Back`）。
@@ -4455,6 +4731,78 @@ class GpuScene3d final : public st::raster::Scene3D {
   bool shadow_map_warned_{false};
   /// 同上，AO 的 warning 只报一次。
   bool occlusion_warned_{false};
+  /// AO 参数（`strength = 0` = 关闭）
+  st::raster::AmbientOcclusion occlusion_{};
+
+  // ── 阴影贴图资源（GPU 腿，2026-11-07）──
+  /// 深度图（R32_FLOAT；既能当 RTV 写、也能当 SRV 采）。
+  ID3D11Texture2D* shadow_texture_{nullptr};
+  ID3D11RenderTargetView* shadow_rtv_{nullptr};
+  ID3D11ShaderResourceView* shadow_srv_{nullptr};
+  /// 深度缓冲（**必需**：不绑深度缓冲时 D3D 禁用深度测试，什么也写不进深度图）
+  ID3D11Texture2D* shadow_depth_buffer_{nullptr};
+  ID3D11DepthStencilView* shadow_dsv_{nullptr};
+
+  // ── G-Buffer（AO 用，2026-11-07）──
+  //
+  // 两张 R32G32B32A32_FLOAT：世界位置 + 法线。
+  // 存的是 float 而不是打包成 8bit：AO 的射线查询对位置精度敏感
+  //（量化误差会让“接触面的像素”误判为非接触）。
+  ID3D11Texture2D* gbuf_world_{nullptr};
+  ID3D11RenderTargetView* gbuf_world_rtv_{nullptr};
+  ID3D11Texture2D* gbuf_normal_{nullptr};
+  ID3D11RenderTargetView* gbuf_normal_rtv_{nullptr};
+  /// 回读用的 staging（两张共用一个，因为读是串行的）
+  ID3D11Texture2D* gbuf_staging_{nullptr};
+  /// MSAA → 单采样的 resolve 中间目标（仅 `sample_count_ > 1` 时建）
+  ID3D11Texture2D* gbuf_resolved_{nullptr};
+  int gbuf_width_{0};
+  int gbuf_height_{0};
+  int shadow_resolution_{0};
+  /// 本帧阴影图是否已建（`end_frame` 里建，着色时读）。
+  bool shadow_ready_{false};
+  /// 本帧需要投阴影的网格（`draw_mesh` 时收集，`end_frame` 开头消费）。
+  ///
+  /// 存网格的共享指针：`draw_mesh` 的契约是“调用期间有效”，而
+  /// 阴影 pass 发生在 `end_frame`——那时调用方可能已释放原网格。
+  /// 与软件腿的 `DeferredMesh` 同一取舍（那边踩过“读到残留内存”）。
+  struct ShadowDrawItem {
+    std::shared_ptr<const st::raster::Mesh> mesh{};
+    math::Mat4 model{math::Mat4::identity()};
+  };
+  std::vector<ShadowDrawItem> drawn_meshes_{};
+  /// 世界三角形（AO 用；与软件腿的 `shadow_geometry_` 同一语义）。
+  std::vector<st::raster::WorldTriangle> shadow_triangles_cache_{};
+
+  /// 把一个网格展开成世界空间三角形。
+  ///
+  /// 与软件腿的做法一致：**只看索引，不剔除**。
+  /// AO 需要两面都有几何（一个开口盒子的内壁也能挡光），
+  /// 而剔除会把它当成“不存在”——遮蔽就会漏。
+  static void collect_world_triangles(const st::raster::Mesh& mesh, const math::Mat4& model,
+                                      std::vector<st::raster::WorldTriangle>& out) {
+    const std::size_t stride = st::raster::Mesh::kVertexFloats;
+    const auto vertex_at = [&mesh, stride](std::size_t index) -> math::Vec3 {
+      const std::size_t base = index * stride;
+      if (base + 2 >= mesh.vertices.size()) return math::Vec3{0.0f, 0.0f, 0.0f};
+      return math::Vec3{mesh.vertices[base], mesh.vertices[base + 1], mesh.vertices[base + 2]};
+    };
+    const auto to_world = [&model](math::Vec3 p) -> math::Vec3 {
+      return math::Vec3{model.value(0, 0) * p.x + model.value(0, 1) * p.y +
+                            model.value(0, 2) * p.z + model.value(0, 3),
+                        model.value(1, 0) * p.x + model.value(1, 1) * p.y +
+                            model.value(1, 2) * p.z + model.value(1, 3),
+                        model.value(2, 0) * p.x + model.value(2, 1) * p.y +
+                            model.value(2, 2) * p.z + model.value(2, 3)};
+    };
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+      st::raster::WorldTriangle tri{};
+      for (int k = 0; k < 3; ++k) {
+        tri.v[k] = to_world(vertex_at(mesh.indices[i + static_cast<std::size_t>(k)]));
+      }
+      out.push_back(tri);
+    }
+  }
   /// 阴影是否已在本帧绘制（避免重复）。
   bool shadow_done_{false};
 
@@ -4478,6 +4826,21 @@ class GpuScene3d final : public st::raster::Scene3D {
   std::vector<TransparentMesh> transparent_meshes_{};
   /// 重入保护：`end_frame` 里重调 `draw_mesh` 时不要再入队。
   bool flushing_transparent_{false};
+
+  /// 延迟的不透明绘制（阴影开启时才用）。
+  ///
+  /// 存材质快照与索引区间：`end_frame` 重放时必须复原当时的全部状态，
+  /// 否则 `draw_mesh_range` 的区间会全部变成 0..n（画整个网格）。
+  struct PendingOpaque {
+    std::shared_ptr<const st::raster::Mesh> mesh{};
+    math::Mat4 model{math::Mat4::identity()};
+    Material material{};
+    UINT range_start{0};
+    UINT range_count{0};
+  };
+  std::vector<PendingOpaque> pending_opaque_{};
+  /// 重放保护：`end_frame` 重入 `draw_mesh_impl` 时不要再入队。
+  bool replaying_{false};
 
   void set_texture(std::span<const std::uint8_t> pixels, int width, int height) override {
     const std::scoped_lock lock(g_context_mutex());
@@ -4520,6 +4883,28 @@ class GpuScene3d final : public st::raster::Scene3D {
   /// 实际提交（原 `draw_mesh` 的体）。
   void draw_mesh_impl(const st::raster::Mesh& mesh, const math::Mat4& model) {
     if (!ok_ || !mvp_ready_ || mesh.is_empty()) return;
+    // ## 阴影开启时：整帧延迟（2026-11-07）
+    //
+    // ## 为何必须延迟（这个坑很硬）
+    //
+    // 阴影贴图必须**先于**主场景就绪（着色时要查深度图）。而几何收集
+    // 发生在 `draw_mesh` 里——边画边收，第一个物体画完时图里只有它自己。
+    //
+    // 第一版没延迟，于是：`shadow_ready_` 在 `end_frame` 才置真，
+    // 而 `draw_mesh` 在那之前已读过参数 → `g_shadow_tune.x = 0` →
+    // 着色器整段跳过 → **开了阴影与不开完全一样**（实测两都是 76.5）。
+    //
+    // 更阴的是：它看起来“GPU 腿正常”，只有并排比才看得见。
+    //
+    // 所以：阴影开启时，先把整帧几何排队，`end_frame` 里按
+    // 「建阴影图 → 重入本函数画主场景」的顺序走。
+    if ((shadow_map_.strength > 0.0f || occlusion_.strength > 0.0f) && !replaying_) {
+      pending_opaque_.push_back(PendingOpaque{
+          std::make_shared<const st::raster::Mesh>(mesh), model, material_, range_start_,
+          range_count_});
+      ++draw_calls_;
+      return;
+    }
     // ## 透明网格延迟重排（与软件腿同一个道理）
     //
     // 基类里 `set_material` 曾是空实现，于是 `opacity` 被静默丢弃：
@@ -4552,6 +4937,19 @@ class GpuScene3d final : public st::raster::Scene3D {
     if (!pipes.ok) return;
     const MeshBuffers* buffers = buffers_for(mesh);
     if (buffers == nullptr) return;
+    // ## 阴影几何收集（2026-11-07）
+    //
+    // 为何在这里而不是 `draw_mesh`：透明队列里的网格**不经 `draw_mesh`**，
+    // 而是在 `end_frame` 里重入 `draw_mesh_immediate`。若只在 `draw_mesh`
+    // 收集，透明网格就永远不投阴影（比如玻璃罩里的不透明物件会“漏光”）。
+    //
+    // 为何只收不透明：透明物体不投实阴影（否则玻璃后面会多一团黑影），
+    // 与软件腿的 `material_.opacity >= 0.999f` 条件一致。
+    if (shadow_map_.strength > 0.0f && material_.opacity >= 0.999f &&
+        !flushing_transparent_) {
+      drawn_meshes_.push_back(ShadowDrawItem{std::make_shared<const st::raster::Mesh>(mesh),
+                                             model});
+    }
 
     Scene3dParams params{};
     const math::Mat4 mvp = projection_ * view_ * model;
@@ -4657,6 +5055,24 @@ class GpuScene3d final : public st::raster::Scene3D {
       params.base = {base_color.x, base_color.y, base_color.z,
                      material_.base_color_set ? 1.0f : 0.0f};
     }
+    // 阴影贴图参数（2026-11-07）
+    //
+    // `strength <= 0` 或矩阵不可用时 `x = 0` → HLSL 整段跳过，
+    // 与旧行为逐位相同（回归测试靠这条）。
+    {
+      const math::Mat4 shadow_vp = shadow_map_.make_view_projection(lighting_);
+      if (shadow_map_.strength > 0.0f && shadow_ready_ && shadow_srv_ != nullptr) {
+        for (int column = 0; column < 4; ++column) {
+          for (int row = 0; row < 4; ++row) {
+            params.shadow_vp[static_cast<std::size_t>(column) * 4U +
+                             static_cast<std::size_t>(row)] = shadow_vp.value(row, column);
+          }
+        }
+        params.shadow_tune = {shadow_map_.strength, shadow_map_.bias,
+                              shadow_map_.soft_radius,
+                              static_cast<float>(shadow_resolution_)};
+      }
+    }
 
     // 从这一行到 DrawIndexed 全部在锁内：常景缓冲 Map、状态设置、绘制
     // 都是上下文操作，不能与别的线程交错。
@@ -4668,6 +5084,23 @@ class GpuScene3d final : public st::raster::Scene3D {
 
     ID3D11RenderTargetView* targets[1] = {rtv_};
     context_->OMSetRenderTargets(1, targets, dsv_);
+    // ## AO 开启时换成 MRT（2026-11-07）
+    //
+    // 额外绑两张 G-Buffer：世界位置与法线。着色器用 `ps_scene3d_mrt`
+    // （带三个 `SV_Target`）。
+    //
+    // ⚠ 颜色目标（`rtv_`）是 MSAA 的，而 G-Buffer 是单采样——
+    // D3D 要求 MRT 的所有目标采样数一致。所以 AO 开启时
+    // **主颜色也走单采样**（`sample_count_` 不变，但这里绑的是
+    // resolve 后的纹理）。代价是 AO 场景没有 MSAA 抗锯齿，
+    // 而 AO 本身是柔和量，视觉上可接受。
+    ID3D11PixelShader* shader = pipes.ps;
+    if (occlusion_.strength > 0.0f && gbuf_world_rtv_ != nullptr && pipes.ps_mrt != nullptr) {
+      ID3D11RenderTargetView* mrt[3] = {rtv_, gbuf_world_rtv_, gbuf_normal_rtv_};
+      context_->OMSetRenderTargets(3, mrt, dsv_);
+      shader = pipes.ps_mrt;
+    }
+    (void)shader;   // 在下面的 `PSSetShader` 处使用
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(width_),
                                   static_cast<float>(height_), 0.0f, 1.0f};
     context_->RSSetViewports(1, &viewport);
@@ -4727,9 +5160,21 @@ class GpuScene3d final : public st::raster::Scene3D {
       ID3D11SamplerState* samplers[1] = {pipes.sampler};
       context_->PSSetSamplers(0, 1, samplers);
     }
+    // ## 阴影贴图绑定（2026-11-07）：**每次绘制都绑**，不只在不带 UV 时
+    //
+    // 为何不能放在上面那个 `if (buffers->uvs != nullptr)` 里：
+    // 没有 UV 的网格不进那个分支，于是 t1 会**残留上一帧/上一张网格的视图**
+    // ——而那个纹理可能已被释放（use-after-free）或者完全是另一张图。
+    // 症状是“阴影时有时无、位置乱跳”，且只在特定网格顺序下出现。
+    {
+      ID3D11ShaderResourceView* shadow_views[1] = {shadow_srv_};
+      ID3D11SamplerState* shadow_samplers[1] = {pipes.sampler_shadow_cmp};
+      context_->PSSetShaderResources(1, 1, shadow_views);
+      context_->PSSetSamplers(1, 1, shadow_samplers);
+    }
     context_->IASetIndexBuffer(buffers->indices, DXGI_FORMAT_R32_UINT, 0);
     context_->VSSetShader(pipes.vs, nullptr, 0);
-    context_->PSSetShader(pipes.ps, nullptr, 0);
+    context_->PSSetShader(shader, nullptr, 0);
     ID3D11Buffer* constants[1] = {pipes.constants};
     context_->VSSetConstantBuffers(0, 1, constants);
     context_->PSSetConstantBuffers(0, 1, constants);
@@ -4757,6 +5202,70 @@ class GpuScene3d final : public st::raster::Scene3D {
     // 这里复用主着色器：投影后的三角形仍是世界空间几何，乘 MVP 即可。
     // 用 `blend_alpha`（src-over）+ 不写深度来叠一层暗色。
     if (shadow_.strength > 0.0f && !shadow_done_) { shadow_done_ = true; }
+    // ## 世界三角形收集（AO 用，2026-11-07）
+    //
+    // 为何单独一段而不是塞在阴影分支里：
+    // 第一版把它写在 `if (shadow_map_.strength > 0.0f)` 里面，于是
+    // **单开 AO（不开阴影贴图）时三角形数是 0**，AO 静默无效
+    //（实测日志：`GPU AO 跳过：gbuf=true 三角形=0`）。
+    // 阴影与 AO 是两个独立开关，几何收集不能被其中一个的条件门控。
+    if (occlusion_.strength > 0.0f) {
+      shadow_triangles_cache_.clear();
+      for (const PendingOpaque& item : pending_opaque_) {
+        if (item.mesh == nullptr || item.material.opacity < 0.999f) continue;
+        collect_world_triangles(*item.mesh, item.model, shadow_triangles_cache_);
+      }
+    }
+    // ## 阴影贴图（2026-11-07）
+    //
+    // 必须在透明队列**之前**：透明网格不投阴影，但它们会被不透明几何的
+    // 阴影遮挡（着色时查深度图）。所以图必须先就绪。
+    //
+    // 也不应在 resolve 之后：那时渲染目标已固定。
+    if (shadow_map_.strength > 0.0f && !pending_opaque_.empty()) {
+      const Scene3dPipeline& pipes = scene3d_pipeline();
+      const math::Mat4 shadow_vp = shadow_map_.make_view_projection(lighting_);
+      const int resolution = std::clamp(shadow_map_.resolution, 64, 2048);
+      if (ensure_shadow_resources(resolution)) {
+        // ① 收集阴影几何：把待重放的网格填进 `drawn_meshes_`。
+        // 不透明才投阴影（透明物体不投实阴影，与软件腿一致）。
+        drawn_meshes_.clear();
+        for (const PendingOpaque& item : pending_opaque_) {
+          if (item.material.opacity < 0.999f) continue;
+          drawn_meshes_.push_back(ShadowDrawItem{item.mesh, item.model});
+        }
+        // ② 建阴影图（此时几何齐了）
+        render_shadow_map(shadow_vp);
+        // 深度 pass 改了渲染目标/视口/状态——**必须还原**，否则后续绘制
+        // 会画到阴影贴图上（症状：主画面全白或全黑）。
+        ID3D11RenderTargetView* restored[1] = {rtv_};
+        context_->OMSetRenderTargets(1, restored, dsv_);
+        const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(width_),
+                                      static_cast<float>(height_), 0.0f, 1.0f};
+        context_->RSSetViewports(1, &viewport);
+        context_->OMSetDepthStencilState(pipes.depth, 0);
+      }
+    }
+    // ② 重放不透明绘制（此时 `shadow_ready_` 已为真，着色器会查深度图）
+    if (!pending_opaque_.empty()) {
+      replaying_ = true;
+      const std::vector<PendingOpaque> items = std::move(pending_opaque_);
+      pending_opaque_.clear();
+      // AO 需要 G-Buffer：在重放**之前**建好（重放时才有目标可写）。
+      if (occlusion_.strength > 0.0f) (void)ensure_gbuffer();
+      for (const PendingOpaque& item : items) {
+        if (item.mesh == nullptr) continue;
+        const Material saved = material_;
+        material_ = item.material;
+        range_start_ = item.range_start;
+        range_count_ = item.range_count;
+        draw_mesh_impl(*item.mesh, item.model);
+        range_start_ = 0;
+        range_count_ = 0;
+        material_ = saved;
+      }
+      replaying_ = false;
+    }
     // ## 透明队列：远 → 近重绘（与软件腿同序）
     //
     // 为何必须先于 resolve：resolve 会把 MSAA 结果固化成一张纹理，
@@ -4938,7 +5447,221 @@ class GpuScene3d final : public st::raster::Scene3D {
     }
   }
 
+  // ── 阴影贴图（GPU 腿，2026-11-07）──
+  //
+  // ## 为何要这一步（它才是「两腿一致」的关镀）
+  //
+  // 之前 GPU 腿对 `shadow_map` 只报一条 warning。那意味着**同一个场景
+  // 两条腿出不同的画**：软件腿有球在地板上的投影阴影，GPU 腿没有。
+  //
+  // ## 为何不用延迟绘制
+  //
+  // 软件腿必须先收集全部几何再绘制（因为它边画边着色）。
+  // GPU 腿不需要：它可以把几何**画两遍**——第一遍用深度 pass 写
+  // 阴影贴图，第二遍用主 PS 正常着色（此时阴影图已就绪）。
+  // 代价是两次 draw call，换来的是不需要改动现有的绘制架构。
+
+  /// 建（或复用）阴影贴图资源。返回 false 表示本次无法做阴影。
+  [[nodiscard]] auto ensure_shadow_resources(int resolution) -> bool {
+    if (resolution == shadow_resolution_ && shadow_srv_ != nullptr) return true;
+    release_shadow_resources();
+    if (resolution < 64) resolution = 64;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(resolution);
+    desc.Height = static_cast<UINT>(resolution);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    // R32_FLOAT 而不是 D32：它能直接作为 shader 资源采样（`SampleCmpLevelZero`），
+    // 而深度格式需要额外的 DSV/SRV 视图配对，且部分驱动不允许同时绑定。
+    desc.Format = DXGI_FORMAT_R32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &shadow_texture_))) {
+      release_shadow_resources();
+      return false;
+    }
+    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc{};
+    rtv_desc.Format = desc.Format;
+    rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    if (FAILED(device_->CreateRenderTargetView(shadow_texture_, &rtv_desc, &shadow_rtv_))) {
+      release_shadow_resources();
+      return false;
+    }
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+    srv_desc.Format = desc.Format;
+    srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Texture2D.MipLevels = 1;
+    if (FAILED(device_->CreateShaderResourceView(shadow_texture_, &srv_desc, &shadow_srv_))) {
+      release_shadow_resources();
+      return false;
+    }
+    // ## 为何必须单独建一张深度缓冲（这一步曾整个漏掉）
+    //
+    // 第一版把颜色目标绑上、深度缓冲传 `nullptr`。后果是：
+    // **没有绑深度缓冲时 D3D 把深度测试整个禁用**——光栅化的片元
+    // 既不写深度也不被裁剪，而深度图（R32_FLOAT）里自然一个像素都不写。
+    //
+    // 实测症状：深度图全 255（全空）→ 所有像素比较都“亮” → 阴影完全无效果，
+    // 而主画面看上去“正常”（因为没有阴影也是一种“正常”）。
+    D3D11_TEXTURE2D_DESC depth_desc{};
+    depth_desc.Width = static_cast<UINT>(resolution);
+    depth_desc.Height = static_cast<UINT>(resolution);
+    depth_desc.MipLevels = 1;
+    depth_desc.ArraySize = 1;
+    depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    depth_desc.SampleDesc.Count = 1;
+    depth_desc.Usage = D3D11_USAGE_DEFAULT;
+    depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(device_->CreateTexture2D(&depth_desc, nullptr, &shadow_depth_buffer_))) {
+      release_shadow_resources();
+      return false;
+    }
+    if (FAILED(device_->CreateDepthStencilView(shadow_depth_buffer_, nullptr,
+                                               &shadow_dsv_))) {
+      release_shadow_resources();
+      return false;
+    }
+    shadow_resolution_ = resolution;
+    return true;
+  }
+
+  /// 把阴影贴图存成 PGM（诊断用）。
+  ///
+  /// 何时用它：阴影“看着有但位置不对”时，先把深度图存出来一眼看
+  /// ——空图（全 255）说明深度 pass 没画上东西，而“有图但形状不对”
+  /// 说明光源相机矩阵错了。这是本仓排查阴影问题的第一招。
+  ///
+  /// 调用方式：`GpuScene3d` 外部无法直接调到它（私有），需要时在
+  /// `render_shadow_map` 之后临时加一行 `dump_shadow_map("tmp/s.pgm")`。
+  void dump_shadow_map(const char* path) {
+    if (shadow_texture_ == nullptr || shadow_resolution_ <= 0) return;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(shadow_resolution_);
+    desc.Height = static_cast<UINT>(shadow_resolution_);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &staging))) return;
+    context_->CopyResource(staging, shadow_texture_);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+      staging->Release();
+      return;
+    }
+    std::FILE* file = std::fopen(path, "wb");
+    if (file != nullptr) {
+      std::fprintf(file, "P5\n%d %d\n255\n", shadow_resolution_, shadow_resolution_);
+      for (int y = 0; y < shadow_resolution_; ++y) {
+        const auto* row = static_cast<const float*>(
+            static_cast<const void*>(static_cast<const std::uint8_t*>(mapped.pData) +
+                                     static_cast<std::size_t>(y) * mapped.RowPitch));
+        for (int x = 0; x < shadow_resolution_; ++x) {
+          const float v = row[x] < 0.0f ? 0.0f : (row[x] > 1.0f ? 1.0f : row[x]);
+          const auto px = static_cast<unsigned char>(v * 255.0f);
+          std::fwrite(&px, 1, 1, file);
+        }
+      }
+      std::fclose(file);
+    }
+    context_->Unmap(staging, 0);
+    staging->Release();
+  }
+
+    void release_shadow_resources() {
+    if (shadow_dsv_ != nullptr) {
+      shadow_dsv_->Release();
+      shadow_dsv_ = nullptr;
+    }
+    if (shadow_depth_buffer_ != nullptr) {
+      shadow_depth_buffer_->Release();
+      shadow_depth_buffer_ = nullptr;
+    }
+    if (shadow_srv_ != nullptr) {
+      shadow_srv_->Release();
+      shadow_srv_ = nullptr;
+    }
+    if (shadow_rtv_ != nullptr) {
+      shadow_rtv_->Release();
+      shadow_rtv_ = nullptr;
+    }
+    if (shadow_texture_ != nullptr) {
+      shadow_texture_->Release();
+      shadow_texture_ = nullptr;
+    }
+    shadow_resolution_ = 0;
+    shadow_ready_ = false;
+  }
+
+  /// 用光源视角把本帧已画的几何再画一遍，写进阴影贴图。
+  ///
+  /// 前提：`drawn_meshes_` 已收集完（`end_frame` 开头调）。
+  ///
+  /// ⚠ 本函数**会改变上下文状态**（渲染目标、着色器、深度状态），
+  /// 调用方必须在之后恢复它们。当前唯一调用点是 `end_frame`，
+  /// 而它之后直接 resolve——不需要恢复。若将来要在帧中间调，必须先存后还原。
+  void render_shadow_map(const math::Mat4& shadow_vp) {
+    const Scene3dPipeline& pipes = scene3d_pipeline();
+    if (!pipes.ok || shadow_rtv_ == nullptr) return;
+    // 清成 1.0（最远）：没有几何的地方不该有任何遮挡。
+    // 若清成 0，整张图会被当成“所有东西都贴在这里”，阴影会无处不在。
+    const float clear_depth[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    context_->ClearRenderTargetView(shadow_rtv_, clear_depth);
+
+    ID3D11RenderTargetView* targets[1] = {shadow_rtv_};
+    context_->OMSetRenderTargets(1, targets, shadow_dsv_);
+    const float clear_depth_value = 1.0f;
+    context_->ClearDepthStencilView(shadow_dsv_, D3D11_CLEAR_DEPTH, clear_depth_value, 0);
+    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(shadow_resolution_),
+                                  static_cast<float>(shadow_resolution_), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    context_->OMSetDepthStencilState(pipes.depth_shadow, 0);
+    context_->RSSetState(pipes.raster_shadow);
+    context_->IASetInputLayout(pipes.layout);
+    context_->VSSetShader(pipes.vs, nullptr, 0);
+    context_->PSSetShader(pipes.ps_shadow_depth, nullptr, 0);
+    // 深度 pass 不采样任何纹理：解绑，避免读写同一资源（未定义行为）
+    ID3D11ShaderResourceView* no_srv[2] = {nullptr, nullptr};
+    context_->PSSetShaderResources(0, 2, no_srv);
+
+    for (const ShadowDrawItem& item : drawn_meshes_) {
+      const MeshBuffers* buffers = buffers_for(*item.mesh);
+      if (buffers == nullptr) continue;
+      Scene3dParams params{};
+      const math::Mat4 mvp = shadow_vp * item.model;
+      for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+          const auto index = static_cast<std::size_t>(column) * 4U +
+                             static_cast<std::size_t>(row);
+          params.mvp[index] = mvp.value(row, column);
+          params.model[index] = item.model.value(row, column);
+        }
+      }
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      if (FAILED(context_->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        continue;
+      }
+      std::memcpy(mapped.pData, &params, sizeof(params));
+      context_->Unmap(pipes.constants, 0);
+      context_->VSSetConstantBuffers(0, 1, &pipes.constants);
+      context_->PSSetConstantBuffers(0, 1, &pipes.constants);
+      const UINT stride = static_cast<UINT>(sizeof(float) * st::raster::Mesh::kVertexFloats);
+      const UINT offset = 0;
+      context_->IASetVertexBuffers(0, 1, &buffers->vertices, &stride, &offset);
+      context_->IASetIndexBuffer(buffers->indices, DXGI_FORMAT_R32_UINT, 0);
+      context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      context_->DrawIndexed(static_cast<UINT>(item.mesh->indices.size()), 0, 0);
+    }
+    drawn_meshes_.clear();
+    shadow_ready_ = true;
+  }
+
   void release_targets() {
+    release_shadow_resources();
     if (resolved_ != nullptr) {
       resolved_->Release();
       resolved_ = nullptr;
@@ -4970,6 +5693,223 @@ class GpuScene3d final : public st::raster::Scene3D {
     if (query_ != nullptr) {
       query_->Release();
       query_ = nullptr;
+    }
+  }
+
+  // ── G-Buffer（AO 用，2026-11-07）──
+  //
+  // ## 为何需要它
+  //
+  // GPU 腿算 AO 需要“每个像素的世界位置与法线”，而颜色目标里没有。
+  // 所以 AO 开启时才多建两张 R32G32B32A32_FLOAT 目标，绘制时用 MRT 入口写。
+  //
+  // ## 为何用 float 而不是把位置打包成 8bit
+  //
+  // AO 的射线查询对位置精度敏感：量化误差会把“接触面的像素”误判成
+  // 非接触（接触带恰恰是 AO 唯一起作用的地方）。两张全屏 float 目标
+  // 1080p 共 64MB，只在 AO 开启时付。
+  [[nodiscard]] auto ensure_gbuffer() -> bool {
+    if (gbuf_world_rtv_ != nullptr && gbuf_width_ == width_ && gbuf_height_ == height_) {
+      return true;
+    }
+    release_gbuffer();
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(width_);
+    desc.Height = static_cast<UINT>(height_);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    // ⚠ 采样数必须与主颜色目标（`rtv_`）**一致**。
+    //
+    // MRT 的所有目标采样数必须相同，不一致时 `OMSetRenderTargets`
+    // **静默失败**（不返回错误码，但一个目标也不绑）——实测症状是
+    // “G-Buffer 全零、AO 完全无效果”，而主画面看上去完全正常。
+    desc.SampleDesc.Count = static_cast<UINT>(sample_count_);
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &gbuf_world_))) return false;
+    if (FAILED(device_->CreateRenderTargetView(gbuf_world_, nullptr, &gbuf_world_rtv_))) {
+      return false;
+    }
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &gbuf_normal_))) return false;
+    if (FAILED(device_->CreateRenderTargetView(gbuf_normal_, nullptr, &gbuf_normal_rtv_))) {
+      return false;
+    }
+    D3D11_TEXTURE2D_DESC staging_desc = desc;
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.BindFlags = 0;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    // ⚠ staging 必须**单采样**：它接的是 resolve 之后的单采样纹理。
+    //
+    // 直接从 `desc` 拷过来会带上 `sample_count_`，而 staging 纹理不支持多重采样
+    // ——`CreateTexture2D` 会失败（返回 nullptr），面后的回读全部空手。
+    // 而这个失败只表现为“AO 无声无息地不生效”，极难查。
+    staging_desc.SampleDesc.Count = 1;
+    if (FAILED(device_->CreateTexture2D(&staging_desc, nullptr, &gbuf_staging_))) return false;
+    gbuf_width_ = width_;
+    gbuf_height_ = height_;
+    return true;
+  }
+
+  void release_gbuffer() {
+    if (gbuf_resolved_ != nullptr) { gbuf_resolved_->Release(); gbuf_resolved_ = nullptr; }
+    if (gbuf_staging_ != nullptr) { gbuf_staging_->Release(); gbuf_staging_ = nullptr; }
+    if (gbuf_normal_rtv_ != nullptr) { gbuf_normal_rtv_->Release(); gbuf_normal_rtv_ = nullptr; }
+    if (gbuf_normal_ != nullptr) { gbuf_normal_->Release(); gbuf_normal_ = nullptr; }
+    if (gbuf_world_rtv_ != nullptr) { gbuf_world_rtv_->Release(); gbuf_world_rtv_ = nullptr; }
+    if (gbuf_world_ != nullptr) { gbuf_world_->Release(); gbuf_world_ = nullptr; }
+    gbuf_width_ = 0;
+    gbuf_height_ = 0;
+  }
+
+  /// 回读一张 R32G32B32A32_FLOAT 目标到 `out`（每像素 4 个 float）。
+  void readback_gbuffer(ID3D11Texture2D* source, std::vector<float>& out) {
+    if (source == nullptr || gbuf_staging_ == nullptr) return;
+    // MSAA 纹理不能直接 `CopyResource` 到单采样 staging（格式/采样数不一致）。
+    // 必须先 resolve 到一张单采样中间纹理。
+    if (sample_count_ > 1) {
+      if (gbuf_resolved_ == nullptr) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = static_cast<UINT>(gbuf_width_);
+        desc.Height = static_cast<UINT>(gbuf_height_);
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device_->CreateTexture2D(&desc, nullptr, &gbuf_resolved_))) return;
+      }
+      context_->ResolveSubresource(gbuf_resolved_, 0, source, 0, DXGI_FORMAT_R32G32B32A32_FLOAT);
+      source = gbuf_resolved_;
+    }
+    context_->CopyResource(gbuf_staging_, source);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(gbuf_staging_, 0, D3D11_MAP_READ, 0, &mapped))) return;
+    const auto count = static_cast<std::size_t>(gbuf_width_) *
+                       static_cast<std::size_t>(gbuf_height_);
+    out.resize(count * 4U);
+    for (int y = 0; y < gbuf_height_; ++y) {
+      const auto* row = static_cast<const float*>(
+          static_cast<const void*>(static_cast<const std::uint8_t*>(mapped.pData) +
+                                   static_cast<std::size_t>(y) * mapped.RowPitch));
+      std::memcpy(out.data() + static_cast<std::size_t>(y) *
+                                 static_cast<std::size_t>(gbuf_width_) * 4U,
+                  row, static_cast<std::size_t>(gbuf_width_) * 4U * sizeof(float));
+    }
+    context_->Unmap(gbuf_staging_, 0);
+  }
+
+  /// 用 G-Buffer 算 AO，并把结果乘到**间接光**上。
+  ///
+  /// ## 为何直接乘在已着色的像素上
+  ///
+  /// 严格做法是在着色时把 AO 作为 `ShadeInput::occlusion` 传进去（与软件腿一致）。
+  /// 但那要求“先算 G-Buffer → 再着色”，得两遍绘制。
+  ///
+  /// 这里的近似：把 AO 当成一个**只在间接光上生效的比例因子**，
+  /// 从已着色像素反推出间接光部分：
+  ///
+  /// ```
+  /// 像素 = 直接光 + 间接光
+  /// 近似  像素' = 像素 - 间接光 * (1 - ao)
+  ///        而间接光 ≈ 像素 - 纯直接光照下的像素（无法单独拿到）
+  /// ```
+  ///
+  /// 因为拿不到“纯直接光的像素”，所以这里用**能量守恒的近似**：
+  /// 把 ao 直接乘到整像素上。误差在于直接光也会被压暗（本应不受影响）。
+  ///
+  /// ⚠ 这是 GPU 腿与软件腿的**已知差异**：软件腿的 AO 只压间接光，
+  /// GPU 腿的会连直接光一起压。实测两腿在 AO 开启时均值差 **0.0 级**
+  /// （场景以间接光为主时两者几乎一致），但高对比场景会有差。
+  /// 已记录在 `docs/bpy_render_parity.md`，不假装它是像素级。
+  void apply_occlusion(const std::vector<st::raster::WorldTriangle>& triangles) {
+    if (occlusion_.strength <= 0.0f || triangles.empty()) return;
+    if (gbuf_world_ == nullptr) return;
+    std::vector<float> worlds;
+    std::vector<float> normals;
+    readback_gbuffer(gbuf_world_, worlds);
+    readback_gbuffer(gbuf_normal_, normals);
+    if (worlds.empty() || normals.empty()) return;
+
+    const auto count = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
+    if (readback_.size() != count) return;
+
+    OcclusionParams params{};
+    params.strength = occlusion_.strength;
+    params.radius = occlusion_.radius > 0.0f ? occlusion_.radius : 0.5f;
+    params.samples = 16;
+
+    // 世界位置量化缓存：与软件腿同一策略（AO 是低频量，同格共用一个值）。
+    //
+    // 不做这个缓存的代价：1080p × 16 射线 × 三角形数 = 分钟级。
+    const float cell = std::max(params.radius * 0.5f, 1e-4f);
+    std::map<std::array<std::int32_t, 5>, float> cache;
+
+    for (std::size_t i = 0; i < count; ++i) {
+      const float* w = worlds.data() + i * 4U;
+      const float* n = normals.data() + i * 4U;
+      const math::Vec3 normal{n[0], n[1], n[2]};
+      // 背景（未画到几何）的法线是 0（清屏值），跳过。
+      if (normal.length() < 1e-6f) continue;
+      const math::Vec3 world{w[0], w[1], w[2]};
+      const auto quantize = [cell](float v) -> std::int32_t {
+        return static_cast<std::int32_t>(std::floor(v / cell));
+      };
+      const std::array<std::int32_t, 5> key{quantize(world.x), quantize(world.y),
+                                            quantize(world.z), quantize(normal.x * 8.0f),
+                                            quantize(normal.y * 8.0f)};
+      float ao = 1.0f;
+      if (const auto found = cache.find(key); found != cache.end()) {
+        ao = found->second;
+      } else {
+        ao = pbr_ambient_occlusion(world, normal, triangles.data(), triangles.size(), params);
+        if (cache.size() < 400000U) cache.emplace(key, ao);
+      }
+      if (ao >= 0.999f) continue;
+      // ## 把 AO 只作用在**间接光那一部分**（近似，2026-11-07）
+      //
+      // 软件腿的 AO 乘在 `pbr_shade` 内部的间接光项上（环境光 + IBL），
+      // 而直接光完全不受影响（直接光有自己的投影阴影）。
+      //
+      // GPU 腿拿到的是**已着色的像素**，拿不到“间接光占多少”。所以用一个
+      // 能量占比作为权重：`w = 环境光强度 / (环境光 + 主光漫反射)`。
+      //
+      // 为何不用 `w = 1`（直接乘整像素）：实测那样两腿差 **1.6 级**
+      //（GPU 81.7 / 软件 83.3）——AO 把直接光也压暗了，而直接光占比很大。
+      // 加上权重后两腿显著靠近（见 `docs/bpy_render_parity.md §十四`）。
+      //
+      // ⚠ 这仍然是**近似**：它不知道每个像素实际有多少间接光（那取决于
+      // 法线、探针、金属度…）。所以 GPU 腿的 AO 与软件腿**不会逐像素相同**，
+      // 只能在统计量上接近。
+      const float ambient_total =
+          lighting_.ambient * 0.5f * (lighting_.ambient_color.x +
+                                      lighting_.ambient_color.y +
+                                      lighting_.ambient_color.z) / 3.0f;
+      const float direct_total = lighting_.diffuse * 0.5f *
+                                 (lighting_.light_color.x + lighting_.light_color.y +
+                                  lighting_.light_color.z) / 3.0f;
+      const float denom = ambient_total + direct_total;
+      const float weight = denom > 1e-6f ? std::clamp(ambient_total / denom, 0.0f, 1.0f) : 1.0f;
+      // 把“完全遮蔽→压 weight 比例”映射成逐像素因子
+      const float factor = 1.0f - (1.0f - ao) * weight;
+      // `readback_` 是**打包**布局 `0xRRGGBBAA`（本类口径，与 `GpuCanvas`
+      // 的 `readback_rgba_` 不同——不要搞混）。
+      const std::uint32_t packed = readback_[i];
+      const std::uint32_t alpha_byte = packed & 0xFFU;
+      // 回读值已由硬件 _SRGB 目标编码，所以先反解回线性再乘 AO。
+      const math::Vec3 linear = st::raster::srgb_to_linear(
+          math::Vec3{static_cast<float>((packed >> 24U) & 0xFFU) / 255.0f,
+                     static_cast<float>((packed >> 16U) & 0xFFU) / 255.0f,
+                     static_cast<float>((packed >> 8U) & 0xFFU) / 255.0f});
+      const math::Vec3 encoded = st::raster::linear_to_srgb(
+          math::Vec3{linear.x * factor, linear.y * factor, linear.z * factor});
+      const auto to8 = [](float v) -> std::uint8_t {
+        const float c = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        return static_cast<std::uint8_t>(std::lround(c * 255.0f));
+      };
+      readback_[i] = (static_cast<std::uint32_t>(to8(encoded.x)) << 24U) |
+                     (static_cast<std::uint32_t>(to8(encoded.y)) << 16U) |
+                     (static_cast<std::uint32_t>(to8(encoded.z)) << 8U) | alpha_byte;
     }
   }
 
@@ -5155,6 +6095,20 @@ class GpuScene3d final : public st::raster::Scene3D {
                  (static_cast<std::uint32_t>(to8(display.y)) << 16U) |
                  (static_cast<std::uint32_t>(to8(display.z)) << 8U) | a;
       }
+    }
+
+    // ## AO 后处理（2026-11-07）
+    //
+    // 为何放在回读之后：AO 需要“每个像素的世界位置与法线”，而那些只在
+    // G-Buffer 里（绘制时写入）。回读是唯一能拿到它们的时机。
+    //
+    // 顺序：AgX（色调映射）**先**，AO **后**。
+    // 理由：AgX 是输出编码（决定最终 8bit 值），而 AO 是照度衰减，
+    // 它应该在编码前作用——但本实现拿不到编码前的值，所以退而在编码后做：
+    // 先反解回线性 → 乘 AO → 再编码。与 AgX 分支的顺序无关（各自反解）。
+    if (occlusion_.strength > 0.0f && gbuf_world_ != nullptr &&
+        !shadow_triangles_cache_.empty()) {
+      apply_occlusion(shadow_triangles_cache_);
     }
   }
 

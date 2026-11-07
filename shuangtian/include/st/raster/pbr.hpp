@@ -98,6 +98,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <utility>
 
 #include "st/math/color.hpp"
@@ -179,6 +180,41 @@ struct PbrLight {
                                     const math::Vec3* probe_dirs,
                                     const math::Vec3* probe_colors, int count) noexcept
     -> math::Vec3;
+
+/// 世界空间三角形（AO 与阴影贴图共用的几何源）。
+struct WorldTriangle {
+  math::Vec3 v[3];
+};
+
+/// 缝隙遮蔽的配置（与 `Scene3D::AmbientOcclusion` 同构，但住在内核层，
+/// 以便两条腿共用同一个实现）。
+struct OcclusionParams {
+  /// 遮蔽强度（0 = 关闭）
+  float strength{0.0f};
+  /// 射线长度（世界单位）
+  float radius{0.5f};
+  /// 半球采样数
+  int samples{16};
+};
+
+/// 估算某世界点的缝隙遮蔽（ambient occlusion，0~1；1 = 无遮蔽）。
+///
+/// ## 为何这个函数必须住在内核层（两条腿共用）
+///
+/// AO 是**几何查询**：它只看“半球里被挡了多少”，与怎么画无关。
+/// 两条腿各写一遍的话，`bias`/采样方向/量化格子任何一处不同，
+/// 就会出两个不同的 AO——而各看各的画面都“有遮蔽”，只是一处亮一处暗。
+///
+/// 本仓已因「两腿各算一遍」出过四次缺陷（光颜色、色调映射、IBL 探针、
+/// 模型统一）。AO 比那几次都更容易错：它多两层循环（方向表 × 三角形）。
+///
+/// 所以：**算法只有一份。** 软件腿在着色时调它，GPU 腿在回读后调它。
+///
+/// 这是纯函数（除临时数组外无状态），可安全多线程并发调用。
+[[nodiscard]] auto pbr_ambient_occlusion(math::Vec3 world, math::Vec3 normal,
+                                         const WorldTriangle* triangles,
+                                         std::size_t triangle_count,
+                                         const OcclusionParams& params) noexcept -> float;
 
 /// 环境 BRDF 的两个标量 `(A, B)`：`F0·A + B` 就是 IBL 镜面反射的强度因子。
 ///

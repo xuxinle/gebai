@@ -412,5 +412,78 @@ auto pbr_shade(const ShadeInput& in) noexcept -> math::Vec3 {
                     non_negative(result.z) * gain};
 }
 
+auto pbr_ambient_occlusion(math::Vec3 world, math::Vec3 normal,
+                           const WorldTriangle* triangles, std::size_t triangle_count,
+                           const OcclusionParams& params) noexcept -> float {
+  if (params.strength <= 0.0f || triangles == nullptr || triangle_count == 0) return 1.0f;
+  const math::Vec3 n = normal.normalized();
+  if (n.length() < 1e-6f) return 1.0f;
+
+  const int samples = std::clamp(params.samples, 1, 64);
+  const float radius = params.radius > 0.0f ? params.radius : 0.5f;
+
+  // 射线起点偏移：避开自相交。
+  //
+  // 为何必须有：每个像素都在它所在的那个三角形上，射线从原点出发必然
+  // 与它自己相交（`t = 0`）——不偏移的话**每个像素都会算成全遮蔽**，
+  // AO 变成一片黑。
+  constexpr float kBias = 0.01f;
+
+  // 以 n 为极轴的局部坐标系（只需算一次，不随采样方向变）
+  const math::Vec3 up = std::abs(n.y) > 0.99f ? math::Vec3{1.0f, 0.0f, 0.0f}
+                                              : math::Vec3{0.0f, 1.0f, 0.0f};
+  const math::Vec3 tangent = up.cross(n).normalized();
+  const math::Vec3 bitangent = n.cross(tangent);
+
+  int hits = 0;
+  for (int i = 0; i < samples; ++i) {
+    // 余弦加权：`sqrt(t)` 让样本向法线附近聚拢，与真实 AO 的积分权重一致。
+    const float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(samples);
+    const float sin_theta = std::sqrt(t);
+    const float cos_theta = std::sqrt(1.0f - t);
+    // 黄金角螺旋：**确定性**分布。不用随机数——随机数会让两次运行出
+    // 不同结果，而本仓所有像素级对账都依赖确定性。
+    const float phi = static_cast<float>(i) * 2.399963f;
+    const float cos_phi = std::cos(phi);
+    const float sin_phi = std::sin(phi);
+    const math::Vec3 dir{tangent.x * (sin_theta * cos_phi) +
+                             bitangent.x * (sin_theta * sin_phi) + n.x * cos_theta,
+                         tangent.y * (sin_theta * cos_phi) +
+                             bitangent.y * (sin_theta * sin_phi) + n.y * cos_theta,
+                         tangent.z * (sin_theta * cos_phi) +
+                             bitangent.z * (sin_theta * sin_phi) + n.z * cos_theta};
+    const math::Vec3 start{world.x + dir.x * kBias, world.y + dir.y * kBias,
+                           world.z + dir.z * kBias};
+    // Möller–Trumbore：光线与三角形求交
+    for (std::size_t k = 0; k < triangle_count; ++k) {
+      const WorldTriangle& tri = triangles[k];
+      const math::Vec3 e1{tri.v[1].x - tri.v[0].x, tri.v[1].y - tri.v[0].y,
+                          tri.v[1].z - tri.v[0].z};
+      const math::Vec3 e2{tri.v[2].x - tri.v[0].x, tri.v[2].y - tri.v[0].y,
+                          tri.v[2].z - tri.v[0].z};
+      const math::Vec3 pvec{dir.y * e2.z - dir.z * e2.y, dir.z * e2.x - dir.x * e2.z,
+                            dir.x * e2.y - dir.y * e2.x};
+      const float det = e1.x * pvec.x + e1.y * pvec.y + e1.z * pvec.z;
+      if (std::abs(det) < 1e-8f) continue;   // 与三角形平行
+      const float inv_det = 1.0f / det;
+      const math::Vec3 tvec{start.x - tri.v[0].x, start.y - tri.v[0].y,
+                            start.z - tri.v[0].z};
+      const float u = (tvec.x * pvec.x + tvec.y * pvec.y + tvec.z * pvec.z) * inv_det;
+      if (u < 0.0f || u > 1.0f) continue;
+      const math::Vec3 qvec{tvec.y * e1.z - tvec.z * e1.y, tvec.z * e1.x - tvec.x * e1.z,
+                            tvec.x * e1.y - tvec.y * e1.x};
+      const float v = (dir.x * qvec.x + dir.y * qvec.y + dir.z * qvec.z) * inv_det;
+      if (v < 0.0f || u + v > 1.0f) continue;
+      const float distance = (e2.x * qvec.x + e2.y * qvec.y + e2.z * qvec.z) * inv_det;
+      if (distance > kBias && distance < radius) {
+        ++hits;
+        break;   // 一根射线最多计一次命中
+      }
+    }
+  }
+  const float occluded = static_cast<float>(hits) / static_cast<float>(samples);
+  return std::clamp(1.0f - occluded * params.strength, 0.0f, 1.0f);
+}
+
 }  // namespace st::raster
 

@@ -219,14 +219,27 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
                                 static_cast<float>(c->g) / 255.0f,
                                 static_cast<float>(c->b) / 255.0f};
   }
-  lit.ibl_strength = static_cast<float>(json_get_double(
-      *node, pick("ibl_strength", "env_strength") != nullptr ? "ibl_strength" : "env_strength",
-      lit.ibl_strength));
+  // ## `pick_key`：选一个**实际存在**的键名交给 `json_get_double`
+  //
+  // ⚠ 这里曾写错（2026-11-07 发现）：原先是
+  //
+  // ```
+  // pick("ibl_strength", "env_strength") != nullptr ? "ibl_strength" : "env_strength"
+  // ```
+  //
+  // `pick` 返回的是“两者中找到的那个”，只要**任一**存在它就非空——
+  // 于是 JSON 里只写旧名 `env_strength` 时，判断为真、去读 `ibl_strength`，
+  // 而它不存在 → **静默返回默认值 0**。后果：存量剧本里所有
+  // `env_strength` 全部失效，环境反射从来没生效过，而且不报错。
+  //
+  // 正确做法：看**新名是否真的存在**再决定读哪个。
+  const auto pick_key = [&](const char* new_key, const char* old_key) -> const char* {
+    return json_find(*node, new_key) != nullptr ? new_key : old_key;
+  };
+  lit.ibl_strength = static_cast<float>(
+      json_get_double(*node, pick_key("ibl_strength", "env_strength"), lit.ibl_strength));
   lit.ibl_rough_falloff = static_cast<float>(json_get_double(
-      *node,
-      pick("ibl_rough_falloff", "env_rough_falloff") != nullptr ? "ibl_rough_falloff"
-                                                               : "env_rough_falloff",
-      lit.ibl_rough_falloff));
+      *node, pick_key("ibl_rough_falloff", "env_rough_falloff"), lit.ibl_rough_falloff));
 
   const std::string tone = json_get_string(*node, "tone_map", "aces");
   if (tone == "none") {
@@ -306,6 +319,47 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
 /// 读**缝隙遮蔽**（`occlusion` 字段）。
 ///
 /// 默认关闭（`strength = 0`）：所有像素级基准都在关闭态下对账。
+/// 读**环境贴图**（`environment` 字段，PMREM 输入）。
+///
+/// ## 为何是六张图而不是一个文件
+///
+/// 本框架不引外部图像解码库（只接 PNG 走已有路径），而 cubemap 标准格式
+/// （.hdr/.exr）需要额外解码器。用「六个 PNG」既不用新依赖，
+/// 也让调用方能用任意工具生成（Blender 导出、裁云渲染、图像生成都行）。
+auto read_environment(const Json& json) -> Result<EnvironmentMap> {
+  EnvironmentMap map{};
+  const Json* node = json_find(json, "environment");
+  if (node == nullptr) return map;
+  if (!node->is_object()) {
+    return st::unexpected(ErrorCode::Parse, "environment：需要对象");
+  }
+  if (const auto* table = st::raster::find_field_table("environment"); table != nullptr) {
+    if (const auto status = st::raster::check_unknown_fields(*node, *table, "environment");
+        !status) {
+      return st::forward_error(status.error());
+    }
+  }
+  map.filter_angle = static_cast<float>(json_get_double(*node, "filter_angle", 0.0));
+  map.exposure = static_cast<float>(json_get_double(*node, "exposure", 1.0));
+  const int probes = int(json_get_double(*node, "probes", 64.0));
+  map.probes = static_cast<std::size_t>(std::clamp(probes, 1, 256));
+  // 六面路径交给调用方加载（需要 `asset_basis` 解析相对路径），
+  // 这里只把路径填进 `face_paths`。
+  static const char* kFaceNames[6] = {"px", "nx", "py", "ny", "pz", "nz"};
+  bool complete = true;
+  for (int i = 0; i < 6; ++i) {
+    const std::string path = json_get_string(*node, kFaceNames[i], "");
+    if (path.empty()) {
+      complete = false;
+      break;
+    }
+    map.face_paths[static_cast<std::size_t>(i)] = path;
+  }
+  // 不完整时清掉：半张 cubemap 无法插值，宁可当作没设。
+  if (!complete) map.face_paths = {};
+  return map;
+}
+
 auto read_occlusion(const Json& json) -> Result<AmbientOcclusion> {
   AmbientOcclusion occlusion{};
   const Json* node = json_find(json, "occlusion");
@@ -1195,6 +1249,10 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
   if (!occlusion) return st::forward_error(occlusion.error());
   spec.occlusion = *occlusion;
 
+  const auto environment = read_environment(json);
+  if (!environment) return st::forward_error(environment.error());
+  spec.environment = *environment;
+
   const std::string cull = json_get_string(json, "cull", "back");
   if (cull == "none") {
     spec.cull_mode = CullMode::None;
@@ -2069,6 +2127,31 @@ auto render_scene(const SceneSpec& spec, Surface& canvas, math::Color background
   return render_scene_into(spec, **scene, canvas, background);
 }
 
+/// 把环境贴图加载进 `spec.lighting.env_map`（就地修改）。
+///
+/// ## 为何需要一步“就地补全”
+///
+/// 贴图的**路径**在解析时就拿到了，但**加载**需要 `asset_basis`
+/// （相对路径基准）与文件系统——那是渲染层的职责，不该塞进解析器。
+/// 而 `render_impl` 接的是 `const SceneSpec&`（它不该改调用方的 spec），
+/// 所以两个公开入口各自拷一份再补全。
+///
+/// 两道入口共用本函数，避免“一处加载、一处忘了”那种不对称。
+auto with_environment_loaded(const SceneSpec& spec) -> SceneSpec {
+  if (spec.environment.face_paths[0].empty()) return spec;
+  SceneSpec copy = spec;
+  EnvironmentMap environment = copy.environment;
+  if (environment.load_faces(copy.asset_basis)) {
+    copy.lighting.env_map = std::move(environment);
+  } else {
+    // 加载失败不致命（缺一张图不该让整张图渲不出来），但**必须说出来**：
+    // 静默退回天地两色会让“我设了环境贴图却没效果”变成隐形差异。
+    st::log::warn("[scene3d] 环境贴图加载失败（{}）——退回 IBL 探针\n",
+                  copy.environment.face_paths[0]);
+  }
+  return copy;
+}
+
 /// 实现主体：`time` 为 `std::nullopt` 表示"不采样动画"（静态场景）。
 ///
 /// 为什么用一个可选时间而不是两个函数体：动画与静态只有**一行**差别
@@ -2079,12 +2162,14 @@ auto render_scene(const SceneSpec& spec, Surface& canvas, math::Color background
 
 auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Surface& canvas,
                        math::Color background) -> Result<void> {
-  return render_impl(spec, std::nullopt, scene, canvas, background);
+  const SceneSpec prepared = with_environment_loaded(spec);
+  return render_impl(prepared, std::nullopt, scene, canvas, background);
 }
 
 auto render_scene_at_into(const SceneSpec& spec, float time, Scene3D& scene, Surface& canvas,
                           math::Color background) -> Result<void> {
-  return render_impl(spec, time, scene, canvas, background);
+  const SceneSpec prepared = with_environment_loaded(spec);
+  return render_impl(prepared, time, scene, canvas, background);
 }
 
 auto render_scene_at(const SceneSpec& spec, float time, Surface& canvas, math::Color background)
@@ -2093,7 +2178,7 @@ auto render_scene_at(const SceneSpec& spec, float time, Surface& canvas, math::C
   if (!scene.has_value()) {
     return st::unexpected(ErrorCode::Unsupported, "无法创建三维场景（后端不可用）");
   }
-  return render_impl(spec, time, **scene, canvas, background);
+  return render_scene_at_into(spec, time, **scene, canvas, background);
 }
 
 auto collect_drawable_node_names(const SceneSpec& spec) -> std::vector<std::string> {
@@ -2660,6 +2745,18 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     return {};
   };
 
+  // ## 阴影与 AO 必须在**任何绘制之前**设（2026-11-07）
+  //
+  // 这里它们曾经写在“画完地面之后”。后果很具体：
+  // 地面绘制时 `shadow_map.strength` 还是 0，于是地面**没进延迟队列**，
+  // 它既不投阴影、也收不到别的物体的阴影——一张完整的图里恰好
+  // 少了最该有阴影的那个大平面。
+  //
+  // 而 `planar_shadow` 恰恰相反：它的契约是「设置之前画的是地面/非实体」，
+  // 所以必须在地面**之后**设。两个语义相反的设置点不能靠一个位置兼顾。
+  scene.set_shadow_map(spec.shadow_map);
+  scene.set_ambient_occlusion(spec.occlusion);
+
   // 先画地面（阴影契约：`set_planar_shadow` 之前画的算"地面/非实体"）
   //
   // ⚠ 顺序被**世界矩阵**影响：`resolve` 的输出是"父先子后"的先序，所以这里
@@ -2672,12 +2769,6 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     if (!status) return st::forward_error(status.error());
   }
   scene.set_planar_shadow(spec.shadow);
-  // 阴影贴图（物体间互相遮挡）：与平面投影**不互斥**，可同时开。
-  //
-  // 必须在画实体**之前**设：两条腿都是「`draw_mesh` 时收集遮影几何，
-  // `end_frame` 时建深度图」。设晚了那个物体就不会投阴影。
-  scene.set_shadow_map(spec.shadow_map);
-  scene.set_ambient_occlusion(spec.occlusion);
   for (const st::raster::ResolvedNode& node : resolved->nodes) {
     const auto found = spec_of.find(node.name);
     if (found != spec_of.end() && found->second->ground) continue;

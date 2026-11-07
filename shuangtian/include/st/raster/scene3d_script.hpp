@@ -372,6 +372,8 @@ struct SceneSpec {
   /// 它是真 GI 的便宜近似——只乘间接光（环境光 + IBL），不乘直接光。
   /// 详见 `scene3d.hpp` 的 `AmbientOcclusion`。
   AmbientOcclusion occlusion{};
+  /// **环境贴图**（PMREM 输入）。六面齐全时才会加载。
+  EnvironmentMap environment{};
   CullMode cull_mode{CullMode::Back};
   std::vector<SceneObjectSpec> objects{};
 

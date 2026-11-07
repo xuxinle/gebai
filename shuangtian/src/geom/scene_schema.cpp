@@ -40,6 +40,10 @@ auto build_tables() -> std::vector<FieldTable> {
   "**缝隙遮蔽**（AO，真 GI 的便宜近似）：strength/radius。**默认关**（0）",
   R"j({"strength":0.7,"radius":0.5})j",
   {"只乘间接光（环境光+IBL），不乘直接光；永远不会与 Cycles 逐像素相同"}},
+  {"environment", "object", false, "",
+  "**环境贴图**（PMREM 输入）：六张 cubemap 面 PNG（px/nx/py/ny/pz/nz）+ filter_angle/exposure/probes",
+  R"j({"px":"px.png","nx":"nx.png","py":"py.png","ny":"ny.png","pz":"pz.png","nz":"nz.png"})j",
+  {"六面必须齐全且尺寸一致；缺一即整体不启用（半张 cubemap 无法插值）"}},
               {"cull", "string", false, R"j("none"/"back"/"front")j", "背面剔除模式", R"j("back")j",
                {"拼成 culling 会被拒"}},
               {"objects", "array", false, "",
@@ -264,6 +268,30 @@ auto build_tables() -> std::vector<FieldTable> {
               {"ground_y", "number", false, "", "投影地面的 Y 高度", "0", {}},
               {"lift", "number", false, ">= 0", "阴影抬起量（防 z-fighting）", "0.01", {}},
               {"color", "color", false, "", "阴影颜色", R"j("#000000")j", {}},
+          },
+      .open = false,
+  });
+
+  // ── environment（环境贴图 / PMREM 输入，2026-11-07）──
+  //
+  // 六张立方图面（PNG）。为何不是单一 .hdr/.exr：前者需要新解码依赖，
+  // 而「六张 PNG」用已用的解码路径就行，且调用方能用任意工具生成。
+  tables.push_back(FieldTable{
+      .scope = "environment",
+      .fields =
+          {
+              {"px", "string", false, "", "+X 面图路径", "px.png", {}},
+              {"nx", "string", false, "", "-X 面图路径", "", {}},
+              {"py", "string", false, "", "+Y 面（上方）图路径", "", {}},
+              {"ny", "string", false, "", "-Y 面（下方）图路径", "", {}},
+              {"pz", "string", false, "", "+Z 面图路径", "", {}},
+              {"nz", "string", false, "", "-Z 面图路径", "", {}},
+              {"filter_angle", "number", false, "0..1.5708",
+               "预过滤锥角（弧度）：0 = 保留高频锐反射，越大越模糊", "0",
+               {"它是**预过滤**而不是运行时模糊：值固定后不能按粗糙度变化"}},
+              {"exposure", "number", false, "> 0", "贴图亮度倍数", "1", {}},
+              {"probes", "number", false, "1..256", "预过滤成多少个方向探针", "64",
+               {"越多越细腻也越慢；探针间是插值，不是连续反射"}},
           },
       .open = false,
   });

@@ -25,6 +25,63 @@
 
 namespace st::raster {
 
+/// 前置声明：`ShadowMap::make_view_projection` 需要它（完整定义在后面）。
+///
+/// 为何不把 `Lighting` 搬到前面：它比 `ShadowMap` 大得多，而且彼此不依赖，
+/// 为一行签名把两个大结构倒序会让阅读顺序变得不自然。
+struct Lighting;
+
+/// 环境贴图（等角 cubemap，PMREM 的输入，2026-11-07）。
+///
+/// ## 为何是 cubemap 而不是 equirect
+///
+/// cubemap 六个面均匀分布、采样时没有极点畸形（equirect 的顶部/底部
+/// 纹素被拉伸得利害，而产品展示场景的地板/天花板正好在那里）。
+/// 解码成 cubemap 只需一次，之后采样是简单的面定位。
+///
+/// ## 它能到什么精度（不假装）
+///
+/// 本框架的 IBL 内核是「方向探针 + 余弦/镜面加权」，没有贴图采样路径。
+/// 所以这里把贴图**预过滤成一组方向探针**（见 `make_filtered_probes`）。
+///
+/// | 项 | 真 PMREM | 本实现 |
+/// |---|---|---|
+/// | 高光形状 | 连续（按 mip 层） | 探针间插值，有台阶 |
+/// | 粗糙面模糊 | 精确 GGX 卷积 | 近似（锥角平均）|
+/// | 镜像反射 | ✅ | sharpness 高时接近 |
+///
+/// 结论：**它能让环境有明暗结构、粗糙面高光变钝，但不会与 Cycles 逐像素相同。**
+struct EnvironmentMap {
+  /// 每面边长（cubemap 六个面均为 `size × size`）
+  int size{0};
+  /// 六个面：+X, -X, +Y, -Y, +Z, -Z。每面 `size × size` 个颜色（**线性**域）。
+  std::array<std::vector<math::Vec3>, 6> faces{};
+  /// 预过滤时的锥角（弧度；0 = 保留高频，越大越模糊）
+  float filter_angle{0.0f};
+  /// 强度缩放（贴图本身的值乘它）
+  float exposure{1.0f};
+  /// 预过滤成多少个方向探针
+  std::size_t probes{64};
+  /// 六张面的**文件路径**（+X, -X, +Y, -Y, +Z, -Z）。
+  ///
+  /// 为何用路径而不是直接存像素：解析器（`scene3d_script`）不碰文件系统，
+  /// 而路径的解析需要 `asset_basis`——那是渲染层的职责。
+  /// 空 = 本面未提供（六个都要有才算完整）。
+  std::array<std::string, 6> face_paths{};
+
+  [[nodiscard]] auto empty() const -> bool { return size <= 0 || faces[0].empty(); }
+  /// 从 `face_paths` 加载六张图（相对路径按 `basis` 解析）。
+  ///
+  /// 返回 false = 没加载成功（任一失败则整体放弃：半张 cubemap 无法插值）。
+  [[nodiscard]] auto load_faces(std::string_view basis) -> bool;
+  /// 按方向采样（双线性，面内 clamp）
+  [[nodiscard]] auto sample_direction(math::Vec3 direction) const -> math::Vec3;
+  /// 预过滤成方向探针（确定性黄金角分布）
+  [[nodiscard]] auto make_filtered_probes(const Lighting& lighting, math::Vec3* out_dirs,
+                                          math::Vec3* out_colors, std::size_t capacity) const
+      -> std::size_t;
+};
+
 class Surface;
 
 /// 面朝向剔除模式。
@@ -335,6 +392,21 @@ struct ShadowMap {
   float soft_radius{1.0f};
   /// 投影相机包络半径（世界单位）：覆盖场景所需的正交盒半径。
   float extent{6.0f};
+
+  /// 算光源视角的 view-projection（世界 → 阴影贴图 NDC）。
+  ///
+  /// ## 为何这个函数住在 `scene3d.cpp`（两条腿共用）
+  ///
+  /// 阴影贴图的**位置正确性**完全取决于这个矩阵。两条腿各算一遍意味着
+  /// 它们可以算出两个不同的相机——而各看各的画面都“有阴影”，只是位置不同。
+  /// 本仓已经因为“两腿各算一遍”出过四次缺陷（光颜色、色调映射、IBL 探针、
+  /// 模型统一）。阴影比那几次都更容易错，因为它多一层“光源相机”的构造。
+  ///
+  /// 所以：**矩阵只算一次，两条腿读它的结果。**
+  ///
+  /// 返回 `identity` 表示“本配置下没有阴影”（strength = 0、索引越界、
+  /// 光源无强度、或者是点光——点光需要立方体贴图）。
+  [[nodiscard]] auto make_view_projection(const Lighting& lighting) const -> math::Mat4;
 };
 
 struct PlanarShadow {
@@ -517,6 +589,11 @@ struct Lighting {
   static constexpr std::size_t kMaxEnvProbes = 8;
   std::array<EnvProbe, kMaxEnvProbes> env_probes{};
   std::size_t env_probe_count{0};
+  /// **环境贴图**（PMREM 输入，2026-11-07）。
+  ///
+  /// 非空时优先于 `env_probes`：贴图有真实的高频结构，而手工探针只有几个方向。
+  /// `make_ibl_probes` 会把它预过滤成方向探针（见 `EnvironmentMap`）。
+  EnvironmentMap env_map{};
   /// 探针权重的锐利度：`w = max(0, dot)^sharpness`。
   /// 1 = 很宽（互相覆盖），8 = 很窄（接近点光源反射）。
   float env_probe_sharpness{3.0f};
