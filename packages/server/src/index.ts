@@ -16,7 +16,7 @@ import type { AppDeps, createApp } from "./app"
 import { composeServer } from "./boot/compose"
 import { serveComposed } from "./boot/serve"
 import { runMain } from "./boot/cli"
-import { consumeRestartContinuation } from "./core/tools/restart"
+import { consumeRestartContinuation, restoreRunningSessions } from "./core/tools/restart"
 
 export interface ServerHandle {
   server: ReturnType<typeof Bun.serve>
@@ -49,6 +49,15 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   // 仅本地模式（restart_server 本身也只在此形态暴露）；测试进程跳过——本机 tmp 可能残留真实续跑请求，
   // 测试触发引擎运行会造成意外副作用。
   if (c.config.auth === "local" && process.env.NODE_ENV !== "test") {
+    // 先复算在运行会话的会话级审批姿态（含**非本会话**）：定时任务/飞书桥接/其他标签页在跑的会话
+    // 没有前端页面会在重启后替它们重新同步，只能靠重启前的登记；且必须**先于**续跑——续跑会立即
+    // 跑起一轮，若晚于它恢复，那一轮的工具审批照旧会弹。
+    await restoreRunningSessions({
+      setSessionEnv: async (sessionId, user, vars) => {
+        await c.store.setEnv(sessionId, user, vars)
+      },
+      sessionExists: async (sessionId, user) => !!(await c.store.load(sessionId, user)),
+    }).catch((err) => console.error(`[restart] 在运行会话恢复异常: ${String((err as Error).message || err)}`))
     void consumeRestartContinuation({
       pid: process.pid,
       sessionExists: async (sessionId, user) => !!(await c.store.load(sessionId, user)),

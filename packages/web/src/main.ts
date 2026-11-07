@@ -11,7 +11,7 @@ import "./css/overlays.css"
 import "./css/wheel.css"
 import "./css/files-split.css"
 import { restoreToken, bindAuth, showLogin, syncTokenCookie, tryExternalAuth } from "./auth"
-import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
+import { bindApprovalSkip, applyApprovalSkip, syncApprovalSkipForRunning } from "./approval-skip"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
 import { bindWheel } from "./wheel"
@@ -397,6 +397,10 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     // 覆盖「刷新晚于任务开始」的时序（此时 task.start 已投递过，不随快照重放）
     const running = getCurrentSession()
     if (running && snap.running.includes(running.id)) attachRunningIfNeeded(running.id)
+    // 自动审批：快照里**全部**在跑会话都要补齐跳过关卡（不只有当前会话）——服务重启丢的是整个进程的
+    // 会话内存态 env，而定时任务/飞书桥接/其他标签页发起的会话没有「被打开」的时机去同步；
+    // 当前会话可能不在快照里（本页刚建），一并传入（幂等）
+    void syncApprovalSkipForRunning(snap.running, running?.id)
     // 模型上下文窗口：标题栏占比显示用（snapshot 与 session.list 均携带）
     setMaxCtxTokens(snap.maxContextTokens ?? 0)
     // 运行态明细基线（会话列表角标 + 待决交互可见性）：以服务端为准收敛本页的本地标记

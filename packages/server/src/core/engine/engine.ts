@@ -457,6 +457,26 @@ export class AgentEngine {
     return false
   }
 
+  /**
+   * 全部在运行会话的登记快照（restart_server 重启前拍快照用）：会话/用户/角色/会话级审批跳过姿态。
+   *
+   * 为何要列「全部」而不只当前会话：重启清空的是**整个进程**的会话内存态 env，而在跑的会话可能
+   * 来自定时任务/飞书桥接/其他标签页——它们没有本页可以重新同步的时机，只能靠重启前的这份快照恢复。
+   * 审批姿态的判定只看**显式开的跳过**（任务级 env 快照 / 会话内存态 env / 请求级 auto）：既然用户
+   * 已同意本次任务不弹审批，重启后续跑不应反而弹；而「无交互通道默认自动通过」不算——那是通道语义。
+   */
+  async runningSessionRegistry(): Promise<Array<{ sessionId: string; user: string; role?: string; approvalSkip?: boolean; startedAt?: number }>> {
+    const out: Array<{ sessionId: string; user: string; role?: string; approvalSkip?: boolean; startedAt?: number }> = []
+    for (const [sessionId, task] of this.tasks) {
+      // 只认**显式开的审批跳过**（请求级 auto / 任务 env / 会话内存态 env）——不能用 isApprovalSkipped：
+      // 它把「无交互通道默认自动通过」也算作跳过，而那只是通道语义、不是用户对该会话的选择；
+      // 据此写回会话 env 会让用户下次在 Web UI 里发消息时意外地不再弹审批。
+      const approvalSkip = task.approvalPolicy === "auto" || task.env.GEBAI_APPROVAL_SKIP === "true" || (await this.opts.store.getEnv(sessionId, task.user)).GEBAI_APPROVAL_SKIP === "true"
+      out.push({ sessionId, user: task.user, ...(task.role ? { role: task.role } : {}), ...(approvalSkip ? { approvalSkip: true } : {}), startedAt: task.startedAt })
+    }
+    return out
+  }
+
   /** 运行中会话附加快照（session.attach，DESIGN「运行中会话恢复」）：页面刷新/切换后前端据此恢复——
    *  在途流式累积（未持久化的部分文本/推理）+ 待决交互清单（审批/选择/填值/画图/捕获——事件已推送过、
    *  新页面收不到，凭此重渲染卡片继续作答）。未运行返回 null。 */
@@ -1937,6 +1957,9 @@ private activeSchemas(sessionId: string) {
       waitForEnv: (name, description, secret) => self.waitForEnv(sessionId, name, description ?? "", secret === true, execSignal),
       waitForDraw: (render) => self.waitForDraw(sessionId, render, execSignal),
       waitForCapture: (opts) => self.waitForCapture(sessionId, opts, execSignal),
+      // 重启前在运行会话登记（restart_server 用）：列全部在跑会话而非只本会话——重置进程丢的是
+      // 整个进程的会话内存态 env，定时任务/飞书桥接/其他标签页在跑的会话没有本页可重新同步
+      runningSessions: () => self.runningSessionRegistry(),
       tasks: self.opts.tasks
         ? {
             add: (input, originSessionId) => self.opts.tasks!.add(user, input, originSessionId ?? sessionId),

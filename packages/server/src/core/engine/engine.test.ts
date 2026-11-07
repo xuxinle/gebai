@@ -1210,6 +1210,37 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
+  test("runningSessionRegistry：列出在运行会话及其审批姿态（不只本会话；内存态跳过被识别）", async () => {
+    const { home, engine, store, provider } = await setup("streamwait")
+    const a = await store.createSession("default", "a")
+    const b = await store.createSession("default", "b")
+    await store.setEnv(b.id, "default", { GEBAI_APPROVAL_SKIP: "true" })
+    // 登记列的是「实际在跑的会话」，与会话目录里有多少会话无关：b 建了但没在跑，不应出现
+    const runA = engine.run(a.id, "default", "hello")
+    for (let i = 0; i < 100 && !provider.release; i++) await new Promise((r) => setTimeout(r, 10))
+    const reg = await engine.runningSessionRegistry()
+    expect(reg.map((r) => r.sessionId)).toEqual([a.id])
+    expect(reg[0]).toMatchObject({ user: "default" })
+    expect(reg[0].approvalSkip).toBeFalsy()
+    provider.release!()
+    await runA
+    // 任务结束即不在登记里
+    expect(await engine.runningSessionRegistry()).toEqual([])
+    cleanup(home)
+  })
+
+  test("runningSessionRegistry：会话内存态审批跳过被识别为 approvalSkip（重启后要恢复的正是它）", async () => {
+    const { home, engine, store, provider } = await setup("streamwait")
+    const s = await store.createSession("default", "t")
+    await store.setEnv(s.id, "default", { GEBAI_APPROVAL_SKIP: "true" })
+    const run = engine.run(s.id, "default", "hello")
+    for (let i = 0; i < 100 && !provider.release; i++) await new Promise((r) => setTimeout(r, 10))
+    expect(await engine.runningSessionRegistry()).toEqual([expect.objectContaining({ sessionId: s.id, approvalSkip: true })])
+    provider.release!()
+    await run
+    cleanup(home)
+  })
+
   test("attachSnapshot：在途流式累积（未持久化部分文本），回合持久化后清空", async () => {
     const { home, engine, store, provider } = await setup("streamwait")
     const session = await store.createSession("default", "t")

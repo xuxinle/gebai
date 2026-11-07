@@ -218,6 +218,12 @@ export type ToolContext = {
     * 统一任务（task_* 工具用，按当前用户绑定——用户级资源与会话解耦；服务端未启用任务能力时为空）。
  */
 tasks?: TaskService
+  /**
+   * 重启前登记用：当前**全部**在运行会话（不只本会话——定时任务/飞书桥接/其他标签页同样在跑）
+   * 及其会话级审批姿态。restart_server 据此拍快照，新服务启动后逐个恢复会话内存态 env。
+   * 可选：测试桩/无引擎环境未注入时不登记。
+   */
+  runningSessions?: () => Promise<Array<{ sessionId: string; user: string; role?: string; approvalSkip?: boolean; startedAt?: number }>>
 }
 
 export interface Tool {

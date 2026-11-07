@@ -20,7 +20,7 @@
  * Linux 用 ss -ltnp（iproute2 基础组件，各发行版标配）。状态文件一律 UTF-8 无 BOM：PS5.1 的
  * Set-Content -Encoding UTF8 会写入 BOM，读方（status 动作）与消费方均按无 BOM 预期解析。
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises"
 import { statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -29,7 +29,7 @@ import { isBinaryMode } from "../base/config"
 import { schema } from "./shared"
 import { log as logger } from "@gebai/sdk/node"
 
-/** 重启工作目录（拉起器脚本/状态文件/续跑请求/新服务日志）。 */
+/** 重启工作目录（拉起器脚本/状态文件/续跑请求/在运行会话登记/新服务日志）。 */
 export function restartDir(tmp: string = tmpdir()): string {
   return join(tmp, "gebai-restart")
 }
@@ -72,6 +72,53 @@ export interface ContinuationResult {
 /** 续跑请求文件路径。 */
 export function continuationFile(tmp: string = tmpdir()): string {
   return join(restartDir(tmp), "continue.json")
+}
+
+/** 在运行会话登记（重启前快照，见 `RunningSession`）文件路径。 */
+export function runningSessionsFile(tmp: string = tmpdir()): string {
+  return join(restartDir(tmp), "running.json")
+}
+
+/**
+ * 重启前登记的一个正在运行的会话。
+ *
+ * 为何需要：会话级审批跳过（`GEBAI_APPROVAL_SKIP`）存在**会话内存态 env**（服务端零落盘），进程重启即清空；
+ * 前端只在「打开某会话 / 该会话发消息」时重新同步。于是：① 重启续跑在页面加载之前就开跑，第 3 步就可能弹
+ * 审批；② 除续跑目标之外同样在跑的会话（定时任务、飞书桥接、其他标签页），重启后永远不会被同步。
+ * 重启前把「正在运行的会话 + 其审批姿态」拍成快照，新进程启动时逐个恢复会话内存态 env。
+ */
+export interface RunningSession {
+  sessionId: string
+  /** 会话属主用户（会话内存态 env 按用户隔离）。 */
+  user: string
+  /** 发起任务用户的角色（续跑任务的公共资源权限判定用）。 */
+  role?: string
+  /** 该会话重启前是否开着审批跳过（true 才在启动时恢复对应 env 键）。 */
+  approvalSkip?: boolean
+  /** 任务开始时刻（null 不计入；仅诊断用）。 */
+  startedAt?: number
+}
+
+/** 写在运行会话登记（覆盖式：只保留本次重启的快照）。 */
+export async function writeRunningSessions(list: RunningSession[], tmp: string = tmpdir()): Promise<void> {
+  await mkdir(restartDir(tmp), { recursive: true })
+  await writeFile(runningSessionsFile(tmp), JSON.stringify({ at: Date.now(), sessions: list }), "utf8")
+}
+
+/** 读在运行会话登记（不存在/损坏返回空数组）。 */
+export async function readRunningSessions(tmp: string = tmpdir()): Promise<RunningSession[]> {
+  try {
+    const parsed = JSON.parse((await readFile(runningSessionsFile(tmp), "utf8")).replace(/^\uFEFF/, "")) as { sessions?: unknown }
+    if (!Array.isArray(parsed?.sessions)) return []
+    return parsed.sessions.filter((s): s is RunningSession => !!s && typeof (s as RunningSession).sessionId === "string" && typeof (s as RunningSession).user === "string")
+  } catch {
+    return []
+  }
+}
+
+/** 删除在运行会话登记（恢复完成或过期丢弃）。 */
+export async function removeRunningSessions(tmp: string = tmpdir()): Promise<void> {
+  await unlink(runningSessionsFile(tmp)).catch(() => {})
 }
 
 /** 续跑执行结果文件路径。 */
@@ -145,6 +192,10 @@ export interface RestartDeps {
   exit: (code: number) => void
   /** 拉起器部署（默认按平台 Start-Process / setsid；测试注入）。 */
   spawnLauncher: (scriptPath: string, platform: NodeJS.Platform) => Promise<{ ok: boolean; error?: string }>
+  /** 重启前的在运行会话快照（引擎注入；缺省/返回空 = 不登记）。
+   *  新进程启动时据此恢复这些会话的**会话内存态 env**（至少含审批跳过）——不只是本会话，
+   *  定时任务/飞书桥接/其他标签页在跑的会话同样要恢复。 */
+  listRunning?: () => Promise<RunningSession[]>
 }
 
 /** 新进程须继承的启动级环境变量（端口/家目录/监听地址/模式；凭据类不复制——.env 由 loadConfig 自行加载）。 */
@@ -409,6 +460,78 @@ async function readStateFile(tmpDir: string): Promise<{ ok?: boolean | null; pid
   } catch {
     return null
   }
+}
+
+/**
+ * 在运行会话的**会话内存态 env 恢复**依赖（新服务启动后调用）。
+ *
+ * 为何必须与续跑分开：续跑只涉及一个会话，而重启会同时打断**所有**在跑的会话（定时任务/飞书桥接/
+ * 其他标签页），它们的会话级审批跳过同样随内存态 env 一起消失。两个动作共用一个前置事实（「本次启动
+ * 由重启拉起器承接」），但互不依赖：任一侧无内容都不应阻断另一侧。
+ */
+export interface RestoreEnvDeps {
+  /** 把会话级开关写回会话内存态 env（装配处包装 store.setEnv）。 */
+  setSessionEnv: (sessionId: string, user: string, vars: Record<string, string | null>) => Promise<void>
+  /** 会话存在性校验（缺省跳过）。 */
+  sessionExists?: (sessionId: string, user: string) => Promise<boolean>
+  tmpDir?: string
+  /** 登记有效期（ms，默认 10 分钟）：与续跑同口径——陈旧登记不得被无关启动误消费。 */
+  maxAgeMs?: number
+  now?: () => number
+  log?: (msg: string) => void
+}
+
+export interface RestoreEnvOutcome {
+  /** 实际恢复了审批姿态的会话 id（无审批跳过标记的会话不写 env，也不计入）。 */
+  restored: string[]
+  /** 跳过/失败的会话数（会话已删、写 env 抛错）。 */
+  skipped: number
+  reason?: string
+}
+
+/**
+ * 恢复在运行会话的会话级审批姿态（一次性消费）——**不只本会话**。
+ *
+ * 只写「重启前确实开着审批跳过」的会话（`approvalSkip: true`）：登记里没有该标记的会话不注入任何键，
+ * 不凭空造出「服务端存着 env」这一事实（服务端仍零留存 env 值，这里恢复的只是用户自己在前端开过的开关）。
+ * 登记过期或不存在都不报错（无重启登记是常态）。
+ */
+export async function restoreRunningSessions(deps: RestoreEnvDeps): Promise<RestoreEnvOutcome> {
+  const tmp = deps.tmpDir ?? tmpdir()
+  const now = deps.now ?? (() => Date.now())
+  const log = deps.log ?? ((m: string) => logger.info(`[restart] ${m}`))
+  let list: RunningSession[] = []
+  let at = 0
+  try {
+    const parsed = JSON.parse((await readFile(runningSessionsFile(tmp), "utf8")).replace(/^\uFEFF/, "")) as { at?: number; sessions?: unknown }
+    at = typeof parsed?.at === "number" ? parsed.at : 0
+    if (Array.isArray(parsed?.sessions)) list = parsed.sessions.filter((s): s is RunningSession => !!s && typeof (s as RunningSession).sessionId === "string" && typeof (s as RunningSession).user === "string")
+  } catch {
+    return { restored: [], skipped: 0, reason: "无在运行会话登记" }
+  }
+  await removeRunningSessions(tmp)
+  const age = now() - at
+  if (!Number.isFinite(age) || age < -60_000 || age > (deps.maxAgeMs ?? 10 * 60_000)) {
+    log(`在运行会话登记已过期（${Math.round(age / 1000)}s），丢弃`)
+    return { restored: [], skipped: 0, reason: "登记已过期" }
+  }
+  const restored: string[] = []
+  let skipped = 0
+  for (const s of list) {
+    if (deps.sessionExists && !(await deps.sessionExists(s.sessionId, s.user).catch(() => false))) {
+      skipped++
+      continue
+    }
+    if (!s.approvalSkip) continue
+    try {
+      await deps.setSessionEnv(s.sessionId, s.user, { GEBAI_APPROVAL_SKIP: "true" })
+      restored.push(s.sessionId)
+    } catch {
+      skipped++
+    }
+  }
+  if (restored.length || skipped) log(`在运行会话恢复：审批姿态 ${restored.length} 个，未恢复 ${skipped} 个`)
+  return { restored, skipped }
 }
 
 /** 续跑消费依赖（测试注入全部可选，便于离线验证判定分支）。 */
@@ -676,12 +799,26 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
       // dev-reload 继承：拉起器固定 `bun run <entry>`（argv 的 --reload 不会被复制），改经环境变量传给新进程
       const effDeps: RestartDeps =
         deps.devReload && deps.env.GEBAI_DEV_RELOAD !== "1" ? { ...deps, env: { ...deps.env, GEBAI_DEV_RELOAD: "1" } } : deps
+      // 在运行会话登记：重启会清空全部会话内存态 env（审批跳过在内），前端只会在打开/发消息时重新同步——
+      // 续跑会话在上述页面加载之前就开跑，定时任务/飞书桥接/其他标签页在跑的会话更是永远回不来。
+      // 先快照再拉起，写失败不阻断重启（只丢「重启后自动恢复审批姿态」这一便利，不丢任务）。
+      let running: RunningSession[] = []
+      const listRunning = ctx.runningSessions ?? deps.listRunning
+      if (listRunning) {
+        try {
+          running = (await listRunning()).map((s) => ({ sessionId: s.sessionId, user: s.user, ...(s.role ? { role: s.role } : {}), ...(s.approvalSkip ? { approvalSkip: true } : {}), ...(s.startedAt ? { startedAt: s.startedAt } : {}) }))
+          await writeRunningSessions(running, deps.tmpDir)
+        } catch {
+          running = []
+        }
+      }
       // 状态文件先写「进行中」（旧内容清除；重启失败时拉起器覆盖为失败原因）
       await writeFile(join(dir, "state.json"), JSON.stringify({ ok: null, note: "重启进行中", oldPid: deps.oldPid, at: new Date().toISOString() }), "utf8")
       const deployed = await deployLauncher(effDeps)
       if (!deployed.ok) {
-        // 未重启：清理续跑请求，避免残留文件被下次无关启动消费
+        // 未重启：清理续跑请求与在运行会话登记，避免残留文件被下次无关启动消费
         if (continuation) await removeContinuation(deps.tmpDir)
+        await removeRunningSessions(deps.tmpDir)
         return { output: `拉起器部署失败，未执行重启（服务仍在运行）：${deployed.error ?? "未知错误"}` }
       }
       // 先送达本回复再退出：延迟自杀窗口内引擎已完成本轮工具结果落盘（endsTask 声明本任务就此结束——
@@ -689,10 +826,14 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
       const contNote = continuation
         ? `续跑已布置：新服务就绪后将在会话 ${continuation.sessionId} 自动注入该提示词（${prompt.length} 字）并继续执行。`
         : ""
+      const runNote = running.length
+        ? `已在运行会话登记 ${running.length} 个（${running.map((s) => s.sessionId).join("、")}），新服务就绪后恢复其会话级审批姿态（含非本会话）。`
+        : ""
       const output =
         `重启已布置：外部拉起器（独立进程）已启动，${deps.exitDelayMs}ms 后当前进程退出（PID ${deps.oldPid}）。` +
         `新服务将以端口 ${deps.port} 拉起${deps.devReload ? "（dev-reload 模式继承）" : ""}，就绪探测最长 90s。` +
         contNote +
+        runNote +
         `恢复后可用 restart_server(action="status") 或查看 ${dir}${deps.platform === "win32" ? "\\state.json" : "/state.json"} 确认结果。`
       setTimeout(() => deps.exit(0), deps.exitDelayMs)
       return { output, endsTask: true }

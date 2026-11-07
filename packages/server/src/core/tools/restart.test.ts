@@ -17,9 +17,12 @@ import {
   pickRestartEnv,
   readContinuation,
   readContinuationResult,
+  readRunningSessions,
   removeContinuation,
+  restoreRunningSessions,
   restartDir,
   writeContinuation,
+  writeRunningSessions,
 } from "./restart"
 
 function makeDeps(overrides: Partial<RestartDeps> = {}): RestartDeps {
@@ -852,6 +855,160 @@ describe("consumeRestartContinuation（新服务启动消费续跑请求）", ()
       const res = await readContinuationResult(dir)
       expect(res?.ok).toBe(false)
       expect(res?.error).toContain("模型不可用")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("在运行会话登记与恢复（重启后会话级审批姿态不丢，含非本会话）", () => {
+  function makeDir(): string {
+    return mkdtempSync(join(tmpdir(), "restart-running-"))
+  }
+
+  test("restart 动作：重启前登记全部在运行会话（不只本会话），结果输出可见登记数量", async () => {
+    const dir = makeDir()
+    try {
+      const tool = makeRestartServerTool({
+        tmpDir: dir,
+        platform: "win32",
+        exitDelayMs: 5,
+        exit: () => {},
+        spawnLauncher: async () => ({ ok: true }),
+        listRunning: async () => [
+          { sessionId: "sess-a", user: "admin", role: "admin", approvalSkip: true, startedAt: 1 },
+          { sessionId: "sess-b", user: "admin", startedAt: 2 },
+        ],
+      })
+      const res = await tool.execute({ action: "restart" }, ctxStub(dir))
+      expect(res.output).toContain("在运行会话登记 2 个")
+      const saved = await readRunningSessions(dir)
+      expect(saved.map((s) => s.sessionId)).toEqual(["sess-a", "sess-b"])
+      expect(saved[0].approvalSkip).toBe(true)
+      expect(saved[1].approvalSkip).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("restart 动作：ctx.runningSessions（引擎注入）优先于 deps.listRunning", async () => {
+    const dir = makeDir()
+    try {
+      const tool = makeRestartServerTool({
+        tmpDir: dir,
+        platform: "win32",
+        exitDelayMs: 5,
+        exit: () => {},
+        spawnLauncher: async () => ({ ok: true }),
+        listRunning: async () => [{ sessionId: "from-deps", user: "admin" }],
+      })
+      const ctx = { ...(ctxStub(dir) as unknown as Record<string, unknown>), runningSessions: async () => [{ sessionId: "from-ctx", user: "admin", approvalSkip: true }] }
+      await tool.execute({ action: "restart" }, ctx as never)
+      expect((await readRunningSessions(dir)).map((s) => s.sessionId)).toEqual(["from-ctx"])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("拉起器部署失败：清理在运行会话登记与续跑请求（不留半成品）", async () => {
+    const dir = makeDir()
+    try {
+      const tool = makeRestartServerTool({
+        tmpDir: dir,
+        platform: "win32",
+        exitDelayMs: 5,
+        exit: () => {},
+        spawnLauncher: async () => ({ ok: false, error: "部署失败" }),
+        listRunning: async () => [{ sessionId: "sess-a", user: "admin", approvalSkip: true }],
+      })
+      const res = await tool.execute({ action: "restart", prompt: "继续" }, ctxStub(dir))
+      expect(res.output).toContain("拉起器部署失败")
+      expect(await readRunningSessions(dir)).toEqual([])
+      expect(await readContinuation(dir)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("恢复：只给重启前开着审批跳过的会话写回会话 env，不只本会话；登记被消费后不再重复恢复", async () => {
+    const dir = makeDir()
+    try {
+      await writeRunningSessions(
+        [
+          { sessionId: "sess-a", user: "admin", role: "admin", approvalSkip: true },
+          { sessionId: "sess-b", user: "admin" },
+          { sessionId: "sess-c", user: "bob", approvalSkip: true },
+        ],
+        dir,
+      )
+      const writes: Array<{ sessionId: string; user: string; vars: Record<string, string | null> }> = []
+      const out = await restoreRunningSessions({
+        tmpDir: dir,
+        setSessionEnv: async (sessionId, user, vars) => void writes.push({ sessionId, user, vars }),
+        log: () => {},
+      })
+      expect(out.restored).toEqual(["sess-a", "sess-c"])
+      expect(writes.map((w) => w.sessionId)).toEqual(["sess-a", "sess-c"])
+      expect(writes[0].vars).toEqual({ GEBAI_APPROVAL_SKIP: "true" })
+      // 一次性消费：登记文件已删，再来一次什么也不做
+      expect(await readRunningSessions(dir)).toEqual([])
+      const again = await restoreRunningSessions({ tmpDir: dir, setSessionEnv: async () => {}, log: () => {} })
+      expect(again.restored).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("恢复：会话已不存在时跳过（不凭已删会话写 env）；写 env 抛错只计数不中断其他会话", async () => {
+    const dir = makeDir()
+    try {
+      await writeRunningSessions(
+        [
+          { sessionId: "gone", user: "admin", approvalSkip: true },
+          { sessionId: "boom", user: "admin", approvalSkip: true },
+          { sessionId: "ok", user: "admin", approvalSkip: true },
+        ],
+        dir,
+      )
+      const out = await restoreRunningSessions({
+        tmpDir: dir,
+        sessionExists: async (id) => id !== "gone",
+        setSessionEnv: async (id) => {
+          if (id === "boom") throw new Error("store down")
+        },
+        log: () => {},
+      })
+      expect(out.restored).toEqual(["ok"])
+      expect(out.skipped).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("恢复：登记过期（>10 分钟）则丢弃不执行（防陈旧登记被无关启动误消费）", async () => {
+    const dir = makeDir()
+    try {
+      await writeRunningSessions([{ sessionId: "sess-a", user: "admin", approvalSkip: true }], dir)
+      let writes = 0
+      const out = await restoreRunningSessions({
+        tmpDir: dir,
+        setSessionEnv: async () => void writes++,
+        now: () => Date.now() + 11 * 60_000,
+        log: () => {},
+      })
+      expect(out.reason).toBe("登记已过期")
+      expect(writes).toBe(0)
+      expect(await readRunningSessions(dir)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("恢复：无登记时不报错（未重启过是常态）", async () => {
+    const dir = makeDir()
+    try {
+      const out = await restoreRunningSessions({ tmpDir: dir, setSessionEnv: async () => {}, log: () => {} })
+      expect(out).toMatchObject({ restored: [], skipped: 0, reason: "无在运行会话登记" })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
