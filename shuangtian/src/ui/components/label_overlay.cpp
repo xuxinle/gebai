@@ -174,42 +174,73 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
   std::stable_sort(placed.begin(), placed.end(),
                    [](const Placed& a, const Placed& b) { return a.at.depth > b.at.depth; });
 
-  // 简单避让：已占用的矩形不重复（只做"垂直让位"——水平让位会让标签离开节点太远）
+  // 避让：多方向候选 + 选位移最小的空位。
+  //
+  // 上一版只“向下让”，密集区里连续下移几次就跑到别人头上了
+  //（实测截图：“GPU 利用率低”压在“训练任务长期 pending”上）。
+  // 改成八个方向轮流试（右/左/上/下 + 四个斜向偏移），取**离节点最近**的那个空位：
+  // 标签离自己的节点越近，归属越清楚；实在没空位才接受重叠。
   std::vector<math::Rect> occupied;
   occupied.reserve(placed.size());
 
+  // 候选偏移（以“右侧对齐节点中线”为基准的 dy，以及左右翻转）
+  struct Candidate {
+    float dx;   // 相对节点的横向偏移（已含文字宽度的处理在外面）
+    float dy;   // 相对节点中线的纵向偏移（行高倍数）
+    bool left;  // 是否放到节点左侧
+  };
+  const Candidate kCandidates[] = {
+      {0.0f, 0.0f, false},   // 右、居中
+      {0.0f, 0.0f, true},    // 左、居中
+      {0.0f, -1.1f, false},  // 右、上
+      {0.0f, 1.1f, false},   // 右、下
+      {0.0f, -1.1f, true},   // 左、上
+      {0.0f, 1.1f, true},    // 左、下
+      {0.0f, -2.2f, false},  // 右、更上
+      {0.0f, 2.2f, false},   // 右、更下
+  };
+
   for (const auto& item : placed) {
     const float line_h = port.line_height(item.font_size);
-    // 标签放在节点**右侧**：节点本身在投影点是圆的中心，
-    // 文字从右边缘起，既不挡住节点也能看出归属。
     const float pad = 4.0f;
-    float tx = item.at.x + pad;
-    float ty = item.at.y - line_h * 0.5f;
 
-    // 越界时放到左侧（右边缘附近的东西）
-    if (tx + item.text_w > width - 4.0f) {
-      tx = item.at.x - item.text_w - pad;
-    }
-    ty = std::clamp(ty, 2.0f, height - line_h - 2.0f);
+    math::Rect best{};
+    bool found = false;
+    float best_distance = 1e30F;
 
-    math::Rect box{tx - 2.0f, ty - 1.0f, item.text_w + 4.0f, line_h + 2.0f};
-    // 重叠就让位：下移一个行高，最多试 4 次（再多就会离节点太远，反而看不懂）
-    int tries = 0;
-    while (tries < 4) {
-      const bool clash = std::any_of(occupied.begin(), occupied.end(), [&box](const math::Rect& other) {
-        return box.x < other.right() && other.x < box.right() && box.y < other.bottom() &&
-               other.y < box.bottom();
-      });
-      if (!clash) break;
-      ty += line_h * 1.05f;
-      if (ty > height - line_h - 2.0f) {
-        ty = std::clamp(item.at.y - line_h * 0.5f - line_h * 1.05f * static_cast<float>(tries + 1),
-                        2.0f, height - line_h - 2.0f);
+    for (const auto& candidate : kCandidates) {
+      float tx = candidate.left ? (item.at.x - item.text_w - pad) : (item.at.x + pad);
+      float ty = item.at.y - line_h * 0.5F + candidate.dy * line_h;
+      ty = std::clamp(ty, 2.0F, height - line_h - 2.0F);
+      // 越界就不算候选（否则会把标签挤出屏幕）
+      if (tx < 2.0F || tx + item.text_w > width - 2.0F) continue;
+      const math::Rect box{tx - 2.0F, ty - 1.0F, item.text_w + 4.0F, line_h + 2.0F};
+      const bool clash =
+          std::any_of(occupied.begin(), occupied.end(), [&box](const math::Rect& other) {
+            return box.x < other.right() && other.x < box.right() && box.y < other.bottom() &&
+                   other.y < box.bottom();
+          });
+      if (clash) continue;
+      // 位移越小越好（=|dy| × 行高 + 左右翻转换的惩罚）
+      const float distance = std::abs(candidate.dy) * line_h + (candidate.left ? 3.0F : 0.0F);
+      if (distance < best_distance) {
+        best_distance = distance;
+        best = box;
+        found = true;
       }
-      box = math::Rect{tx - 2.0f, ty - 1.0f, item.text_w + 4.0f, line_h + 2.0f};
-      ++tries;
     }
-    occupied.push_back(box);
+
+    if (!found) {
+      // 八个方向都占满了：**不画**而不是叠上去。
+      //
+      // 重叠的字两段都读不清，不如让密集区只显示先到的那些
+      //（它们是按深度排序的，也就先到的是远的）——这比一坨糊字有用。
+      continue;
+    }
+
+    occupied.push_back(best);
+    const float tx = best.x + 2.0F;
+    const float ty = best.y + 1.0F;
 
     // 底板：深色半透明，保证文字在任何球体颜色上都能读。
     //
@@ -218,7 +249,7 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
     //
     // 不透明度 0xE6（90%）：之前用 0xC8（78%）时，深色文字叠在球体的
     // 亮色光晕上会发糊——实测截图里“调度”两字几乎读不出。
-    canvas.fill_rect(box, raster::Paint::solid(math::Color{0x0A, 0x0D, 0x13, 0xE6}), 3.0f);
+    canvas.fill_rect(best, raster::Paint::solid(math::Color{0x0A, 0x0D, 0x13, 0xE6}), 3.0F);
     port.draw(canvas, item.text, math::Point{tx, ty}, item.font_size, item.color);
     ++painted_;
   }

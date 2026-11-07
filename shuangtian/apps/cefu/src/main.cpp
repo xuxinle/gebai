@@ -1039,10 +1039,10 @@ auto run_app(int argc, char** argv) -> int {
               break;
           }
           // 词条文字用**高亮近白**：它是主角，必须先读得到。
-          // 语义（已确认/待确认）改用底色微调体现（见下面的底板色），
-          // 而不是把字本身染成暗色——实测暗蓝/暗琥珀字在深底上读不清。
+          // 语义（已确认 / 待确认 / 过期）靠色相微差区分，
+          // 但三者都保证在深底上可读——实测把过期那条染成暗灰后字就没了。
           if (confidence == "verified") return 0xFFE8F2FFU;  // 略带蓝的白
-          if (confidence == "stale") return 0xFF9AA3ADU;     // 过期：灰白
+          if (confidence == "stale") return 0xFFC4CBD4U;     // 过期：**中性灰白**（比上一版亮很多）
           return 0xFFFFE9C4U;                                 // 待确认：暖白
         };
         std::vector<st::ui::LabelAnchor> labels;
