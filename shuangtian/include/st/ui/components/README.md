@@ -1,4 +1,4 @@
-# 组件库：一个组件一个头，按需导入
+# 组件库：一个组件一个头，用到才进产物
 
 本目录（`include/st/ui/components/`）放霜天的全部 UI 组件头。
 这份文档回答三件事：**怎么用**、**为什么这么设计**、**加组件要做什么**。
@@ -7,79 +7,168 @@
 
 ## 一、怎么用
 
-### 开发期 / XML 应用：全量头
+### 三种写法，看你要做什么
+
+**① 直接 `new` 组件（最常见）——一行 import 都不用写**
+
+```cpp
+#include "st/ui/components/button.hpp"
+
+auto btn = std::make_unique<st::ui::Button>("确定");
+// 到 main 之后，Button 已经自动注册好了：component_registry::contains("Button") == true
+```
+
+组件实现的 `.cpp` 末尾有静态登记块；你一 `new`，那个 `.o` 就进了产物，
+登记随之在 `main` 之前完成。实测见第二节。
+
+**② 要在运行期按名字建（XML / 脚本 / `ui.create`）——需要 import**
+
+```cpp
+#include "st/ui/components/button.hpp"
+st::ui::import_components<st::ui::Button>();   // 我没 new 它，但运行期要按名建
+```
+
+这里 import 的作用是**把那个 `.o` 拉进产物**（即使你一次也不 `new`）。
+
+**③ 开发期 / 不确定用哪些——全量**
 
 ```cpp
 #include "st/ui/components/all.hpp"
-
-// 某个初始化函数里（**必须调**，见下文"为什么要导入"）：
-st::ui::import_all_components();
+st::ui::import_all_components();   // 全部组件进产物，XML 里写什么标签都能用
 ```
 
-一个 include 拿到全部组件，XML 里写什么标签都能用。
+### XML 应用
 
-### 交付期：按需导入
+XML 的标签是**运行期**才决定的，编译期枚举不出来——所以不能指望"自动注册"。
+两条路：
 
-```cpp
-#include "st/ui/components/button.hpp"   // 只拿 Button
-#include "st/ui/components/text.hpp"     // 只拿 Text
-
-st::ui::import_components<st::ui::Button, st::ui::Text>();
-```
-
-**产物里就只会有这两个组件**（以及它们真正依赖的东西）。
-没 include、没导入的组件整块不进产物。
-
-### XML 应用要自己导入
-
-XML 里的标签是运行期才决定的，编译期枚举不出来。所以：
-
-- 用 `all.hpp` + `import_all_components()`：全部标签可用（推荐）；
-- 或者自己按需 include 用到的组件，逐个 `import_components<T>()`。
+- `all.hpp` + `import_all_components()`：全部标签可用（推荐）；
+- 自己按需 include 用到的组件，逐个 `import_components<T>()`。
 
 写了没导入的标签**不会静默消失**：`XmlBuildReport::unknown_tags` 会如实报出来
 （见 `docs/xml-ui.md`）。
 
+### 按需效果
+
+```cpp
+#include "st/ui/components/button.hpp"
+#include "st/ui/components/text.hpp"
+st::ui::import_components<st::ui::Button, st::ui::Text>();
+```
+
+产物里就只会有这两个组件（以及它们真正依赖的东西）。没 include、没导入、
+也没 `new` 过的组件**整块不进产物**。
+
 ---
 
-## 二、为什么是"导入"而不是"include 就自动注册"
+## 二、注册是怎么发生的：两层机制（前一版文档在这里说错过）
 
-这一条踩过坑，写清楚免得下一个人再试一遍。
+> ⚠ 本节曾写成一个错误结论：「include 不能自动注册，所以必须显式导入」。
+> 2026-11-08 重新用独立最小实验测出：**组件被真正使用时，注册确实会自动发生**。
+> 下面是把两种情形分开测后的准确说法。
 
-注册必须发生在**运行期**（`dsl::make_element(name)` 是按字符串查表），而"组件的
-代码在不在产物里"由**链接器**按引用决定。两者之间有一条硬约束：
+### 先看一条硬约束
 
-- **静态库里没人引用的 `.o` 不进产物**——这正是"按需"的机制本身；
-- 于是"只 include 头、不引用任何符号"的组件不会进产物，它的**任何静态初始化
-  都不会运行**；
-- 想让注册"自动"发生就得引用它，那又让"用不用"变成编译期常量，按需失效。
+注册必须发生在**运行期**（`dsl::make_element(name)` 是按字符串查表），而
+"组件的代码在不在产物里"由**链接器**按引用决定：
 
-实测过三条死路，全都**编译链接全绿、运行时注册表是空的**：
+> **静态库里没人引用的 `.o` 不进产物**——这正是"按需"的机制本身。
+
+把这个约束和两种使用方式对上，结论就清楚了。
+
+### 情形一：应用真的用到了组件 → **自动注册**
+
+```cpp
+#include "st/ui/components/terminal.hpp"
+auto t = std::make_unique<st::ui::Terminal>();   // 就这一步
+```
+
+`Terminal` 的构造函数在 `terminal.cpp` 里，所以这一步让 `terminal.o` 进了产物；
+那个 `.cpp` 末尾的静态登记块随之在 `main` 之前执行。**一行 `import` 都不用写。**
+
+实测（临时探针，只 `new` 了 `Terminal`，不写任何 import）：
+
+```
+造出 type=Terminal
+未写 import，Terminal 已注册=1        ← AUTO_OK
+```
+
+为什么能这样：静态库里"`.o` 进不进产物"取决于**有没有引用它的符号**。
+`new Terminal` 引用构造函数，这就是引用。
+
+### 情形二：只 include，不用 → **不注册**（而且这是对的）
+
+实测（include 了 `terminal.hpp`，但只 `new Text`）：
+
+```
+没用 Terminal，它已注册=0             ← ON_DEMAND_OK
+产物中 Terminal 成员符号数: 0
+```
+
+这正是"按需"成立的原因。**如果你要用 `Terminal` 却没 `new` 它**（典型：
+XML 里写了 `<Terminal>`、脚本里 `ui.create("Terminal")`），那么它本来就不在
+产物里，必须靠显式导入把它拉进来：
+
+```cpp
+st::ui::import_components<st::ui::Terminal>();   // 我没有 new 它，但运行期要按名建
+```
+
+### 所以 `import` 的含义是什么
+
+| 你想做的事 | 写法 | 需要 `import` 吗 |
+|---|---|---|
+| 直接 `new` 一个组件 | `std::make_unique<Button>(...)` | **不需要**（自动） |
+| 运行期按**名字**建（XML / 脚本 / `ui.create`） | `import_components<Button>()` | **需要** |
+
+`import_components<T>()` 表达的不是"我要用它"，而是
+**"我要在运行期靠名字找到它"**——这是个额外诉求：它对
+`detail::component_importer<T>::run` 产生真实引用，于是那个 `.o` 被拉进产物，
+即使你一次也没 `new` 过它。**"导入"与"链进来"是同一件事。**
+
+### 两条边界（实测量出来的）
+
+**① 只 include 不用，就是不注册。** 这不是缺陷：`<Terminal>` 这种标签是
+**运行期**才决定要不要建的，编译期不知道。要覆盖这条路径，就显式导入。
+
+**② 自动注册发生在 `main` 之前，但也只早于 `main`。**
+
+实测（应用自己也有个全局对象，组件的 `.o` 确实进了产物）：
+
+```
+[全局对象构造期] 注册表 0 项      ← 应用的静态对象可能先跑
+[main 期]        注册表 2 项      ← 到 main 就有了
+```
+
+跨 TU 静态初始化顺序不可控。所以**不要在某个全局对象的构造函数里按名字建组件**
+（那会拿到空注册表）；放到 `main` 之后、或某个惰性初始化函数里就好。
+
+### 曾经走过的弯路（别重试）
+
+这三条都**编译链接全绿、运行时注册表是空的**，它们验的全部是
+**头文件里的 `inline` 变量**（没人 ODR-use 时链接器可整块丢弃）：
 
 | 写法 | 断在哪 |
 |---|---|
-| 头里 `inline const bool x = [](){...}();` | 没有 TU 对它 ODR-use → 链接器可整块丢弃 → 初始化不发生 |
-| 同上 + 实现文件里取一次地址 | 只保住**被取地址的那一份**；"哪个 `.o` 进产物"仍由别处决定 |
-| 头里声明非 inline 函数、`.cpp` 里定义 + 静态登记 | `.cpp` 不进产物，定义与登记都不存在 |
+| 头里 `inline const bool x = [](){...}();` | 没有 TU 对它 ODR-use → 链接器可整块丢弃 |
+| 同上 + 实现文件里取一次地址 | 只保住**那一份**；"哪个 `.o` 进产物"仍由别处决定 |
+| 头里声明非 inline 函数、`.cpp` 里定义 + 静态登记 | 头里那个声明无人引用时，`.cpp` 不进产物 |
 
-所以本框架采用**显式导入**，与 Qt 的 `qmlRegisterType`、Flutter 的
-`registerViewFactory` 同一形态。
+⚠ **关键区别（这也是我上次搞错的地方）**：**`.cpp` 里命名空间作用域的静态对象**
+和上面第三条不一样——它进 `.init_array`，**只要该 `.o` 进了产物就必然构造**。
+上面第三条"失败"的真正原因是「没人引用那个 `.o`」，而不是「静态初始化不可靠」。
+这两件事被混为一谈了很久。
 
-**这一步不是形式主义**：`import_components<T>()` 引用
-`detail::component_importer<T>::run`，那个定义在组件的 `.cpp` 里——所以调用它
-= 对那个目标文件产生真实引用 = 链接器必须把它拉进来。**"导入"与"链进来"是同一件事。**
+还试过把登记项放进自定义链接段（`__attribute__((section))` + `__start/__stop`），
+想做到零时序依赖的自动注册——**在 PE/Mach-O 下段边界符号不存在，实测直接段错**。
+放弃。
 
-### 有可执行证据
+### 可执行证据
 
-`tools/import_probe.cpp` 是一个独立的验证程序：它只 include/导入 `Panel`、`Text`、
-`Button` 三个组件。实测结果：
-
-```
-components=8          ← 注册表里只有 basic.cpp 那一个目标文件里的组件
-panel=1 text=1 button=1
-terminal_present=0    ← Terminal 查不到
-产物中 Terminal 符号数: 0   ← 而且二进制里没有它的任何符号
-```
+- `tools/import_probe.cpp`：只 include/导入 `Panel`、`Text`、`Button`。实测
+  `components=8`（注册表里只有 `basic.cpp` 那一个目标文件里的组件）、
+  `terminal_present=0`、**产物中 Terminal 符号数 0**。
+  这是"按需"在**产物**层面的证据。
+- 上面的两个探针（自动注册 / 不注册）是"注册时机"层面的证据。
 
 （`components=8` 是因为 `basic.cpp` 一个文件实现了 7 个基础组件，加上 `Panel`。
 按文件粒度按需，而不是按组件粒度——那是 `.cpp` 的组织方式决定的，见下文。）
