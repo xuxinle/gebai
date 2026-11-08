@@ -303,18 +303,39 @@ def icon_xiangqi(c):
 
 
 def icon_gbcode(c):
-    """gbcode：尖括号 + 中心点。
+    """gbcode：双折带（上臂亮 / 下臂暗），**无内框**。
 
-    用**粗线段**拼而不是四边形填：四边形版实测出来是菱形
-    （凹多边形被当成凸的来填，两个角退化成三角），看着不像尖括号。
+    ## 与旧版（尖括号 + 中心点）的差别
+
+    旧记号只有 1.9 宽的细线和一个小点，视觉重量 ≈9%；16px 下细线直接消失。
+    现在是 4 条实心圆头折带，重量 ≈26%，与 louyue/gallery 同量级。
+
+    ## 坐标换算
+
+    SVG 源（24 视框）→ 256 画布，倍数 256/24 = 10.6667。
+    本函数与 `apps/gbcode/assets/gbcode-logo.svg` 必须**同源**：
+    改一边必改另一边，否则任务栏与标题栏会显示两个不同的东西。
+
+    ## 定稿参数（用户拍板：不要卡片，折带放大 1.15）
+
+    24 视框 → 左 apex x=5.21 / 右 apex x=18.79，cy=12；
+    半高 4.25，进深 4.48，线宽 3.45；下臂 alpha 0.62。
     """
     fg = (1.0, 1.0, 1.0)
-    w = 26
-    thick_line(c, 106, 66, 62, 128, w, fg)     # <
-    thick_line(c, 62, 128, 106, 190, w, fg)
-    thick_line(c, 150, 66, 194, 128, w, fg)    # >
-    thick_line(c, 194, 128, 150, 190, w, fg)
-    disc(c, 128, 128, 15, fg)
+    k = SIZE / 24.0                      # 24 视框 → 256
+
+    def R(v):
+        return v * k
+
+    w = R(3.45)
+    apex_l, apex_r, cy = R(5.21), R(18.79), R(12.0)
+    dx, dy = R(4.48), R(4.25)
+    # 左折带：上臂亮、下臂暗
+    thick_line(c, apex_l, cy, apex_l + dx, cy - dy, w, fg, alpha=1.0)
+    thick_line(c, apex_l, cy, apex_l + dx, cy + dy, w, fg, alpha=0.62)
+    # 右折带：镜像
+    thick_line(c, apex_r, cy, apex_r - dx, cy - dy, w, fg, alpha=1.0)
+    thick_line(c, apex_r, cy, apex_r - dx, cy + dy, w, fg, alpha=0.62)
 
 
 APPS = {
