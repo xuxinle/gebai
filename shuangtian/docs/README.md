@@ -196,8 +196,9 @@
 | [`OPTIMIZATION_PROGRESS.md`](OPTIMIZATION_PROGRESS.md) | 结构优化过程与交接 | 速查 | 记录 |
 | [`OPTIMIZATION_REPORT.md`](OPTIMIZATION_REPORT.md) | 结构优化收尾（17 个提交，每阶段可回滚） | 速查 | 记录 |
 | [`OPTIMIZATION_PERF_2026-11.md`](OPTIMIZATION_PERF_2026-11.md) | 性能优化轮（2026-11）：局部上屏/双绘/重排 SIMD/空转归零 + 后续 R 轮 | 速查 | 记录（进行中） |
- | [`STARTUP_UX_STUDY_20261108.md`](STARTUP_UX_STUDY_20261108.md) | 启动体验调研（2026-11-08）：建窗/首帧前空白/启动动画的实测账本与候选方案 | 详读 | 实测（调研阶段） |
- | [`STARTUP_SPLASH_LANDED_20261108.md`](STARTUP_SPLASH_LANDED_20261108.md) | 启动卡落地记录：磨砂三条路线的实测对比、四个真缺陷、代价账与未做清单 | 详读 | 实测（已落地） |
+ | [`STARTUP_UX_STUDY_20261108.md`](STARTUP_UX_STUDY_20261108.md) | 启动体验调研（2026-11-08）：建窗/首帧前空白/启动动画的实测账本与候选方案 | 速查 | 实测（调研阶段） |
+ | [`STARTUP_SPLASH_FINAL_20261108.md`](STARTUP_SPLASH_FINAL_20261108.md) | **启动体验最终档案**（2026-11-08）：悬浮动画的完整账本——为何推翻磨砂、纯分层四条硬约束、自适应口径错三次、量具教训、建窗一次到位 | 详读 | 实测（当前形态） |
+ | [`STARTUP_SPLASH_LANDED_20261108.md`](STARTUP_SPLASH_LANDED_20261108.md) | 磨砂启动卡落地记录。⚠ **已被 FINAL 取代**（Acrylic 整窗材质那条路走不通）；仅 §二/§3.3 仍有参考价值 | 速查 | 记录（已废弃） |
 | [`MERGE_REVIEW.md`](MERGE_REVIEW.md) | `optimize/ui-viewport-2026` 合并前复核（16 笔逐笔） | 速查 | 记录（分支已并入） |
 | [`BUILD_ISOLATION_PLAN.md`](BUILD_ISOLATION_PLAN.md) | **构建隔离方案（未落地）**：多 worker 互踩的四层机制 + 改动面与代价 | 详读 | 方案（只分析未落地） |
 
