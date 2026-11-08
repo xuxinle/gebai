@@ -98,9 +98,14 @@ void DividerLabel::relayout(const RenderContext& context, math::Rect rect) const
   action_box_ = math::Rect{};
   if (rect.is_empty()) return;
 
-  // 线在**行盒的垂直中心**（不是墨迹中心）：分隔线要与整行视觉中线对齐，
-  // 这里是唯一"线居中"比"墨迹居中"更正确的地方。
-  const float line_y = rect.y + (rect.height - kLineThickness) * 0.5f;
+  // 线与**文字墨迹中心**对齐（不是行盒中心）。
+  //
+  // 为何：文字经 `centered_line_top` 落位时居中的是行盒，而字形实际占据的墨迹带
+  // 在行盒里**偏下**（字体上方预留了空格）。按行盒中心画线，视觉上就是「线在文字上方」
+  // （实测截图：『高级设置』的分隔线压在上边缘）。
+  const auto geometry = layout_line(port, kInkReferenceSample, font_size_, rect.height);
+  const float line_y = rect.y + geometry.glyph_top + geometry.glyph_height * 0.5f -
+                       kLineThickness * 0.5f;
 
   // 右侧动作先占位（贴右缘）。
   float right_limit = rect.right();

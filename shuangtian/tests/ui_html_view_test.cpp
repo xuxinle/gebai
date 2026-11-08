@@ -365,6 +365,41 @@ ST_TEST(html_css_border_left_draws_only_left_edge) {
 /// 首版 `layout_node` 在递归行内元素时把 `cursor_y` 作为游标传进去，而 `<code>`
 /// 的 UA 样式带 `padding`/`margin`，于是游标被推进——下一段文字就**盖在上一个字上**。
 /// 表现是“`.class#id` 糊成一团”，而且每个行内元素的缺陷就在它自己身上，
+/// 带 `padding` 的块里，**首个 run 与后续行内元素不能重叠**。
+///
+/// ⚠ 为何与下一条分开：`html_view_inline_runs_do_not_overlap` 用的是**无 padding**
+/// 的 `<p>`，而缺陷只出现在「块有 padding 且内部有行内元素」时——`padding` 被算了
+/// 两次，于是首个 run 不动、后续被踢 10px，两段文字叠在一起（截图实测：
+/// 引用块里「引用式提示块：」与「背景色 + 左边框」重叠）。
+/// 无 padding 的块上两者位置相同，那条用例自然看不出问题。
+ST_TEST(html_padded_block_inline_runs_do_not_overlap) {
+  st::ui::Theme theme = st::ui::Theme::light();
+  FixedAdvanceTextPort port;
+  st::ui::RenderContext context{theme, &port, 0.0};
+
+  st::ui::HtmlView view(
+      R"(<style>.box { background: #eef2ff; padding: 10px; }</style>`
+         `<div class="box">前缀 <strong>加粗</strong> 结尾</div>)");
+  view.apply_theme(theme);
+  view.measure(context, st::ui::Constraints{});
+  view.arrange(context, st::math::Rect{0.0f, 0.0f, 400.0f, view.measured_size().height});
+
+  // ⚠ 断言 **`ink`**（片段自身矩形）而不是 `box`：
+  // 有背景/边框的块会把同一行所有片段的 `box` 拉成整块宽（铺底色用），
+  // 于是每个片段的 `box.x` 都是块左缘——拿它判重叠永远“不重叠”（假绿）。
+  // 文字真正的横向位置在 `ink.x`。
+  const auto geometry = view.row_geometry();
+  float previous_right = -1.0f;
+  bool saw_first = false;
+  for (const auto& row : geometry) {
+    if (row.text.find("前缀") != std::string::npos) saw_first = true;
+    if (!saw_first) continue;
+    ST_CHECK(row.ink.x >= previous_right - 0.5f);
+    previous_right = row.ink.right();
+  }
+  ST_CHECK(saw_first);
+}
+
 /// 属性面完全正常（段落数、文本内容都对）。
 ST_TEST(html_view_inline_runs_do_not_overlap) {
   st::ui::Theme theme = st::ui::Theme::light();

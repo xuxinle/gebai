@@ -180,20 +180,19 @@ void Rating::paint_content(const RenderContext& context, raster::Surface& canvas
     const math::Rect box = star_boxes_[i];
     if (box.is_empty()) continue;
     const float filled = std::clamp(shown - static_cast<float>(i), 0.0f, 1.0f);
-    // 空星（底）
-    Icon::draw(canvas, "star", box, empty_color_,
-               Icon::effective_stroke("star", star_size_));
+    // 空星：**描边**（轮廓）。
+    Icon::draw(canvas, "star", box, empty_color_, Icon::effective_stroke("star", star_size_));
     if (filled <= 0.0f) continue;
+    // 满星：**填充**——满/空靠「实心 vs 空心」区分，而不是两种描边色。
+    // （实测：两边都描边时，悬停预览下 3 星与 4 星的差别小到分不出。）
     if (filled >= 0.999f) {
-      Icon::draw(canvas, "star", box, filled_color_,
-                 Icon::effective_stroke("star", star_size_));
+      Icon::draw_filled(canvas, "star", box, filled_color_);
       continue;
     }
-    // ⚠ 半星：用**裁剪**画左半边，而不是画一颗小的。
-    // 画小星会让半星看起来比满星瘦一圈（形状不同），像字体回退错误。
+    // 半星：用**裁剪**画左半边的填充星，而不是画一颗小的。
+    // 小星形状与满星不同（边长不同），看起来像字体回退错误。
     canvas.push_clip_rect(math::Rect{box.x, box.y, box.width * filled, box.height});
-    Icon::draw(canvas, "star", box, filled_color_,
-               Icon::effective_stroke("star", star_size_));
+    Icon::draw_filled(canvas, "star", box, filled_color_);
     canvas.pop_clip();
   }
 

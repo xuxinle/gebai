@@ -199,7 +199,7 @@ void TagInput::relayout(const RenderContext& context, math::Rect rect) const {
     }
     const float origin_x = left + (x > 0.0f ? x + kTagGap : 0.0f);
     tag_boxes_[i] = math::Rect{origin_x, y, item, kTagHeight};
-    close_boxes_[i] = math::Rect{origin_x + item - kCloseWidth - kTagPaddingX * 0.5f,
+    close_boxes_[i] = math::Rect{origin_x + item - kCloseWidth - kTagPaddingX,
                                  y + (kTagHeight - kCloseWidth) * 0.5f, kCloseWidth, kCloseWidth};
     x = (x > 0.0f ? x + kTagGap : 0.0f) + item;
   }

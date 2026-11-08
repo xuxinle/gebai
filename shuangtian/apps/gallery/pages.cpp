@@ -1168,7 +1168,7 @@ namespace {
 
   // Banner：四档语义色调，最上面一条可关。
   auto banner_info = std::make_unique<Banner>("有新版本可用", Tone::Primary);
-  banner_info->set_description("重启后生效；它占位在内容流里，不会被忽略）；");
+  banner_info->set_description("重启后生效；它占位在内容流里，不会被忽略");
   banner_info->set_action("重启");
   banner_info->set_closable(true);
   banner_info->set_id("demo-banner-info");
@@ -1313,9 +1313,13 @@ namespace {
   input_form_card->add_child(std::move(radio_demo));
 
   // 标签输入：多到需要折行。
+  //
+  // 显式给高：`TagInput` 的高度由内容行数决定，但父级（卡片列布局）会把它
+  // 拉到剩余高度，于是框底会空出一大片（截图实测）。这里按「一行标签 + 内边距」给死。
   auto tag_demo = std::make_unique<TagInput>();
   tag_demo->set_tags({"C++", "Rust", "Qt", "自绘渲染", "无头测试", "跨平台"});
   tag_demo->style().width = 420.0f;
+  tag_demo->style().height = 40.0f;
   tag_demo->set_id("demo-tag-input");
   input_form_card->add_child(std::move(tag_demo));
 

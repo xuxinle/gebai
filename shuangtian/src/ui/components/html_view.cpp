@@ -324,6 +324,17 @@ void HtmlView::finish_inline_flow(const RenderContext& context, InlineFlow& flow
         row.ink.width += run_style.inline_padding * 2.0f;
         row.text_x += run_style.inline_padding;
       }
+      // 有背景的片段之间留一道**微缝**。
+      //
+      // 为何：紧邻两个背景块若共用一条边界，后画的那块会把自己的底色压在
+      // 前一格末尾字上——放大后看到的是“冒号被切掉右半”（实测截图：引用块里
+      // `提示块：` 的冒号紧贴 `<strong>` 底色块的竖边）。留 1px 缝比调绘制顺序稳：
+      // 画序已分两趟（背景→文字），再接下去只能改几何。
+      if (run_style.has_inline_background) {
+        row.ink.x += 0.5f;
+        row.ink.width = std::max(row.ink.width - 1.0f, 1.0f);
+        row.ink.height = std::max(row.ink.height - 1.0f, 1.0f);
+      }
       row.text = std::move(piece);
       // 行内元素自己的背景/边框（`<code>` 的灰底）：用 UA 样式里那一份。
       if (run_style.has_inline_background) {
@@ -443,11 +454,17 @@ void HtmlView::layout_node(const RenderContext& context, const html::Node& node,
 
   cursor_y += style.margin_top;
   const float outer_left = left + style.margin_left;
+  // 边框占位：`border-left` / `border-right` 是**框内**的石墨，内容要再内缩一个边框宽。
+  //
+  // 为何：只算 `padding` 时，有 `border-left` 的块（引用块/提示条）文字会紧贴
+  // 那道竖线（实测截图：引用块文字贴住左边框）。
+  const float border_left_w = style.border_width > 0.0f ? style.border_width : 0.0f;
+  const float border_right_w = border_left_w;
   const float content_width =
       std::max(width - style.margin_left - style.margin_right - style.padding_left -
-                   style.padding_right,
+                   style.padding_right - border_left_w - border_right_w,
                20.0f);
-  const float content_left = outer_left + style.padding_left;
+  const float content_left = outer_left + border_left_w + style.padding_left;
   cursor_y += style.padding_top;
 
   BlockLayout inner{};
@@ -637,12 +654,18 @@ void HtmlView::layout_node(const RenderContext& context, const html::Node& node,
         rows_[row].radius = inner.radius;
       }
       if (inner.has_background || inner.border_width > 0.0f) {
-        // 行盒横向铺满块宽，文字按内边距内缩（**先记下文字相对偏移再扩盒子**：
-        // 否则文字会左移一个 padding 位置——实测踩到）。
+        // 行盒横向铺满块宽，文字保持原来的**相对位置**。
+        //
+        // ⚠ **不要在这里再加 `padding_left`**。`text_offset` 是相对 `block_left`
+        // （块的外框左缘）的偏移，而行的 x 本来就是从 `content_left =
+        // outer_left + padding_left` 起算的——padding 已经在里面了。
+        // 再加一次会让文字右移一个 padding，且**只影响有背景/边框的块**：
+        // 于是同一个块里「首个 run 不动、后面的行内元素被踢」→ 两段文字重叠
+        // （实测截图：引用块里「引用式提示块：」与「背景色 + 左边框」叠在一起）。
         const float text_offset = rows_[row].box.x - block_left;
         rows_[row].box.x = block_left;
         rows_[row].box.width = block_width;
-        rows_[row].text_x = text_offset + style.padding_left;
+        rows_[row].text_x = text_offset;
       }
     }
   }
