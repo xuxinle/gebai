@@ -91,9 +91,15 @@ describe("手机后台半死连接：回前台/定时自检必需接线", () => 
     expect(fn).toContain("setInterval(trigger, VERIFY_INTERVAL_MS)")
   })
 
-  test("main.ts 建连后绑定自检（不挂钩即永不核对，半死连接无人发现）", () => {
+  test("main.ts 在**建连之前**绑定自检（首次建连失败也要有自检把页面救回）", () => {
     const s = readFileSync(join(import.meta.dirname, "main.ts"), "utf8")
     expect(s).toContain("bindConnectionVerify()")
-    expect(/await connPromise[\s\S]{0,400}bindConnectionVerify\(\)/.test(s)).toBe(true)
+    // 绑定必须早于 await connPromise：写成“建连成功后才绑定”，首连失败就再也走不到——
+    // 自检/运行态收敛永久缺席，弱网下刷新一次就只能手动刷新（本缺陷的根因）
+    const bindAt = s.indexOf("bindConnectionVerify()")
+    const awaitAt = s.indexOf("await connPromise")
+    expect(bindAt).toBeGreaterThan(0)
+    expect(awaitAt).toBeGreaterThan(0)
+    expect(bindAt).toBeLessThan(awaitAt)
   })
 })

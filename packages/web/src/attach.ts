@@ -44,8 +44,14 @@ function scheduleAttachRetry(sessionId: string, attempt = 1): void {
 }
 setRunningAttach(attachRunningSession)
 
-/** 自检节流：一次核对在途时不再叠一次（定时器与回前台事件可能同时到达）。 */
-let verifying = false
+/** 自检节流：一次核对在途时不再叠一次（定时器与回前台事件可能同时到达）。
+ *  用**时间戳**而非布尔量：布尔量一旦因异常路径没有复位（或某次核对被长超时挂住），
+ *  后面的自检就全部被静默吃掉（弱网下就是“看着在自检、实际形同没有”）。 */
+let lastVerifyAt = 0
+/** 自检节流窗口（毫秒）：小于它视为重复触发（定时器与回前台/online 同时到达）。 */
+export const VERIFY_MIN_GAP_MS = 1_500
+/** 单次自检的时长上限（毫秒）：内部已经用短超时，这里再加一道，保证不会挂住整个自检链路。 */
+export const VERIFY_BUDGET_MS = 8_000
 /** 可见时自检的周期（毫秒）：手机后台回来是「半死连接」，靠它把攒住的事件与真相补上。 */
 export const VERIFY_INTERVAL_MS = 10_000
 
@@ -63,10 +69,25 @@ export const VERIFY_INTERVAL_MS = 10_000
  * - 服务端 `running` 含某会话而本页没接管 → 附加恢复
  */
 export async function verifyConnection(): Promise<void> {
-  if (verifying) return
-  verifying = true
+  const now = Date.now()
+  if (now - lastVerifyAt < VERIFY_MIN_GAP_MS) return
+  lastVerifyAt = now
   try {
-    const r = await client.verify()
+    const r = await Promise.race([
+      client.verify(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), VERIFY_BUDGET_MS)),
+    ])
+    if (!r) {
+      // 预算内没回来：链路基本不可用，推进重连（不等下一拍退避）
+      client.hurryReconnect()
+      return
+    }
+    if (!r.heartbeatOk) {
+      // 自检报“链路不可用”：SDK 内部已判死/或本来就未连接——推一把重连，
+      // 否则网络已恢复的情况下还得干等最长 30s 的退避到点
+      client.hurryReconnect()
+      return
+    }
     // 运行态明细不用在这里回写：verify 内部的 requestSnapshot 会走 applySnapshot →
     // snapshotHandlers，main.ts 的 onSnapshot 已在那个回调里调 setRuntimeInfo——
     // 自检因此天然把最新的 runtime 带到会话列表角标，不额外多一次往返。
@@ -87,9 +108,8 @@ export async function verifyConnection(): Promise<void> {
       if (getCurrentSession()?.id === sid) attachRunningIfNeeded(sid)
     }
   } catch {
-    /* 自检失败不改动界面：连接状态由 SDK 状态回调如实呈现 */
-  } finally {
-    verifying = false
+    /* 自检失败不改动界面：连接状态由 SDK 状态回调如实呈现；但推一把重连，别让恢复干等退避 */
+    client.hurryReconnect()
   }
 }
 
@@ -144,6 +164,11 @@ function handleNetEvent(ev: NetEvent): void {
     client.dropConnection()
     return
   }
-  // 恢复：立即核对服务端真值（不等下一拍定时器）。不可见时也跑——网络恢复正是该补的时候
-  if (action.verify) void verifyConnection()
+  // 恢复：**先打断退避立即重连**，再核对服务端真值。
+  // 不打断的话，网络恢复与“下一拍退避到点”毫无关系（实测退避最长 30s），用户看到的就是“网回来了但还卡着”；
+  // 另外 verify() 在未连接态原本只空转返回——它是重连的真正推进点。
+  if (action.verify) {
+    client.hurryReconnect()
+    void verifyConnection()
+  }
 }

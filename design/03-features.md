@@ -297,20 +297,43 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 | `sync.request` 重放 | 即时 | 按 `seq` 补发断线期错过的 `event.*`（缺口过大回 `overrun` → 全量重同步） |
 | `visibilitychange` / `pageshow` | 回前台即时 | 手机后台冻结后“半死连接”的真相核对 |
 | 定时自检（默认 10s） | ≤ 10s | 冻结期事件不可靠时的兵底 |
-| **`online` / `offline`（新增）** | **即时** | 断网与恢复的最快信号（早于任何定时器） |
+| `online` / `offline` | 即时 | 断网与恢复的最快信号（早于任何定时器） |
 
 **为何必须单列网络事件**（它补的正是上表最后一行）：
 - **断网瞬间**：WS 对象往往仍是 `OPEN`、心跳定时器照跑，但服务端早已收不到——这种**半死连接不会自己 close**。
   不主动断开就只能等心跳超时（默认 10s），这期间界面持续谎报「已连接」，用户发的消息石沉大海。
   所以 `offline` → 立即标断开 + `client.dropConnection()`（**保留重连意图**，与登录/登出用的
   `closeWs()` 相反——后者置 `manualClose` 不再重连）。
-- **恢复瞬间**：只能靠下一拍定时自检的话，最长**白等 10 秒**才被采到，用户看到的就是
-  “网回来了但界面还卡着”。所以 `online` → **立即自检**（不等定时器）。
+- **恢复瞬间**：只能靠下一拍定时自检的话，最长**白等 10 秒**才被采到，且就算采到也会被退避到点前挡住（最长 30s）。
+  所以 `online` → **先 `hurryReconnect()` 打断退避立即建连，再自检核对真值**。
+
+**自检本身在弱网下的可靠性约束**（`web/src/attach.ts` 的 `verifyConnection`）：
+- 节流用**时间戳**（`VERIFY_MIN_GAP_MS` = 1.5s）而不用布尔锁：布尔量一旦因异常路径没复位，后面的自检就全被静默吃掉（“看着在自检、实际形同没有”）；
+- 单次自检有**总预算**（`VERIFY_BUDGET_MS` = 8s，`Promise.race`）：内部虽已改用心跳口径短超时，外层再加一道，超预算即视为链路不可用并 `hurryReconnect()`；
+- `client.verify()` **未连接时不再空转返回**——它会推进重连（否则断网期每拍自检都是空转，网络恢复后还得干等退避）。
 
 **挂事件的对象**：`online`/`offline` 是 **window** 的事件；`navigator` 只有只读的 `onLine`、
 **没有 `addEventListener`**。挂错对象会静默降级成 no-op——不报错、测试全绿，但断网时界面照旧显示已连接
 （已出现过的实际错误，现由 `net-wiring.test.ts` 静态盯住）。`navigator.onLine` 只作提前量：
 它为 true 只说明有网络接口，不代表能连到服务端（公司网需认证/代理挂了/服务端重启中）。
+
+#### 启动过程的弱网容错
+
+启动链是串行的（二开引导 → 令牌恢复 → 工具元数据/外部身份 → `connect` → 会话列表 → 消息），
+弱网下两个环节会「挂住而不是失败」，都必须有兜底（见 `web/src/boot-guard.ts` + `main.ts` 的 init）：
+
+- **首连失败不终止初始化**：`await client.connect()` 失败只写启动画面状态并继续渲染骨架，
+  由自检/退避重连接回。初始化只跑一次且无重试入口时，一次建连失败就把整页丢掉（弱网下刷新必踩）。
+- **自检绑定早于建连**：`bindConnectionVerify()` 必须在 `await connPromise` **之前**注册——
+  写在之后，首连失败就再也走不到，自检与运行态收敛从此永久缺席（页面只能靠手动刷新救回）。
+- **启动期 REST 全部带超时**（`withTimeout`，`BOOT_REST_TIMEOUT_MS` = 8s）：默认 `fetch` 无超时，
+  一次挂住就把整个 init 卡在启动画面上。会话列表/消息加载失败不当作未登录（弱网下把用户灰到
+  登录页是错的——登录本身也是一次受影响的往返），只记在状态栏，由连接恢复后的自检重新拉取。
+- **启动画面如实告知**：`bootStatus()` 写「正在连接 / 连接中断，正在重连（第 n 次）」，离线态露出
+  「重试连接」按钮（`bindBootRetry` 接 `hurryReconnect` + 自检）。连接成功后才揭幕启动画面并补拉
+  启动时没拉到的会话列表/消息——不展示空白聊天页（那会让人以为“已经好了”，而实际请求全会失败）。
+- **连接状态可见到次数**：`onStatusChange` 把断开次数写进状态栏文案（「已断开，正在重连（第 n 次）…」），
+  弱网下用户能分辨「在重连」与「卡死」。
 
 消息发送与流式输出**统一走 WebSocket 单通道**：`sendPrompt`（SDK）经 WS `session.prompt` 发起任务，引擎事件（`event.message.delta`/`tool_call`/`tool_result`/`approval`/`task.done` 等）由连接级订阅推送，SDK 将事件流转换为 `ChatChunk` 迭代返回（`wsEventToChunk`，字段与原 SSE 契约一致）。
 
@@ -355,6 +378,9 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 - **状态快照（`state.snapshot`）**：连接建立（本地模式）/登录成功（服务模式）后服务端自动推送，含当前会话/会话列表/运行中会话/日志基线 `lastSeq`/**模型上下文窗口 `maxContextTokens`**（engine `contextWindow()` 取自 provider capabilities，标题栏上下文占比显示用，0=未知）；客户端作为模型基线，也可主动请求（幂等）；**SDK 快照模型保留 `maxContextTokens` 字段**（重建快照不丢弃，标题栏占比显示的数据源）；**运行态明细 `runtime`**（会话 id → `{ startedAt, pending, toolCalls, bgTasks, subRuns }`，键集即 `running`，引擎 `runtimeOf()` 同一遍历产出 running 与明细）——待决交互明细 + 在途工具调用数 + 后台命令任务（sh async 记录，按会话过滤）+ 子会话运行概要；前端据此把「哪个会话在跑/在等谁」标进会话列表（行内角标：运行中圆点、等待输入沙漏，悬浮说明含后台任务与子会话数），不必逐个附加就能看出后台会话的处境（含非当前会话），任务开始/结束事件另行增量收敛角标（不等下一次快照）。**等待项的取值按是否本页接管分流**（`sessions.ts` 的 `resolveWaitingCount`）：快照只在建连/登录时推送一次、运行期不再更新，而待决卡的出卡→作答→揭卡都在本页实时发生——本页接管着这次运行（`runs` 有它）时角标一律数本地卡，本页没接管（别处发起）时才回落快照的 `pending`（那时它可能是别处的卡，而「哪个会话卡在等人」正是角标要回答的问题）。先信快照会让建连时正在等审批的会话在本页批完后一直显示 ⌛，反之快照为 0 时新来的卡也看不到。所有揭卡路径都要派发 `gebai:pending-change`（选择/填值卡由 `tool-cards.ts` 的 `dropCard` 统一走，直接 `.remove()` 会绕过通知）
 - **重连自动重新认证**：WS 连接无法携带 Header，SDK 持有令牌/API Key 时在每次建连后自动发送 `auth.login { token }` / `auth.login { apiKey }` 恢复用户上下文（服务模式重连不掉回未登录态）
 - **自动重连的两条入口**：意外断开（含心跳 pong 超时判定的死连、慢客户端被服务端断开）经 `onclose` → 指数退避（1s→30s）重连；**建连本身失败**（页面打开时服务端未就绪、网络刚断、握手被拒）同样退避重连并推送 `disconnected` 状态——建连失败后 `ws` 已置空，随之到来的 `onclose` 会因「不是当前连接」直接返回，不在此处调度就永久停在断开态，只能手动刷新。主动关闭（登录/登出/换令牌）仍不重连。
+- **退避打断与立即重连（`hurryReconnect()`）**：退避最长 30s 一次尝试，而「网络恢复」与「下一拍退避到点」毫无关系——不加打断，网络回来后仍要干等（实测：62s 断网期间重连间隔为 1/2/4/8/16/30s，恢复瞬间正等着的那一拍最长 30s）。`hurryReconnect()` 清掉退避定时器、复位退避序列（新一轮断网从 1s 起重试）并立即建连；调用点三处：浏览器 `online` 事件、`verify()` 在未连接态、自检失败/超预算。主动关闭（`manualClose`）时是 no-op（登出后不得被重新连回去）。
+- **REST 请求超时（`requestTimeoutMs`，默认 15s）**：`fetch` 默认**不超时**——弱网/代理挂起（TCP 通、服务端不应答）时请求永久悬挂，既无 resolve 也无 reject（实测该形态 20s 仍未返回），调用方的 UI 就永远转圈。SDK 的所有 REST 辅助方法统一经内部 `rest()` 出口发出并带 `AbortSignal.timeout`（直接 `fetch` 没有这道保护）；无 `AbortSignal.timeout` 的旧 WebView 降级为不限制（功能不丢，只是少一道保护）。
+- **幂等读的自动重试**：连接抖动时 `onclose` 会把在途请求一律 reject（不重试就无法知道服务端到底处理没），弱网下表现为「切个会话列表空了」「打开会话报错」。`requestRead()` 对**读**类 RPC（`session.list`/`session.get`/`session.todo.get`/`session.tool.get`/`session.files.list`/`user.list`/`sub_agent.list`）在传输层断裂/超时/连接未就绪时重试**一次**，重试前先 `hurryReconnect()`；协议/业务错误码（`already_running` 等）与 HTTP 层错误不重试，写操作一律不走该路径（重复副作用）。
 - **半死连接的主动核对（`verify()`）**：手机后台（系统冻结页面、浏览器挂起定时器）回来时，WS 对象往往仍是 `readyState === OPEN`、也不会发 `close`——后台期间的事件攒在浏览器里没消化、心跳早已过期，界面显示「已连接」而内容不更新；服务端任务也可能已在离线期间跑完而本地还在等。单看本地标志位无法识别，故提供 `verify()` 主动向服务端核对：心跳超期先探一拍（`pingOnce`，不通则断开交退避重连）、拿快照收敛 `running`/`lastSeq`、按 seq 补拉漏消费的事件。前端收敛规则见 `web/src/attach.ts` 的 `verifyConnection`（本地在等而服务端已结束 → 中止 + 丢弃旧气泡 + 重读历史；服务端在跑而本页未接管 → 附加恢复）。
 - **流式任务断线恢复**：`sendPrompt` 断线时**挂起**（不抛错），等待自动重连后按 `seq` 重放离线事件无缝续流；任务未确认接收时以快照判定（运行中→恢复；已跑完→从存储合成收尾；未开始→补发一次，遇协议错误码 `already_running` 视为已接受**（仅限补发路径：原请求已被服务端受理、确认帧丢失）**；**首次发送**遇 `already_running` 如实上抛——另一处的任务在跑、本次输入未被受理，前端撤回幻影消息（已上屏但从未进存储/模型）并把内容放回输入框，同时附加该会话运行态；**已受理的任务重连后核对服务端真相**（快照 `running` 不含该会话 → 从存储合成收尾：有助手回复则回填该回复，无回复但有引擎提示（服务中断说明）则展示说明，两者皆无则合成「已结束但无产出」说明——否则要等前端 150s 空闲看门狗才收场，服务模式（无 bootId 自动刷新）尤其明显；受理后引擎登记运行态前的起跑竞态由宽限窗口（`acceptSettleMs`，默认 15s）排除，测试可调小）；`overrun` 走全量重同步（`resume` 重置 + **标记 `reloadHistory`**：前端重读消息列表（缺口期间的工具卡/子会话容器事件已丢失且不可重放）+ 重取待决交互清单重建卡片，重载期间正文只累积、完成后按累积内容重建在途气泡；种子只取**本轮**（当前用户消息之后）的已落盘内容——不过滤会把上一轮回答当本轮在途文本回填）。**重放事件经全局 `onEvent` 分发**（与在线推送同通道）：离线期间的审批/选择/工具事件全局订阅者（前端卡片渲染）也能收到——重连后审批卡/工具卡可恢复，而非只进 `sendPrompt` 的 chunk 通道（此前离线窗口内的审批请求永远不渲染、任务卡死至超时）
 - **运行中会话恢复（页面刷新/切换，`session.attach`）**：前端恢复逻辑拆分在 `web/src/attach.ts`（纯副作用模块——模块尾部 `setRunningAttach(attachRunningSession)` 注册钩子，无具名导出），**入口 `main.ts` 须保留 `import "./attach"`**——丢失导入不触发 typecheck/lint 报错、钩子恒为 null 静默跳过（`attach.test.ts` 源扫描守住该导入）；断线恢复覆盖「连接断而页面在」，**页面刷新/切换进入运行中会话**是另一类恢复——页面内存态（运行态 runs、sendPrompt 流、待决交互卡片）全部丢失，事件早已推送过、重放基线（快照 lastSeq）也已越过。恢复链路：引擎在任务态上维护**附加快照**（`TaskState`：`startedAt` 任务开始时刻、`stream` 在途 assistant 回合的累积文本/推理——delta/reasoning 发布点同步累积、消息持久化点清空、含 session 标记路由到子会话容器；审批/选择/填值/画图/捕获的等待项保留**展示载荷**——工具名、prompt/options、env 名与说明、图表源码、捕获参数）→ `session.attach` 返回 `{ running, startedAt, stream, pending, tools, lastSeq }`（归属校验同其余会话操作；lastSeq 为该用户日志基线；**`tools` 为在途工具调用**——已发出尚未产出结果的调用（名称/参数/子会话归属），引擎在事件发布单点拦截维护（tool.call 记入、tool.result 删除），前端据此重建「**等待中的工具卡**」：走实时事件同一渲染入口 `onToolCall`，结果到达时按 toolCallId 配对填充，与在线路径完全同构）→ 前端 `loadMessages` 尾部触发附加：**待决交互卡片重建**（审批/选择/填值/画图/捕获走既有渲染入口，替换式幂等——不重建则任务干等到超时；审批锁输入随之恢复）→ `consumeTaskStream` 接管 SDK `attachStream`（与 `sendPrompt` 同构的 ChatChunk 迭代但不发起任务：订阅就位后请求快照，**在途文本/推理作为种子 chunk 先行**（session 标记路由到惰性重建的子会话折叠容器），按 seq 重放快照之后的事件（与断线恢复同一套机制，缺口 overrun 放弃附加由存储恢复兜底），此后实时续流到任务结束）——信号灯思考闪烁、停止按钮、单轮计时（起点用快照 startedAt）、空闲看门狗、收尾清理（审批卡/配对/自动标题）与发起页完全同构。附加期间再次断线：挂起重连后**重新附加**（`resume` 重置渲染态 + 新快照重播种，防内容重复）；**任务在离线期间结束**（重连后快照 `running=false`）时发 `resume{reloadHistory:true}` 由前端重读消息列表——重附已发出的 `resume` 会清空在途累积，不补这一拍则整段回答从界面上消失（存储里有、页面空白，只能刷新才见）；**任务仍在跑但日志缺口（overrun）**时不结束附加（否则界面停在进行到一半的旧内容上而服务端还在推进），改为 `reloadHistory` 全量重同步 + 重新播种在途文本后继续实时续流；附加竞态（任务已在附加前结束，running=false）立即结束迭代，视图由存储恢复兜底。防重：附加请求在途标记 + `runs` 已接管即跳过；**附加失败退避重试**（1s/3s/9s 共三次）——静默失败会让界面谎报空闲（无信号灯/停止按钮/计时），用户随后的发送还会被 `already_running` 拒结
@@ -1216,6 +1242,11 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | 长工具执行心跳 | 25 秒 | 工具执行期间周期发布 `event.tool.alive` 刷新前端空闲看门狗（`TOOL_HEARTBEAT_MS`，测试可注入 `heartbeatMs`；见「等待期不误判挂起」） |
 | 交互等待心跳 | 25 秒 | 等待用户作答（审批/选择/填值/画图/捕获）期间周期发布 `event.interaction.alive`（`INTERACTION_ALIVE_MS`，等待结束即停）；前端看门狗另按「已连接 + 无待决交互」两重豁免，断线或长时间思考不得杀后台任务 |
 | 任务受理宽限窗口 | 15 秒 | SDK 任务受理后不据快照判定任务已结束（排除引擎登记运行态前的起跑竞态）；构造函数选项 `acceptSettleMs` 可调（测试） |
+| REST 请求超时 | 15 秒 | SDK 内部 `rest()` 统一出口（构造函数选项 `requestTimeoutMs` 可调）；默认 `fetch` **不超时**，弱网/代理挂起时会永久悬挂（实测 20s 未返回） |
+| WS 心跳间隔/超时 | 5 秒 / 10 秒 | `heartbeatIntervalMs`/`heartbeatTimeoutMs`；同时是自检内部快照/重放的超时口径（不用 60s 的 RPC 默认值，否则一次挂住吃掉 6 拍自检） |
+| 重连退避 | 1s → 30s | `RECONNECT_BASE_MS`/`RECONNECT_MAX_MS`；`hurryReconnect()` 可打断并复位序列 |
+| 前端自检节流/预算 | 1.5 秒 / 8 秒 | `VERIFY_MIN_GAP_MS`/`VERIFY_BUDGET_MS`（`web/src/attach.ts`）；节流用时间戳不用布尔锁，超预算即推进重连 |
+| 启动期 REST 超时 | 8 秒 | `BOOT_REST_TIMEOUT_MS`（`web/src/boot-guard.ts`）：启动链上每个 REST 的上限，失败降级而非挂死 |
 | 子Agent 调用超时 | 不设 | 子Agent 调用不设整体超时（执行进度实时可见，中止仅由父任务取消传播；`SUBAGENT_TIMEOUT` 已移除） |
 | 子Agent 递归深度 | 3 层 | 子Agent 嵌套调用最大深度 |
 | 待办续做轮次上限 | 1 轮 | 会话完成时仍有 `pending`/`in_progress` 待办，注入**模拟 todo 查询工具调用对**（assistant(toolCalls)+tool，`engineNote: "todo"` 留在 tool 消息）继续会话的轮次上限（`MAX_TODO_CONTINUE`，达到即停止；模型对注入的纯文本回应视为决策收尾，不再注入） |

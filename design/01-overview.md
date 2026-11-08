@@ -285,6 +285,11 @@ class GebaiClient {
   // 持续增长的内容（流式输出）不适用——由 event.* 推送通道承载，见「WebSocket（实时通道）」）
   send(type: string, payload?: object, handlers?: { onOk?; onError?; timeoutMs?; queueOffline? }): () => void // 返回取消函数
   request<T>(type: string, payload?: object): Promise<T> // Promise 版 RPC
+  // 连接恢复控制（弱网）：打断退避立即建连（online 事件/自检失败/自检超预算时调用；主动关闭时 no-op）
+  hurryReconnect(): void
+  canReconnect(): boolean // 是否处于「会自动恢复」的断开态（未被主动关闭）：启动画面据此决定揭幕还是留在离线态
+  // 幂等读（listSessions/getSession/listTodos/listTools/listSubAgents/listUsers/listSessionFiles）
+  // 在传输层断裂/超时/连接未就绪时**自动重试一次**（协议/业务错误码不重试；写操作不走该路径）
   sendPrompt(sessionId: string, prompt: string, opts?: { attachments?: AttachmentInput[]; messageId?; signal?; env? }): AsyncIterable<ChatChunk>
   chat(prompt: string, opts?: { sessionId?; name?; autoApprove?; env?; messageId? }): Promise<{ sessionId: string; message: { id; content; createdAt } | null; error?: string }> // 单 HTTP 一站式对话（REST /api/v1/chat）：同步阻塞至任务完成；sessionId 缺省自动建会话、带 id 续聊；autoApprove 审批姿态（true 自动通过/false 无交互拒绝/缺省通道默认）；无需 WS 连接
   attachSession(sessionId: string): Promise<AttachSnapshot> // 运行中会话附加快照（session.attach）：running/stream（在途文本+推理）/pending（待决交互）/startedAt/lastSeq

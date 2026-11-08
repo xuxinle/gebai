@@ -53,22 +53,38 @@
         from { opacity: 0.7; }
         to   { opacity: 1; text-shadow: 0 0 20px rgba(139, 92, 246, 0.9); }
       }
+      /* 启动阶段状态与重试：弱网下必须看得出「在重连」/「可重试」，否则跟卡死无法区分 */
+      .gb-splash-status {
+        margin-top: 18px; min-height: 18px; font-size: 13px; line-height: 1.5;
+        color: #9a9aa6; text-align: center; max-width: 78vw; padding: 0 16px;
+      }
+      .gb-splash-retry {
+        margin-top: 14px; padding: 8px 20px; border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.22); background: rgba(255, 255, 255, 0.06);
+        color: #e6e6e6; font-size: 13.5px; cursor: pointer;
+      }
+      .gb-splash-retry:active { background: rgba(255, 255, 255, 0.14); }
     </style>
   </head>
   <body>
-    <!-- 启动动画画面（JS 就绪前覆盖全屏；init 完成/失败或 12s 超时后自动移除） -->
+    <!-- 启动动画画面（JS 就绪前覆盖全屏；init 完成/失败后自动移除） -->
     <div id="gb-splash" aria-hidden="true">
       <div class="gb-splash-inner">
         <div class="gb-splash-orb" aria-hidden="true"><span class="gb-splash-ring"></span></div>
         <div class="gb-splash-brand">歌白</div>
+        <!-- 启动阶段提示（连接中/重试中/离线可重试）：脚本未就绪时为空、不占位提示，
+             由 main.ts 按网络状态写入——弱网下用户能看出「在重连」而非「卡死了」 -->
+        <div class="gb-splash-status"></div>
+        <button class="gb-splash-retry" type="button" hidden>重试连接</button>
       </div>
     </div>
     <script>
-      // 兜底：JS 模块加载/初始化异常时最多展示 12s，避免启动画面永久残留
+      // 兜底：模块脚本本身加载失败（弱网/资源不可达）时最多展示 20s，避免启动画面永久残留。
+      // 初始化完成后的隐藏由 main.ts 负责（那时会先展示真实状态，不是静默卡住）
       setTimeout(function () {
         var s = document.getElementById("gb-splash")
         if (s) { s.classList.add("gb-splash-done"); setTimeout(function () { s.remove() }, 400) }
-      }, 12000)
+      }, 20000)
     </script>
     <div id="app">
       <header>

@@ -61,6 +61,9 @@ export interface GebaiClientOptions {
   /** 任务受理后的宽限窗口（毫秒），默认 15000：窗口内不据快照判定任务已结束（排除「prompt 已受理、
    *  引擎尚未登记运行态」的起跑竞态）。测试可调小。 */
   acceptSettleMs?: number
+  /** REST 请求超时（毫秒），默认 15000：默认的 fetch **没有超时**——弱网/代理挂起时会永远挂着，
+   *  调用方永远等不到 resolve 也等不到 reject（实测「有 TCP 无响应」形态 20s 仍未返回）。 */
+  requestTimeoutMs?: number
 }
 
 /** WS 建连超时（毫秒）：服务不可达/代理挂起时快速失败，避免初始化永久等待。 */
@@ -74,6 +77,8 @@ const RECONNECT_BASE_MS = 1000
 const RECONNECT_MAX_MS = 30_000
 /** 请求应答超时（毫秒）：应答未归视为请求失败（心跳有独立超时）。 */
 const REQUEST_TIMEOUT_MS = 60_000
+/** REST 请求超时（毫秒）：默认 fetch 无超时，弱网/代理挂起会永久悬挂，必须显式给上限。 */
+const REST_TIMEOUT_MS = 15_000
 /** 任务受理后的宽限窗口（毫秒）：受理后引擎登记运行态前的短暂窗口不据快照判定任务已结束。 */
 const ACCEPT_SETTLE_MS = 15_000
 
@@ -136,6 +141,8 @@ export class GebaiClient {
   private heartbeatTimeoutMs: number
   /** 任务受理后的宽限窗口（毫秒）：受理后引擎登记运行态前的短暂窗口不据快照判定任务已结束。 */
   private acceptSettleMs: number
+  /** REST 请求超时（毫秒）：默认 fetch 无超时，弱网下会永久悬挂。 */
+  private requestTimeoutMs: number
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   /** 当前心跳是否已发出等待 pong（超时未归判定死连）。 */
   private heartbeatPending = false
@@ -151,6 +158,7 @@ export class GebaiClient {
     this.heartbeatIntervalMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS
     this.heartbeatTimeoutMs = opts.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS
     this.acceptSettleMs = opts.acceptSettleMs ?? ACCEPT_SETTLE_MS
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? REST_TIMEOUT_MS
   }
 
   login(username: string, password: string): Promise<void> {
@@ -245,7 +253,9 @@ export class GebaiClient {
    */
   async verify(): Promise<{ running: string[]; missed: number; heartbeatOk: boolean }> {
     if (!this.connected || this.manualClose) {
-      // 未连接：交给自动建连/退避重连，不在这里重复发起
+      // 未连接：不自检做无用往返，但要**推进重连**——否则断网期间每拍自检都是空转，
+      // 网络恢复后还得干等最长 30s 的退避到点
+      this.hurryReconnect()
       return { running: [], missed: 0, heartbeatOk: false }
     }
     // 心跳超期（典型：页面被冻结，定时器停摆）：WS 对象看着是 OPEN，但链路实际已静默。
@@ -259,9 +269,11 @@ export class GebaiClient {
       }
     }
     try {
-      const snap = await this.requestSnapshot()
+      // 超时口径跟心跳走：默认 60s 的 RPC 超时会让一次挂住的快照吃掉后面 6 拍自检
+      // （自检周期 10s）——弱网下“看着在自检、实际形同没有”
+      const snap = await this.requestSnapshot(this.heartbeatTimeoutMs)
       // 快照基线之后的增量事件（后台期间攒住/漏消费的）补拉一次
-      const r = await this.syncEvents(this.lastSeq)
+      const r = await this.syncEvents(this.lastSeq, this.heartbeatTimeoutMs)
       if (!r.overrun) {
         for (const ev of r.events) this.dispatchEvent(ev)
       }
@@ -295,6 +307,11 @@ export class GebaiClient {
   /** WS 连接是否处于可用状态（UI 状态展示/SSE 兜底判定用）。 */
   isConnected(): boolean {
     return this.connected
+  }
+
+  /** 是否处于「会自动恢复」的断开态（未被主动关闭）：启动画面据此决定是揭幕还是留在离线态。 */
+  canReconnect(): boolean {
+    return !this.manualClose
   }
 
   /**
@@ -408,6 +425,30 @@ export class GebaiClient {
           this.scheduleReconnect()
         })
     }, delay)
+  }
+
+  /**
+   * 立即重连（打断退避等待）：网络恢复（`online`）或自检发现链路不可用时调用。
+   *
+   * 为何必须有：退避呈指数增长，最长 30s 一次尝试。移动网络/WiFi 切走再切回时，
+   * “网回来了”与“下一拍退避到点”完全无关——不打断就只能干等，用户看到的就是
+   * 「网回来了但界面还卡着」。实测：62s 断网期间重连间隔为 1/2/4/8/16/30s，
+   * 恢复瞬间正在等的那一拍最长 30s。
+   *
+   * 语义：同时**复位退避序列**（新一轮断网从 1s 起重试，不背负上一轮的 30s）。
+   * 已连接、或已主动关闭（登录/登出/换令牌）时无操作；在途建连由 connect 内部共享。
+   */
+  hurryReconnect(): void {
+    if (this.manualClose) return
+    if (this.ws?.readyState === WebSocket.OPEN) return
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.reconnectDelay = RECONNECT_BASE_MS
+    void this.connect().catch(() => {
+      /* 失败由 onclose/下一拍退避接住 */
+    })
   }
 
   async connect(): Promise<void> {
@@ -585,9 +626,9 @@ export class GebaiClient {
     for (const h of this.snapshotHandlers) h(this.snapshot)
   }
 
-  /** 请求当前状态快照（主动收敛模型，幂等）。 */
-  private requestSnapshot(): Promise<WsSnapshot> {
-    return this.request<Partial<WsSnapshot>>("state.snapshot", {}).then((p) => {
+  /** 请求当前状态快照（主动收敛模型，幂等）。timeoutMs 缺省用 RPC 默认（自检传更短的心跳口径）。 */
+  private requestSnapshot(timeoutMs?: number): Promise<WsSnapshot> {
+    return this.requestWithTimeout<Partial<WsSnapshot>>("state.snapshot", {}, timeoutMs).then((p) => {
       // 直接交给 applySnapshot 归一：两条快照路径（推送/主动请求）共用同一套字段处理，
       // 不再各手写一份——分头手写就是“某个字段在一侧被丢掉”的温床
       this.applySnapshot(p as unknown as Record<string, unknown>)
@@ -677,9 +718,48 @@ export class GebaiClient {
     })
   }
 
+  /**
+   * **幂等读** RPC（可安全重试）：断线/超时自动重试一次。
+   *
+   * 为何需要：连接抖动时 `onclose` 会将在途请求一律 reject（不重试就无法知道服务端到底处理没），
+   * 弱网下表现就是「切个会话列表空了」「打开会话报错」——而这些读操作本身幂等，重试代价为零。
+   * 只用于**读**：写操作重试有重复副作用，不得走这里。
+   * 重试前先推进重连（断线场景），避免在白等一次超时。
+   */
+  private async requestRead<T>(type: string, payload?: Record<string, unknown>): Promise<T> {
+    try {
+      return await this.request<T>(type, payload)
+    } catch (e) {
+      if (!this.retriable(e)) throw e
+      this.hurryReconnect()
+      return this.request<T>(type, payload)
+    }
+  }
+
+  /** 错误是否值得重试：传输层断裂/超时、或连接未就绪；协议错（unauthorized/invalid…）与业务错不重试。 */
+  private retriable(e: unknown): boolean {
+    if (!this.autoReconnecting()) return false
+    const err = e as Error & { code?: string }
+    if (err.code) return false // 服务端业务错误码（already_running/expired 等）——重试无意义
+    const msg = String(err.message ?? "")
+    if (msg.startsWith("HTTP ")) return false // REST 层错误
+    return /WS (closed|connect|请求超时)|aborted/i.test(msg)
+  }
+
+  /** 同 request，但可指定应答超时（超时 = 断线等价处理，调用方自行决定是否重试）。 */
+  private requestWithTimeout<T>(type: string, payload: Record<string, unknown> | undefined, timeoutMs?: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.send(type, payload, {
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        onOk: (p) => resolve(p as T),
+        onError: reject,
+      })
+    })
+  }
+
   /** 断线补偿：按 seq 请求重放离线期间错过的日志事件；返回 null 表示缺口（走全量重同步）。 */
-  private async syncEvents(lastSeq: number): Promise<{ events: AgentEvent[]; overrun: boolean; lastSeq: number }> {
-    const r = await this.request<{ events: unknown; overrun?: boolean; lastSeq?: number }>("sync.request", { lastSeq })
+  private async syncEvents(lastSeq: number, timeoutMs?: number): Promise<{ events: AgentEvent[]; overrun: boolean; lastSeq: number }> {
+    const r = await this.requestWithTimeout<{ events: unknown; overrun?: boolean; lastSeq?: number }>("sync.request", { lastSeq }, timeoutMs)
     const entries = (Array.isArray(r.events) ? r.events : []) as Array<{ type: string; sessionId: string; payload: Record<string, unknown>; seq: number }>
     return {
       events: entries.map((e) => ({ type: e.type, sessionId: e.sessionId, payload: e.payload, seq: e.seq, timestamp: Date.now() })),
@@ -736,8 +816,23 @@ export class GebaiClient {
     return this.baseUrl ? `${this.baseUrl}${path}` : appPath(path)
   }
 
+  /**
+   * 统一的 REST 请求入口：**强制带超时**。
+   *
+   * 为何不能直接 `fetch`：默认 fetch 没有超时，弱网/代理挂起（TCP 通、服务端不应答）时会永久悬挂
+   * ——调用方既拿不到 resolve 也拿不到 reject，UI 就“永远转圈”（实测该形态 20s 仍未返回）。
+   * 超时只中止本次请求，不影响其他在途请求。
+   */
+  private async rest(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<Response> {
+    const { timeoutMs, ...rest } = init ?? {}
+    const ms = timeoutMs ?? this.requestTimeoutMs
+    // AbortSignal.timeout 在无该 API 的宿主（旧 WebView）下降级为不限制（功能不丢，只是少一道保护）
+    const signal = ms > 0 && typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined
+    return fetch(this.apiUrl(path), { ...rest, signal })
+  }
+
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(this.apiUrl(path), {
+    const res = await this.rest(path, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
@@ -747,20 +842,20 @@ export class GebaiClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const res = await fetch(this.apiUrl(path), { headers: this.headers() })
+    const res = await this.rest(path, { headers: this.headers() })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return res.json() as Promise<T>
   }
 
   private async del<T>(path: string): Promise<T> {
-    const res = await fetch(this.apiUrl(path), { method: "DELETE", headers: this.headers() })
+    const res = await this.rest(path, { method: "DELETE", headers: this.headers() })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return res.json() as Promise<T>
   }
 
   // ---- Sessions ----
   listSessions(): Promise<SessionInfo[]> {
-    return this.request<{ sessions: SessionInfo[] }>("session.list").then((r) => r.sessions)
+    return this.requestRead<{ sessions: SessionInfo[] }>("session.list").then((r) => r.sessions)
   }
   createSession(name?: string): Promise<SessionInfo> {
     return this.request<{ session: SessionInfo }>("session.create", name ? { name } : {}).then((r) => r.session)
@@ -770,7 +865,7 @@ export class GebaiClient {
     return this.request<{ session: SessionInfo }>("session.import", { session }).then((r) => r.session)
   }
   getSession(id: string): Promise<SessionDetail> {
-    return this.request<{ session: SessionDetail }>("session.get", { id }).then((r) => r.session)
+    return this.requestRead<{ session: SessionDetail }>("session.get", { id }).then((r) => r.session)
   }
   deleteSession(id: string): Promise<void> {
     return this.request<void>("session.delete", { id })
@@ -855,7 +950,7 @@ export class GebaiClient {
   }
 
   listUsers(): Promise<UserInfo[]> {
-    return this.request<{ users: UserInfo[] }>("user.list").then((r) => r.users)
+    return this.requestRead<{ users: UserInfo[] }>("user.list").then((r) => r.users)
   }
   createUser(username: string, password: string, role?: "user" | "admin"): Promise<UserInfo> {
     return this.request<UserInfo>("user.create", { username, password, role })
@@ -868,7 +963,7 @@ export class GebaiClient {
   }
 
   listSubAgents(): Promise<SubAgentInfo[]> {
-    return this.request<{ subAgents: SubAgentInfo[] }>("sub_agent.list").then((r) => r.subAgents)
+    return this.requestRead<{ subAgents: SubAgentInfo[] }>("sub_agent.list").then((r) => r.subAgents)
   }
   /** 装载子Agent：sessionId 传入时装载到该会话（注册工具 + 提示词消息写入会话记录）；缺省仅全局注册工具。 */
   loadSubAgent(name: string, sessionId?: string): Promise<void> {
@@ -884,7 +979,7 @@ export class GebaiClient {
   }
 
   listTodos(sessionId: string): Promise<TodoItem[]> {
-    return this.request<{ todos: TodoItem[] }>("session.todo.get", { id: sessionId }).then((r) => r.todos)
+    return this.requestRead<{ todos: TodoItem[] }>("session.todo.get", { id: sessionId }).then((r) => r.todos)
   }
 
   // ---- 用户级待办（待办弹窗，REST /api/v1/todos；与会话级 TodoItem 无关） ----
@@ -900,7 +995,7 @@ export class GebaiClient {
   /** 修改待办（文本/完成/闲时标记/执行时间段；开启闲时即重置状态，下次队列空闲执行一次）。
    *  `idleWindow: null` 清除时段（回到不限），不传则不改动。 */
   updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean; idleWindow?: IdleWindow | null }): Promise<UserTodo> {
-    return fetch(this.apiUrl(`/api/v1/todos/${id}`), {
+    return this.rest(`/api/v1/todos/${id}`, {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify(patch),
@@ -914,7 +1009,7 @@ export class GebaiClient {
   }
   /** 拖动排序：按给定 id 顺序重排清单（返回新顺序的清单）。 */
   reorderUserTodos(ids: string[]): Promise<UserTodo[]> {
-    return fetch(this.apiUrl("/api/v1/todos"), {
+    return this.rest("/api/v1/todos", {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify({ ids }),
@@ -935,7 +1030,7 @@ export class GebaiClient {
   }
   /** 更新用户级偏好（浅合并；`idleWindow: null` 清除默认时段）。 */
   updateUserPrefs(patch: { idleWindow?: IdleWindow | null }): Promise<UserPrefs> {
-    return fetch(this.apiUrl("/api/v1/prefs"), {
+    return this.rest("/api/v1/prefs", {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify(patch),
@@ -962,7 +1057,7 @@ export class GebaiClient {
     return this.post<Task>("/api/v1/tasks", input)
   }
   updateTask(id: string, patch: TaskUpdateInput): Promise<Task> {
-    return fetch(this.apiUrl(`/api/v1/tasks/${id}`), {
+    return this.rest(`/api/v1/tasks/${id}`, {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify(patch),
@@ -1005,7 +1100,7 @@ export class GebaiClient {
     return this.get<{ path: string; content: string }>(`/api/v1/tasks/${id}/files/content?path=${encodeURIComponent(path)}`)
   }
   writeTaskFile(id: string, path: string, content: string): Promise<TaskFileEntry> {
-    return fetch(this.apiUrl(`/api/v1/tasks/${id}/files/content`), {
+    return this.rest(`/api/v1/tasks/${id}/files/content`, {
       method: "PUT",
       headers: this.headers(),
       body: JSON.stringify({ path, content }),
@@ -1018,11 +1113,11 @@ export class GebaiClient {
     return this.del<void>(`/api/v1/tasks/${id}/files?path=${encodeURIComponent(path)}`)
   }
   listTools(): Promise<ToolInfo[]> {
-    return this.request<{ tools: ToolInfo[] }>("session.tool.get", {}).then((r) => r.tools)
+    return this.requestRead<{ tools: ToolInfo[] }>("session.tool.get", {}).then((r) => r.tools)
   }
   /** 工具启停（REST PATCH /api/v1/tools）。 */
   setToolEnabled(name: string, enabled: boolean): Promise<void> {
-    return fetch(this.apiUrl("/api/v1/tools"), {
+    return this.rest("/api/v1/tools", {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify({ name, enabled }),
@@ -1032,7 +1127,7 @@ export class GebaiClient {
   }
 
   listSessionFiles(sessionId: string): Promise<FileEntry[]> {
-    return this.request<{ files: FileEntry[] }>("session.files.list", { id: sessionId }).then((r) => r.files)
+    return this.requestRead<{ files: FileEntry[] }>("session.files.list", { id: sessionId }).then((r) => r.files)
   }
   async readSessionFile(sessionId: string, path: string): Promise<string> {
     const q = new URLSearchParams({ path })
@@ -1040,7 +1135,7 @@ export class GebaiClient {
   }
   async downloadSessionFile(sessionId: string, path: string): Promise<Blob | Uint8Array> {
     const q = new URLSearchParams({ path })
-    const res = await fetch(this.apiUrl(`/api/v1/sessions/${sessionId}/files/download?${q}`), {
+    const res = await this.rest(`/api/v1/sessions/${sessionId}/files/download?${q}`, {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -1050,7 +1145,7 @@ export class GebaiClient {
 
   /** 多选打包下载：返回 zip 归档字节（REST POST /files/download）。 */
   async downloadFilesZip(sessionId: string, paths: string[]): Promise<Blob | Uint8Array> {
-    const res = await fetch(this.apiUrl(`/api/v1/sessions/${sessionId}/files/download`), {
+    const res = await this.rest(`/api/v1/sessions/${sessionId}/files/download`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({ paths }),
@@ -1071,7 +1166,7 @@ export class GebaiClient {
       part = new Blob([copy.buffer])
     }
     form.append("file", part, name)
-    const res = await fetch(this.apiUrl(`/api/v1/sessions/${sessionId}/attachments`), {
+    const res = await this.rest(`/api/v1/sessions/${sessionId}/attachments`, {
       method: "POST",
       headers: requestHeaders(this.token ?? null),
       body: form,

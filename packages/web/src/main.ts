@@ -51,7 +51,8 @@ import { bindTooltips, showNoticeDialog, toast } from "./ui"
 // 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
 import "./attach"
 // 回前台/定时自检：手机后台冻结时 WS 看着仍 OPEN、事件却攒在浏览器里（详见 attach.ts）
-import { bindConnectionVerify } from "./attach"
+import { bindConnectionVerify, verifyConnection } from "./attach"
+import { BOOT_REST_TIMEOUT_MS, bindBootRetry, bootStatus, withTimeout } from "./boot-guard"
 
 // 二开前端脚本（custom/web/，产物根 gebai.config.js 与 gebai.custom.js）：配置模块加载即应用——先于任何
 // 模块级/初始化期读取 localStorage 的代码；初始化脚本的异步引导在 init 首行等待（awaitCustomBoot）
@@ -226,6 +227,12 @@ async function sendUrlPrompt(sessionId: string, text: string): Promise<void> {
 async function init() {
   // 二开初始化脚本（gebai.custom.js）：等其本地存储初始化 / 注册登录完成再继续（超时兜底，见 boot-config）
   await awaitCustomBoot()
+  bootStatus("正在连接…")
+  // 离线态重试入口：启动期就已被这个钩子接住，不必等「init 抛错→整页定格」后才想到刷新
+  bindBootRetry(() => {
+    client.hurryReconnect()
+    void verifyConnection()
+  })
   blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
   initFxPanels() // 特效面板形态（毛玻璃/实底）：根元素标记先于主题与特效挂载
@@ -253,8 +260,12 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   bindFilesSplit() // 文件工作台入口：主按钮 = 分屏并列，副按钮 = 全屏打开文件工作台（见 files-split.ts）
   restoreToken()
   // 工具卡片元数据（titleParams/args 模式，须先于历史消息渲染就绪）与外部身份兑换（同源集成，本地无令牌
-  // 且服务端启用时用 URL 参数/宿主 localStorage 的登录态兑换令牌）互不依赖：并行发起，缩短首屏初始化串行链
-  await Promise.all([loadToolCardMeta(), tryExternalAuth()])
+  // 且服务端启用时用 URL 参数/宿主 localStorage 的登录态兑换令牌）互不依赖：并行发起，缩短首屏初始化串行链。
+  // 两者都走 REST——超时上限必备：默认 fetch 无超时，弱网下会永久挂住整个 init
+  await Promise.all([
+    withTimeout(loadToolCardMeta(), BOOT_REST_TIMEOUT_MS, "工具元数据").catch(() => {}),
+    withTimeout(tryExternalAuth(), BOOT_REST_TIMEOUT_MS, "外部身份兑换").catch(() => false),
+  ])
   // 登录态补写 cookie（原生资源请求凭证通道）：免登/外部兑换与 restoreToken 各自已同步一次，
   // 此处兜底「令牌由其他路径进入 client 而未经以上任一处」的情形；无令牌时 syncTokenCookie 直接
   // 返回——未登录页面**不得**清掉同 host 其他实例的 cookie（cookie 按 host 共享、不隔离端口）。
@@ -378,9 +389,26 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流
   // 由 sendPrompt 挂起等待重连恢复（事件日志重放），长断线由空闲超时兜底取消）
+  let reconnects = 0
   client.onStatusChange((status) => {
-    if (status === "connected") setConn("已连接")
-    else setConn("已断开，自动重连中…", false)
+    if (status === "connected") {
+      setConn("已连接")
+      reconnects = 0
+      bootStatus("")
+      // 启动期离线（首连失败）后终于连上：此刻才揭启动画面，并补齐启动时没能拉到的列表
+      if (!splashHidden) {
+        hideSplash()
+        void refreshSessions().catch(() => {})
+        const c = getCurrentSession()
+        if (c && !runs.has(c.id)) void loadMessages(c.id).catch(() => {})
+      }
+    } else {
+      reconnects += 1
+      // 带次数：弱网下用户能看出「系统在努力」而不是「死住了」
+      setConn(reconnects > 1 ? `已断开，正在重连（第 ${reconnects} 次）…` : "已断开，正在重连…", false)
+      // 启动画面挂着时同步告知（否则用户只看到一个转圈的 Logo，看不出到底在干什么）
+      if (!splashHidden) bootStatus(`连接中断，正在重连（第 ${reconnects} 次）…`, true)
+    }
   })
   // 状态快照（建连/登录/重连后到达）：重连后模型收敛——静默刷新会话列表；
   // 当前会话缺失时恢复服务端当前会话（含 localStorage 记忆，供 init 对齐）
@@ -410,31 +438,47 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   // connect 与 listSubAgents 并行（SDK 内共享同一连接尝试，listSubAgents 复用该连接）
   const connPromise = client.connect()
   const agentsPromise = client.listSubAgents().catch(() => [] as SubAgentInfo[])
-  await connPromise
-  setConn("已连接")
-  // 回前台 / pageshow / 定时自检：手机后台冻结时 WS 看着仍 OPEN、事件却攒在浏览器里，
-  // 界面会停在旧内容且不报断连——只能主动向服务端核对真相（详见 attach.ts 的 verifyConnection）
+  // 回前台 / pageshow / online / 定时自检：手机后台冻结时 WS 看着仍 OPEN、事件却攒在浏览器里，
+  // 界面会停在旧内容且不报断连（详见 attach.ts 的 verifyConnection）。
+  // **必须早于 await connect**：绑定成 connect 之后的语句，首次建连失败就再也走不到——
+  // 自检与运行态收敛就此永久缺席，网络恢复后页面只能靠手动刷新
   bindConnectionVerify()
+  // 首连失败不再终止初始化：转入离线态继续渲染骨架，由自检/退避重连把后续请求接回。
+  // 初始化只做一次，无单独重试入口，一次建连失败就把整页丢掉（弱网下刷新必踩）
+  await connPromise.catch((err) => {
+    bootStatus(`暂时连不上服务端（${(err as Error).message}），正在自动重试…`)
+  })
+  if (client.isConnected()) setConn("已连接")
+  else setConn("连接中…", false)
   // 缓存子Agent 名：工具全名（{agent}_{tool}）解析显示用
   setSubAgentNames((await agentsPromise).map((a) => a.name))
   // 模型配置清单（标题栏下拉）：与会话列表并行拉取，不阻塞首屏渲染
   void initModelPicker()
   let sessions: SessionInfo[] = []
   try {
-    sessions = await client.listSessions()
+    sessions = await withTimeout(client.listSessions(), BOOT_REST_TIMEOUT_MS, "读取会话列表")
     // 恢复上次浏览的会话；没有本地保存或已删除则进入空白草稿页（首条消息发送时才创建，不产生空会话）
     const saved = lastSessionId()
     const target = saved ? sessions.find((s) => s.id === saved) : undefined
     if (target) setCurrentSession(target)
     else enterDraftView()
   } catch (err) {
-    // 服务模式未登录 / 无权限：进入登录态
-    showLogin((err as Error).message)
-    return
+    // 服务模式未登录 / 无权限：进入登录态。（连接类失败不当作未登录——弱网下把用户
+    // 灰到登录页是因为登录本身就是一次受影响的往返，登录也会失败；只记在状态栏，
+    // 由自检在连接恢复后重新拉列表）
+    const msg = (err as Error).message || ""
+    if (/unauthorized|HTTP 401|login required/i.test(msg)) {
+      showLogin(msg)
+      return
+    }
+    setConn(`会话列表读取失败（${msg}），连接恢复后自动重试`, false)
   }
   // 会话列表与当前会话消息并行加载（互不依赖；列表复用上面已拉取的结果，避免重复请求）
   const cur = getCurrentSession()
-  await Promise.all([refreshSessions(sessions), cur ? loadMessages(cur.id) : Promise.resolve()])
+  await Promise.all([
+    refreshSessions(sessions).catch(() => {}),
+    cur ? withTimeout(loadMessages(cur.id), BOOT_REST_TIMEOUT_MS * 2, "加载会话").catch(() => {}) : Promise.resolve(),
+  ])
   // 外部链接携带提示词（?gb_prompt=…）：首屏就绪后自动建会话并运行，随即把地址栏重定向为会话地址
   // ——刷新只打开该会话，不再重复创建会话、重复执行任务（关闭入口见配置文件 allowUrlPrompt）
   try {
@@ -467,7 +511,13 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
 }
 
 init()
-  .catch((err) => setConn(`连接失败: ${(err as Error).message}`, false))
+  .catch((err) => {
+    // 启动失败不是“没连上”：给出原因与可操作的重试，而不是一个永远隐藏启动画面的回调
+    setConn(`初始化失败: ${(err as Error).message}`, false)
+    bootStatus(`初始化失败：${(err as Error).message}`, true)
+  })
   .finally(() => {
-    hideSplash()
+    // 离线态（首连没成）不揭启动画面：露出一个空白聊天页反而让人以为“已经好了”
+    // （实际所有请求都会失败）。改为在启动画面里如实告知 + 给重试，连上后由状态回调揭幕。
+    if (client.isConnected() || !client.canReconnect()) hideSplash()
   })
