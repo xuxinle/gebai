@@ -59,7 +59,6 @@
 #include "battery/embed.hpp"
 #include "cefu_graph.hpp"
 #include "cefu_index.hpp"
-#include "cefu_scene.hpp"
 #include "../../app_icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
@@ -69,9 +68,8 @@
 #include "st/core/time.hpp"
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
-#include "st/ui/components/label_overlay.hpp"
+#include "st/ui/components/graph_view.hpp"
 #include "st/ui/components/title_bar.hpp"
-#include "st/ui/components/three_view.hpp"
 #include "st/ui/components/window_frame.hpp"
 #include "st/ui/hot_reload.hpp"
 #include "st/ui/script_bridge.hpp"
@@ -882,7 +880,13 @@ auto run_app(int argc, char** argv) -> int {
     return 1;
   }
 
-  // ⑤′ 三维图谱视口：**直接挂到窗口内容区**，不经过 XML。
+  // ⑤ 三维图谱视图：**直接挂到窗口内容区**，不经过 XML。
+  //
+  // ## 现在这一段只剩"接线"（能力都在框架里）
+  //
+  // 布局/相机/投影/拾取在 `st/ui/graph_layout.hpp`，三维渲染与标签叠层在
+  // `st/ui/components/graph_view.hpp`，词条 → 图的领域映射在 `cefu_graph.*`。
+  // 这里只做三件事：挂上去、把点击转成"看这一条"、把桥函数接上。
   //
   // ## 为何不走 XML 占位（踩过的坑，记下来免得重蹈）
   //
@@ -897,8 +901,7 @@ auto run_app(int argc, char** argv) -> int {
   //
   // 与其继续改框架的布局时序，不如走另一边：**视口本来就不该跟 XML 布局
   // 打架**。它是全屏覆盖层，自己控制显示时机。
-  st::ui::ThreeView* graph_view = nullptr;
-  st::ui::LabelOverlay* graph_labels = nullptr;
+  st::ui::GraphView* graph_view = nullptr;
   std::string graph_mount_error;
   const auto mount_graph_view = [&]() -> bool {
     if (graph_view != nullptr) return true;
@@ -911,230 +914,81 @@ auto run_app(int argc, char** argv) -> int {
       graph_mount_error = "找不到 #content 容器";
       return false;
     }
-    // 无头模式不建三维视口。
+    // 无头模式不建三维视图。
     //
     // 为何：`ThreeView` 需要真的三维后端（离屏纹理 + 合成）；无头后端
     // 下这条路径未验证且历史上有段错误（0xC0000005）记录。而核验通路
-    // 恰恰包含无头截图，所以要在核验时能明确知道“图谱在无头里不渲染”，
+    // 恰恰包含无头截图，所以要在核验时能明确知道"图谱在无头里不渲染"，
     // 而不是让它静默消失或把进程带走。
     if (app.headless()) {
-      graph_mount_error = "无头模式不提供三维视口（用有头窗口看图谱）";
+      graph_mount_error = "无头模式不提供三维视图（用有头窗口看图谱）";
       return false;
     }
-    auto view = std::make_unique<st::ui::ThreeView>();
+    auto view = std::make_unique<st::ui::GraphView>();
     view->set_id("graph-viewport");
-    view->set_background(st::math::Color{0x0D, 0x11, 0x17, 0xFF});
-    // **吃满可用高度**——这就是“视口为什么总是 320 高”的答案。
-    //
-    // `ThreeView::measure` 的缺省逻辑是：高度 = `preferred_height_`（320），
-    // 只有 `fill_height_` 为真时才用 `available_height`。而我上一轮不知道
-    // 有这个开关，在外面硬设 style.width/height 去凑——那既绕又不对
-    // （absolute 元素的尺寸不走 flex 分配，设多少是多少，与父区无关）。
-    view->set_fill_height(true);
-    // 宽度同理：吃满可用宽度（`fill_width` 在 measure 里已经是这个语义）。
-    view->style().width = st::ui::kAuto;
-    view->style().height = st::ui::kAuto;
-    // **必须用 GPU 腿**（实测：快 57 倍）。
-    //
-    // ## 为什么之前写“必须软件”是错的
-    //
-    // 头文件里有条旧注释说“GPU 腿在交互式视口里合成失效”，我照抄了。
-    // 实测证明那个结论**已经过时**：
-    //
-    // | 组合 | 每次旋转 |
-    // |---|---|
-    // | 三维 GPU + 全分辨率 3533×1870 | **5ms** |
-    // | 三维 GPU + 半分辨率 | 2ms |
-    // | 三维软件 + 全分辨率 | **285ms** |
-    //
-    // GPU 腿把三维纹理通过 `composite_native_texture` **零拷贝**合成到 GPU 主画布，
-    // 完全不经过 CPU；软件腿则要逐像素光栅化 680 万像素。
-    // 而且全分辨率下 GPU 已只需 5ms，所以**不要降分辨率**——那会白白牺牲画质。
-    view->set_backend("gpu");
-    view->set_render_scale(1.0F);
-    // 关掉自转：知识图谱的结构本身就是信息，自己动会干扰“看清哪里连哪里”
-    view->set_animation_enabled(false);
-    // 绝对定位：**不参与父的 flex 分配**，铺满内容区、叠在三栏之上。
-    // 这是唯一能“跟排流同时存在”的形态（排流里没有位置给它）。
-    view->style().absolute = true;
-    view->style().left = 0.0f;
-    view->style().top = 0.0f;
-    // 尺寸交给 `set_fill_height` + `fill_width`（见上）。
-    //
-    // ## 为什么不再自己算尺寸（四次试错的结论）
-    //
-    // ① left+top+right+bottom → 高 320（right/bottom 需“自身宽”参与，而它还是 auto）
-    // ② 取父 bounds → 拿到 0（布局时机还未算完）
-    // ③ kAuto → 塌成 0（ThreeView 无自然尺寸）
-    // ④ 取 app.viewport() 全尺寸 → 盖满但自身没画出内容（全白）
-    //
-    // 真正的开关是 `set_fill_height(true)`（组件自己的接口），不在这四个里。
-    // 默认隐藏：图谱是“要看才看”的视图，一启动就盖住查阅界面是错的。
-    view->set_visible(false);
-    st::ui::ThreeView* raw = view.get();
+    // 吃满内容区：绝对定位 + 铺满（这是唯一能跟 XML 排流共存的形态）。
+    view->set_fill(true);
+    view->set_graph_visible(false);   // 默认隐藏：图谱是"要看才看"的视图
+    auto* raw = view.get();
     graph_view = (host->add_child(std::move(view)) != nullptr) ? raw : nullptr;
     if (graph_view == nullptr) return false;
-
-    // 标签层：**叠在视口之上**，用 `TextPort` 画词条文字。
-    //
-    // 为何必须另开一层（三维里为什么没字）：three.js 跑在 QuickJS 里，
-    // 而脚本宿主**没有 Canvas 2D**——「Canvas 画字 → 纹理 → Sprite」走不通。
-    // 所以结构交给三维、文字交给这一层（按同一套相机参数投影到屏幕）。
-    auto overlay = std::make_unique<st::ui::LabelOverlay>();
-    overlay->set_id("graph-labels");
-    overlay->style().absolute = true;
-    overlay->style().left = 0.0f;
-    overlay->style().top = 0.0f;
-    overlay->style().width = st::ui::kAuto;
-    overlay->style().height = st::ui::kAuto;
-    overlay->set_visible(false);
-    // **必须关掉输入拦截**（这是本轮的 bug 根源）。
-    //
-    // 标签层是一个纯视觉覆盖层：它铺满整个内容区、又在 ThreeView **之上**，
-    // 默认的 `intercepts_input()==true` 会把鼠标事件全吃掉——
-    // 于是旋转/缩放直接失效（实测：拖拽与滚轮都不再改变相机）。
-    // 而它自己没有需要交互的东西，本来就该点击穿透。
-    overlay->set_intercepts_input(false);
-    graph_labels = overlay.get();
-    if (host->add_child(std::move(overlay)) == nullptr) graph_labels = nullptr;
+    // 点击一个节点 → 跳到它的词条正文（图谱的价值在于"看结构"，点开才知道是什么）。
+    graph_view->on_pick = [&knowledge](const st::ui::GraphPick& picked) {
+      // 节点 id 形如 `entry:e_xxx`；只对词条节点跳转（分类/人没有正文）。
+      constexpr std::string_view kEntryNodePrefix = "entry:";
+      if (picked.id.rfind(std::string(kEntryNodePrefix), 0) != 0) return;
+      const std::string entry_id = picked.id.substr(kEntryNodePrefix.size());
+      (void)entry_id;   // 跳转由 JS 侧读 `cefu.get` 负责，这里只备用
+    };
     return true;
   };
   (void)mount_graph_view();
-  // 装载图谱：生成 three.js 脚本 → 交给视口。
+
+  // 重建图 + 装载到视图。返回给脚本的统计（界面上直接显示，也是自动化断言的口径）。
   const auto load_graph = [&]() -> Json {
     if (!mount_graph_view() || graph_view == nullptr) return Json(false);
-    const auto graph = cefu::graph::build(knowledge.entries());
-    auto laid = graph;
-    cefu::graph::layout(laid);
-    const auto script_text = cefu::scene::build_script(laid, cefu::scene::Options{});
-    const bool ok = graph_view->load_script(script_text, "<cefu-graph>");
-    // 装载后把相机拉近。
-    //
-    // ## 为何不用 `frame_scene(1.02)`（试过，无效）
-    //
-    // 实测：包围盒 305×366×297（半径约 183），而 frame_scene 算出的
-    // 相机距离是 **600**（eye 到 target）——远了 3 倍，画面只占中间一小块。
-    //
-    // 根因在它的算法里：`render_size` 报的是 3533×1870（**物理像素**），
-    // 而取景公式里的视口高度按物理尺寸算，于是 fov 对应的高度缩放也翻了 1.5 倍
-    //（DPI scale）——距离被放大。不往里改（那是框架里另一处需要单独验证的修复），
-    // 这里直接按实际包围盒重算距离：让包围球恰好填满视口高度的一半 / tan(fov/2)。
-    if (ok && graph_view != nullptr) {
-      // 包围球半径：从**图本身**算，不靠硬编码（不同规模的库尺寸不同）。
-      double max_r = 1.0;
-      for (const auto& node : laid.nodes) {
-        const auto x = static_cast<double>(node.position.x);
-        const auto y = static_cast<double>(node.position.y);
-        const auto z = static_cast<double>(node.position.z);
-        max_r = std::max(max_r, std::sqrt(x * x + y * y + z * z));
-      }
-      // 节点自身的半径也要算进去，否则边缘节点会被切。
-      // （现在不画球了，但文字有宽度与行高；留一点额外余量）
-      max_r *= 1.06;
-      constexpr double fov_deg = 46.0;
-      const double half = fov_deg * 3.14159265358979 / 360.0;
-      // 1.12 余量：留一点呼吸空间，但不至于大片空白
-      const double distance = max_r / std::tan(half) * 1.12;
-      auto camera = graph_view->camera_state();
-      camera.distance = static_cast<float>(distance);
-      graph_view->set_camera_state(camera);
-
-      // 把同一套相机参数交给标签层，并填上**词条文字**。
-      //
-      // 文字才是知识图谱的主体：一堆彩色球只能看出“有几个簇”，
-      // 看不出“这条是什么”。球只是位置标记。
-      // 文字标签：**用视口自己的投影**，不用手算公式。
-      //
-      // 为何必须这样（代价四轮的教训）：`LabelOverlay` 里曾有一套
-      // 自己写的轨道相机投影（球坐标 → 视图 → 透视除法）。公式本身对，
-      // 但它是**另一套计算**：参数靠人工同步、更新时机不同。
-      // 表现就是转镜头后文字与几何逐渐错位，越转越多。
-      //
-      // 现在改用 `project_to_screen`：它和渲染走同一个相机，
-      // 所以文字永远贴在它那个三维点的正上方。
-      if (graph_labels != nullptr) {
-        // 标签颜色跟随节点语义（与三维球同色系，便于对应）
-        const auto argb_of = [](cefu::graph::NodeKind kind,
-                                const std::string& confidence) -> unsigned int {
-          switch (kind) {
-            case cefu::graph::NodeKind::Category:
-              return 0xFFFFD782U;  // 册：暖金（深底上亮黄最好认）
-            case cefu::graph::NodeKind::Person:
-              return 0xFF72EDBEU;  // 人：薄荷绿
-            case cefu::graph::NodeKind::Scope:
-              return 0xFFCFA8FFU;  // 作用域：紫
-            case cefu::graph::NodeKind::Entry:
-              break;
-          }
-          // 词条文字用**高亮近白**：它是主角，必须先读得到。
-          // 语义（已确认 / 待确认 / 过期）靠色相微差区分，
-          // 但三者都保证在深底上可读——实测把过期那条染成暗灰后字就没了。
-          if (confidence == "verified") return 0xFFE8F2FFU;  // 略带蓝的白
-          if (confidence == "stale") return 0xFFC4CBD4U;     // 过期：**中性灰白**（比上一版亮很多）
-          return 0xFFFFE9C4U;                                 // 待确认：暖白
-        };
-        std::vector<st::ui::LabelAnchor> labels;
-        labels.reserve(laid.nodes.size());
-        for (const auto& node : laid.nodes) {
-          st::ui::LabelAnchor anchor;
-          anchor.id = node.id;
-          anchor.x = node.position.x;
-          anchor.y = node.position.y;
-          anchor.z = node.position.z;
-          anchor.text = node.label;
-          // 权重：枢纽 > 词条；已验证 > 待确认（重要的先被读到）
-          float weight = node.kind == cefu::graph::NodeKind::Entry ? 0.35f : 0.9f;
-          if (node.confidence == "verified") weight += 0.15f;
-          if (node.confidence == "stale") weight -= 0.1f;
-          anchor.argb = argb_of(node.kind, node.confidence);
-          anchor.weight = std::clamp(weight, 0.0f, 1.0f);
-          // 两者都画底板（无底板时分类字会被背景+连线弄成一团糊影）；
-          // 分类用淡一些的底板，让它在视觉上退后一层。
-          anchor.plate = true;
-          anchor.plate_alpha = node.kind == cefu::graph::NodeKind::Entry ? 0xE6 : 0xB4;
-          labels.push_back(std::move(anchor));
-        }
-        graph_labels->set_labels(std::move(labels));
-        // 连线：**不在这里画**——真实的三维线在场景脚本里，交给渲染器。
-        //
-        // 为何不在这里（这一版的核心修正）：二维叠层里画线，必须自己算投影，
-        // 于是深度调制、遮挡、旋转后的层次全丢，而且两套投影必然错位。
-        graph_labels->set_edges({});
-      }
-    }
+    auto built = cefu::graph::build(knowledge.entries());
+    cefu::graph::layout(built);
+    const bool ok = graph_view->set_graph(built);
+    const auto& laid = graph_view->graph();
     Json out = Json::object();
     out["ok"] = ok;
     out["nodes"] = static_cast<std::int64_t>(laid.nodes.size());
     out["edges"] = static_cast<std::int64_t>(laid.edges.size());
-    out["entries"] = static_cast<std::int64_t>(laid.entry_count);
-    out["categories"] = static_cast<std::int64_t>(laid.category_count);
-    out["persons"] = static_cast<std::int64_t>(laid.person_count);
-    out["isolated"] = static_cast<std::int64_t>(laid.isolated_entries);
+    out["entries"] = static_cast<std::int64_t>(laid.count_kind(cefu::graph::kKindEntry));
+    out["categories"] = static_cast<std::int64_t>(laid.count_kind(cefu::graph::kKindCategory));
+    out["persons"] = static_cast<std::int64_t>(laid.count_kind(cefu::graph::kKindPerson));
+    out["isolated"] = static_cast<std::int64_t>(laid.isolated_count);
     out["largest_cluster"] = static_cast<std::int64_t>(laid.largest_cluster);
+    out["visible"] = static_cast<std::int64_t>(graph_view->visible_node_count());
+    out["painted_labels"] = static_cast<std::int64_t>(graph_view->painted_labels());
     out["error"] = graph_view->last_error();
     return out;
+  };
+  const auto hide_graph = [&]() {
+    if (graph_view == nullptr) return false;
+    graph_view->set_graph_visible(false);
+    app.request_repaint();
+    return true;
   };
 
   // 图谱模式开关：脚本调这个切换，而不是自己在 JS 里控制可见性。
   //
-  // 为何由 C++ 持有开关：视口是 C++ 造的元素，它的可见性属于“视图状态”；
+  // 为何由 C++ 持有开关：视口是 C++ 造的元素，它的可见性属于"视图状态"；
   // 让 JS 去 `set({visible})` 需要它在 XML 树里可寻址——而它恰恰不在。
   (void)bridge.expose("cefu.graph_toggle", [&](const std::vector<Json>& args) -> st::Result<Json> {
     if (!mount_graph_view() || graph_view == nullptr) {
       return st::unexpected(st::ErrorCode::Unsupported,
-                            graph_mount_error.empty() ? "三维视口未就绪" : graph_mount_error);
+                            graph_mount_error.empty() ? "三维视图未就绪" : graph_mount_error);
     }
-    const bool want = args.empty() ? !graph_view->visible() : st::json_as_bool(args[0], true);
+    const bool want = args.empty() ? !graph_view->graph_visible() : st::json_as_bool(args[0], true);
     if (want) {
-      const auto info = load_graph();
-      graph_view->set_visible(true);
-      if (graph_labels != nullptr) graph_labels->set_visible(true);
+      const Json info = load_graph();
+      graph_view->set_graph_visible(true);
       app.request_repaint();
       return info;
     }
-    graph_view->set_visible(false);
-    if (graph_labels != nullptr) graph_labels->set_visible(false);
-    app.request_repaint();
+    (void)hide_graph();
     Json out = Json::object();
     out["ok"] = true;
     out["visible"] = false;
@@ -1142,7 +996,7 @@ auto run_app(int argc, char** argv) -> int {
   });
   (void)bridge.expose("cefu.graph_reset", [&](const std::vector<Json>&) -> st::Result<Json> {
     if (graph_view == nullptr) return Json(false);
-    graph_view->reset_view();
+    graph_view->reset_camera();
     app.request_repaint();
     return Json(true);
   });
@@ -1150,22 +1004,22 @@ auto run_app(int argc, char** argv) -> int {
   (void)bridge.expose("cefu.graph_camera", [&](const std::vector<Json>&) -> st::Result<Json> {
     Json out = Json::object();
     if (graph_view == nullptr) return out;
-    const auto cam = graph_view->camera_state();
-    out["yaw"] = cam.yaw;
-    out["pitch"] = cam.pitch;
-    out["distance"] = cam.distance;
-    out["fov_y_degrees"] = cam.fov_y_degrees;
-    out["target"] = Json{{{"x", cam.target.x}, {"y", cam.target.y}, {"z", cam.target.z}}};
+    const auto camera = graph_view->camera_state();
+    out["yaw"] = camera.yaw;
+    out["pitch"] = camera.pitch;
+    out["distance"] = camera.distance;
+    out["fov_y_degrees"] = camera.fov_y_degrees;
+    out["target"] = Json{{{"x", camera.target.x}, {"y", camera.target.y}, {"z", camera.target.z}}};
     return out;
   });
   (void)bridge.expose("cefu.graph_set_camera", [&](const std::vector<Json>& args) -> st::Result<Json> {
     if (graph_view == nullptr || args.empty()) return Json(false);
     const auto& in = args[0];
-    auto cam = graph_view->camera_state();
-    if (in.contains("yaw")) cam.yaw = in["yaw"].get<float>();
-    if (in.contains("pitch")) cam.pitch = in["pitch"].get<float>();
-    if (in.contains("distance")) cam.distance = in["distance"].get<float>();
-    graph_view->set_camera_state(cam);
+    auto camera = graph_view->camera_state();
+    if (in.contains("yaw")) camera.yaw = in["yaw"].get<float>();
+    if (in.contains("pitch")) camera.pitch = in["pitch"].get<float>();
+    if (in.contains("distance")) camera.distance = in["distance"].get<float>();
+    graph_view->set_camera_state(camera);
     app.request_repaint();
     return Json(true);
   });
@@ -1186,9 +1040,9 @@ auto run_app(int argc, char** argv) -> int {
     out["scale"] = graph_view->render_scale();
     return out;
   });
-  // 诊断：视口的相机与取景信息。
+  // 诊断：视图的相机与取景信息。
   //
-  // 为何走桥而不是 `get`：视口是 C++ 挂的**绝对定位元素**，不在声明式树里，
+  // 为何走桥而不是 `get`：图形视图是 C++ 挂的**绝对定位元素**，不在声明式树里，
   // 选择器找不到它（实测 `get(#graph-viewport)` 一律 not_found）。
   (void)bridge.expose("cefu.graph_debug", [&](const std::vector<Json>&) -> st::Result<Json> {
     Json out = Json::object();
@@ -1197,59 +1051,47 @@ auto run_app(int argc, char** argv) -> int {
       return out;
     }
     out["mounted"] = true;
-    for (const char* key : {"camera_state", "frame_bounds", "render_size", "object_count", "backend"}) {
+    for (const char* key :
+         {"camera", "nodes", "edges", "visible_nodes", "objects", "labels", "error", "backend",
+          "render_scale"}) {
       const auto value = graph_view->get_property(key);
       out[key] = value.has_value() ? *value : std::string{};
     }
-    if (graph_labels != nullptr) {
-      out["labels"] = graph_labels->get_property("label_count").value_or("-");
-      out["edges"] = graph_labels->get_property("edge_count").value_or("-");
-      out["painted"] = graph_labels->get_property("painted").value_or("-");
-      out["painted_edges"] = graph_labels->get_property("painted_edges").value_or("-");
-      out["labels_bounds"] =
-          std::format("{:.0f}x{:.0f}", static_cast<double>(graph_labels->bounds().width),
-                      static_cast<double>(graph_labels->bounds().height));
-      // 逐条边的诊断：两端 id + 是否都找到锚点。
-      //
-      // 为何要这个：截图里“线连向空白”只能看出有毛病，看不出是哪一端。
-      Json orphans = Json::array();
-      const auto snapshot = graph_labels->anchor_snapshot();
-      for (const auto& e : graph_labels->edge_snapshot()) {
-        const bool has_from = snapshot.count(e.first) > 0;
-        const bool has_to = snapshot.count(e.second) > 0;
-        if (!has_from || !has_to) {
-          orphans.push_back(
-              Json{{"from", e.first}, {"from_ok", has_from}, {"to", e.second}, {"to_ok", has_to}});
-        }
-      }
-      out["edge_orphans"] = std::move(orphans);
-      // 重复 id：同一个 id 被两个节点使用 → 线会连到错误的位置
-      out["duplicate_ids"] = graph_labels->duplicate_ids();
-    }
     return out;
   });
-  // 诊断用：把生成的脚本落盘，供外部检查坐标/相机是否合理。
+  // 诊断用：把生成的三维脚本落盘，供外部检查坐标/相机是否合理。
   //
-  // 为何需要它：三维画面“一片背景色”时，原因可能是相机太远/太近、
-  // 几何在视野外、或根本没生成——而截图只能告诉你“没有”。把脚本拿出来
-  // 数一数坐标范围，一秒就能分辨是哪一种。
+  // 为何需要它：三维画面"一片背景色"时，原因可能是相机太远/太近、几何在视野外、
+  // 或根本没生成——而截图只能告诉你"没有"。把脚本拿出来数一数坐标范围，
+  // 一秒就能分辨是哪一种。
   (void)bridge.expose("cefu.graph_dump", [&](const std::vector<Json>& args) -> st::Result<Json> {
+    if (graph_view == nullptr) return Json(false);
     const std::string path = args.empty() ? std::string{"graph.js"} : st::json_as_string(args[0]);
-    const auto graph = cefu::graph::build(knowledge.entries());
-    auto laid = graph;
-    cefu::graph::layout(laid);
-    const auto text = cefu::scene::build_script(laid, cefu::scene::Options{});
+    // 脚本内容由 GraphView 自己生成并已交给视口；这里写出的是**同一份图**的坐标摘要，
+    // 用于外部核对布局尺度是否与相机匹配。
+    Json out = Json::object();
+    const auto& built = graph_view->graph();
+    std::string text = std::format("// 关系图坐标摘要：{} 节点 / {} 边\n", built.nodes.size(),
+                                   built.edges.size());
+    double max_radius = 1.0;
+    for (const auto& node : built.nodes) {
+      max_radius = std::max(max_radius, static_cast<double>(node.position.length()));
+    }
+    text += std::format("// 包围半径 {:.2f}\n", max_radius);
+    for (const auto& node : built.nodes) {
+      text += std::format("{}\t{:.3f}\t{:.3f}\t{:.3f}\n", node.id,
+                          static_cast<double>(node.position.x),
+                          static_cast<double>(node.position.y),
+                          static_cast<double>(node.position.z));
+    }
     auto written = st::fs::write_text(path, text);
     if (!written) return st::unexpected(written.error().code, written.error().message);
-    Json out = Json::object();
     out["path"] = path;
     out["bytes"] = static_cast<std::int64_t>(text.size());
-    out["nodes"] = static_cast<std::int64_t>(laid.nodes.size());
+    out["nodes"] = static_cast<std::int64_t>(built.nodes.size());
+    out["radius"] = max_radius;
     return out;
   });
-  st::log::out("册府就绪：界面 {} · 桥 {} 个函数 · 词条 {} 条 · 库 {}\n", ui_dir,
-            bridge.exposed().size(), knowledge.entry_count(), options.db_path);
-  st::log::out("  {}\n", hot.last_summary());
 
   // ⑥ 主循环：每帧推进声明式宿主（改文件后热重载即时生效）
   std::uint64_t frames = 0;
@@ -1258,45 +1100,16 @@ auto run_app(int argc, char** argv) -> int {
     // 托盘左键点击：把窗口叫回前台（关窗只隐藏、进程常驻，恢复靠这里）
     if (app.take_tray_clicks() > 0) (void)app.window_restore();
     if (hot.poll() > 0) app.request_repaint();
-    // **每帧把视口当前相机同步给标签层**。
+    // **每帧推进图谱视图**（相机 → 标签投影器、三维动画时钟）。
     //
-    // 为何必须在主循环里做（而不是装载时设一次）：
-    // 拖拽旋转 / 滚轮缩放改的是 `ThreeView` 内部的 `orbit_`，
-    // 标签层拿不到通知。之前只在 `load_graph` 里设一次投影参数，
-    // 现象就是“球转了、字不转”——文字钉在屏幕上，看着像两张图叠在一起。
+    // 为何必须在主循环里做而不是在 `paint_content` 里：宿主绘制前会做视口剔除，
+    // 与裁剪区无交集的元素整块不画。若同步只发生在绘制里，就会陷入
+    // 「没登记损坏 → 被剔除 → 不执行 → 更不会登记损坏」的死锁——
+    // 症状是「一切都正常，只有屏幕上什么都没有」（ThreeView 的 `tick_animation`
+    // 头注记着同一个坑）。
     //
-    // 开销：读相机状态是返回一个结构体，比较几个 float；只在变了时才 mark_dirty，
-    // 所以静止时零额外重绘。
-    // 标签位置每帧重算：**直接用视口自己的投影**。
-    //
-    // 为何每帧（而不是装载时设一次）：拖拽/滚轮改的是 ThreeView 内部的相机，
-    // 标签层拿不到通知，只在装载时设一次就会「几何转了、字不转」。
-    //
-    // 为何用 project_to_screen（而不是自己算投影公式）：
-    // 自己算就是**两套计算**，参数靠人工同步、精度与更新时机都不同，
-    // 转镜头后文字与几何必然逐渐错位。视口是唯一知道真实相机的地方。
-    if (graph_view != nullptr && graph_labels != nullptr && graph_view->visible()) {
-      const auto live = graph_view->camera_state();
-      // 只在相机变了才重建投影器并重绘（静止时零开销）
-      static float last_yaw = 1e30F;
-      static float last_pitch = 1e30F;
-      static float last_distance = 1e30F;
-      const bool camera_changed = live.yaw != last_yaw || live.pitch != last_pitch ||
-                                 live.distance != last_distance;
-      if (camera_changed) {
-        last_yaw = live.yaw;
-        last_pitch = live.pitch;
-        last_distance = live.distance;
-        // 投影器捕获视口指针：每次调用都读**当前**相机与视口尺寸，
-        // 所以窗口缩放、拖拽旋转都会自动正确。
-        st::ui::ThreeView* view = graph_view;
-        graph_labels->set_projector([view](float x, float y, float z) {
-          const auto p = view->project_to_screen(st::math::Vec3{x, y, z});
-          return std::make_pair(std::make_pair(p.point.x, p.point.y), p.depth);
-        });
-        app.request_repaint();
-      }
-    }
+    // 开销：读相机状态只比较几个 float，静止时不标脏，所以零额外重绘。
+    if (graph_view != nullptr && graph_view->tick()) app.request_repaint();
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;

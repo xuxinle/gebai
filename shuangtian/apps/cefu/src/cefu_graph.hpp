@@ -1,89 +1,61 @@
 ﻿#pragma once
 
 /// @file cefu_graph.hpp
-/// @brief 册府知识图谱：图构建 + 三维力导向布局 + 轨道相机 + 透视投影 + 拾取。
+/// @brief 册府知识图谱的**领域适配层**：把知识词条变成一张通用关系图。
 ///
-/// ## 为什么这一层不碰渲染
+/// ## 这一层现在只剩什么（框架化之后）
 ///
-/// 三维图谱有两类完全不同的工作，混在一起就没法各自验证：
+/// 布局、相机、投影、拾取、三维渲染都已经在框架里
+/// （`st/ui/graph_layout.hpp` 的纯计算 + `st/ui/components/graph_view.hpp` 的组件）。
+/// 本文件只负责**只有册府知道的三件事**：
 ///
-/// | 层 | 工作 | 能否单测 |
-/// |---|---|---|
-/// | **本文件** | 图构建、布局解算、相机、投影、拾取 | ✅ 纯函数，可穷举 |
-/// | `graph3d` 组件 | 把投影结果画成球体/连线/文字 | 只能截图核验 |
+/// | 领域知识 | 落在哪里 |
+/// |---|---|
+/// | 有哪些实体（词条 / 分类 / 负责人 / 作用域） | `build()` 建节点 |
+/// | 谁和谁有关系（从属 / 显式关联 / 取代 / 共事 / 共享硬事实） | `build()` 建边 |
+/// | 长什么样（配色、标签、聚簇优先级） | `node_color()` / `edge_color()` / `label_of()` |
 ///
-/// 所以这一层零依赖 `st::ui`，只用 `cefu::Entry` 与 `st::math`——
-/// 布局收敛、投影边界、拾取命中都能写断言，而不是"看着像对的"。
+/// 这个划分不是形式主义：通用层不认识"分类"是什么，也不需要认识——它只认
+/// `Node::cluster_rank`（谁该当簇心）与 `Node::argb`（什么颜色）。于是同一个
+/// `GraphView` 能画知识图谱、依赖图、调用图、组织关系……
 ///
-/// ## 为什么布局要预先算一次并缓存
+/// ## 为什么图要预先算一次布局并缓存
 ///
 /// 力导向是迭代解算（O(迭代 × 节点²)）。300 节点 × 300 迭代 ≈ 2700 万次距离计算，
-/// 每帧算一次会直接卡死界面。所以：**布局算一次 → 缓存坐标 → 每帧只做投影与绘制**。
-/// 词条集变化时才重算（由调用方按 `revision` 判断）。
+/// 每帧算一次会直接卡死界面。所以：**布局算一次 → 坐标存在 `graph::Graph` 里 →
+/// 每帧只做投影与绘制**。词条集变化时才重算（判据是 `graph.revision` 变没变）。
+///
+/// ## 共享硬事实这条边为什么最有价值也最危险
+///
+/// 它能在没人显式声明关联的情况下发现「这三条知识其实在说同一台机器」。
+/// 危险在于噪声：任何两条都共享某些平凡硬事实（比如都写了 `负责人=张三`）。
+/// 所以只取**足够具体**的值（含数字或路径分隔符，且按码点算长度 ≥ 2），
+/// 且至少两条共享才建边，且**只连成链**——全连接会 O(n²) 边爆炸。
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cefu_index.hpp"
-#include "st/math/matrix.hpp"  // Vec3（三维向量；几何头只到二维 Point）
+#include "st/ui/graph_layout.hpp"
 
 namespace cefu::graph {
 
-/// 节点类型。**顺序即绘制层次**（小的先画、盖在下面更"远"）。
-enum class NodeKind : std::uint8_t {
-  Category = 0,  ///< 分类册（一个册一个节点）
-  Person = 1,    ///< 负责人
-  Scope = 2,     ///< 作用域（persona / chat）
-  Entry = 3,     ///< 词条本体
-};
+/// 节点类型常量（**只是字符串**：通用层不解释它们，册府用它们做计数与配色）。
+inline constexpr std::string_view kKindCategory{"category"};
+inline constexpr std::string_view kKindPerson{"person"};
+inline constexpr std::string_view kKindScope{"scope"};
+inline constexpr std::string_view kKindEntry{"entry"};
 
-/// 边的语义。颜色与线型按它区分。
-enum class EdgeKind : std::uint8_t {
-  BelongsTo = 0,  ///< 词条 → 所属分类
-  Links = 1,      ///< 词条 → 词条（`links` 字段显式声明）
-  Supersedes = 2, ///< 新词条 → 被它取代的旧词条
-  OwnedBy = 3,    ///< 词条 → 负责人
-  SharedFact = 4, ///< 两条词条共享同一条硬事实（同 IP/端口/阈值）——**隐含的关联**
-  ScopedTo = 5,   ///< 词条 → 作用域
-};
-
-/// 图节点。
-struct Node {
-  std::string id;      ///< 唯一 id（`cat:运维` / `person:张三` / `entry:e_xxx`）
-  std::string label;   ///< 显示标签（截断后的短标题）
-  NodeKind kind{NodeKind::Entry};
-  std::string entry_id;  ///< 若本节点代表词条，指向它（点击跳转用）
-  std::string confidence;  ///< verified / inferred / stale（仅词条节点有意义）
-  double weight{1.0};      ///< 影响球体半径（分类/人比词条大）
-
-  /// 三维坐标（布局解算结果；单位约等于像素尺度）。
-  st::math::Vec3 position{};
-  /// 是否已参与布局（孤立节点会被放到远处，见 `layout`）。
-  bool isolated{false};
-};
-
-/// 图边。
-struct Edge {
-  std::size_t from{0};  ///< 节点下标
-  std::size_t to{0};
-  EdgeKind kind{EdgeKind::BelongsTo};
-};
-
-/// 整张图（一次构建，供布局与渲染共用）。
-struct Graph {
-  std::vector<Node> nodes;
-  std::vector<Edge> edges;
-  /// 词条集指纹（标题+分类+更新时间），变了才需要重算布局。
-  std::uint64_t revision{0};
-  /// 统计（界面上直接显示，用于判断"图是不是太稀/太密"）。
-  std::size_t entry_count{0};
-  std::size_t category_count{0};
-  std::size_t person_count{0};
-  std::size_t isolated_entries{0};
-  std::size_t largest_cluster{0};
-};
+/// 边的语义常量（同上：通用层只看 `Edge::clustering` 与颜色）。
+inline constexpr std::string_view kEdgeBelongsTo{"belongs_to"};
+inline constexpr std::string_view kEdgeLinks{"links"};
+inline constexpr std::string_view kEdgeSupersedes{"supersedes"};
+inline constexpr std::string_view kEdgeOwnedBy{"owned_by"};
+inline constexpr std::string_view kEdgeSharedFact{"shared_fact"};
+inline constexpr std::string_view kEdgeScopedTo{"scoped_to"};
 
 /// 构建选项（阈值都在这里，不散落在实现里）。
 struct BuildOptions {
@@ -95,92 +67,34 @@ struct BuildOptions {
   bool include_meta_nodes{true};
 };
 
-/// 从索引构建图。**纯派生**，不写库、不改索引。
-[[nodiscard]] auto build(const std::vector<Entry>& entries, const BuildOptions& options = {})
-    -> Graph;
-
-/// 布局参数。
-struct LayoutOptions {
-  std::size_t iterations{220};    ///< 迭代轮数（多 = 更稳，线性变慢）
-  double repel{1.0};              ///< 斥力强度
-  double attract{0.06};           ///< 引力强度（沿边的弹簧）
-  double center_pull{0.012};      ///< 向原点聚拢（防止整体飘散）
-  double damping{0.86};           ///< 速度阻尼（小 = 更稳但收敛慢）
-  double max_step{14.0};          ///< 单步位移上限（防早期爆炸）
-  double scale{170.0};            ///< 布局完成后的整体缩放（贴合视野）
-
-  /// 分册聚簇的强度（0 = 关，即原行为）。
-  ///
-  /// ## 为何需要它（治本，而不是调线条参数）
-  ///
-  /// 原布局是纯力导向：节点只被「真实关系」约束，于是同册的词条
-  /// 也可能被斥力推到对面。三维投影后连线横七竖八——那是**布局**的后果，
-  /// 不是线条画法的错（四轮调线条参数都没治）。
-  ///
-  /// 加簇力之后：同一册的词条被拉向该册的锚点，簇之间再互斥。
-  /// 于是「同册聚成一团」，连线变成簇内短段 + 簇间少数跨线。
-  /// 这才是知识图谱应有的形状（也是 Obsidian / Gephi 分组视图的做法）。
-  double cluster_pull{0.055};
-  /// 各簇锚点之间的分布半径（相对 `scale`）——控制「分得多开」。
-  ///
-  /// 从 0.62 提到 0.92：实测 0.62 时簇内文字仍然拥挤，
-  /// 避让算法把标签推开几十像素，造成“字离点很远”的观感。
-  /// 铺幐一点后，簇内能用「贴着圆点」的默认位置排下，连线也变得短而清楚。
-  double cluster_spread{0.92};
-
-  /// 固定的随机种子：布局必须可重复，否则每次打开图形状都变（截图回归也会飘）。
-  std::uint64_t seed{0x9E3779B97F4A7C15ULL};
-};
-
-/// 解算三维布局（原地写入 `node.position`）。确定性：同输入必得同输出。
-void layout(Graph& graph, const LayoutOptions& options = {});
-
-/// 轨道相机（球坐标）。
-struct Camera {
-  double yaw{0.6};      ///< 方位角（弧度）
-  double pitch{0.42};   ///< 俯仰角（弧度，正值从上方看）
-  double distance{620.0}; ///< 相机到原点距离
-  double fov_degrees{52.0};
-
-  /// 归位（回到默认视角）。
-  void reset() { *this = Camera{}; }
-  void orbit(double delta_yaw, double delta_pitch);
-  void zoom(double factor);
-};
-
-/// 投影结果（每个节点一份）。
-struct Projected {
-  double x{0.0};          ///< 屏幕坐标（逻辑像素，已含视口偏移）
-  double y{0.0};
-  double depth{0.0};      ///< 相机空间 z（越大越远）
-  double radius{0.0};     ///< 投影后的球体半径（透视缩放后）
-  bool visible{false};    ///< 视锥/近平面裁剪结果
-};
-
-/// 投影参数。
-struct ProjectOptions {
-  double viewport_x{0.0};
-  double viewport_y{0.0};
-  double viewport_width{800.0};
-  double viewport_height{600.0};
-  /// 球体基准半径（未透视缩放前）。
-  double base_radius{9.0};
-  /// 近平面（小于它的点不画：投影会炸成巨大坐标）。
-  double near_plane{24.0};
-};
-
-/// 把全部节点投到屏幕。返回与 `graph.nodes` 同序的数组。
-[[nodiscard]] auto project(const Graph& graph, const Camera& camera, const ProjectOptions& options)
-    -> std::vector<Projected>;
-
-/// 拾取：屏幕点 → 最近的可见节点下标（没有命中返回 `nullopt` 语义的 `nodes.size()`）。
+/// 从词条集构建图（**纯派生**：不写库、不改索引）。
 ///
-/// 只按**屏幕距离 vs 投影半径**判定，不做深度遮挡判断——图谱里**故意**允许
-/// 点到被别的节点"挡住"的节点：用户看到的是标签，不是球体表面。
-[[nodiscard]] auto pick(const Graph& graph, const std::vector<Projected>& projected, double x,
-                        double y, double tolerance = 4.0) -> std::size_t;
+/// 坐标全为零——布局是下一步（`cefu::layout`）。分成两步的理由：
+/// ① 布局很贵（见文件头），只该在数据真变时做；② 建图本身要能单测，
+/// 混进迭代解算会让断言变慢且难定位。
+[[nodiscard]] auto build(const std::vector<Entry>& entries, const BuildOptions& options = {})
+    -> st::ui::graph::Graph;
 
-/// 按深度从远到近排序的下标（画家算法：先画远的）。
-[[nodiscard]] auto depth_order(const std::vector<Projected>& projected) -> std::vector<std::size_t>;
+/// 解算布局（对 `st::ui::graph::layout` 的领域缺省包装）。
+///
+/// 为何要这一层而不是让调用方直接调框架的 `layout`：册府的规模与观感参数
+/// （迭代数、簇拉力）是**调出来的**，散在各调用点必然漂移。收敛到一处，
+/// 将来改观感只改这里。
+void layout(st::ui::graph::Graph& graph);
+
+/// 节点主色（按类型 + 置信度）。
+///
+/// 单独成函数是为了让单测钉住「verified 与 inferred 必须可区分」——
+/// 这正是图谱的语义价值：一眼看出哪些知识还没被确认。
+[[nodiscard]] auto node_color(std::string_view kind, std::string_view confidence) -> std::uint32_t;
+
+/// 边色（按语义）。颜色都亮但可区分：连线是背景结构，仍要能分出类型。
+[[nodiscard]] auto edge_color(std::string_view kind) -> std::uint32_t;
+
+/// 作用域类型的存储值 → 人话标签（`chat` → 「本群」）。
+///
+/// 为何需要：schema 里的 kind 是**存储值**，直接显示会得到 `chatoc_f71d4c…` 这种
+/// 看不懂的串。图谱给人看，标签就得是人话。
+[[nodiscard]] auto scope_label(std::string_view scope_kind) -> std::string;
 
 }  // namespace cefu::graph
