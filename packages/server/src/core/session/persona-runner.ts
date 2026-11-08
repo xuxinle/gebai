@@ -215,6 +215,24 @@ export function personaNote(input: PersonaRunInput, now = Date.now(), approvalMo
     lines.push("它们各盯一面、各有上下文，看不到你看到的事件。别替它们把话说尽：")
     for (const s of siblings) lines.push(`- \`${s.id}\`：${s.focus}`)
   }
+  // 定时工作面：模型得知道「自己会在什么时候被自己叫醒」。
+  //
+  // 不写这段的后果：它把定时触发当成普通消息事件（“谁让你们来找我的？”），
+  // 或反过来以为“没有人来叫我就什么都不用做”——而它本来就有一张作息表。
+  const schedules = driver.schedules ?? []
+  if (schedules.length) {
+    lines.push("")
+    lines.push("## 你自己的作息（定时任务）")
+    lines.push("下面这些时刻你会被**自己**叫醒（不是有人来找你），到点就按要求做，不必等人提：")
+    for (const s of schedules) {
+      const label = s.description?.trim() || s.id
+      const tz = s.timezone ? `（${s.timezone}）` : ""
+      lines.push(`- \`${s.cron}\`${tz} —— ${label}：${s.prompt}`)
+    }
+    lines.push("")
+    lines.push("到点那次是被定时器触发的；若判断当时没什么可说的（例如巡检结果一切正常），")
+    lines.push("按任务要求自行决定是否需要对外发言——**不要为了“有动静”而发没内容的消息**。")
+  }
   // 记忆纪律：只在人格声明了工具包时才写。
   //
   // 为何必须跟工具面同源：只装工具不写这段，模型面对一排 cefu_* 工具想不起来用；

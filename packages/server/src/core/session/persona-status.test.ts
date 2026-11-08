@@ -82,6 +82,42 @@ describe("collectPersonaState：基本形状", () => {
   })
 })
 
+describe("collectPersonaState：定时工作面可见", () => {
+  test("分身声明的 schedules 透出到快照（定时失败是静默的，面板是唯一可见面）", async () => {
+    const def: PersonaDef = {
+      ...DEF,
+      drivers: [
+        {
+          id: "report",
+          focus: "写日报",
+          subscriptions: ["schedule", "message"],
+          schedules: [{ id: "morning", cron: "0 9 * * 1-5", description: "工作日早报", prompt: "写早报", timezone: "Asia/Shanghai" }],
+        },
+      ],
+    }
+    const snap = await collectPersonaState({
+      catalog: new PersonaCatalog({ personas: new Map([["xiaoshuang", def]]) }),
+      runtime: fakeRuntime({}),
+      drivers: new DriverRegistry({}),
+      sessionRunning: () => false,
+    })
+    const d = snap.personas[0]!.drivers[0]!
+    expect(d.schedules).toEqual([
+      { id: "morning", cron: "0 9 * * 1-5", description: "工作日早报", timezone: "Asia/Shanghai" },
+    ])
+  })
+
+  test("未声明定时的分身不带该字段（不编造空数组）", async () => {
+    const snap = await collectPersonaState({
+      catalog: catalog(),
+      runtime: fakeRuntime({}),
+      drivers: new DriverRegistry({}),
+      sessionRunning: () => false,
+    })
+    expect(snap.personas[0]!.drivers[0]!.schedules).toBeUndefined()
+  })
+})
+
 describe("collectPersonaState：调度与引擎的口径", () => {
   test("调度计数与会话归属合流；sessionRunning 取引擎判定（不是调度计数）", async () => {
     const snap = await collectPersonaState({

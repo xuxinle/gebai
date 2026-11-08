@@ -36,6 +36,13 @@ export interface PersonaDriverView {
   /** 动态创建的理由（审计线索）。 */
   reason?: string
   maxConcurrent?: number
+  /**
+   * 该分身声明的定时任务（`DriverDef.schedules`）。
+   *
+   * 为何要在面板里看得到：定时任务的失败形态是**静默**的（订阅没盖、源没通电、
+   * 表达式永不触发），而它们都不报错。没有这一行，「配了定时但没动静」只能靠等。
+   */
+  schedules?: Array<{ id: string; cron: string; description?: string; timezone?: string; misfire?: "skip" | "run" }>
   /** 是否已有调度器条目（= 至少发生过一次投递/被显式上线）。 */
   active: boolean
   running: number
@@ -161,6 +168,17 @@ export async function collectPersonaState(deps: PersonaStatusDeps): Promise<Pers
         origin: rec?.origin ?? "static",
         ...(rec?.reason ? { reason: rec.reason } : {}),
         ...(d.maxConcurrent !== undefined ? { maxConcurrent: d.maxConcurrent } : {}),
+        ...(d.schedules?.length
+          ? {
+              schedules: d.schedules.map((s) => ({
+                id: s.id,
+                cron: s.cron,
+                ...(s.description ? { description: s.description } : {}),
+                ...(s.timezone ? { timezone: s.timezone } : {}),
+                ...(s.misfire ? { misfire: s.misfire } : {}),
+              })),
+            }
+          : {}),
         active: s !== undefined,
         running: s?.runningSessions ?? 0,
         queued: s?.queued ?? 0,

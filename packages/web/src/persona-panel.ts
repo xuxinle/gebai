@@ -36,6 +36,8 @@ export interface PersonaStateView {
       origin: "static" | "dynamic"
       reason?: string
       maxConcurrent?: number
+      /** 该分身声明的定时任务（`DriverDef.schedules`）。 */
+      schedules?: Array<{ id: string; cron: string; description?: string; timezone?: string; misfire?: "skip" | "run" }>
       active: boolean
       running: number
       queued: number
@@ -349,6 +351,7 @@ export function renderPersonaPanel(host: HTMLElement, snapshot: PersonaStateView
       if (d.maxConcurrent !== undefined) bits.push(`并发 ${d.maxConcurrent}`)
       if (d.sessionId) bits.push(`会话 ${d.sessionId.slice(0, 8)}`)
       else bits.push("尚无会话（还没接过事件）")
+      if (d.schedules?.length) bits.push(`定时 ${d.schedules.length} 条`)
       info.append(
         el("div", "settings-row-name", `${d.id} — ${d.focus}`),
         el("div", "settings-row-desc", bits.join(" · ")),
@@ -361,6 +364,11 @@ export function renderPersonaPanel(host: HTMLElement, snapshot: PersonaStateView
           ["失败", d.failed],
         ),
       )
+      // 定时任务逐条列出：它们是静默的（不触发时不报错），面板是唯一的可见面
+      for (const s of d.schedules ?? []) {
+        const tz = s.timezone ? `（${s.timezone}）` : ""
+        info.appendChild(el("div", "settings-row-desc", `⏰ ${s.description ?? s.id}：${s.cron}${tz}`))
+      }
       if (d.reason) info.appendChild(el("div", "settings-row-desc", `创建原因：${d.reason}`))
       row.appendChild(info)
       // 会话在跑 = 最可信的「正在干活」信号（调度计数会滞后）

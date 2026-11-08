@@ -21,6 +21,8 @@ export interface BuildEventInput {
   attachments?: PersonaAttachment[]
   /** 覆盖幂等键（缺省按 kind 推导）。 */
   id?: string
+  /** 定向 driver（缺省 = 该角色下所有关注者；定时声明靠它只唤醒自己那个分身）。 */
+  driverId?: string
   /** 覆盖时间（缺省 now）。 */
   at?: number
 }
@@ -70,6 +72,7 @@ export function buildEvent(input: BuildEventInput): PersonaEvent {
     kind: input.kind,
     personaId: input.personaId,
     channel: input.channel,
+    ...(input.driverId ? { driverId: input.driverId } : {}),
     ...(input.threadKey ? { threadKey: input.threadKey } : {}),
     context,
     body: input.body,

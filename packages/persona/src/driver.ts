@@ -87,7 +87,12 @@ function sameDriverDef(a: DriverDef, b: DriverDef): boolean {
   if (a.sessionKeyOf !== b.sessionKeyOf) return false
   const sig = (t?: DriverDef["outputs"]): string =>
     (t ?? []).map((o) => `${o.channel}:${o.address}#${o.thread ?? ""}:${o.default ? 1 : 0}`).join(",")
-  return sig(a.outputs) === sig(b.outputs)
+  if (sig(a.outputs) !== sig(b.outputs)) return false
+  // 定时工作面：改了它就是行为变了（这里只影响「静态定义是否被当成变更」，
+  // 不参与 driver 身份判定——它不影响“谁能收事件”）
+  const sch = (list?: DriverDef["schedules"]): string =>
+    (list ?? []).map((s) => [s.id, s.cron, s.timezone ?? "", s.misfire ?? "", s.prompt].join("\u0001")).join("\u0000")
+  return sch(a.schedules) === sch(b.schedules)
 }
 
 /**

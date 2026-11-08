@@ -842,6 +842,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   let personaState: (() => Promise<import("../core/session/persona-status").PersonaStateSnapshot>) | null = null
   /** 拟人装配失败的原因（null = 装配成功 / 未启用）。装配失败不阻断启动，只如实上报。 */
   let personaSetupError: string | null = null
+  /**
+   * 人格定时声明的读取面（内置 `schedule` 源靠它算档期）。
+   *
+   * 为何提升到这一层：声明要跨“拟人装配块”与“事件源装配块”使用，而两者是不同的 try 域。
+   * 同时它是**函数而非快照**：人格定义热加载是整体替换 catalog，快照会让新加的定时任务
+   * 要重启才生效。未启用拟人时保持空数组（`personaRuntime` 为 null，源也不会启动）。
+   */
+  let collectPersonaSchedules: () => import("@gebai/persona").ScheduleDeclaration[] = () => []
   if (config.personaEnabled) {
     // 整块故障隔离：拟人模式是**附加能力**，它装配期抛的任何错都不允许把整个服务拖下水。
     //
@@ -858,6 +866,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       createDriverTools,
       createDriverListTool,
       applyPersonaEnv: applyPersonaEnvCore,
+      collectScheduleDeclarations,
       personaApprovalMode: readApprovalMode,
       sessionRoutingMode: readSessionRouting,
     } = await import("@gebai/persona")
@@ -869,6 +878,17 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     const { SessionWorkerSpawner } = await import("../core/session/worker-spawner")
     const { createWorkerTools, createWorkerTaskBook } = await import("../core/session/worker-tools")
     const { ApprovalBridge } = await import("../core/session/persona-approval")
+
+    // 人格定时声明的统一读取面（内置 `schedule` 源靠它算档期）：**函数而非快照**——
+    // 人格定义热加载是整体替换 catalog，快照会让新加的定时任务要重启才生效。
+    collectPersonaSchedules = () =>
+      collectScheduleDeclarations(
+        (personaCatalog?.all() ?? []).map((p) => ({
+          id: p.id,
+          ...(p.name ? { name: p.name } : {}),
+          drivers: (p.drivers ?? []).map((d) => ({ id: d.id, ...(d.schedules ? { schedules: d.schedules } : {}) })),
+        })),
+      )
 
     const personaDirs = defaultPersonaScanDirs({ packageRoot: await resolvePersonaPackageRoot() })
     const found = await discoverPersonas(personaDirs)
@@ -1404,7 +1424,13 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       home: config.gebaiHome,
       enable: config.eventSourcesEnable,
       disable: config.eventSourcesDisable,
-      deps: feishuDeps,
+      // 宿主能力注入：人格定时声明（内置 `schedule` 源用它算档期）。
+      // **读函数而非快照**：人格定义是可热加载的（catalog 整体替换），快照会让
+      // 「新加的定时任务要重启才生效」；每次 tick 现取才是热加载的兑现。
+      deps: {
+        ...feishuDeps,
+        personaSchedules: () => collectPersonaSchedules(),
+      },
       log: { info: log.info, warn: log.warn, error: log.error },
     })
     await personaSources.start()
@@ -1415,6 +1441,16 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       `[gebai] 拟人事件源已启动 ${running.length} 个` +
         (running.length ? `：${running.map((s) => `${s.name}(${s.channel})`).join("、")}` : "（无——只靠渠道入站；放一个源文件到 custom/persona/ 即生效）"),
     )
+    // 定时声明计数（配了几条、在哪些分身上）：没有它，「定时任务到底通没通电」只能靠等
+    const scheduled = collectPersonaSchedules()
+    if (scheduled.length) {
+      log.info(
+        `[gebai] 人格定时任务 ${scheduled.length} 条：` +
+          scheduled.map((s) => `${s.personaId}/${s.driverId}/${s.schedule.id}(${s.schedule.cron})`).join("、"),
+      )
+    } else {
+      log.info("[gebai] 人格定义里没有声明 drivers[].schedules（定时任务为空）")
+    }
     } catch (err) {
       // 事件源没起来不影响渠道与人格：事件源是驱动面，渠道是收发面
       personaSources = null

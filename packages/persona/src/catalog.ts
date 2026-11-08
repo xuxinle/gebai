@@ -99,8 +99,22 @@ function samePersona(a: PersonaDef, b: PersonaDef): boolean {
     const ta = (d.outputs ?? []).map((t) => `${t.channel}:${t.address}#${t.thread ?? ""}:${t.default ? 1 : 0}`).join(",")
     const tb = (o.outputs ?? []).map((t) => `${t.channel}:${t.address}#${t.thread ?? ""}:${t.default ? 1 : 0}`).join(",")
     if (ta !== tb) return false
+    // 定时工作面变了也是行为变了（改了时刻/指令必须让新一轮重新读，不能等重启）
+    if (schedulesSignature(d.schedules) !== schedulesSignature(o.schedules)) return false
   }
   return true
+}
+
+/**
+ * 定时声明的签名（catalog 变更检测用）。
+ *
+ * 为何不整个 `JSON.stringify` 比：组件顺序无关紧要，而逐字段拼能保证
+ * “只改一处描述/时刻”也一定被当成行为变了（否则热加载不刷新面板与提示词）。
+ */
+function schedulesSignature(list?: import("./ports").DriverSchedule[]): string {
+  return (list ?? [])
+    .map((s) => [s.id, s.cron, s.timezone ?? "", s.misfire ?? "", s.description ?? "", s.prompt].join("\u0001"))
+    .join("\u0000")
 }
 
 /** 身份（扮演者）是否相同：按**键值表**逐项比较（键顺序无意义）。 */

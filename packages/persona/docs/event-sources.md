@@ -14,7 +14,7 @@
 
 | 域 | 路径 | 说明 |
 |---|---|---|
-| 内置 | `packages/persona/src/sources/` | 随包分发（`file_drop` 是参考实现） |
+| 内置 | `packages/persona/src/sources/` | 随包分发（`file_drop` 参考实现 · `feishu` · `schedule`） |
 | 二开 | `custom/persona/`（仓库内二开域，同名**覆盖**内置）|
 
 支持两种形态（与子 Agent 一致）：
@@ -114,8 +114,12 @@ interface IngressEvent {
   attachments?: PersonaAttachment[]
   at?: number              // 事件产生时刻
   personaId?: string       // 通常**不该填**：归属是部署配置的事
+  driverId?: string        // 该事件天然属于某个分身时才填（人格定时就用它）
 }
 ```
+
+> `driverId` 的用途：同一角色里两个分身都关注 `schedule` 时，定时事件**只能**回到声明的那个分身；
+> 不填的话两边会把对方的定时活各跑一遍（幂等按「事件×driver」记账，不会拦）。
 
 ### 3.4 `EmitResult`（核心已裁决，插件据此决定回不回话）
 
@@ -170,7 +174,15 @@ async stop() {
 > 实测代价：写成模块级变量时，多条用例顺序执行会互相清空 `handled`/`timer`，
 > 表现为「事件偶发丢失」，而单实例手动验证完全正常——极难定位。
 
-## 6. 与子 Agent 一致的机制
+## 6. 内置源：`schedule`（人格定时任务）
+
+无人格声明时它空转；一旦有人在 `drivers[].schedules` 里写了 cron，它到点就把事件投给
+**那个分身**（定向 `personaId + driverId`）。写法见 `custom/persona/README.md`。
+
+它与其他源的差别只有一处：声明不是自己扫目录得来的，而是宿主经 `ctx.deps.personaSchedules`
+注入的读取函数（人格定义由 `PersonaCatalog` 热加载，源再扫一份就是第二份发现逻辑）。
+
+## 7. 与子 Agent 一致的机制
 
 | 机制 | 行为 |
 |---|---|
@@ -183,7 +195,7 @@ async stop() {
 **失败隔离为什么重要**：若不隔离，"飞书源配错"会连带"定时任务也不跑了"——
 表现为「整个拟人模式失效」，而根因只是一个小配置错。
 
-## 7. 程序化注册
+## 8. 程序化注册
 
 不适合写成文件的场景（内置核心源、需要宿主上下文、测试注入）用 `register()`：
 
@@ -195,7 +207,7 @@ await mgr.start()
 
 `register()` 同样走字段校验（不能绕过）。显式注册的源在后续重扫中**不会被丢弃**。
 
-## 8. 接入服务端
+## 9. 接入服务端
 
 ```ts
 const manager = new EventSourceManager({
@@ -216,7 +228,7 @@ await manager.refreshIfChanged()
 await manager.stop()
 ```
 
-## 9. 诊断
+## 10. 诊断
 
 ```ts
 manager.state()        // 每源：started / enabled / channel / stats{emitted,accepted,unattended,duplicate,overflow,unavailable} / error
@@ -226,7 +238,7 @@ manager.list()         // 已注册源定义
 
 `unattended` 计数持续增长 = 归属配置有问题（该源的 `channel` 没被任何人格认领）。
 
-## 10. 检查清单（写新源时逐条过）
+## 11. 检查清单（写新源时逐条过）
 
 - [ ] `name` 与文件名一致，`channel` 是稳定的 `[a-z0-9_]+`
 - [ ] `start` 订阅后**立即 resolve**，长循环在后台

@@ -38,6 +38,8 @@ event.ts           PersonaEvent 形态 + threadKey 推导（路由键，不含�
 events.ts          buildEvent / 每源幂等键推导 / renderEventContext（出站纪律注入）
 dedupe.ts          EventDedupe：有界幂等环（重复事件 = 重复副作用）
 scheduler.ts       PersonaScheduler：两层队列（会话级串行 + driver 级并发额度）
+schedules.ts       定时工作面：档期计算 / 幂等键 / 事件构造 / 声明校验（drivers[].schedules）
+cron.ts            cron 与 @ 别名解析（全仓唯一实现，服务端 expr.ts 转出）
 runtime.ts         PersonaRuntime：幂等 → 路由 → 会话解析 → 入队 → 调度 → 交引擎
 ports.ts           Port 接口（PersonaRunner / SessionResolver / PersonaLookup）
 source.ts          事件源扩展契约（EventSourceDef / IngressEvent / ctx）
@@ -56,7 +58,7 @@ credentials.ts / oauth.ts / user-token.ts   飞书进程级用户凭据
 
 ```
 ├─ 内置
-│  ├─ packages/persona/src/sources/         # 随包分发（file_drop 参考实现 + feishu）
+│  ├─ packages/persona/src/sources/         # 随包分发（file_drop 参考实现 + feishu + schedule）
 │  └─ packages/persona/src/personas/        # 内置人格（xiaoshuang 示例）
 └─ 二开（recommended）
    └─ custom/persona/                       # 两类定义混放，靠导出名区分
@@ -279,12 +281,41 @@ GEBAI_PERSONA_XIAOSHUANG_SUPPORT_SESSION_MAP=[{"when":"message","key":"{chat}-{t
 （否则就是“每步弹卡”的回潮）。四条硬规矩：fail-closed（相期不在 → 拒绝）、同一 `toolCallId`
 只问一次、超时不记结论、只代理人**人格会话**。
 
+## 定时任务：`driver.schedules`
+
+角色自己的工作节律（早报、巡检、周复盘）写在**分身**上，与 `subscriptions` 同层：
+
+```ts
+drivers: [{
+  id: "report",
+  focus: "写日报",
+  subscriptions: ["schedule", "message"],   // 必须能匹配 schedule（加载期强校验）
+  schedules: [{ id: "morning", cron: "0 9 * * 1-5", description: "工作日早报", prompt: "写今天的早报" }],
+}]
+```
+
+内置事件源 `schedule` 到点投一条 `kind:"schedule"` 事件（定向 `personaId + driverId`），
+之后走与群消息**完全相同**的一条路——身份、出站纪律、审批姿态、同会话串行全部自动生效。
+
+| 事实 | 取值 |
+|---|---|
+| 表达式 | 5 段 cron / `@hourly` `@daily` `@weekly` `@monthly` / `@every 30m` / `@at <时刻>`（一次性） |
+| 首次见到声明 | **不回溯**（游标从当前时刻起算）；`misfire:"run"` 显式补跑一次 |
+| 落后（阻塞/休眠/关机） | 只补最近 5 分钟内的档期，更早整段跳过并留痕 |
+| 单 tick 上限 | 64 档（防 `@every 1s` 把队列打满） |
+| 声明来源 | 宿主注入的 `ctx.deps.personaSchedules`（**函数**，人格热加载即时生效） |
+
+两件容易配错且**不报错**的事，已在加载期拦住：
+
+1. 声明了 `schedules` 却没收 `schedule` 订阅 → 到点事件找不到该分身
+2. cron 写错 / 时区非法 / `@at` 已过期 → 运行期永远算不出档期
+
 ## 幂等：每源必有一条
 
 | 来源 | 幂等键 |
 |---|---|
 | `message` | 渠道消息 id（飞书 `om_xxx`）；缺失时用 `来源+正文哈希` |
-| `schedule` | `task:{taskId}@{触发时刻}` |
+| `schedule` | `task:{taskId}@{触发时刻}`；人格定时为 `task:persona:{pid}/{did}/{sid}@{档期时刻}` |
 | `webhook` | 投递方 id；缺失时用内容哈希 |
 | `desktop` / `idle` | 调用方显式给 |
 

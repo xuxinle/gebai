@@ -35,6 +35,21 @@ export { deriveThreadKey } from "./event"
 export type { BuildEventInput } from "./events"
 export { buildEvent, eventIdFor, hash32, renderEventContext } from "./events"
 
+// ── 定时表达式与人格定时工作面 ──
+export type { TaskSchedule } from "./cron"
+export { isOneShotSchedule, parseSchedule } from "./cron"
+export type { DueEvent, DueResult, ScheduleDeclaration, ScheduleOwnerView } from "./schedules"
+export {
+  DEFAULT_CATCHUP_MS,
+  MAX_SLOTS_PER_TICK,
+  collectDue,
+  collectScheduleDeclarations,
+  nextSlot,
+  scheduleEventId,
+  scheduleKey,
+  validateDriverSchedule,
+} from "./schedules"
+
 // ── 幂等与调度 ──
 export { EventDedupe } from "./dedupe"
 export type { PersonaSchedulerOptions, PersonaSchedulerState, RoundInput, SessionQueueState, InsertStrategy } from "./scheduler"
@@ -67,6 +82,7 @@ export { workerReportEvent } from "./worker"
 // ── 运行时与端口 ──
 export type {
   DriverDef,
+  DriverSchedule,
   OutputTarget,
   PersonaActor,
   PersonaDelivery,

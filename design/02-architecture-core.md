@@ -1211,6 +1211,56 @@ export const persona: PersonaDef = {
 四套机制与子 Agent / 事件源 / 渠道逐条对齐：双域扫描 · 目录签名热加载 · 单源失败隔离 ·
 二开覆盖 · 严格字段校验。
 
+#### 定时任务：`driver.schedules`（角色自己的工作节律）
+
+```ts
+drivers: [{
+  id: "report",
+  focus: "写日报",
+  subscriptions: ["schedule", "message"],   // 必须能匹配 schedule（加载期强校验）
+  schedules: [
+    { id: "morning", cron: "0 9 * * 1-5", description: "工作日早报", prompt: "写今天的早报" },
+  ],
+}]
+```
+
+**落点选 driver**：定时与订阅是同一件事的两种触发方式（”被消息叫醒“ vs ”到点自己开工“），
+而 driver 的粒度就是专注的任务类别。放人格级会迫使同一角色的多个分身共用一张时刻表。
+
+**执行路径是事件，不是任务**：内置事件源 `schedule` 到点 `ctx.emit({ kind:"schedule", personaId, driverId, refs:{taskId} })`，
+之后走 `PersonaRuntime` → 该分身的常驻会话（`threadKey=anchor`）。身份、出站纪律、审批姿态、
+同会话串行**全部沿用**，引擎与调度器零改动。
+
+| 不走什么 | 为何 |
+|---|---|
+| 直接 `engine.run` | 不注入人格注记（模型不知道自己是谁），且绕开调度器的同会话串行约束 |
+| 借统一任务管理的 `target:"session"` | 同上；且人格调度器看不到会话被占（“以为闲着”） |
+
+三条语义（失败形态都是“静默不触发”，所以逐条写死）：
+
+| # | 语义 | 不这样会怎样 |
+|---|---|---|
+| 1 | **首次见到声明不回溯**（游标从此刻起算；要启动即补跑须显式 `misfire:"run"`） | 下午加一条 `0 9 * * *` 会立刻跑一次 |
+| 2 | **落后窗口 5 分钟**（更早的整段跳过并留痕）、**单 tick 上限 64 档** | `@every 1m` 停一天会喷 1440 条，把分身队列打满→后续真实消息全 overflow 丢弃 |
+| 3 | **幂等键 = `task:persona:{pid}/{did}/{sid}@{档期时刻}`** | 重启后同档期重投会重复副作用 |
+
+加载期强制交叉校验：声明了 `schedules` 的分身，其 `subscriptions` 必须能匹配 `schedule`
+（否则到点的事件在 `subscribers()` 里找不到它——现象是“配了定时但永不触发”且日志全绿）。
+
+cron 表达式解析的唯一实现在 `packages/persona/src/cron.ts`（5 段 cron + `@hourly/@daily/@weekly/@monthly`、
+`@every 30m`、`@at <时刻>`），服务端 `core/schedule/expr.ts` 只是 re-export——两份必然分叉，
+而分叉的表现是“加载期接受了、运行期算出永不触发”。
+
+声明经宿主注入的 `ctx.deps.personaSchedules` 读取（**函数而非快照**：人格定义热加载整体替换
+catalog，快照会让新加的定时任务要重启才生效）。未注入时源如实 warn，不静默空转。
+
+可观测：`GET /api/v1/persona/state` 的每个分身带 `schedules`，设置→拟人面板逐条列出；
+分身提示词多一段「你自己的作息」——不写时模型会把定时触发当成别人来找它，
+或以为“没人叫我就不用做事”。
+
+**明确不做**：不做“人格运行中自建定时任务”的工具（`driver_create` 不带 schedules）——
+定时是部署方的时间表，不是模型的自组织面。
+
 **静态优先于动态**：`DriverRegistry` 里的运行期 driver（模型自建的分身）追加在静态之后，
 **同 id 静态胜出**。否则模型可以靠「创建一个同名 driver」把关注面改成 `*`，
 等于让人手写的部署配置被模型静默改写。

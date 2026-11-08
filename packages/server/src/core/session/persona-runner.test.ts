@@ -182,6 +182,34 @@ describe("personaNote：注入注记的必备内容", () => {
     expect(note).not.toContain("cefu_search")
   })
 
+  test("声明了定时任务：写明“你自己会把自己叫醒”与每条时刻/要求", () => {
+    const withSchedules = personaNote({
+      ...runInput(),
+      driver: {
+        ...runInput().driver,
+        schedules: [
+          { id: "morning", cron: "0 9 * * 1-5", description: "工作日早报", prompt: "写今天的早报" },
+          { id: "patrol", cron: "@every 30m", prompt: "巡检一遍告警", timezone: "Asia/Shanghai" },
+        ],
+      },
+      now: 0,
+    } as never)
+    expect(withSchedules).toContain("定时任务")
+    // 时刻与要求都必须写明：只给 cron 模型不知道到点干什么；只给要求它不知道什么时候做
+    expect(withSchedules).toContain("0 9 * * 1-5")
+    expect(withSchedules).toContain("工作日早报")
+    expect(withSchedules).toContain("写今天的早报")
+    expect(withSchedules).toContain("@every 30m")
+    expect(withSchedules).toContain("Asia/Shanghai")
+    // 「不要为了有动静而发没内容的消息」——巡检类任务最容易涞生的噪音
+    expect(withSchedules).toContain("没内容的消息")
+  })
+
+  test("未声明定时：一个字节都不提（不让模型凭空以为有作息表）", () => {
+    expect(note).not.toContain("定时任务")
+    expect(note).not.toContain("作息")
+  })
+
   describe("声明了 cefu 时写记忆纪律", () => {
     const withMemory = personaNote({ ...runInput(), agents: ["cefu"], now: 0 } as never)
 

@@ -43,7 +43,8 @@ import { join } from "node:path"
 import { validateTemplate } from "./identity"
 import type { DriverDef, PersonaIdentity } from "./ports"
 import { validateSessionMap } from "./session-map"
-import { validateSubscription } from "./subscription"
+import { validateDriverSchedule } from "./schedules"
+import { matchesSubscription, validateSubscription } from "./subscription"
 
 /**
  * 人格定义：`PersonaIdentity` + 它下面的静态 driver 清单。
@@ -185,7 +186,7 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
     for (const d of o.drivers) {
       if (!d || typeof d !== "object") return "drivers 每项必须是对象"
       const dr = d as Record<string, unknown>
-      const dAllowed = new Set(["id", "focus", "subscriptions", "maxConcurrent", "sessionKeyOf", "sessionMap", "outputs"])
+      const dAllowed = new Set(["id", "focus", "subscriptions", "maxConcurrent", "sessionKeyOf", "sessionMap", "outputs", "schedules"])
       for (const k of Object.keys(dr)) {
         if (!dAllowed.has(k)) return `drivers 项含未知字段「${k}」（可用：${[...dAllowed].join(" / ")}）`
       }
@@ -222,6 +223,26 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
       for (const s of dr.subscriptions as string[]) {
         const bad = validateSubscription(s)
         if (bad) return `drivers「${dr.id}」的 ${bad}（合法写法：* / kind / channel / channel:kind / channel:chatId:kind）`
+      }
+      if (dr.schedules !== undefined) {
+        if (!Array.isArray(dr.schedules)) return `drivers「${dr.id}」的 schedules 必须是数组`
+        const scheduleIds = new Set<string>()
+        for (const s of dr.schedules) {
+          const bad = validateDriverSchedule(s, { driverId: dr.id, seen: scheduleIds })
+          if (bad) return bad
+        }
+        if (scheduleIds.size > 0) {
+          // 交叉校验：声明了定时就必须让订阅能匹配 `schedule` 事件。
+          // 不查的后果：到点的事件在 `subscribers()` 里找不到这个分身——表现是
+          // 「配了定时但永不触发」，而且日志全绿（事件被丢弃在 unrouted）。
+          const covered = (dr.subscriptions as string[]).some((s) => matchesSubscription(s, { kind: "schedule", channel: "schedule" }))
+          if (!covered) {
+            return (
+              `drivers「${dr.id}」声明了 schedules，但其 subscriptions（${(dr.subscriptions as string[]).join("、")}）不包含 schedule 类事件——` +
+              `加一条 "schedule"（或 "*"），否则到点的事件找不到这个分身、定时永不执行`
+            )
+          }
+        }
       }
       if (dr.maxConcurrent !== undefined && (typeof dr.maxConcurrent !== "number" || !Number.isInteger(dr.maxConcurrent) || dr.maxConcurrent < 1)) {
         return `drivers「${dr.id}」的 maxConcurrent 必须是 >=1 的整数（当前：${String(dr.maxConcurrent)}）`

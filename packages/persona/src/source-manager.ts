@@ -339,6 +339,7 @@ export class EventSourceManager {
     const built = buildEvent({
       kind: ingress.kind,
       personaId: ingress.personaId ?? "",
+      ...(ingress.driverId ? { driverId: ingress.driverId } : {}),
       channel,
       body: ingress.body,
       source: ingress.source,
