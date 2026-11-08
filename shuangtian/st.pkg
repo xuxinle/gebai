@@ -740,6 +740,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "启动卡动画的离屏验证：8 帧时间序列 + 三条断言（相邻帧有变化 / 不溢到卡外）。为何不用截图：磨砂档走分层窗口，GetDC 抓到的是纯黑（实测全部采样帧中心 (0,0,0)），看着像“动画没动”"
     },
+    "backdrop_level_probe": {
+      "kind": "executable",
+      "sources": ["tools/backdrop_level_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "启动期窗口背景透明度档位对比：Acrylic 整窗磨砂 vs 纯分层（只有卡）。用来判定“只看到悬浮的卡”该走哪条路——Acrylic 是整窗材质，无法只作用到卡区"
+    },
     "composite_pivot_probe": {
       "kind": "executable",
       "sources": ["tools/composite_pivot_probe.cpp"],

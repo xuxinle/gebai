@@ -396,6 +396,24 @@ class Backend {
     return set_size(width_logical, height_logical);
   }
 
+  /// 让窗口**只开分层通道**（`WS_EX_LAYERED` + 逐像素 alpha），不开磨砂。
+  ///
+  /// ## 为何单独成接口（2026-11-08，用户“只看到悬浮的动画”）
+  ///
+  /// 启动卡要让**卡外真透明**（透出桌面），这只能靠逐像素 alpha，
+  /// 而它只能经 `WS_EX_LAYERED` + `UpdateLayeredWindow` 送给合成器。
+  /// 但磨砂（Acrylic）是**整窗材质**，开了就铺满整个窗口——
+  /// 实测窗口角 `#1E1E20` vs 桌面 `#15151A`：用户看到的是一块方块。
+  ///
+  /// 所以要有一个“只要分层、不要磨砂”的入口。实测此时窗口角与桌面
+  /// **完全一致**（`tools/backdrop_level_probe.cpp`）：只有卡悬浮在桌面上。
+  ///
+  /// 默认实现返回 Unsupported（无头后端不需要这个）。
+  [[nodiscard]] virtual auto set_layered_present(bool enabled) -> Status {
+    (void)enabled;
+    return unexpected(ErrorCode::Unsupported, "该后端不支持分层上屏");
+  }
+
   /// 安装「拖动/缩放时立即重绘」的钩子（由 app 层安装；后端不认识 app 层）。
   ///
   /// **为什么必须有它**：用户拖边框走的是窗口系统的模态循环

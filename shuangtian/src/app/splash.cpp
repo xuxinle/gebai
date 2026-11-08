@@ -168,6 +168,46 @@ constexpr double k_pi = 3.14159265358979323846;
 SplashPump::SplashPump(shell::Backend& backend, SplashState base, SplashStyle style)
     : backend_(&backend), state_(base), style_(style) {
   started_ns_ = time::now_ns();
+  // ## 必须**暂停 GPU 换型**（2026-11-08，忘了一次的代价）
+  //
+  // 后台 GPU 预热（实测 ~395ms）就绪后，`framebuffer()` 会返回**新的 GPU 画布**，
+  // 而启动卡只能画在软件 `raster::Canvas` 上。后果（本轮实测）：
+  // 泵往旧画布画（`dynamic_cast<Canvas*>` 成功），而 ULW 从新画布读 →
+  // DIB 里是**旧帧内容**（卡体 0x9B 还在），屏幕上就多一圈"浅色方块"。
+  //
+  // 旧的 `run_splash_animation` / `paint_splash_once` 都有这一步，
+  // 新写的 `SplashPump` 漏了——这类“新代码重复老代码的前置条件”最容易漏。
+  backend_->pause_deferred_upgrade(true);
+}
+
+SplashPump::~SplashPump() {
+  if (backend_ != nullptr) backend_->pause_deferred_upgrade(false);
+}
+
+SplashPump::SplashPump(SplashPump&& other) noexcept
+    : backend_(other.backend_),
+      state_(other.state_),
+      style_(other.style_),
+      started_ns_(other.started_ns_),
+      last_frame_ms_(other.last_frame_ms_),
+      frames_(other.frames_) {
+  // **源对象放弃所有权**：否则它析构时会把“恢复 GPU 换型”做一遍，
+  // 而新对象还在用软件画布——那正是本轮踩过的坑（请参构造处那段说明）。
+  other.backend_ = nullptr;
+}
+
+SplashPump& SplashPump::operator=(SplashPump&& other) noexcept {
+  if (this == &other) return *this;
+  // 先把自己那份先释放（否则新对象接管后，旧引用永远不恢复换型）
+  if (backend_ != nullptr) backend_->pause_deferred_upgrade(false);
+  backend_ = other.backend_;
+  state_ = other.state_;
+  style_ = other.style_;
+  started_ns_ = other.started_ns_;
+  last_frame_ms_ = other.last_frame_ms_;
+  frames_ = other.frames_;
+  other.backend_ = nullptr;
+  return *this;
 }
 
 void SplashPump::tick() {
@@ -215,9 +255,8 @@ void paint_splash_card(raster::Canvas& canvas, const SplashState& state, const S
   if (width <= 1.0f || height <= 1.0f) return;
 
   // ── ① 底 ──
-  // 无磨砂：填主题底色（卡外不能透出桌面）。磨砂档的“清成透明”在下面几何算完后做
-  // **只清卡那一块**——`clear` 整窗要写 6.8MP（gallery 3533×1921，实测 ~7ms）。
-  if (!state.backdrop_blur) {
+  // 无磨砂且**不要求卡外透明**：填主题底色（否则会透出桌面壁纸，那是“漏”）。
+  if (!state.backdrop_blur && !state.transparent_outside) {
     canvas.clear(state.background);
   }
 
@@ -248,7 +287,7 @@ void paint_splash_card(raster::Canvas& canvas, const SplashState& state, const S
   // ⚠ **小窗口时必须直接清整窗**：窗口本身只比卡大一点时，“卡+光晕”的外包矩形
   // 会盖住整窗，而四角仍在它**外面**（矩形是方的、角是圆的）——那几像素会留着
   // 上一帧的内容。实测：测试用例在 320×220 逻辑的画布上当场红（四角 alpha ≠ 0）。
-  if (state.backdrop_blur) {
+  if (state.backdrop_blur || state.transparent_outside) {
     const math::Rect hole = card.inflate(style.glow_radius + 8.0f);
     if (hole.x <= 0.0f && hole.y <= 0.0f && hole.x + hole.width >= width &&
         hole.y + hole.height >= height) {
@@ -278,7 +317,9 @@ void paint_splash_card(raster::Canvas& canvas, const SplashState& state, const S
   const float breath =
       static_cast<float>(0.5 + 0.5 * std::sin(2.0 * k_pi * t / pulse_period - k_pi * 0.5));
 
-  const float card_alpha = state.backdrop_blur ? style.card_opacity : splash_opacity_without_backdrop();
+  const float card_alpha =
+      (state.backdrop_blur || state.transparent_outside) ? style.card_opacity
+                                                      : splash_opacity_without_backdrop();
 
   timer.mark("hole");
   // ── ③ 柔光晕：让卡片"浮"起来的一层氛围光 ──
@@ -291,7 +332,17 @@ void paint_splash_card(raster::Canvas& canvas, const SplashState& state, const S
   // 改用**三圈同心圆角矩形**（纯色、不同 alpha）：每圈都是一次 `fill_rect`
   //（可直接按行填充，不需要逐像素求值），三层叠起来观感几乎一致，
   // 而代价从 17.3ms 降到 < 1ms。这也是"低 alpha 的氛围层不值得逐像素精度"的自觉。
-  if (style.glow_radius > 0.0f && style.glow_opacity > 0.0f) {
+  // ## 纯分层档**不画光晕**（2026-11-08，用户“不要边界”）
+  //
+  // 光晕是向外扩的一层层低 alpha 圆角矩形。在磨砂背景上它是“浮起来”的氛围；
+  // 但在**真透明背景**上它就变成了一圈看得见的淡轮廓——用户直接指出
+  // “卡外还有一圈影子”，而要求是“只有卡悬浮”。
+  //
+  // 所以 `transparent_outside` 档直接跳过它。代价是失去“悬停”的景深感，
+  // 但换来干净的单卡边界（这正是用户要的）。
+  const bool want_glow = style.glow_radius > 0.0f && style.glow_opacity > 0.0f &&
+                          !state.transparent_outside;
+  if (want_glow) {
     const float base_alpha = style.glow_opacity * (0.55f + 0.45f * breath);
     // ## 层数与层距：为什么是 8 层而不是 3 层
     //
@@ -326,24 +377,39 @@ void paint_splash_card(raster::Canvas& canvas, const SplashState& state, const S
   //
   // 所以磨砂档用**白色低 alpha** 当玻璃色（Win11 原生 acrylic 卡就是这么做的）：
   // 它在亮/暗背景上都是"抬一层"，这才是玻璃的观感。无磨砂档才用主题底色。
-  const math::Color glass = state.backdrop_blur ? st::math::Color::rgb(255, 255, 255)
-                                                : state.background;
-  const float top_alpha = card_alpha * (state.backdrop_blur ? 1.15f : 1.02f);
-  const float bottom_alpha = card_alpha * (state.backdrop_blur ? 0.72f : 0.86f);
-  canvas.fill_rect(
-      card,
-      raster::Paint::with_gradient(raster::Gradient::linear(
-          math::Point{card.x, card.y}, math::Point{card.x, card.y + card.height},
-          {raster::GradientStop{0.0f, alpha_of(glass, std::min(1.0f, top_alpha))},
-           raster::GradientStop{1.0f, alpha_of(glass, std::min(1.0f, bottom_alpha))}})),
-      style.card_radius);
+  const bool glass_look = state.backdrop_blur || state.transparent_outside;
+  const math::Color glass = glass_look ? st::math::Color::rgb(255, 255, 255) : state.background;
+  const float top_alpha = card_alpha * (glass_look ? 1.15f : 1.02f);
+  const float bottom_alpha = card_alpha * (glass_look ? 0.72f : 0.86f);
+  // ## 纯分层档**不画卡片本体**（2026-11-08，用户“不要卡片边界”）
+  //
+  // 用户要的是“图标和环悬浮在桌面上”，而不是“一张卡片又悬浮”。
+  // 在真透明背景下，卡本体那块矩形即使只有 17% 白，也会被看成
+  // **一块可见的方形/圆角矩形”——而用户明确要求“不要边界”。
+  //
+  // 所以 `transparent_outside` 档只保留**有信息的那两层**：脉冲环 + 品牌标记。
+  // 它们本来就是环形/图形，自然融入桌面，没有任何矩形边界。
+  const bool draw_card_body = !state.transparent_outside;
+  if (draw_card_body) {
+    canvas.fill_rect(
+        card,
+        raster::Paint::with_gradient(raster::Gradient::linear(
+            math::Point{card.x, card.y}, math::Point{card.x, card.y + card.height},
+            {raster::GradientStop{0.0f, alpha_of(glass, std::min(1.0f, top_alpha))},
+             raster::GradientStop{1.0f, alpha_of(glass, std::min(1.0f, bottom_alpha))}})),
+        style.card_radius);
+  }
 
   timer.mark("card");
   // ── ⑤ 描边：1.5px 的内描边，用强调色的极低透明度（"玻璃边缘光"） ──
   // 它是卡片"有厚度"的唯一线索；没有它，半透明卡在深色底上会糊成一团。
-  const float edge_alpha = state.backdrop_blur ? 0.20f : 0.12f;
-  canvas.fill_path(math::make_rounded_border_ring(card, style.card_radius, 1.5f),
-                   raster::Paint::solid(alpha_of(state.accent, edge_alpha * (0.5f + 0.5f * breath))));
+  // 纯分层档没卡片，这道描边也就不画（否则它自己就是一圈边界）。
+  if (draw_card_body) {
+    const float edge_alpha = glass_look ? 0.20f : 0.12f;
+    canvas.fill_path(math::make_rounded_border_ring(card, style.card_radius, 1.5f),
+                     raster::Paint::solid(
+                         alpha_of(state.accent, edge_alpha * (0.5f + 0.5f * breath))));
+  }
 
   timer.mark("edge");
   // ── ⑥ 三个交错脉冲环（各错开 1/3 周期） ──
@@ -475,7 +541,12 @@ void paint_splash_card(raster::Canvas& canvas, const SplashState& state, const S
   // ⇒ 1.5x 下 ~440×420 物理），实测吃掉 **~12ms**——而启动卡的全部目标就是 < 3ms。
   // 所以改为**几何自守**：每列只画在卡的**圆角内接矩形**里（上下各让出 `card_radius`）。
   // 光带本来就是斜的、两端 alpha 为 0，让出的那两条角带里它本来也看不见。
-  if (card.width > 8.0f) {
+  // ## 纯分层档**不画扫光**（2026-11-08，用户“不要卡片边界”）
+  //
+  // 扫光带的几何是“卡的圆角内接矩形里的一个竖条”——它本身就是一个矩形，
+  // 而且它存在的语义是“光在**玻璃表面**滑过”。现在没有玻璃卡了，
+  // 它在桌面上就是一块会飘的矩形（实测就是它造成了“还有卡片边界”的错觉）。
+  if (card.width > 8.0f && !state.transparent_outside) {
     const double sweep_period = std::max(0.4f, style.sweep_seconds);
     const double cycle = t / sweep_period;
     const float shift = static_cast<float>(cycle - std::floor(cycle));   // 0..1

@@ -135,6 +135,45 @@ ST_TEST(splash_animation_actually_moves) {
   ST_CHECK(differing > 200U);
 }
 
+ST_TEST(splash_layered_mode_has_no_card_body) {
+  // ## 纯分层档（`transparent_outside`）：**只有图形，没有卡片本体**
+  //
+  // 用户要求："不要卡片边界"——即图标和环直接悬浮在桌面上，
+  // 不允许出现那块圆角矩形（哪怕只有 17% 白，它也看得见）。
+  //
+  // 这条用例钉住两件事：
+  //   ① 卡外全透明（否则会透出一块底）；
+  //   ② **卡内的非图形区域也全透明**——这是它跟磨砂档的根本区别。
+  //
+  // ② 的采样点选在"卡内、但避开环与 logo"的地方：卡右上角向内 14%
+  //（环的最大半径是 `ring_radius * 1.6` ≈ 90 逻辑像素，而卡宽 320 ⇒
+  // 右上角 14% 处在环外）。
+  st::raster::Canvas canvas =
+      st::raster::Canvas::for_logical_size(kLogicalWidth, kLogicalHeight, kScale);
+  st::app::SplashState state = make_state(false);
+  state.transparent_outside = true;   // 纯分层档
+  st::app::paint_splash_card(canvas, state);
+
+  const int width = canvas.physical_width();
+  const int height = canvas.physical_height();
+  // ① 四角全透明
+  ST_CHECK(alpha_at(canvas, 1, 1) <= 1U);
+  ST_CHECK(alpha_at(canvas, width - 2, height - 2) <= 1U);
+
+  // ② 卡内非图形区也必须透明。卡心向外偏移到环外。
+  st::app::SplashStyle style{};
+  const float logical_w = static_cast<float>(kLogicalWidth);
+  const float logical_h = static_cast<float>(kLogicalHeight);
+  const float card_w = std::min(style.card_width, logical_w * 0.86f);
+  const float card_h = std::min(card_w / std::max(0.2f, style.card_aspect), logical_h * 0.86f);
+  const float card_x = logical_w * 0.5f - card_w * 0.5f;
+  const float card_y = logical_h * 0.5f - card_h * 0.5f;
+  // 卡右上角向内 16%（环半径 90，卡半宽 160 ⇒ 这个点离圆心足够远）
+  const int probe_x = static_cast<int>(std::lround((card_x + card_w * 0.84f) * kScale));
+  const int probe_y = static_cast<int>(std::lround((card_y + card_h * 0.16f) * kScale));
+  ST_CHECK(alpha_at(canvas, probe_x, probe_y) <= 1U);
+}
+
 ST_TEST(splash_pump_repeats_without_waiting) {
   // ## 这条用例钉住的是“动画真的会被反复调用”
   //

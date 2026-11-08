@@ -340,6 +340,11 @@ struct Application::Impl {
   std::function<void()> startup_frame_pump{};
   /// 启动卡的磨砂探测结果（`start()` 里算一次，`paint_splash_once` 直接用）。
   shell::BackdropSupport splash_backdrop_{shell::BackdropSupport::Unsupported};
+  /// 启动期是否真的开了**分层窗口**（逐像素 alpha 上屏）。
+  ///
+  /// 决定 `SplashState::transparent_outside`：分层 → 卡外真透明（只有卡悬浮）；
+  /// 不开 → 填主题底色（不透明卡，退路）。
+  bool splash_layered_{false};
   /// 启动卡是否真的会发生（判据集中在这一处，实现与日志/测试同源）。
   ///
   /// 条件（任一不成立就不画）：
@@ -1660,8 +1665,8 @@ auto Application::start() -> Status {
     }
     const float card_w = options_.splash_style.card_width;
     const float card_h = card_w / std::max(0.2f, options_.splash_style.card_aspect);
-    // 小窗 = 卡 + 两侧边距（边距要盖住光晕；卡本身也可能被窗口小尺寸夹过，所以留足）
-    const float margin = options_.splash_window_margin + options_.splash_style.glow_radius * 0.55f;
+    // 小窗 = 卡 + 两侧边距（纯分层档光晕不画，边距只是保险量）。
+    const float margin = options_.splash_window_margin;
     int splash_w = static_cast<int>(std::lround(card_w + margin * 2.0f));
     int splash_h = static_cast<int>(std::lround(card_h + margin * 2.0f));
     // ⚠ **不能比真实窗口还大**（实测：相期的真实窗口是 460×620，而卡窗算出
@@ -1681,6 +1686,26 @@ auto Application::start() -> Status {
                   real_width, real_height);
     }
   }
+  // ## 启动卡的上屏通道：**只分层、不磨砂**（2026-11-08，用户要求）
+  //
+  // 旧版这里开的是磨砂（Acrylic）。而 Acrylic 是**整窗材质**：
+  // 即使画布 alpha=0，那层玻璃也铺满整个窗口——用户看到的是“一块 447×403 的
+  // 灰方块，卡在里面”，而不是“卡悬浮在桌面上”。
+  //
+  // 实测（`tools/backdrop_level_probe.cpp`）：
+  //   Acrylic 开   → 窗口角 `#1E1E20`，与桌面 `#15151A` **不一致**（方块可见）
+  //   Acrylic 关   → 窗口角 `#15151A`，与桌面**完全一致**（只有卡可见）
+  //
+  // 所以只开分层位（逐像素 alpha 所需），磨砂那块能力不用。
+  // 代价：卡内透出的是**清晰背景**而非模糊背景——用户已确认接受这个取舍。
+  if (splash_active) {
+    if (auto layered = impl_->backend->set_layered_present(true); !layered) {
+      ST_LOG_INFO("启动卡：分层上屏不可用（{}），退化为不透明卡", layered.error().message);
+    } else {
+      impl_->splash_layered_ = true;
+    }
+  }
+  // 磨砂仍按应用声明尝试（有些应用可能想要），但启动卡默认已关。
   if (splash_active && options_.splash_backdrop_blur) {
     impl_->splash_backdrop_ = impl_->backend->set_backdrop_blur(true);
     if (impl_->splash_backdrop_ != shell::BackdropSupport::Active) {
@@ -1709,6 +1734,8 @@ auto Application::start() -> Status {
     state.background = theme.colors().bg;
     state.accent = theme.colors().accent;
     state.backdrop_blur = impl_->splash_backdrop_ == shell::BackdropSupport::Active;
+    // 纯分层档：卡外真透明（只看到卡悬浮在桌面上）。
+    state.transparent_outside = !state.backdrop_blur && impl_->splash_layered_;
     state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
     splash_pump.emplace(*impl_->backend, state, options_.splash_style);
     // 首帧之前：先把卡画出来（窗口一出现就有东西可看）。
@@ -1758,6 +1785,7 @@ auto Application::start() -> Status {
   // 而真实窗口那一帧本就要走 GDI（主界面），所以退场放在它之前正好。
   if (splash_active && !splash_shrunk) {
     (void)impl_->backend->set_backdrop_blur(false);
+    (void)impl_->backend->set_layered_present(false);
   }
   // 首帧完成：这是“启动慢”的真实终点（用户看到完整界面的时刻）。
   // 它里面含字体首次光栅化与图元缓存建表——那正是帧剖析里“冷启动帧”的 200ms。
@@ -1791,8 +1819,14 @@ auto Application::start() -> Status {
       ST_LOG_WARN("启动后恢复窗口尺寸失败：{}", resized.error().message);
     }
     (void)impl_->backend->center_window();
-    // 磨砂退场必须在**尺寸恢复之后、画主界面之前**（见上面那段注释）。
-    if (splash_active) (void)impl_->backend->set_backdrop_blur(false);
+    // 启动期的两个“临时状态”都必须在这里退掉：
+    //   ① 分层位：不退掉的话主界面的 GDI `blit()` 不参与合成（整屏黑/白）；
+    //   ② 磨砂（若应用开过）：同上。
+    // 顺序无所谓，但都必须在画主界面之前完成。
+    if (splash_active) {
+      (void)impl_->backend->set_backdrop_blur(false);
+      (void)impl_->backend->set_layered_present(false);
+    }
   }
   // 画**真实尺寸**的那一帧（启动期小窗时，这是用户会看到的第一帧内容）。
   //
@@ -1867,6 +1901,7 @@ void Application::run_splash_animation(shell::BackdropSupport backdrop) {
   state.accent = theme.colors().accent;
   // 磨砂是否生效由调用方判定（它负责控制时序），这里只接结果。
   state.backdrop_blur = backdrop == shell::BackdropSupport::Active;
+  state.transparent_outside = !state.backdrop_blur && impl_->splash_layered_;
   state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
 
   const double started_ms = static_cast<double>(time::now_ms());
@@ -1958,8 +1993,9 @@ void Application::paint_splash_once() {
   state.elapsed_seconds = 0.22;
   state.progress = 0.12f;
 
-  // 磨砂由调用方先开好（它决定了上屏通道是 ULW 还是 BitBlt）；这里只取结果。
+  // 上屏通道由调用方先开好（分层 → ULW，否则 BitBlt）；这里只取结果。
   state.backdrop_blur = impl_->splash_backdrop_ == shell::BackdropSupport::Active;
+  state.transparent_outside = !state.backdrop_blur && impl_->splash_layered_;
   state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
   // 启动动画期间**暂停 GPU 换型**：换型后 `framebuffer()` 不再是软件画布，卡就画不出去。
   impl_->backend->pause_deferred_upgrade(true);

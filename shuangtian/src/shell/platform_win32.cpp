@@ -759,6 +759,12 @@ class Win32Backend final : public Backend {
   /// 幂等：重复调用只在第一次生效。
   void show_when_ready() override {
     if (window_ == nullptr) return;
+    // 主界面露面时**必须撤销启动期的临时置顶**（见 `show_early`）。
+    // 放在这里而不是只靠 `set_layered_present(false)`：后者不一定被调到
+    //（无磨砂且不分层时启动卡走 GDI，不走分层位），而置顶是 `show_early` 自己加的。
+    // 幂等：本来就不置顶时这次调用无副作用。
+    (void)::SetWindowPos(window_, HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     // **已由 `show_early` 显过**：不重复 `ShowWindow`/抢焦点，但**必须补一次 present**
     // ——那正是首帧内容贴上去的时机（`show_early` 只填了底色）。
     if (shown_) {
@@ -883,12 +889,36 @@ class Win32Backend final : public Backend {
     if (window_ == nullptr || shown_) return;
     shown_ = true;
     ::ShowWindow(window_, SW_SHOWNOACTIVATE);
+    // ## 启动卡必须**真的在最上面**（2026-11-08，用户截图发现）
+    //
+    // `SW_SHOWNOACTIVATE` 只映射窗口，**不改 Z 序**：窗口会按创建时的位置待在
+    // 其它窗口下面（启动瞬间常常有个终端/编辑器在前台）。于是用户看到的是
+    // “卡的环与图标被那个窗口压住，从那块透明区域里透出别人的内容”——
+    // 看起来像“透明度算错了”，实际是**层级不对**。
+    //
+    // 为何用 `HWND_TOPMOST` 而不是 `HWND_TOP`：
+    // - `HWND_TOP` 只在**非置顶**那一堆里提到最高，仍低于任何置顶窗口；
+    // - `HWND_TOPMOST` 能盖过它们（启动卡只活几百毫秒，不存在“长期骚扰”）；
+    // - 而且 `TOPMOST` 不受前台锁约束（`SetForegroundWindow` 受）。
+    //
+    // 退场时**必须**取消置顶：见 `set_layered_present(false)` 与主界面显示前的清位。
+    if (::SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) == 0) {
+      ST_LOG_INFO("启动卡窗口未能置顶（错误码 {}）：可能被前台窗口遮住", ::GetLastError());
+    }
     // 用主题背景色填一帧：`HWND` 背景刷足够，不需要走画布与交换链
     // （那一步要等 GPU 就绪，正是我们要避开的那 1.4s）。
     //
-    // ⚠ **磨砂开启时不填**：填一块不透明色会盖住 DWM 刚垫上的模糊层，
-    // 而那时画布还是空的——用户看到的会是"磨砂闪一下又变成纯色块"。
-    if (!backdrop_active_) paint_early_matte();
+      // ⚠ **分层窗口不填底色**（2026-11-08）。
+  //
+  // 两个理由：
+  // ① 分层窗口的像素只能经 `UpdateLayeredWindow` 进屏，`paint_early_matte()`
+  //    走的是 `FillRect`，在分层窗口上会把整窗变成**不透明底色**
+  //    （实测：启动卡与背后桌面全被盖成一片纯色）；
+  // ② 启动卡只要“卡外真透明”才能悬浮在桌面上（用户要求）。
+  //
+  // 所以判据从“是否开磨砂”换成“是否分层”：两者都靠分层通道上屏。
+      if (!layered_window() && !backdrop_active_) paint_early_matte();
     ::SetForegroundWindow(window_);
   }
 
@@ -964,6 +994,21 @@ class Win32Backend final : public Backend {
   /// 对"透出窗口背后的东西"无能为力。分层窗口（`WS_EX_LAYERED`）能把四角变成真透明，
   /// 但实测每帧 +2.8ms 且把上屏从异步变同步（`docs/BACKLOG.md` 的代价表）。
   /// 而 Acrylic 是合成器在做，应用侧**零每帧成本**。
+  /// 窗口背景磨砂（DWM Acrylic）。
+  ///
+  /// ## ⚠ 已被启动卡弃用（2026-11-08，用户要求“只看到悬浮的卡”）
+  ///
+  /// Acrylic 是**整窗材质**：即使画布 alpha=0，那层玻璃照样铺满整个窗口。
+  /// 实测（`tools/backdrop_level_probe.cpp`）：
+  ///
+  /// | 档位 | 窗口角像素 | 与桌面一致 | 读法 |
+  /// |---|---|---|---|
+  /// | Acrylic 开 | `#1E1E20` | **否** | 一块可见的方块，卡在里面 |
+  /// | Acrylic 关（纯分层） | `#15151A` | **是** | 只有卡悬浮在桌面上 |
+  ///
+  /// 所以启动卡现在**不用它**（`AppOptions::splash_backdrop_blur` 默认已关）。
+  /// 这个能力仍保留，因为它是通用窗口能力（以后可能有“磨砂面板”这类需求）——
+  /// 但启动卡那条路不再调它。
   [[nodiscard]] auto set_backdrop_blur(bool enabled) -> BackdropSupport override {
     if (window_ == nullptr) return BackdropSupport::Unsupported;
     // ## 为何用 `SetWindowCompositionAttribute` 而不是 `DWMWA_SYSTEMBACKDROP_TYPE`
@@ -1079,6 +1124,16 @@ class Win32Backend final : public Backend {
   /// 不告诉 DWM“这是暗色窗口”，暗色主题下会得到一块**白板**（实测 243,253,253）。
   bool acrylic_dark_{true};
 
+  /// 当前窗口是否是分层窗口（`WS_EX_LAYERED`）。
+  ///
+  /// 把“窗口是否分层”这个判据收成一处：它现在被 **三处** 用到
+  ///（`show_early` 不填底色 / `refresh_early` 走 ULW / `blit` 不填底色），
+  /// 三处散写很容易漏掉一处——实测就是这样漏到一半（启动卡外多了一圈不透明底）。
+  [[nodiscard]] auto layered_window() const noexcept -> bool {
+    if (window_ == nullptr) return false;
+    return (::GetWindowLongPtrW(window_, GWL_EXSTYLE) & static_cast<LONG_PTR>(WS_EX_LAYERED)) != 0;
+  }
+
   /// 告诉 DWM 框架该用深色还是浅色（Win10 1809+ / Win11）。
   ///
   /// 属性号：20 = `DWMWA_USE_IMMERSIVE_DARK_MODE`（19 是 1809~1903 的旧号），
@@ -1108,6 +1163,32 @@ class Win32Backend final : public Backend {
     return setter(window_, &data) != 0;
   }
 
+  /// 让窗口**只开分层通道**（`WS_EX_LAYERED`），不开磨砂。
+  ///
+  /// ## 为何需要它（用户要求“只看到悬浮的动画”）
+  ///
+  /// 启动卡要让卡外**真透明**（透出桌面），这必须靠逐像素 alpha，
+  /// 而逐像素 alpha 只能经 `WS_EX_LAYERED` + `UpdateLayeredWindow` 送给合成器。
+  /// 但磨砂（Acrylic）是**整窗材质**，开了它就会铺满整个窗口，
+  /// 用户看到的是“一块方块，卡在里面”（实测窗口角 `#1E1E20` vs 桌面 `#15151A`）。
+  ///
+  /// 所以启动卡现在走这条：**只开分层、不开磨砂**。
+  /// 实测（`tools/backdrop_level_probe.cpp`）此时窗口角与桌面**完全一致**，
+  /// 即“只有卡悬浮在桌面上”。
+  ///
+  /// 代价：失去背景模糊（卡内透出的是清晰背景）——用户已确认接受这个取舍。
+  [[nodiscard]] auto set_layered_present(bool enabled) -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    set_layered(enabled);
+    // 启动期结束后**撤销置顶**（见 `show_early` 里置顶的理由）：
+    // 不退的话主界面会一直压在其它窗口之上，那是真骚扰。
+    if (!enabled) {
+      (void)::SetWindowPos(window_, HWND_NOTOPMOST, 0, 0, 0, 0,
+                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    return ok();
+  }
+
   /// 启动动画帧上屏：**只上屏，不改任何状态位**（见接口声明处的说明）。
   ///
   /// 走的是与 `blit()` 同一条通道，但**不**置 `canvas_painted_`、也**不**碰
@@ -1115,7 +1196,13 @@ class Win32Backend final : public Backend {
   void refresh_early() override {
     if (window_ == nullptr || surface_ == nullptr) return;
     early_content_active_ = true;   // 让 `WM_PAINT`/`blit` 重贴卡而不是涂底色
-    if (backdrop_active_) {
+    // ## 何时走 `UpdateLayeredWindow`（2026-11-08）
+    //
+    // 旧版判据是 `backdrop_active_`（= 开了磨砂）。现在启动卡**不再开磨砂**
+    //（用户要“只看到悬浮的卡”），所以判据换成“窗口是否是分层窗口”：
+    // 只要是分层窗口，GDI `BitBlt` 就不参与合成（会把整窗涂成不透明），
+    // 必须走 ULW。
+    if (layered_window()) {
       // 磨砂档：**必须走分层窗口通道**（`UpdateLayeredWindow`）。
       //
       // 为何不能用 GDI BitBlt（实测，`tmp/backdrop_probe*.py`）：
@@ -1153,19 +1240,17 @@ class Win32Backend final : public Backend {
     //   画布 `0xRRGGBBAA`（预乘）→ DIB 内存序 BGRA（预乘）= uint32 `0xAARRGGBB`
     // 即 uint32 意义上的循环右移 8 位（与 `rotate_bgra_row` 只差 alpha 那一个字节）。
     //
-    // **只重排非空行**（实测：整窗重排占上屏 19ms 的绝大部分，是启动卡的最后一笔成本）：
-    // 启动卡只占窗口中间一小块，其余行的 alpha 全是 0（= 完全透明），
-    // 而 DIB 是**保留型**的，那些行上一帧已经是 0——不必再写一遍。
-    // 代价：必须是“本帧要覆盖的矩形”内的行才扫（参数给出）。
-    const auto row_is_blank = [&](int row) {
-      const std::uint32_t* src = source.data() + static_cast<std::size_t>(row) * count;
-      for (std::size_t index = 0; index < count; ++index) {
-        if ((src[index] & 0xFFU) != 0U) return false;
-      }
-      return true;
-    };
+    // ## 为何**不能**只写非空行（2026-11-08 实测真因）
+    //
+    // 曾经按“源行是否全空”跳过写入，理由是省掉那些 0 的拷贝。那是错的：
+    // DIB 是**保留型**的——它里面还留着**上一次 GDI 填的不透明底色**
+    //（`fill_dib_with_matte` 写的 `FF1F1F28`）。跳过那些行，等于把旧的不透明
+    // 像素当成“最新的空像素”交给 ULW → 卡外出现一圈浅色方块（实测 DIB 边中
+    // = `FF1F1F28`，alpha=FF）。
+    //
+    // 而 ULW 的语义是“把这块 DIB 当成整个窗口的新内容”，它无法区分“没写”与“写了 0”。
+    // 所以分层通路必须在**本帧要覆盖的矩形内逐行写满**。
     for (int row = 0; row < height; ++row) {
-      if (row_is_blank(row)) continue;
       const std::size_t offset = static_cast<std::size_t>(row) * count;
       if (offset + count > source.size()) break;
       std::uint32_t* dst = dib_pixels_ + offset;
@@ -1188,8 +1273,15 @@ class Win32Backend final : public Backend {
                                             static_cast<std::size_t>(width) +
                                             static_cast<std::size_t>(width / 2)];
       const std::uint32_t corner = dib_pixels_[2U * static_cast<std::size_t>(width) + 2U];
-      ST_LOG_INFO("启动卡诊断：ULW 位 {}x{} · DIB 中心 {:08X} · DIB 边中 {:08X} · layered={}",
-                  width, height, mid, corner,
+      // **卡外、但仍在窗口内**的一点：这是“卡外是否真透明”的直接证据。
+      // 为何要单独看它：`corner` 只验证到窗口最边上一个像素，
+      // 而用户看到的那圈“浅色方块”在窗口边与卡之间（实测 DIB 里那处曾是 FF1F1F28）。
+      const std::uint32_t body = dib_pixels_[static_cast<std::size_t>(height / 4) *
+                                            static_cast<std::size_t>(width) +
+                                            static_cast<std::size_t>(width / 8)];
+      ST_LOG_INFO("启动卡诊断：ULW 位 {}x{} · DIB 中心 {:08X} · DIB 边中 {:08X} · DIB 卡外 "
+                  "{:08X} · layered={}",
+                  width, height, mid, corner, body,
                   (::GetWindowLongPtrW(window_, GWL_EXSTYLE) & WS_EX_LAYERED) != 0);
     }
     // `SourceConstantAlpha = 255` + `AC_SRC_ALPHA` = "按像素 alpha 合成"。
@@ -2265,7 +2357,8 @@ class Win32Backend final : public Backend {
       // `refresh_early()` 先贴对了，也会立刻被涂白。
       //
       // 磨砂档的像素**只能**经 `UpdateLayeredWindow` 进屏，所以这里重新走它。
-      if (backdrop_active_) {
+      // 判据是“窗口是否分层”（而非“是否开了磨砂”）：启动卡现在只分层、不磨砂。
+      if (layered_window()) {
         present_early_layered();
         return true;
       }
@@ -2275,21 +2368,20 @@ class Win32Backend final : public Backend {
         if (offset + count > source.size()) break;
         raster::simd::rotate_bgra_row(dib_pixels_ + offset, source.data() + offset, count);
       }
-    } else if (backdrop_active_) {
-      // ## 磨砂档且画布还没内容：**什么都不贴**（2026-11-08 修）
+    } else if (backdrop_active_ || layered_window()) {
+      // ## 磨砂档 / **分层窗口**且画布还没内容：什么都不贴（2026-11-08）
       //
       // 旧版这里走 `fill_dib_with_matte`，把主题底色用 `BitBlt` 贴上去。
-      // 但磨砂档里客户区是“玻璃”，**GDI 贴上去的像素不参与合成**；
-      // 而分层窗口（`WS_EX_LAYERED`）下 `BitBlt` 会把整个窗口 DC 弄成一个
-      // 不透明白块——实测：启动卡窗口整片 (243,253,253)、四角纯 255，
-      // 卡与磨砂全都不见了。
+      // 但分层窗口（`WS_EX_LAYERED`）下这个 DIB 是 **ULW 的源**：
+      // 一旦把它填成不透明（`A=0xFF`），接下来 `UpdateLayeredWindow` 就会
+      // 把整窗当成不透明——实测启动卡窗口整片 `(31,31,40)`、四角 `FF1F1F28`
+      // （alpha=FF），卡外那圈“浅色方块”就是这么来的。
       //
-      // 正确姿态：磨砂档的像素**只能**经 `UpdateLayeredWindow` 进屏，
-      // 而那是 `refresh_early()` 的职责。这里一旦没内容就什么都不做，
-      // 让 DWM 保持它已经合成好的（磨砂 + 上一次 ULW 的卡）。
+      // 正确姿态：分层档的像素**只能**由 `present_early_layered()` 按真实 alpha 写，
+      // 而那是 `refresh_early()` 的职责。这里一旦没内容就什么都不做。
       if (!layered_paint_skipped_logged_) {
         layered_paint_skipped_logged_ = true;
-        ST_LOG_INFO("上屏：磨砂档画布无内容，本次不贴（交由 UpdateLayeredWindow）");
+        ST_LOG_INFO("上屏：分层/磨砂档画布无内容，本次不贴（交由 UpdateLayeredWindow）");
       }
     } else {
       // 只报一次：启动期这条日志就是"黑屏被换成底色"的**可观测证据**，

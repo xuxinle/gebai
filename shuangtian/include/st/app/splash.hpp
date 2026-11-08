@@ -87,6 +87,20 @@ struct SplashState {
   math::Color accent{0x38, 0x6B, 0xFF, 0xFF};
   /// 是否有合成器磨砂（决定卡片透明度用 `style.card_opacity` 还是退化档）。
   bool backdrop_blur{false};
+  /// **卡外是否要求真透明**（= 纯分层上屏，只看到卡悬浮在桌面上）。
+  ///
+  /// ## 为何与 `backdrop_blur` 分开（2026-11-08）
+  ///
+  /// 两件事本来被我当一件：`backdrop_blur` = “有磨砂 → 卡外透明”。
+  /// 但用户要“只看到悬浮的卡”，而磨砂（Acrylic）是**整窗材质**，
+  /// 开了它就是一块可见的方块。所以变成：
+  ///
+  /// | 状态 | 卡外 | 背景模糊 | 效果 |
+  /// |---|---|---|---|
+  /// | `backdrop_blur` | 透明 | **有** | 一块方块，卡在里面 |
+  /// | `layered`（本字段） | 透明 | 无 | **只有卡悬浮** ← 现在用这个 |
+  /// | 都不开 | 填主题色 | 无 | 不透明卡（退路） |
+  bool transparent_outside{false};
   /// **应用自己的品牌 logo**（PNG 字节）。非空就画它，空着才画霜天雪花。
   ///
   /// 为何是 PNG 字节而不是路径：与 `Backend::set_window_icon` 同一形式——
@@ -144,6 +158,14 @@ class SplashPump {
   SplashPump(shell::Backend& backend, SplashState base, SplashStyle style);
   /// 泵一帧（未到帧间隔则立即返回）。
   void tick();
+
+  /// 析构时**恢复 GPU 换型**（构造里 `pause_deferred_upgrade(true)`）。
+  ~SplashPump();
+  /// 可移动（需要放进 `std::optional`）；**移动后源对象不再负责恢复换型**。
+  SplashPump(SplashPump&& other) noexcept;
+  SplashPump& operator=(SplashPump&& other) noexcept;
+  SplashPump(const SplashPump&) = delete;
+  SplashPump& operator=(const SplashPump&) = delete;
 
   /// 泵一帧，**忽略帧间隔**。
   ///
