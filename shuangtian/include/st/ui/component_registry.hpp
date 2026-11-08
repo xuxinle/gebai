@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /// @file component_registry.hpp
 /// @brief 组件注册表：**登记**与**查询**的唯一入口。
@@ -209,22 +209,34 @@ void import_components() {
 
 // ── 组件实现文件里的定义 ────────────────────────────────────────────────────
 
-/// 在组件实现的 `.cpp` 里生成**导入锚点**的定义（每组件一次）。
+/// 内部：两阶段拼接（`__COUNTER__` 必须先宏展开才能与词缀拼成标识符）。
+#define ST_UI_CAT_IMPL_(A, B) A##B  /* lint-allow: L3 X-macro */
+#define ST_UI_CAT_(A, B) ST_UI_CAT_IMPL_(A, B)  /* lint-allow: L3 */
+
+/// 在组件实现的 `.cpp` 里生成**登记**（每组件一次）。
 ///
-/// 这里只做两件事：从头的 `component_meta<T>` 取名字与构造方式，登记进注册表。
-/// 名字**不在这里重复写**——它是组件头里的那一份（单一来源）。
+/// 它同时做两件事，都不需调用方再做任何事：
+///
+/// 1. **静态登记**：一个命名空间作用域的 `const bool`，初始化器里把组件登记进注册表。
+///    它进 `.init_array`，**只要本 `.o` 进了产物，它就在 `main` 之前跑**。
+///    这就是“真的用到组件就自动注册”的实现。
+/// 2. **登记锚点** `component_importer<T>::run()`：给“我要在运行期按名字找它”
+///    那种场景（XML / 脚本）用——`import_components<T>()` 引用它，于是那个 `.o`
+///    被拉进产物。类外定义才是外部链接的强符号（类内会隐式 `inline`，取不到地址）。
+///
+/// 为何静态登记不能只靠 `run()`：`run()` 是个函数，**没人调它就不会执行**。
+/// 实测过：只定义 `run()` 而不在任何地方调用，注册表是空的——即使 `.o` 在产物里。
+/// 静态对象的初始化器是“由运行时自己跑”的，这才是自动注册的实现方式。
 #define ST_UI_COMPONENT_IMPL(TYPE)                                                 \
   namespace st::ui::detail {                                                       \
-  /* 特化声明（类内**不**定义 run：否则隐式 inline，拿不到强符号） */              \
   template <>                                                                      \
   struct component_importer<TYPE> {                                                \
     static void run();                                                             \
   };                                                                               \
-  /* 类外定义：不带 `template <>`——因为已经处于显式特化的作用域里。            \
-     加上反而会报 "template-id 'run<>' ... does not match any template
-     declaration"（实测）。 */                                                    \
+  /* 类外定义：不带 `template <>`——已处于显式特化作用域里；加上反而报                \
+     "template-id 'run<>' ... does not match any template declaration"（实测）。 */ \
   void component_importer<TYPE>::run() {                                           \
-    /* 幂等：同一个组件被多处导入时只登记一次 */                                     \
+    /* 幂等：多个入口（静态登记与显式导入）都调它，只登记一次 */                     \
     static const bool registered = []() {                                          \
       (void)::st::ui::component_registry::add(                                     \
           ::st::ui::component_registry::Entry{                                     \
@@ -237,8 +249,15 @@ void import_components() {
     }();                                                                           \
     (void)registered;                                                              \
   }                                                                                \
+  /* 静态登记：让“真的用到这个组件”就等于“已注册”，不需任何额外代码。       \
+     变量名用 `__COUNTER__`：TYPE 是全限定名（`::st::ui::Text`），`##` 拼不上。 */   \
+  [[maybe_unused]] const bool ST_UI_CAT_(component_autoreg_, __COUNTER__) =        \
+      []() {                                                                       \
+        component_importer<TYPE>::run();                                           \
+        return true;                                                               \
+      }();                                                                         \
   }                                                                                \
   static_assert(true, "ST_UI_COMPONENT_IMPL 需要分号终止");
 
-/// 同上（保留旧名以兼容已有调用点）。
+/// 同 `ST_UI_COMPONENT_IMPL`（保留旧名；名字已统一取自组件头的 `component_meta`）。
 #define ST_UI_COMPONENT_IMPL_NAMED(TYPE, NAME) ST_UI_COMPONENT_IMPL(TYPE)

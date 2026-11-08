@@ -14,9 +14,17 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-LIB=build/dev/obj/_library_units_library.a
+LIB=build/dev/obj/_library_units_cefu.a
+# 为何不是 `_library_units_library.a`：实测它虽然 342 个成员，却**不含
+# `components_terminal.o` 等组件目标文件**（各目标的归档划分不同）。
+# 用它验证会得到“产物里 Terminal 符号数 0”——那是假阳性，不是按需生效。
+# `cefu.a` 是真正包含全部 UI 组件的最新归档。
 if [ ! -f "$LIB" ]; then
-  echo "[错误] 找不到 $LIB —— 先跑 st build（任意目标）生成库" >&2
+  echo "[错误] 找不到 $LIB —— 先跑 st build cefu 生成归档" >&2
+  exit 2
+fi
+if ! ar t "$LIB" 2>/dev/null | grep -q "components_terminal"; then
+  echo "[错误] $LIB 里没有 components_terminal.o —— 不是预期归档" >&2
   exit 2
 fi
 

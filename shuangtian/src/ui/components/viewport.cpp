@@ -287,17 +287,7 @@ auto Viewport::invoke_action(std::string_view action, std::string_view argument)
 
 // ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────
 //
-// 两件事都在**这个 TU 里**完成，因为它们互相依赖：
-//  ① 定义登记器（`ST_UI_COMPONENT_IMPL_*`）——完整特化只能出现在这里；
-//  ② 调 `import_components<T>()` 把它登记进注册表。
-//
-// ② 必须在**函数体**里：命名空间作用域下以模板实参开头的表达式会被当成声明
-//（实测：`expected unqualified-id before 'void'`）。
+// 一行一个组件，展开后包含**静态登记**（本 .o 进产物即在 main 前完成注册）
+// 与**导入锚点**（`import_components<T>()` 取它的地址，把本 .o 拉进产物）。
+// 所以：真的用到组件 → 自动注册；要按名字建 → 另调 import。
 ST_UI_COMPONENT_IMPL(::st::ui::Viewport);
-
-namespace {
-[[maybe_unused]] const bool st_ui_imported_viewport_cpp = []() {
-  st::ui::import_components<::st::ui::Viewport>();
-  return true;
-}();
-}  // namespace
