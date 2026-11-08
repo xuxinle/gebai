@@ -9,17 +9,11 @@
 
 #include <functional>
 #include <string>
-#include "st/ui/component_id.hpp"
+#include "st/ui/component_registry.hpp"
+#include "st/ui/components/scroll_bar.hpp"
 #include "st/ui/element.hpp"
 
 namespace st::ui {
-
-// 前向声明而非 include（**一组件一头**的要点）：
-//
-// 头里只用 `ScrollBar*`（成员指针与返回指针），不需要它的完整定义。
-// include 它会把 `ScrollBar` 的依赖一起拉进每一个用 `ScrollView` 的翻译单元——
-// 而这正是拆分之前的毛病。真正需要完整定义的是 `scroll_view.cpp`（它构造滚动条）。
-class ScrollBar;
 
 /// 垂直滚动容器：子节点按列堆叠，超出视口部分被裁剪，右侧自动出现 `ScrollBar`。
 /// 滚动不改变子节点尺寸，只平移其 `bounds`（因此会触发重排）。

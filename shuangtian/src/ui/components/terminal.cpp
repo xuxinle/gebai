@@ -15,7 +15,6 @@
 /// 光标是**屏幕状态**（`AnsiScreen::cursor_*`），渲染时画出来。
 
 #include "st/ui/components/terminal.hpp"
-#include "st/ui/component_registry.hpp"  // 登记与导入需要注册表接口
 
 #include <algorithm>
 #include <cstdlib>

@@ -11,7 +11,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "st/ui/component_id.hpp"
+#include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
 
 namespace st::ui {

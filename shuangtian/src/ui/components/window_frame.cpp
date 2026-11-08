@@ -1,5 +1,4 @@
 #include "st/ui/components/window_frame.hpp"
-#include "st/ui/component_registry.hpp"  // 登记与导入需要注册表接口
 
 #include <algorithm>
 #include <format>
@@ -8,9 +7,6 @@
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
-// `TitleBar` 在头里是前向声明（头里只用 `TitleBar*`），但本文件要构造它、
-// 还要读 `TitleBar::bar_height()`——两个都要求完整定义。
-#include "st/ui/components/title_bar.hpp"
 
 namespace st::ui {
 namespace {

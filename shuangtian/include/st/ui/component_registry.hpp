@@ -61,11 +61,6 @@
 #include <string_view>
 #include <vector>
 
-// 组件身份（`component_meta<T>` / `component_importer<T>` 与那两个宏）在轻量头里：
-// 组件头只依赖它，不依赖本文件（本文件的 `<functional>` / `<vector>` 等只对
-// 真正登记/查表的地方有意义）。
-#include "st/ui/component_id.hpp"
-
 namespace st::ui {
 
 class Element;
@@ -130,8 +125,33 @@ void run_imports();
 
 namespace detail {
 
-// `component_meta<T>` / `component_importer<T>` 的定义在 `component_id.hpp`
-// （那个头极轻量，组件头只依赖它）。这里不重复声明，避免两处漂移。
+/// 组件的**身份**（注册名 + 默认构造）：**特化在组件头里**。
+///
+/// 为什么身份放头里、导入放 `.cpp` 里——
+///
+/// - 身份（名字、怎么造）是**组件自己的事**，写在它自己的头里，
+///   于是"这个组件叫什么、怎么建"在代码里一看就是它自己的，不在某张集中表里；
+/// - 而"它进不进产物"是**应用的选择**，写在 `.cpp` 的一次导入里。
+///
+/// `component_meta<T>` 是**类模板全特化、定义在头里**，这与"一个 `.cpp` 一个
+/// 函数定义"不冲突：类模板特化的定义可以出现在多个 TU（要求完全一致，而它们
+/// 来自同一个头）。
+template <class T>
+struct component_meta;
+
+/// 组件的**导入锚点**：只有主模板声明（不定义）。
+///
+/// 组件的 `.cpp` 用 `ST_UI_COMPONENT_IMPL` 声明特化类并**在类外**定义 `run`——
+/// 类外定义才是外部链接的强符号（类内定义会被隐式设为 `inline`，取不到地址，
+/// 实测报：`undefined symbol ... run()`）。
+///
+/// 于是 `import_components<T>()` 取它的地址就对组件 `.o` 产生真实引用，
+/// 链接器必须把它拉进来。没被导入的类型没有定义 → 链接期报未定义符号
+/// （**直接指出是哪个类型**），不会变成"编译过了但注册表里没有"的静默失败。
+template <class T>
+struct component_importer {
+  static void run();
+};
 
 }  // namespace detail
 
@@ -156,11 +176,30 @@ void import_components() {
 
 }  // namespace st::ui
 
-// ── 组件实现文件里的定义 ──────────────────────────────────────────────────
-//
-// （`ST_UI_COMPONENT` / `ST_UI_COMPONENT_WITH` 两个宏在 `component_id.hpp` 里
-// ——组件头只依赖那个轻量头。这里只保留实现侧这一个宏，因为它要碰注册表。）
+// ── 组件头里的声明 ───────────────────────────────────────────────────────────
 
+/// 在组件头末尾声明"本组件可被导入"。
+///
+/// 它给出组件的**身份**（注册名 + 默认构造）——放在头里，因为那是组件自己的事。
+/// 真正的"导入"发生在应用侧（`import_components<T>()`），或被 `all.hpp` 一次做完。
+///
+/// 需要构造参数的组件（`Button(label)` / `SelectPanel(options, selected)`）用
+/// `ST_UI_COMPONENT_WITH` 给出"不传参也能造一个"的表达式——`make_element` 要的
+/// 就是那个默认形态。
+#define ST_UI_COMPONENT(TYPE, NAME) \
+  ST_UI_COMPONENT_WITH(TYPE, NAME, std::make_unique<TYPE>())
+
+#define ST_UI_COMPONENT_WITH(TYPE, NAME, MAKE)                                     \
+  namespace st::ui::detail {                                                       \
+  template <>                                                                      \
+  struct component_meta<TYPE> {                                                    \
+    static constexpr const char* name = NAME;                                      \
+    static auto make() -> std::unique_ptr<::st::ui::Element> { return MAKE; }      \
+  };                                                                               \
+  }                                                                                \
+  static_assert(true, "ST_UI_COMPONENT 需要分号终止");
+
+// ── 组件实现文件里的定义 ────────────────────────────────────────────────────
 
 /// 在组件实现的 `.cpp` 里生成**导入锚点**的定义（每组件一次）。
 ///

@@ -86,45 +86,91 @@ terminal_present=0    ← Terminal 查不到
 
 ---
 
-## 三、include 关系怎么摆（这一节是「一组件一头」真正难的部分）
+## 三、为什么**不**把指针依赖改成前向声明（一条经验，别重跑）
 
-光把文件切开不等于依赖就干净了：拆完一问发现过 4 处**假依赖**（include 了但\.hpp\n里根本不用），还有 5 处是「只用指针」——本来前向声明就够，却把对方的\.hpp\n整个拉进了每一个用它的翻译单元。
+> 本节是一条**已经做过又撤掉的尝试**的结论。写在这里是因为“该不该前向声明”
+> 每隔一阵就会有人重新想一遍，而这次把代价量干净了。
 
-### 规则
+### 当时的做法与收益
 
-头里用到对方的方式，决定了能不能去掉 include：
+把 `window_frame.hpp -> title_bar.hpp`、`title_bar.hpp -> theme_picker.hpp`、
+`scroll_view.hpp -> scroll_bar.hpp` 三处（头里只用到 `T*`）改成 `class T;` 前向声明，
+并刚掉 `chip.hpp -> icon_view.hpp` 这类真·假依赖。
 
-| 头里的用法 | 需要什么 | 能不能去 include |
-|---|---|---|
-| 成员对象、值传参/返回、`std::vector<T>` 成员 | **完整定义** | 不能 |
-| 继承（`class Heading : public Text`） | **完整定义** | 不能 |
-| 嵌套类型（`CodeEditor::LineDecoration`） | **完整定义** | 不能 |
-| 常量表达式里调静态成员（`Icon::ink_size`） | **完整定义** | 不能 |
-| 仅 `T*` 成员 / 返回 `T*` / 形参 `T&` | **前向声明** | **能，而且应该** |
+收益：那几个头被依赖的 TU 数是 11 / 14 / 17 个，而 `title_bar.hpp` 本身 258 行。
+**构建时间上量不出来**。语义上确实更准（“只用一个指针”不等于“要知道这个类的一切”），
+但这份准确度换不来任何可观测改善。
 
-去 include 后，那个 ".cpp" 必须自己 include 它（它要构造/解引用）——这是该付的代价，
-而且付在正确的地方：只有真正实现它的人扛这份依赖。
+### 代价（这是撤掉的真原因）
 
-### 两个头：身份 vs 注册表
+前向声明把错误从“编译期看得见”推到了“会在下次改代码时突然冒出来”，而且
+**错不在改的那一行**：
 
-组件头只 include **`st/ui/component_id.hpp`**（只依赖 `<memory>`，装着
-`ST_UI_COMPONENT` 宏与两个模板声明）；
-**`st/ui/component_registry.hpp`** 是"真正登记/查表"的地方才要的
-（`add` / `create` / `names` / `import_components`），它要 `<functional>`、
-`<string>`、`<vector>` 等。
+**场景 A：往 `.cpp` 里加了用到完整定义的代码**（模型最常做的事）
 
-> 实测记一笔：只 include `button.hpp` 展开约 7.6 万行，其中 `element.hpp` 占绝对主体，
-> `component_registry.hpp` 那几百行**不是瓶颈**。所以拆两个头**不是为了省编译时间**，
-> 而是为了把依赖关系说准：`<functional>` 出现在 60 个组件头里，仅仅因为有人把
-> 宏和注册表搞混了。
+```
+auto bar = std::make_unique<TitleBar>(std::move(title));
+```
+
+实测报错（GCC 16，本仓）：
+
+```
+error: invalid use of incomplete type 'class st::ui::TitleBar'
+note: forward declaration of 'class st::ui::TitleBar'
+```
+
+问题不在“看不懂”，而在：
+
+- 同一个错误**重复 12 次**（每个用到它的成员函数各一次）；
+- 夹一条**误导性的级联错误**：`cannot convert 'unique_ptr<TitleBar>' to
+  'unique_ptr<Element>'`——它会把人引向“转换写错了”，而不是“缺 include”；
+- 编译器**从不提示该 include 什么**（实测：报错里没有任何 include 建议）。
+
+**场景 B：在头里加了值成员**
+
+```cpp
+error: field 'bar_' has incomplete type 'st::ui::TitleBar'
+note: forward declaration of 'class st::ui::TitleBar'
+```
+
+这条倒是很干净、位置也对。所以场景 B 不是问题，**场景 A 才是**。
+
+### 一个可行但不愿背的缓解办法
+
+把“需要完整定义时 include 哪个头”写在**前向声明同一行的注释**里。编译器的 note
+会把出错那一行的源码打出来（实测有效）：
+
+```
+note: forward declaration of 'class st::ui::TitleBar'
+ 49 | class TitleBar;  // 前置声明：在 .cpp 里用它请 include "st/ui/components/title_bar.hpp"
+```
+
+管用，但要 60 多个头 × 每一处前向声明都写对、永远不许漂。
+**用“永不漂移的人工约定”去换“量不出来的构建收益”，不划算。**
+
+### 结论（以后照这个判）
+
+| 情况 | 做法 |
+|---|---|
+| 头里只用 `T*` / `T&` / 返回 `T*` | **照旧 include**。本仓不采用前向声明换收益 |
+| 头里**根本不用**那个类型 | **删掉 include**（这种是纯多余，无条件该删） |
+| 头里真的需要完整定义 | include（本来就得） |
+
+第二行是本次唯一留下的改动：`chip.hpp` 曾经 include `icon_view.hpp` 却根本不用
+（Chip 的图标是运行期经 `IconRegistry` 按名取的）。这种“纯多余”不换任何可读性，
+删掉没有争议。
+
+⚠ 一条必须记住的反例：`button.hpp` 里也搜不到 `IconView` 字样，但它调了
+`Icon::ink_size(...)`（常量表达式），**必须**完整定义。删了立刻报
+`'Icon' has not been declared`。**“头里搜不到那个类名”不等于“不依赖那个头”。**
 
 ---
 
 ## 四、加一个组件要做什么
 
-1. **新建头** `st/ui/components/<名字>.hpp`：只 include 它**自己需要**的东西
-   （别 include `all.hpp`；别的组件头只在真有依赖时 include，且先对照上表判断
-   是不是前向声明就够）；
+1. **新建头** `st/ui/components/<名字>.hpp`：只 include 它自己需要的东西
+   （别 include `all.hpp`；别的组件头只在真有依赖时 include——注意上节那条，
+   只用指针也照 include，不要为了“更纯粹”改前向声明）；
 2. **在头末尾加一行**：
 
    ```cpp
