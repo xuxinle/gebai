@@ -151,6 +151,7 @@
 | [`visual_craft.md`](visual_craft.md) | 视觉制作手册（裁云 · 三维画面） | 速查 | 活 |
 | [`polish.md`](polish.md) | 精致度：指标测不到的那一点 | 速查 | 活 |
 | [`WEIGHT_CURVE.md`](WEIGHT_CURVE.md) | 字重曲线（跨字号连续映射） | 速查 | 活 |
+| [`COMPONENT_PACKS_20261108.md`](COMPONENT_PACKS_20261108.md) | 组件补全台账：每包交付了什么、缺口全集、交付中修掉的缺陷 | 速查 | 活 |
 | [`README.md`](README.md) | 本文件 | 详读 | 活 |
 
 ## B. 待办台账

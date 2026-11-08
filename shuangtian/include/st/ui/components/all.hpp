@@ -49,10 +49,31 @@
 #include "st/ui/components/text.hpp"
 #include "st/ui/components/tooltip.hpp"
 
+// ── 导航与定位（2026-11-08 补全）──
+#include "st/ui/components/breadcrumb.hpp"
+#include "st/ui/components/pagination.hpp"
+#include "st/ui/components/segmented_control.hpp"
+#include "st/ui/components/steps.hpp"
+
 // ── 输入与开关 ──
 #include "st/ui/components/checkbox.hpp"
 #include "st/ui/components/input_box.hpp"
 #include "st/ui/components/radio.hpp"
+#include "st/ui/components/radio_group.hpp"
+#include "st/ui/components/number_input.hpp"
+#include "st/ui/components/search_box.hpp"
+#include "st/ui/components/form_row.hpp"
+#include "st/ui/components/tag_input.hpp"
+#include "st/ui/components/accordion.hpp"
+#include "st/ui/components/toolbar.hpp"
+#include "st/ui/components/status_bar.hpp"
+#include "st/ui/components/divider_label.hpp"
+// 展示微件（包五）
+#include "st/ui/components/sparkline.hpp"
+#include "st/ui/components/progress_ring.hpp"
+#include "st/ui/components/rating.hpp"
+#include "st/ui/components/kbd.hpp"
+#include "st/ui/components/link.hpp"
 #include "st/ui/components/select_box.hpp"
 #include "st/ui/components/select_panel.hpp"
 #include "st/ui/components/slider.hpp"
@@ -74,6 +95,13 @@
 #include "st/ui/components/dialog.hpp"
 #include "st/ui/components/toast.hpp"
 
+// ── 反馈与状态（2026-11-08 补全包二）──
+#include "st/ui/components/avatar_group.hpp"
+#include "st/ui/components/banner.hpp"
+#include "st/ui/components/empty_state.hpp"
+#include "st/ui/components/skeleton.hpp"
+#include "st/ui/components/status_dot.hpp"
+
 // ── 复合控件 ──
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/color_picker.hpp"
@@ -81,6 +109,7 @@
 #include "st/ui/components/completion_popup.hpp"
 #include "st/ui/components/diff_view.hpp"
 #include "st/ui/components/file_dialog.hpp"
+#include "st/ui/components/html_view.hpp"
 #include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/merge_view.hpp"
@@ -121,16 +150,26 @@ inline void import_all_components() {
       // 基础
       Text, Heading, IconView, Button, Card, Divider, KeyValueRow, Panel, Spacer,
       ProgressBar, Spinner, Badge, Chip, Avatar, Tooltip,
+      // 导航与定位
+      Breadcrumb, Pagination, SegmentedControl, Steps,
       // 输入与开关
       Input, TextArea, Checkbox, Radio, Switch, Slider, Select, SelectPanel,
+      // 输入与表单（包三）
+      NumberInput, SearchBox, FormRow, RadioGroup, TagInput,
+      // 结构与容器（包四）
+      Accordion, Toolbar, StatusBar, DividerLabel,
+      // 展示微件（包五）
+      Sparkline, ProgressRing, Rating, Kbd, Link,
       // 容器与列表
       List, ListItem, ScrollView, ScrollBar, SplitView, Table, Tabs, Tree, Viewport,
       // 浮层与反馈
       Dialog, Toast,
+      // 反馈与状态
+      EmptyState, Banner, Skeleton, StatusDot, AvatarGroup,
       // 复合控件
       CodeEditor, ColorPicker, CommandPalette, CompletionPopup, DiffView, FileDialog,
       MarkdownView, MenuBar, MenuPanel, ContextMenu, MergeView, SlowContent, Terminal,
-      ThemePicker, TimelineView, TitleBar, WindowFrame>();
+      ThemePicker, TimelineView, TitleBar, WindowFrame, HtmlView>();
   // 三维族（ThreeView / LabelOverlay / SceneView / GraphView）**不在**导入列表里：
   // 它们不进声明式注册表（理由见各自头文件末尾）。它们的头仍被上面的 include 引入，
   // 所以想直接 `new` 它们的代码只需要 `all.hpp` 就够了。

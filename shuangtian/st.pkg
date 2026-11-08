@@ -5,7 +5,7 @@
   "cxx_standard": 23,
   "include_dirs": ["include", "third_party", "third_party/sqlite",
                    "third_party/micropython"],
-  "modules": ["core", "math", "codec", "geom", "raster", "text", "md", "xml", "ui", "shell", "control", "app", "pkg", "ext", "edit", "lsp", "perf"],
+  "modules": ["core", "math", "codec", "geom", "raster", "text", "md", "html", "xml", "ui", "shell", "control", "app", "pkg", "ext", "edit", "lsp", "perf"],
   "sources": [
     "src/core/*.cpp",
     "src/math/*.cpp",
@@ -14,6 +14,7 @@
     "src/geom/*.cpp",
     "src/text/*.cpp",
     "src/md/*.cpp",
+    "src/html/*.cpp",
     "src/xml/*.cpp",
     "src/ui/*.cpp",
     "src/ui/components/*.cpp",

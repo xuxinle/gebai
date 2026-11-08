@@ -3745,8 +3745,11 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 };
 }
 ```
-组件库（`include/st/ui/components/*.hpp`）——**已实现 35 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `SplitView` `TitleBar` `WindowFrame` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog`。
-**规划中 5 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Link` `Dropdown` `SegmentedControl` `Sparkline`。
+组件库（`include/st/ui/components/*.hpp`）——**已实现 75 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `SplitView` `TitleBar` `WindowFrame` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog` `Breadcrumb` `Pagination` `Steps` `SegmentedControl` `HtmlView` `KeyValueRow` `Heading` `ColorPicker` `CommandPalette` `CompletionPopup` `DiffView` `MergeView` `ThemePicker` `TimelineView` `Terminal` `Viewport` `ListItem` `SelectPanel` `SlowContent` `Spacer` `EmptyState` `Banner` `Skeleton` `StatusDot` `AvatarGroup` `NumberInput` `SearchBox` `FormRow` `RadioGroup` `TagInput` `DividerLabel` `Accordion` `Toolbar` `StatusBar` `Sparkline` `ProgressRing` `Rating` `Kbd` `Link`。
+
+（2026-11-08 组件补全：五个包共 22 个组件 + `HtmlView`（含 `st/html` 解析/样式两层），
+交付台账见 `docs/COMPONENT_PACKS_20261108.md`。）
+**规划中 2 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Dropdown`。
 - 布局：自研 flex 子集（`direction`/`gap`/`padding`/`margin`/`grow`/`shrink`/`align`/`justify`/`wrap`/百分比/固定尺寸/自适应内容）。
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
 - 图标：自绘矢量路径集（`IconName` + 路径数据），零位图资源、任意缩放清晰。

@@ -18,5 +18,15 @@
 #include "st/ui/components/card.hpp"
 #include "st/ui/components/divider.hpp"
 #include "st/ui/components/key_value_row.hpp"
+// 导航与定位（2026-11-08 补全）
+#include "st/ui/components/breadcrumb.hpp"
+#include "st/ui/components/pagination.hpp"
+#include "st/ui/components/steps.hpp"
+#include "st/ui/components/segmented_control.hpp"
+// 结构与容器（2026-11-08 补全包四）
+#include "st/ui/components/divider_label.hpp"
+#include "st/ui/components/accordion.hpp"
+#include "st/ui/components/toolbar.hpp"
+#include "st/ui/components/status_bar.hpp"
 
 // 自注册锚点随各子头到达（`ST_UI_COMPONENT`）；本文件不再持有任何类型定义。

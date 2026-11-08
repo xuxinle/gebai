@@ -56,7 +56,7 @@ namespace gallery {
 /// 与 apps/gallery/{pages,main}.cpp 的实例化点一一对应。
 /// 「直接实例化」含两种形态：建卡时实例化，以及懒创建组件经按钮触发构造后挂
 /// 叠加层（后者另列 kGalleryLazy；树自检时两类都在场断言里放行）。
-inline constexpr std::array<std::string_view, 45> kGalleryExhibits{
+inline constexpr std::array<std::string_view, 69> kGalleryExhibits{
     "Panel",       "Text",       "Heading",     "Icon",        "Button",
     "Card",        "Divider",    "KeyValueRow", "Input",       "TextArea",
     "Checkbox",    "Radio",      "Switch",      "Slider",      "Select",
@@ -67,7 +67,19 @@ inline constexpr std::array<std::string_view, 45> kGalleryExhibits{
     "CodeEditor",  "DiffView",   "CompletionPopup", "CommandPalette",
     "TimelineView", "MergeView", "MenuBar",     "ContextMenu", "FileDialog",
     "Terminal",    "ThemePicker",
-};
+    // 2026-11-08 补全包一 · 导航与定位
+          "Breadcrumb",  "Pagination", "Steps",       "SegmentedControl",
+      // 2026-11-08 · HTML 预览
+      "HtmlView",
+      // 2026-11-08 补全包二 · 反馈与状态
+      "EmptyState",   "Banner",     "Skeleton",    "StatusDot", "AvatarGroup",
+      // 2026-11-08 补全包三 · 输入与表单
+      "NumberInput", "SearchBox", "FormRow", "RadioGroup", "TagInput",
+      // 2026-11-08 补全包四 · 结构与容器
+      "Accordion",   "Toolbar",   "StatusBar",   "DividerLabel",
+      // 2026-11-08 补全包五 · 展示微件
+      "Sparkline",   "ProgressRing", "Rating",   "Kbd",         "Link",
+  };
 
 /// gallery 懒创建展示集：交互时才构造、挂 UiRoot 叠加层的展示卡组件。
 /// 启动树上不可见是它们的存在形态（按钮触发，见括号触发钮 id）；树自检的
@@ -81,8 +93,7 @@ inline constexpr std::array<std::string_view, 7> kGalleryLazy{
 };
 
 /// gallery 豁免清单：注册表里不该有展示卡的组件（注册名 + 理由）。
-/// 结构性豁免 4 条，与展示集 45 条合起来正好覆盖注册表 49 项（49 = 45 + 4，
-/// ThemePicker（2026-10-30）随组件新增补卡，同步升到 45。
+/// 结构性豁免 6 条，与展示集 49 条合起来恰好覆盖注册表 55 项（49 = 45 + 4 导航包）。
 /// 【待补卡】清单已随三包补卡全部清零：首包 Tree/Tooltip/ColorPicker/Viewport，
 /// 二包 CodeEditor/DiffView/CompletionPopup/CommandPalette，
 /// 三包 TimelineView/MergeView/MenuBar/ContextMenu/FileDialog/Terminal）。

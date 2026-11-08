@@ -1,4 +1,4 @@
-#include "pages.hpp"
+﻿#include "pages.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +18,7 @@
 #include "st/math/color.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/breadcrumb.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/color_picker.hpp"
 #include "st/ui/components/command_palette.hpp"
@@ -28,10 +29,20 @@
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/theme_picker.hpp"
+// 展示微件（2026-11-08 补全包五）
+#include "st/ui/components/sparkline.hpp"
+#include "st/ui/components/progress_ring.hpp"
+#include "st/ui/components/rating.hpp"
+#include "st/ui/components/kbd.hpp"
+#include "st/ui/components/link.hpp"
 #include "st/ui/builtin_themes.hpp"   // builtin_theme_display_name（主题卡回显）
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/html_view.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/merge_view.hpp"
+#include "st/ui/components/pagination.hpp"
+#include "st/ui/components/segmented_control.hpp"
+#include "st/ui/components/steps.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
@@ -58,7 +69,10 @@ using st::math::Point;
 using st::math::Rect;
 using st::ui::Align;
 using st::ui::Avatar;
+using st::ui::AvatarGroup;
 using st::ui::Badge;
+using st::ui::Banner;
+using st::ui::Breadcrumb;
 using st::ui::Button;
 using st::ui::Card;
 using st::ui::Checkbox;
@@ -72,7 +86,23 @@ using st::ui::Chip;
 using st::ui::DiffLayout;
 using st::ui::DiffView;
 using st::ui::Divider;
+using st::ui::EmptyState;
 using st::ui::Element;
+using st::ui::FormRow;
+using st::ui::NumberInput;
+using st::ui::RadioGroup;
+using st::ui::RadioOption;
+using st::ui::SearchBox;
+using st::ui::TagInput;
+using st::ui::Accordion;
+using st::ui::Toolbar;
+using st::ui::StatusBar;
+using st::ui::DividerLabel;
+using st::ui::Sparkline;
+using st::ui::ProgressRing;
+using st::ui::Rating;
+using st::ui::Kbd;
+using st::ui::Link;
 using st::ui::FileDialog;
 using st::ui::FlexDirection;
 using st::ui::FontWeight;
@@ -90,11 +120,16 @@ using st::ui::MenuItem;
 using st::ui::MenuPanel;
 using st::ui::MergeView;
 using st::ui::Panel;
+using st::ui::Pagination;
 using st::ui::ProgressBar;
 using st::ui::Radio;
+using st::ui::SegmentedControl;
 using st::ui::Select;
 using st::ui::Slider;
+using st::ui::Skeleton;
 using st::ui::Spinner;
+using st::ui::StatusDot;
+using st::ui::Steps;
 using st::ui::ThemePicker;
 using st::ui::SplitView;
 using st::ui::Switch;
@@ -624,7 +659,7 @@ namespace {
 
 [[nodiscard]] auto build_components(const PageHooks& hooks) -> std::unique_ptr<Panel> {
   auto page = make_page("components", "组件",
-                        "选择控件 · 滑块 · 标签页 · 下拉 · 反馈徽标 · 图标 · 文字 · 浮层 · 多行文本 · 禁用态 · 树 · 提示气泡 · 取色器 · 缩放视口 · 代码编辑器 · 差异视图 · 补全弹层 · 命令面板 · 时间轴 · 三方合并 · 菜单栏 · 右键菜单 · 文件对话框 · 终端");
+                        "选择控件 · 滑块 · 标签页 · 下拉 · 导航定位（面包屑/分页/步骤/分段）· 反馈徽标 · 图标 · 文字 · 浮层 · 多行文本 · 禁用态 · 树 · 提示气泡 · 取色器 · 缩放视口 · 代码编辑器 · 差异视图 · 补全弹层 · 命令面板 · 时间轴 · 三方合并 · 菜单栏 · 右键菜单 · 文件对话框 · 终端");
 
   // —— 选择控件 ——
   auto choice_card = make_card("card-choice", "选择控件");
@@ -997,6 +1032,466 @@ namespace {
   split_card->add_child(std::move(split_actions));
   split_card->add_child(std::move(split_demo));
   page->add_child(std::move(split_card));
+
+  // —— 导航与定位（2026-11-08 补全：此前这四类控件在画廊零出现）——
+  auto nav_card = make_card("card-nav", "导航与定位");
+  nav_card->add_child(make_caption(
+      "Breadcrumb：分段路径（末段=当前位置、不可点；超宽折叠中段但保留两端）"));
+  auto crumb = std::make_unique<Breadcrumb>();
+  crumb->set_id("demo-breadcrumb");
+  crumb->set_segments({{.label = "首页", .icon = "home"},
+                       {.label = "组件", .value = "components"},
+                       {.label = "导航", .value = "nav", .icon = "layers"}});
+  crumb->style().width = 520.0f;
+  auto* crumb_ptr = crumb.get();
+  nav_card->add_child(std::move(crumb));
+  auto crumb_state = std::make_unique<Text>("点前两段可回退（末段是当前位置，默认不可点）");
+  crumb_state->set_id("breadcrumb-state");
+  crumb_state->set_tone(Tone::Faint);
+  crumb_state->set_scale(Text::Scale::Xs);
+  auto* crumb_state_ptr = crumb_state.get();
+  nav_card->add_child(std::move(crumb_state));
+  crumb_ptr->on_navigate = [crumb_state_ptr, hooks](std::string_view value) {
+    crumb_state_ptr->set_content(std::format("已导航到「{}」（按业务值回调，不用段序号）", value));
+    hooks.set_status(std::format("面包屑：{}", value));
+  };
+
+  nav_card->add_child(make_caption(
+      "Pagination：页码窗口固定 2s+1，靠边时向中间撑开（页码条长度恒定，按钮不集体跳）"));
+  auto pager = std::make_unique<Pagination>();
+  pager->set_id("demo-pagination");
+  pager->set_page_count(30);
+  pager->set_page(15);
+  pager->style().width = 420.0f;
+  auto* pager_ptr = pager.get();
+  nav_card->add_child(std::move(pager));
+  auto pager_state = std::make_unique<Text>("第 15 / 30 页");
+  pager_state->set_id("pagination-state");
+  pager_state->set_tone(Tone::Faint);
+  pager_state->set_scale(Text::Scale::Xs);
+  auto* pager_state_ptr = pager_state.get();
+  nav_card->add_child(std::move(pager_state));
+  pager_ptr->on_change = [pager_state_ptr, hooks](int current_page) {
+    pager_state_ptr->set_content(std::format("第 {} / 30 页", current_page));
+    hooks.set_status(std::format("翻到第 {} 页", current_page));
+  };
+
+  nav_card->add_child(make_caption(
+      "Steps：已完成画对勾、进行中外圈光环、待办淡描边；连线颜色取左端那一步的状态"));
+  auto steps = std::make_unique<Steps>();
+  steps->set_id("demo-steps");
+  steps->set_titles({"打开工程", "选择模板", "导出产物"});
+  steps->set_current(1);
+  steps->style().height = 48.0f;
+  steps->style().width = 560.0f;
+  auto* steps_ptr = steps.get();
+  nav_card->add_child(std::move(steps));
+  auto steps_actions = make_row(8.0f, /*wrap=*/true);
+  const auto make_steps_button = [&](const char* id, const char* label, const char* action) {
+    auto button = std::make_unique<Button>(label, Button::Variant::Ghost, Button::Size::Small);
+    button->set_id(id);
+    button->on_click = [steps_ptr, action]() { (void)steps_ptr->invoke_action(action, ""); };
+    return button;
+  };
+  steps_actions->add_child(make_steps_button("steps-prev", "上一步", "prev"));
+  steps_actions->add_child(make_steps_button("steps-next", "下一步", "next"));
+  steps_actions->add_child(make_steps_button("steps-done", "全部完成", "done"));
+  nav_card->add_child(std::move(steps_actions));
+
+  nav_card->add_child(make_caption(
+      "SegmentedControl：选中段有随动滑块（motion_normal 滑动）；键盘 ←/→ 循环切换"));
+  auto segmented = std::make_unique<SegmentedControl>();
+  segmented->set_id("demo-segmented");
+  segmented->set_options({"日", "周", "月"});
+  segmented->set_stretch(true);
+  segmented->style().width = 240.0f;
+  auto* segmented_ptr = segmented.get();
+  nav_card->add_child(std::move(segmented));
+  auto segmented_state = std::make_unique<Text>("当前：日");
+  segmented_state->set_id("segmented-state");
+  segmented_state->set_tone(Tone::Faint);
+  segmented_state->set_scale(Text::Scale::Xs);
+  auto* segmented_state_ptr = segmented_state.get();
+  nav_card->add_child(std::move(segmented_state));
+  segmented_ptr->on_change = [segmented_ptr, segmented_state_ptr, hooks](int index) {
+    segmented_state_ptr->set_content(
+        std::format("当前：{}（序号 {}）", segmented_ptr->selected_label(), index));
+    hooks.set_status(std::format("分段切到「{}」", segmented_ptr->selected_label()));
+  };
+  page->add_child(std::move(nav_card));
+
+  // —— HTML 预览（自研排版 + 基础 CSS 子集）——
+  auto html_card = make_card("card-html", "HTML 预览（基础 CSS）");
+  html_card->add_child(make_caption(
+      "自研 HTML+CSS 子集排版：标签/class/id 选择器、特异性与继承、块级流与行内折行、列表/表格/pre"));
+  auto html_view = std::make_unique<st::ui::HtmlView>(std::string(R"(
+<style>
+  body { color: #1b1f24; font-size: 15px; }
+  h2 { color: #2563eb; font-size: 22px; margin-bottom: 6px; }
+  .lead { color: #4b5563; font-size: 15px; margin-bottom: 10px; }
+  .box { background: #eef2ff; padding: 10px; border-left: 4px solid #2563eb; margin: 8px 0; }
+  .box strong { color: #1d4ed8; }
+  ul { margin-top: 6px; }
+  li { margin-bottom: 3px; }
+  code { background: #f3f4f6; padding: 2px; color: #b91c1c; }
+  td { padding: 4px; border: 1px solid #d1d5db; }
+  th { padding: 4px; border: 1px solid #d1d5db; }
+</style>
+<h2>HtmlView 能力演示</h2>
+<p class="lead">这是一段正文，包含 <b>粗体</b>、<i>斜体</i>、<code>行内代码</code>
+与 <a href="https://example.com">一个链接</a>。超长文本会自动折行——中文没有空格也可以逐字断行。</p>
+<div class="box">引用式提示块：<strong>背景色 + 左边框</strong>由 CSS 控制，不是写死的。</div>
+<p>无序列表：</p>
+<ul><li>标签 / <code>.class</code> / <code>#id</code> 选择器</li>
+<li>后代会与子代选择器</li>
+<li>层叠：特异性 + 顺序 + !important</li></ul>
+<pre>code block
+  保留空白
+    缩进不变</pre>
+<table><tr><th>能力</th><th>状态</th></tr>
+<tr><td>块级排版</td><td>支持</td></tr>
+<tr><td>flex / float</td><td>忽略</td></tr></table>
+)"));
+  html_view->set_id("demo-html-view");
+  html_view->style().height = 380.0f;
+  auto* html_view_ptr = html_view.get();
+  html_card->add_child(std::move(html_view));
+  html_view_ptr->on_link_click = [hooks](std::string_view url) {
+    hooks.set_status(std::format("点了链接：{}", url));
+  };
+  page->add_child(std::move(html_card));
+
+  // —— 反馈与状态（补全包二：EmptyState / Banner / Skeleton / StatusDot / AvatarGroup）——
+  auto status_showcase_card = make_card("card-status-showcase", "反馈与状态（空态 / 通知条 / 骨架屏 / 状态点 / 头像组）");
+  status_showcase_card->add_child(make_caption(
+      "均自带布局与命中：空态的图标-标题-说明-动作四块、通知条的色调-图标-关闭、骨架的呼吸（时间驱动）、状态点的墨迹对齐、头像组的 +N 溢出"));
+
+  // Banner：四档语义色调，最上面一条可关。
+  auto banner_info = std::make_unique<Banner>("有新版本可用", Tone::Primary);
+  banner_info->set_description("重启后生效；它占位在内容流里，不会被忽略）；");
+  banner_info->set_action("重启");
+  banner_info->set_closable(true);
+  banner_info->set_id("demo-banner-info");
+  auto* banner_info_ptr = banner_info.get();
+  status_showcase_card->add_child(std::move(banner_info));
+
+  auto banner_warn = std::make_unique<Banner>("网络连接不稳定", Tone::Warning);
+  banner_warn->set_description("部分请求可能超时");
+  banner_warn->set_id("demo-banner-warn");
+  status_showcase_card->add_child(std::move(banner_warn));
+
+  // 状态点：五档一行排开（颜色差异一眼可见）。
+  auto status_row = make_row(16.0f, /*wrap=*/true);
+  struct StatusSpec {
+    const char* id;
+    const char* label;
+    StatusDot::State state;
+  };
+  const StatusSpec statuses[] = {{"demo-dot-ok", "正常", StatusDot::State::Ok},
+                                 {"demo-dot-warn", "降级", StatusDot::State::Warn},
+                                 {"demo-dot-error", "故障", StatusDot::State::Error},
+                                 {"demo-dot-idle", "空闲", StatusDot::State::Idle},
+                                 {"demo-dot-busy", "连接中", StatusDot::State::Busy}};
+  for (const auto& spec : statuses) {
+    auto dot = std::make_unique<StatusDot>(spec.label, spec.state);
+    dot->set_id(spec.id);
+    status_row->add_child(std::move(dot));
+  }
+  status_showcase_card->add_child(std::move(status_row));
+
+  // 头像组： 全部放得下 / 溢成 +N 两种。
+  auto avatars = std::make_unique<AvatarGroup>();
+  avatars->set_members({"张三", "李四", "王五", "赵六", "孙七"});
+  avatars->set_id("demo-avatars");
+  status_showcase_card->add_child(std::move(avatars));
+
+  auto avatars_narrow = std::make_unique<AvatarGroup>();
+  avatars_narrow->set_members({"A", "B", "C", "D", "E", "F", "G", "H"});
+  avatars_narrow->set_max_visible(3);
+  avatars_narrow->set_id("demo-avatars-capped");
+  status_showcase_card->add_child(std::move(avatars_narrow));
+
+  // 骨架屏： 三行文本 + 一个头像位。
+  auto skeleton_row = make_row(16.0f, /*wrap=*/false);
+  auto skeleton_circle = std::make_unique<Skeleton>();
+  skeleton_circle->set_shape(Skeleton::Shape::Circle);
+  skeleton_circle->style().width = 48.0f;
+  skeleton_circle->style().height = 48.0f;
+  skeleton_circle->set_pulse(false);   // 画廊截图要可复现：相位固定在 t=0
+  skeleton_circle->set_id("demo-skeleton-circle");
+  skeleton_row->add_child(std::move(skeleton_circle));
+
+  auto skeleton_text = std::make_unique<Skeleton>(3);
+  skeleton_text->set_shape(Skeleton::Shape::Text);
+  skeleton_text->style().width = 220.0f;
+  skeleton_text->style().height = 48.0f;
+  skeleton_text->set_pulse(false);
+  skeleton_text->set_id("demo-skeleton-text");
+  skeleton_row->add_child(std::move(skeleton_text));
+  status_showcase_card->add_child(std::move(skeleton_row));
+
+  // 空态：带主动作。
+  auto empty_demo = std::make_unique<EmptyState>("还没有任何项目", "创建第一个项目开始同步的体验");
+  empty_demo->set_action("新建项目");
+  empty_demo->set_size(EmptyState::Size::Small);
+  empty_demo->set_id("demo-empty-state");
+  auto* empty_ptr = empty_demo.get();
+  status_showcase_card->add_child(std::move(empty_demo));
+
+  auto feedback_state = std::make_unique<Text>("点主按钮 / 关通知可以试：状态会显示在这里");
+  feedback_state->set_id("feedback-state");
+  feedback_state->set_tone(Tone::Faint);
+  feedback_state->set_scale(Text::Scale::Xs);
+  auto* feedback_state_ptr = feedback_state.get();
+  status_showcase_card->add_child(std::move(feedback_state));
+  page->add_child(std::move(status_showcase_card));
+
+  // 回调要在卡片挂上之后再接（否则钩子里的 status 写不到已存在的控件上）。
+  empty_ptr->on_action = [hooks, feedback_state_ptr] {
+    feedback_state_ptr->set_content("空态的主按钮被点了（on_action 已派发）");
+    hooks.set_status("空态：新建项目");
+  };
+  banner_info_ptr->on_dismiss = [hooks, feedback_state_ptr] {
+    feedback_state_ptr->set_content("通知条已被关闭（dismiss 会把自身设为不可见）");
+    hooks.set_status("通知条：已关闭");
+  };
+
+  // —— 输入与表单（补全包三：NumberInput / SearchBox / FormRow / RadioGroup / TagInput）——
+  auto input_form_card = make_card("card-input-form", "输入与表单（数值 / 搜索 / 表单行 / 单选组 / 标签）");
+  input_form_card->add_child(make_caption(
+      "数值框：区间夹取 + 步进 + 非法输入不污染值；搜索框：放大镜 + 清除 × + 计数徽标；表单行：标签列对齐 + 错误文案占位；单选组：互斥 + 方向键跳过禁用；标签：折行 + 去重 + 空草稿退格删尾"));
+
+  auto form_row1 = make_row(12.0f, /*wrap=*/true);
+  auto num_demo = std::make_unique<NumberInput>(5.0);
+  num_demo->set_min(0.0);
+  num_demo->set_max(100.0);
+  num_demo->set_step(5.0);
+  num_demo->set_suffix("%");
+  num_demo->style().width = 120.0f;
+  num_demo->set_id("demo-number");
+  form_row1->add_child(std::move(num_demo));
+
+  auto search_demo = std::make_unique<SearchBox>("搜索组件…");
+  search_demo->set_value("table");
+  search_demo->set_count(3);
+  search_demo->style().width = 240.0f;
+  search_demo->set_id("demo-search");
+  form_row1->add_child(std::move(search_demo));
+  input_form_card->add_child(std::move(form_row1));
+
+  // 表单行：同一标签宽 + 一个错误态。
+  auto row_a = std::make_unique<FormRow>("项目名");
+  row_a->set_label_width(80.0f);
+  row_a->set_required(true);
+  auto input_a = std::make_unique<Input>();
+  input_a->set_text("shuangtian");
+  input_a->set_id("demo-form-input-a");
+  row_a->add_child(std::move(input_a));
+  row_a->set_id("demo-form-row-a");
+  input_form_card->add_child(std::move(row_a));
+
+  auto row_b = std::make_unique<FormRow>("端口");
+  row_b->set_label_width(80.0f);
+  row_b->set_required(true);
+  row_b->set_error("端口已被占用，请换一个");
+  auto input_b = std::make_unique<Input>();
+  input_b->set_text("8080");
+  input_b->set_id("demo-form-input-b");
+  row_b->add_child(std::move(input_b));
+  row_b->set_id("demo-form-row-b");
+  input_form_card->add_child(std::move(row_b));
+
+  // 单选组：水平 + 一个禁用项（键盘可跳）。
+  auto radio_demo = std::make_unique<RadioGroup>();
+  radio_demo->set_options({RadioOption{"浅色", "light", true},
+                           RadioOption{"深色", "dark", true},
+                           RadioOption{"跟随系统", "auto", false}});
+  radio_demo->set_direction(RadioGroup::Direction::Horizontal);
+  radio_demo->set_value("dark");
+  radio_demo->set_id("demo-radio-group");
+  auto* radio_ptr = radio_demo.get();
+  input_form_card->add_child(std::move(radio_demo));
+
+  // 标签输入：多到需要折行。
+  auto tag_demo = std::make_unique<TagInput>();
+  tag_demo->set_tags({"C++", "Rust", "Qt", "自绘渲染", "无头测试", "跨平台"});
+  tag_demo->style().width = 420.0f;
+  tag_demo->set_id("demo-tag-input");
+  input_form_card->add_child(std::move(tag_demo));
+
+  auto form_state = std::make_unique<Text>("改单选 / 加标签 / 步进数值：状态会显示在这里");
+  form_state->set_id("form-state");
+  form_state->set_tone(Tone::Faint);
+  form_state->set_scale(Text::Scale::Xs);
+  auto* form_state_ptr = form_state.get();
+  input_form_card->add_child(std::move(form_state));
+  page->add_child(std::move(input_form_card));
+
+  // —— 结构与容器（补全包四：DividerLabel / Accordion / Toolbar / StatusBar）——
+  auto structure_card = make_card("card-structure", "结构与容器（分隔标题 / 折叠面板 / 工具条 / 状态栏）");
+  structure_card->add_child(make_caption(
+      "分隔标题：线居中于行盒、两侧留白相等；折叠面板：单选互斥 + 整行可点 + 展开动画；工具条：溢出时从右往左折叠、pinned 永不折；状态栏：左右分流、中间空白被压缩"));
+
+  // 分隔标题（三档对齐示意）。
+  auto divider_demo = std::make_unique<DividerLabel>("高级设置");
+  divider_demo->set_action("查看全部");
+  divider_demo->set_id("demo-divider-label");
+  structure_card->add_child(std::move(divider_demo));
+
+  // 折叠面板：单选模式 + 两项带内容。
+  auto accordion_demo = std::make_unique<Accordion>();
+  accordion_demo->set_mode(Accordion::Mode::Single);
+  auto panel1 = std::make_unique<Text>("面板一的内容：这里可以放任意 Element，高度会参与布局。");
+  panel1->set_tone(Tone::Muted);
+  accordion_demo->add_panel("面板一（默认展开）", std::move(panel1));
+  auto panel2 = std::make_unique<Text>("面板二的内容：单选模式下打开它会自动收起前一个。");
+  panel2->set_tone(Tone::Muted);
+  accordion_demo->add_panel("面板二", std::move(panel2));
+  accordion_demo->add_panel("面板三（空内容）");
+  accordion_demo->open(0);
+  accordion_demo->style().width = 420.0f;
+  accordion_demo->set_id("demo-accordion");
+  structure_card->add_child(std::move(accordion_demo));
+
+  // 工具条：足够多的按钮，窄宽下会折叠。
+  auto toolbar_demo = std::make_unique<Toolbar>();
+  const char* toolbar_labels[] = {"新建", "打开", "保存", "撤销", "重做", "查找", "替换"};
+  int toolbar_index = 0;
+  for (const char* label : toolbar_labels) {
+    auto button = std::make_unique<Button>(label, Button::Variant::Secondary, Button::Size::Small);
+    button->set_id(std::format("demo-toolbar-{}", toolbar_index++));
+    // 第一项固定：窄宽时也不该折。
+    toolbar_demo->add_item(std::move(button), /*pinned=*/toolbar_index == 1);
+  }
+  toolbar_demo->style().width = 380.0f;
+  toolbar_demo->set_id("demo-toolbar");
+  structure_card->add_child(std::move(toolbar_demo));
+
+  // 状态栏。
+  auto statusbar_demo = std::make_unique<StatusBar>();
+  StatusBar::Segment ready{};
+  ready.text = "就绪";
+  ready.icon = "success";
+  ready.tone = Tone::Success;
+  statusbar_demo->add_left(ready);
+  StatusBar::Segment problems{};
+  problems.text = "3 个问题";
+  problems.icon = "warning";
+  problems.tone = Tone::Warning;
+  statusbar_demo->add_left(problems);
+  StatusBar::Segment position{};
+  position.text = "行 12, 列 5";
+  position.id = "position";
+  position.clickable = true;
+  statusbar_demo->add_right(position);
+  StatusBar::Segment encoding{};
+  encoding.text = "UTF-8";
+  statusbar_demo->add_right(encoding);
+  statusbar_demo->style().width = 560.0f;
+  statusbar_demo->set_id("demo-status-bar");
+  auto* statusbar_ptr = statusbar_demo.get();
+  structure_card->add_child(std::move(statusbar_demo));
+
+  auto structure_state = std::make_unique<Text>("点折叠面板标题 / 工具条溢出按钮 / 状态栏「行 12」：状态会显示在这里");
+  structure_state->set_id("structure-state");
+  structure_state->set_tone(Tone::Faint);
+  structure_state->set_scale(Text::Scale::Xs);
+  auto* structure_state_ptr = structure_state.get();
+  structure_card->add_child(std::move(structure_state));
+  page->add_child(std::move(structure_card));
+
+  // —— 展示微件（补全包五：Sparkline / ProgressRing / Rating / Kbd / Link）——
+  auto widget_card = make_card("card-widgets", "展示微件（迷你趋势 / 环形进度 / 评分 / 键帽 / 链接）");
+  widget_card->add_child(make_caption(
+      "迷你图：纵轴按数据自适应 + 笔画内缩（峰谷不被削）；环形进度：弧从 12 点顺时针、不确定态转动；评分：半星用裁剪（不是画小星）、悬停只预览；键帽：平台修饰键名；链接：下划线贴基线"));
+
+  auto widget_row = make_row(20.0f, /*wrap=*/true);
+
+  auto spark_line = std::make_unique<Sparkline>(std::vector<double>{3.1, 3.4, 2.9, 3.8, 4.2, 3.6, 4.5, 4.1, 4.8});
+  spark_line->set_shape(Sparkline::Shape::Line);
+  spark_line->style().width = 110.0f;
+  spark_line->set_id("demo-spark-line");
+  widget_row->add_child(std::move(spark_line));
+
+  auto spark_area = std::make_unique<Sparkline>(std::vector<double>{2.0, 3.5, 3.0, 4.2, 3.8, 5.0, 4.4});
+  spark_area->set_shape(Sparkline::Shape::Area);
+  spark_area->set_tone(Tone::Success);
+  spark_area->style().width = 110.0f;
+  spark_area->set_id("demo-spark-area");
+  widget_row->add_child(std::move(spark_area));
+
+  auto spark_bar = std::make_unique<Sparkline>(std::vector<double>{4.0, 7.0, 3.0, 9.0, 5.0, 6.0, 8.0});
+  spark_bar->set_shape(Sparkline::Shape::Bar);
+  spark_bar->style().width = 110.0f;
+  spark_bar->set_id("demo-spark-bar");
+  widget_row->add_child(std::move(spark_bar));
+
+  auto ring_demo = std::make_unique<ProgressRing>(0.72f);
+  ring_demo->style().width = 44.0f;
+  ring_demo->style().height = 44.0f;
+  ring_demo->set_id("demo-ring-72");
+  widget_row->add_child(std::move(ring_demo));
+
+  auto ring_busy = std::make_unique<ProgressRing>();
+  ring_busy->set_indeterminate(true);
+  ring_busy->style().width = 32.0f;
+  ring_busy->style().height = 32.0f;
+  ring_busy->set_id("demo-ring-busy");
+  widget_row->add_child(std::move(ring_busy));
+  widget_card->add_child(std::move(widget_row));
+
+  // 评分（半星 + 显示数值）与键帽、链接一行。
+  auto widget_row2 = make_row(20.0f, /*wrap=*/true);
+  auto rating_demo = std::make_unique<Rating>(5);
+  rating_demo->set_allow_half(true);
+  rating_demo->set_show_value(true);
+  rating_demo->set_value(3.5f);
+  rating_demo->set_id("demo-rating-half");
+  auto* rating_ptr = rating_demo.get();
+  widget_row2->add_child(std::move(rating_demo));
+
+  auto rating_read = std::make_unique<Rating>(5);
+  rating_read->set_readonly(true);
+  rating_read->set_value(4.0f);
+  rating_read->set_show_value(true);
+  rating_read->set_id("demo-rating-readonly");
+  widget_row2->add_child(std::move(rating_read));
+
+  auto kbd_demo = std::make_unique<Kbd>();
+  kbd_demo->set_shortcut("Ctrl+Shift+S");
+  kbd_demo->set_separator(Kbd::Separator::Plus);
+  kbd_demo->set_id("demo-kbd");
+  widget_row2->add_child(std::move(kbd_demo));
+
+  auto link_demo = std::make_unique<Link>("查看文档");
+  link_demo->set_url("https://example.com/docs");
+  link_demo->set_external(true);
+  link_demo->set_id("demo-link");
+  widget_row2->add_child(std::move(link_demo));
+  widget_card->add_child(std::move(widget_row2));
+
+  auto widget_state = std::make_unique<Text>("点评分星 / 点链接：状态会显示在这里");
+  widget_state->set_id("widget-state");
+  widget_state->set_tone(Tone::Faint);
+  widget_state->set_scale(Text::Scale::Xs);
+  auto* widget_state_ptr = widget_state.get();
+  widget_card->add_child(std::move(widget_state));
+  page->add_child(std::move(widget_card));
+
+  rating_ptr->on_change = [hooks, widget_state_ptr](float value) {
+    widget_state_ptr->set_content(std::format("评分改成：{}", value));
+    hooks.set_status(std::format("评分：{}", value));
+  };
+
+  statusbar_ptr->on_segment_click = [hooks, structure_state_ptr](std::string_view id) {
+    structure_state_ptr->set_content(std::format("状态栏段被点了：{}", id));
+    hooks.set_status(std::format("状态栏：{}", id));
+  };
+
+  radio_ptr->on_change = [hooks, form_state_ptr](std::string_view value) {
+    form_state_ptr->set_content(std::format("单选组选到：{}", value));
+    hooks.set_status(std::format("单选：{}", value));
+  };
 
   // —— 浮层与反馈（Dialog / Toast / Tooltip；v0.1.5 补全：此前三个组件在画廊零出现） ——
   auto overlay_card = make_card("card-overlay", "浮层与反馈（对话框 / 轻提示 / 提示气泡）");

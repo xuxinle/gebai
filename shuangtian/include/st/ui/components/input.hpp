@@ -14,4 +14,14 @@
 #include "st/ui/components/input_box.hpp"
 #include "st/ui/components/text_area.hpp"
 
+// 输入与表单（2026-11-08 补全包三）
+#include "st/ui/components/number_input.hpp"
+#include "st/ui/components/search_box.hpp"
+#include "st/ui/components/form_row.hpp"
+#include "st/ui/components/radio_group.hpp"
+#include "st/ui/components/tag_input.hpp"
+// 展示微件（2026-11-08 补全包五）
+#include "st/ui/components/kbd.hpp"
+#include "st/ui/components/link.hpp"
+
 // 自注册锚点随各子头到达（`ST_UI_COMPONENT`）；本文件不再持有任何类型定义。

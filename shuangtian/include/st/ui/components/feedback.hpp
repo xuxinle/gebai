@@ -16,6 +16,13 @@
 #include "st/ui/components/badge.hpp"
 #include "st/ui/components/chip.hpp"
 #include "st/ui/components/avatar.hpp"
+#include "st/ui/components/avatar_group.hpp"
 #include "st/ui/components/tooltip.hpp"
+#include "st/ui/components/status_dot.hpp"
+
+// 反馈与状态（2026-11-08 补全包二）
+#include "st/ui/components/empty_state.hpp"
+#include "st/ui/components/banner.hpp"
+#include "st/ui/components/skeleton.hpp"
 
 // 自注册锚点随各子头到达（`ST_UI_COMPONENT`）；本文件不再持有任何类型定义。
