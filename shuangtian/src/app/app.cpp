@@ -36,6 +36,53 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+/// 启动卡自适应的**跨启动记忆**文件路径。
+///
+/// ## 为何要落盘（2026-11-08）
+///
+/// “首帧要算多久”只有算完才知道，而下次启动需要它——所以必然跨进程。
+/// 只存在成员里等于每次都是 0（永远拿不到历史）。
+///
+/// ## 为何放临时目录而不放应用数据目录
+///
+/// 这是个**纯启发值**（用来决定动画播多久），丢了最坏后果是下次按冷启动估计，
+/// 而应用数据目录里放它需要先有一整套目录约定。先用最小机制：
+/// `%TEMP%/st-splash-<app>.txt`（Linux/macOS 对应 `$TMPDIR`/`/tmp`）。
+[[nodiscard]] auto splash_memory_path(std::string_view app_name) -> std::string {
+  // 应用名进文件名：多个应用各记各的（裁云慢不代表 gallery 也慢）。
+  // 非法字符换成 '-'：应用名来自构造参数，不该让它把路径弄坏。
+  std::string safe(app_name);
+  for (char& ch : safe) {
+    const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                    (ch >= '0' && ch <= '9') || ch == '-' || ch == '_';
+    if (!ok) ch = '-';
+  }
+  if (safe.empty()) safe = "app";
+  std::string base = fs::temp_dir();
+  if (base.empty()) base = ".";   // 拿不到临时目录时的退路（宁可写在当前目录，也不要丢掉整个机制）
+  return fs::join(base, "st-splash-" + safe + ".txt");
+}
+
+/// 读上次记下的首帧耗时（毫秒；读不到/解析失败 → 0）。
+[[nodiscard]] auto read_splash_memory(std::string_view app_name) -> double {
+  const auto text = fs::read_text(splash_memory_path(app_name));
+  if (!text.has_value()) return 0.0;
+  const auto value = parse_f64(*text);
+  if (!value.has_value() || *value <= 0.0) return 0.0;
+  // 上界夹取：文件可能被手改/损坏，离谱值会让卡播到天荒地老。
+  return std::min(*value, 30000.0);
+}
+
+/// 写回本次的首帧耗时（**失败静默**：这是启发值，不是契约）。
+void write_splash_memory(std::string_view app_name, double ms) {
+  if (ms <= 0.0) return;
+  (void)fs::write_text(splash_memory_path(app_name), std::format("{:.1f}", ms));
+}
+
+}  // namespace
+
 auto resolve_text_lcd(std::string_view mode) -> bool {
   if (const auto parsed = parse_bool_word(mode); parsed.has_value()) return *parsed;
   if (const auto value = fs::read_env("ST_TEXT_LCD"); value.has_value() && !value->empty()) {
@@ -345,6 +392,39 @@ struct Application::Impl {
   /// 决定 `SplashState::transparent_outside`：分层 → 卡外真透明（只有卡悬浮）；
   /// 不开 → 填主题底色（不透明卡，退路）。
   bool splash_layered_{false};
+  /// **上一轮的首帧耗时**（毫秒；0 = 还没量到）。
+  ///
+  /// ## 为何要记它（2026-11-08，启动卡自适应）
+  ///
+  /// 启动卡该播多久，取决于“首帧要算多久”——而那个数**只有算完才知道**。
+  /// 所以它必然是一个**跨启动的记忆**：本次用它决定本次播多久，本次算完后写回。
+  ///
+  /// 为何不改用“首次启动就慢、后续快”那套静态假设：用户报的场景正是
+  /// “首次慢、之后快”，而卡住看不清动画的是首次——固定值一定会在其中一种下错。
+  ///
+  /// 存的是**首帧本身**（`first_frame` 里程碑），不含启动卡与建窗时间：
+  /// 那些与本决策无关（启动卡自己就是被决定的对象，不能把自己算进预期）。
+  double last_first_frame_ms{0.0};
+  /// **启动卡从显示到主界面就绪的真实时长**（毫秒；0 = 还没量到）。
+  ///
+  /// ## 为何是这一对时刻（2026-11-08，第三次修正口径）
+  ///
+  /// 自适应要回答的是“用户在卡上看多久”，那就必须量**用户真在等的那段**：
+  ///
+  /// | 候选口径 | 量到 | 为何不对 |
+  /// |---|---|---|
+  /// | `now - started_ns` | 883→1277ms 递增 | 把卡自己播的时间也算进去 → 正反馈恶化 |
+  /// | `render_frame()` 耗时 | **5ms** | 那是“画一帧”，不是“等多久”——差两个数量级 |
+  /// | **`show_early → show_when_ready`** | ~700~900ms | ✅ 就是用户看卡的那段 |
+  ///
+  /// 前两个都是我先选错的口径，实测才发现——所以这里把三个值都记下来，
+  /// 免得下次又拿错一个数。
+  std::int64_t splash_shown_ns{0};
+  /// **本轮启动卡动画自己占用的时长**（毫秒）。
+  ///
+  /// 用途：从“卡在屏时长”里扣掉它，剩下的才是“界面准备耗时”
+  ///（见 `show_when_ready` 之后那段注释：不扣就会正反馈累加）。
+  double splash_anim_ms{0.0};
   /// 启动卡是否真的会发生（判据集中在这一处，实现与日志/测试同源）。
   ///
   /// 条件（任一不成立就不画）：
@@ -1716,6 +1796,9 @@ auto Application::start() -> Status {
     }
   }
   impl_->backend->show_early();
+  // 记下“卡开始露在屏幕上”的时刻：启动卡自适应要量的正是“从这里到主界面就绪”。
+  // 详见 `splash_shown_ns` 处那张三种口径的对照表。
+  impl_->splash_shown_ns = time::now_ns();
   impl_->backend->pump_events();
   // ── 启动卡：**动画**（不是静态一帧）──
   //
@@ -1758,12 +1841,15 @@ auto Application::start() -> Status {
       platform::sleep_ms(16);
     }
   }
-  // 显式要求长动画时（`ST_SPLASH_MS`，演示/录屏用）才跑那个循环。
+  // 启动卡动画：**自适应**跑（不再要求环境变量）。
+  //
+  // 旧条件 `if (ST_SPLASH_MS 存在) run_splash_animation(...)` 的后果：
+  // 常态下动画只靠小窗阶段那几帧（~300ms）——用户报的“一闪而过”就是这个。
+  // 而真正该决定时长的是**首帧要算多久**（见 `run_splash_animation` 里的自适应段）。
+  // 它内部会自己算：启动快 → `min_ms=0` → 几乎立即返回（不多花时间）；
+  // 启动慢 → 陪到首帧完成（封顶 1.5s）。
   if (splash_active) {
-    if (const auto loop_ms = st::fs::read_env("ST_SPLASH_MS");
-        loop_ms.has_value() && !loop_ms->empty()) {
-      run_splash_animation(impl_->splash_backdrop_);
-    }
+    run_splash_animation(impl_->splash_backdrop_);
   }
   // ## 小窗档不在这里 render（2026-11-08 修，实测真因）
   //
@@ -1841,6 +1927,38 @@ auto Application::start() -> Status {
   // 右下/底部一大块黑**（实测 0.6s 后自愈）。放在首帧之后：用户看到的第一眼
   // 就是一个完整界面，没有中间态。
   impl_->backend->show_when_ready();
+  // ## 启动卡自适应：量“卡在屏上”的真实时长（2026-11-08）
+  //
+  // 口径：从 `show_early()`（卡开始露在屏上）到 `show_when_ready()`（完整界面就位）。
+  // 这是用户**真正在看卡**的那段时间，也正是下次启动时动画该覆盖的长度。
+  //
+  // 为何不用其它三个候选值：见 `splash_shown_ns` 处那张对照表
+  //（`now - started_ns` 会正反馈恶化；`render_frame()` 耗时只有 5ms，差两个数量级）。
+  if (impl_->splash_shown_ns > 0) {
+    // ## 为什么要**减掉动画自己占的时间**（2026-11-08，第四次修正）
+    //
+    // 直接量 `show_early → show_when_ready` 会得到正反馈累加：
+    // 实测 735 → 964 → 1175 → 1422ms，因为那段时间里**包含了本轮动画自己的播放**。
+    // 播得越久 → 量到越久 → 下回播更久 → 无限递增（直到封顶 1.5s）。
+    //
+    // 所以口径拆开：
+    //   “卡在屏时长” = 动画耗时 + **界面准备耗时**
+    // 而自适应该用的是后者——它是“不用动画也耍等的时间”，播多长都改变不了它。
+    const double on_screen_ms =
+        static_cast<double>(time::now_ns() - impl_->splash_shown_ns) / 1'000'000.0;
+    impl_->last_first_frame_ms = std::max(0.0, on_screen_ms - impl_->splash_anim_ms);
+    // **落盘给下次启动**（只存成员等于每次都是 0：每次启动都是新进程）。
+    write_splash_memory(name_, impl_->last_first_frame_ms);
+    if (const auto flag = st::fs::read_env("ST_SPLASH_DEBUG");
+        flag.has_value() && !flag->empty() && *flag != "0") {
+      ST_LOG_INFO("启动卡自适应：界面准备 {:.0f}ms（卡在屏 {:.0f}ms，动画占 {:.0f}ms）"
+                  " → 下次最短播 {:.0f}ms",
+                  impl_->last_first_frame_ms, on_screen_ms, impl_->splash_anim_ms,
+                  impl_->last_first_frame_ms >= 350.0
+                      ? std::min(impl_->last_first_frame_ms, 1500.0)
+                      : 0.0);
+    }
+  }
   // 显示之后是否**再画一帧**：
   //
   // 必要性（小窗档**没有**）：`ShowWindow` 之前做的 present 发生在窗口被合成器
@@ -1881,16 +1999,56 @@ void Application::run_splash_animation(shell::BackdropSupport backdrop) {
   // 后台 GPU 预热（实测 390ms）也同样被灋在启动卡之后才开始（主线程要画卡）。
   // 结果不是“填住空白”，而是“额外多等 341ms”。那种“优化”不该默认开。
   //
-  // ## `ST_SPLASH_MS` 的语义：**最短**显示时长（不封顶）
+  // ## 默认行为：**自适应**（2026-11-08）
   //
-  // 演示/录屏时想“看清楚动画”，就要让卡至少活这么久；而启动本身慢时，
-  // 它本来就会继续播到首帧完成（不因为超时就强行切走——那才是用户报的
-  // “动画一闪而过”）。所以它叫**最短**时长，不是上限。
+  // 用户报“动画一闪而过、看不清”，而根源不是动画太快，是**启动本来就快**：
+  // 实测 gallery 的启动卡阶段只有 ~300ms（启动期小窗 + 首帧），
+  // 一张 1.15s 周期的脉冲动画在那里只能完成 1/4 个周期。
+  //
+  // 而“把动画拉长”与“不要把启动拖慢”是一对矛盾，所以按**真实耗时**分档：
+  //
+  // | 启动耗时 | 行为 | 用户感受 |
+  // |---|---|---|
+  // | < 350ms（常态） | 只播小窗阶段那几帧 | 一闪而过——**这是对的**，本来就快 |
+  // | 350ms ~ 1.5s | 播到首帧完成（封顶 1.5s） | 能看清环在扩散 |
+  // | > 1.5s（冷缓存/换机器） | 封顶 1.5s 后放行 | 不会让人干等 |
+  //
+  // ## 为何上限是 1.5s
+  //
+  // 一个脉冲周期是 1.15s；能看到**一个完整周期**才能读出“它在循环”而不是
+  // “它在加载”。超过 1.5s 后多播的部分不增加信息，只是拖时间。
+  //
+  // ## 环境变量仍可接管
+  //
+  // `ST_SPLASH_MS=N` = **至少**播 N 毫秒（演示/录屏用），覆盖自适应。
   double min_ms = 0.0;
+  bool forced_min = false;
   if (const auto override_ms = st::fs::read_env("ST_SPLASH_MS");
       override_ms.has_value() && !override_ms->empty()) {
     if (const auto parsed = parse_f64(*override_ms); parsed.has_value() && *parsed > 0.0) {
       min_ms = *parsed;
+      forced_min = true;
+    }
+  }
+  if (!forced_min) {
+    // 自适应：拿**上次启动**的首帧耗时当预期（跨进程记忆，见 `read_splash_memory`）。
+    //
+    // ⚠ 拿不到历史（首次启动/临时目录不可写）时用 500ms：
+    // 宁可略长一点让人看清动画，也不要按“很快”的假设一闪而过——
+    // 而首次启动本来就慢，500ms 不会白等。
+    constexpr double kColdStartGuessMs = 500.0;
+    constexpr double kMaxAdaptiveMs = 1500.0;
+    const double observed =
+        impl_->last_first_frame_ms > 0.0 ? impl_->last_first_frame_ms
+                                         : read_splash_memory(name_);
+    const double estimate = observed > 0.0 ? observed : kColdStartGuessMs;
+    // 只在“确实比较慢”时才延长：快启动不该人为拖慢。
+    constexpr double kSlowThresholdMs = 350.0;
+    min_ms = estimate >= kSlowThresholdMs ? std::min(estimate, kMaxAdaptiveMs) : 0.0;
+    if (const auto flag = st::fs::read_env("ST_SPLASH_DEBUG");
+        flag.has_value() && !flag->empty() && *flag != "0") {
+      ST_LOG_INFO("启动卡自适应：预期首帧 {:.0f}ms（{}）→ 最短播 {:.0f}ms", estimate,
+                  observed > 0.0 ? "历史实测" : "冷启动估计", min_ms);
     }
   }
   if (min_ms <= 0.0) return;
@@ -1962,8 +2120,10 @@ void Application::run_splash_animation(shell::BackdropSupport backdrop) {
     if (remaining > 0.5) platform::sleep_ms(remaining);
   }
   perf::startup_mark("splash_frames");
-  ST_LOG_INFO("启动卡：{} 帧 · {:.0f}ms · 磨砂 {}", painted,
-              static_cast<double>(time::now_ms()) - started_ms,
+  // 记下本轮动画自己占的时长：`show_when_ready` 之后要把它从“卡在屏时长”里扣掉，
+  // 否则自适应会正反馈累加（实测 735→964→1175→1422ms）。
+  impl_->splash_anim_ms = static_cast<double>(time::now_ms()) - started_ms;
+  ST_LOG_INFO("启动卡：{} 帧 · {:.0f}ms · 磨砂 {}", painted, impl_->splash_anim_ms,
               state.backdrop_blur ? "开" : "关");
 }
 
