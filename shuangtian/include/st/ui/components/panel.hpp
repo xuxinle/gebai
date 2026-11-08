@@ -19,7 +19,7 @@
 /// 于是 `dsl::make_element("Panel")` 在没有 include 本头的翻译单元里查不到——
 /// 那正是按需导入的语义。
 
-#include "st/ui/component_registry.hpp"
+#include "st/ui/component_id.hpp"
 #include "st/ui/element.hpp"
 
 ST_UI_COMPONENT(::st::ui::Panel, "Panel")

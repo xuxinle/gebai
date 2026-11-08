@@ -7,7 +7,7 @@
 /// 一个头一个组件 → 依赖关系写在组件自己身上 → include 谁就只有谁进产物。
 /// `basic.hpp` 仍保留**聚合**（只 include 各子头），既有引用不必一次改完。
 
-#include "st/ui/component_registry.hpp"
+#include "st/ui/component_id.hpp"
 #include "st/ui/element.hpp"
 
 namespace st::ui {

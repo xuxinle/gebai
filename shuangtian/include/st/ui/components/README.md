@@ -86,10 +86,45 @@ terminal_present=0    ← Terminal 查不到
 
 ---
 
-## 三、加一个组件要做什么
+## 三、include 关系怎么摆（这一节是「一组件一头」真正难的部分）
 
-1. **新建头** `st/ui/components/<名字>.hpp`：只 include 它自己需要的东西
-   （别 include `all.hpp`，也别 include 别的组件头，除非真有依赖）；
+光把文件切开不等于依赖就干净了：拆完一问发现过 4 处**假依赖**（include 了但\.hpp\n里根本不用），还有 5 处是「只用指针」——本来前向声明就够，却把对方的\.hpp\n整个拉进了每一个用它的翻译单元。
+
+### 规则
+
+头里用到对方的方式，决定了能不能去掉 include：
+
+| 头里的用法 | 需要什么 | 能不能去 include |
+|---|---|---|
+| 成员对象、值传参/返回、`std::vector<T>` 成员 | **完整定义** | 不能 |
+| 继承（`class Heading : public Text`） | **完整定义** | 不能 |
+| 嵌套类型（`CodeEditor::LineDecoration`） | **完整定义** | 不能 |
+| 常量表达式里调静态成员（`Icon::ink_size`） | **完整定义** | 不能 |
+| 仅 `T*` 成员 / 返回 `T*` / 形参 `T&` | **前向声明** | **能，而且应该** |
+
+去 include 后，那个 ".cpp" 必须自己 include 它（它要构造/解引用）——这是该付的代价，
+而且付在正确的地方：只有真正实现它的人扛这份依赖。
+
+### 两个头：身份 vs 注册表
+
+组件头只 include **`st/ui/component_id.hpp`**（只依赖 `<memory>`，装着
+`ST_UI_COMPONENT` 宏与两个模板声明）；
+**`st/ui/component_registry.hpp`** 是"真正登记/查表"的地方才要的
+（`add` / `create` / `names` / `import_components`），它要 `<functional>`、
+`<string>`、`<vector>` 等。
+
+> 实测记一笔：只 include `button.hpp` 展开约 7.6 万行，其中 `element.hpp` 占绝对主体，
+> `component_registry.hpp` 那几百行**不是瓶颈**。所以拆两个头**不是为了省编译时间**，
+> 而是为了把依赖关系说准：`<functional>` 出现在 60 个组件头里，仅仅因为有人把
+> 宏和注册表搞混了。
+
+---
+
+## 四、加一个组件要做什么
+
+1. **新建头** `st/ui/components/<名字>.hpp`：只 include 它**自己需要**的东西
+   （别 include `all.hpp`；别的组件头只在真有依赖时 include，且先对照上表判断
+   是不是前向声明就够）；
 2. **在头末尾加一行**：
 
    ```cpp
@@ -125,7 +160,7 @@ terminal_present=0    ← Terminal 查不到
 
 ---
 
-## 四、目录里都有什么
+## 五、目录里都有什么
 
 ### 聚合头（开发期方便，交付前建议改回按需）
 
@@ -155,7 +190,7 @@ terminal_present=0    ← Terminal 查不到
 
 ---
 
-## 五、已知的粒度限制
+## 六、已知的粒度限制
 
 **按需的粒度是 `.cpp` 文件，不是组件。** 一个 `.cpp` 实现了多个组件时，
 导入其中任何一个都会把整个文件（以及里面其余组件）带进产物。

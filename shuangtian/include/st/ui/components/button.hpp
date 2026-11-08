@@ -10,7 +10,9 @@
 #include <functional>
 #include <string>
 #include <string_view>
-#include "st/ui/component_registry.hpp"
+#include "st/ui/component_id.hpp"
+// `Icon::ink_size`（下面 `icon_ink_size()` 的常量表达式）需要完整定义，
+// 不能前向声明——这是本头对 `Icon` 的**真实依赖**。
 #include "st/ui/components/icon_view.hpp"
 #include "st/ui/element.hpp"
 

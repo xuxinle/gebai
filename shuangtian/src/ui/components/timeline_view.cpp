@@ -1,4 +1,5 @@
 #include "st/ui/components/timeline_view.hpp"
+#include "st/ui/component_registry.hpp"  // 登记与导入需要注册表接口
 
 #include <algorithm>
 #include <cmath>

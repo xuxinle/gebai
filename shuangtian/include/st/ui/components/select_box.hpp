@@ -17,7 +17,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "st/ui/component_registry.hpp"
+#include "st/ui/component_id.hpp"
 #include "st/ui/components/select_panel.hpp"
 #include "st/ui/element.hpp"
 

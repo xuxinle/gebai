@@ -260,7 +260,7 @@ class SlowContent final : public Element {
 };
 
 }  // namespace st::ui
-// ── 自注册声明（`st/ui/component_registry.hpp`）───────────────────────
+// ── 自注册声明（`st/ui/component_id.hpp`）───────────────────────
 //
 // 它是**壳组件**（调度 + 占位；内容由 `setup` 后置）。无参构造给出的是
 // 空壳，那正是 `make_element` 要的默认形态；真要排版由调用方 setup。
@@ -268,6 +268,6 @@ class SlowContent final : public Element {
 // gallery 展示集里它属**豁免**（`gallery_exhibits.hpp`）：它没有独立视觉形态，
 // 单独摆一张卡看不出名堂。但注册表里必须有它——对账机制的前提是
 // "豁免项也真实存在"，否则豁免清单会烂成缺卡的坟场。
-#include "st/ui/component_registry.hpp"
+#include "st/ui/component_id.hpp"
 
 ST_UI_COMPONENT(::st::ui::SlowContent, "SlowContent")

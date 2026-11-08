@@ -39,11 +39,14 @@
 #include <vector>
 
 #include "st/math/geometry.hpp"
-#include "st/ui/components/title_bar.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/window_control.hpp"
 
 namespace st::ui {
+
+// 前向声明而非 include：头里只用 `TitleBar*`。
+// 构造标题栏、读 `TitleBar::bar_height()` 都在 `window_frame.cpp`。
+class TitleBar;
 
 class WindowFrame : public Element {
  public:
@@ -136,12 +139,12 @@ class WindowFrame : public Element {
 
 }  // namespace st::ui
 
-// ── 自注册声明（`st/ui/component_registry.hpp`）───────────────────────
+// ── 自注册声明（`st/ui/component_id.hpp`）───────────────────────
 // 只声明导入函数；真正的登记在实现文件里（静态初始化在静态库中不可靠，
-// 见 component_registry.hpp 文件头的实测记录）。
+// 见 component_id.hpp 文件头的实测记录）。
 //
 // ⚠ include 本头 + 调用 `st::ui::import_components<类名>()` 才真正可用；
 //   `st/ui/components/all.hpp` 一次做完全部导入。
-#include "st/ui/component_registry.hpp"
+#include "st/ui/component_id.hpp"
 
 ST_UI_COMPONENT(::st::ui::WindowFrame, "WindowFrame")
