@@ -25,9 +25,11 @@
 #include "pages.hpp"
 #include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
+#include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/string.hpp"   // `parse_f64` / `parse_i64`（参数取值校验）
 #include "st/core/time.hpp"
 #include "st/core/log.hpp"
 #include "st/perf/report.hpp"
@@ -162,136 +164,101 @@ using st::ui::TextAlign;
 using st::ui::Tone;
 using st::ui::UiRoot;
 
+/// 本应用特有参数（框架通用开关全部在 `st::app::CommonOptions` 里）。
+///
+/// 为何只留这三项：`--headless`/`--renderer`/`--theme` 等 24 个通用开关，本文件
+/// 曾自己再接一遍，两个方向都出过事——框架新增的开关到这里被静默吐掉（实测：
+/// 三档渲染出来的图几乎一样，差点被当成"三档观感接近"的结论），而这里的开关到
+/// 别的应用又不存在。**参数的归属与"谁在用"一致**：通用的归框架，特有的归这张表。
 struct Options {
-  bool headless{false};
-  float scale{0.0f};
-  std::string theme{"light"};
-  /// 自定义主题 JSON（稀疏覆盖；`--theme-file` 或 `ST_THEME_FILE`）。
-  std::string theme_file{};
-  /// 渲染器：空串（未指定——无头后端解析为 software，窗口后端解析为 auto）/ auto（按实测帧耗时选更快）/ gpu / software。
-  /// 不能默认 `"auto"`：那会让无头启动也真建 GPU 设备（+53MB/55 线程），
-  /// 与 AppOptions::renderer 的空串三态约定冲突（见 app.hpp 的注释）。
-  std::string renderer{};
-  /// 文字抗锯齿：auto（有窗口 → LCD 亚像素；无头 → 灰度）/ on / off。
-  std::string text_lcd{"auto"};
-  /// 字形网格拟合：auto/off/light/normal（见 AppOptions::text_fit）。
-  std::string text_fit{"auto"};
-  /// 覆盖率 gamma 预校正：auto/off/数值（见 AppOptions::text_gamma）。
-  std::string text_gamma{"auto"};
-  std::string text_gamma_small{};
-  std::string text_digit_gamma{"auto"};
-  std::string text_letter_gamma{"auto"};
-  std::string text_han_gamma{"auto"};
-  std::string text_fit_max_size{"auto"};
-/// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
-std::string ui_font_scale{"auto"};
-  std::string backend{};
-  int width{1280};
-  int height{800};
-  std::uint16_t control_port{0};
-  std::string control_file{};
-  std::string shots{};
-  std::uint32_t frames{0};
+  /// 框架的通用解析结果（`--frames`/`--ms`/`--perf-*`/`--shots`…）。
+  ///
+  /// 为何把它整个带在 `Options` 里而不抄成一个个字段：`--frames`/`--ms` 这类
+  /// “跑多久后退出”的语义由框架定义（`max_frames` / `max_ms`），拆成同名字段
+  /// 就成了第二份口径。应用只读它，不重新解释。
+  st::app::CommonOptions common{};
   /// 渲染基准帧数（`--bench N`）：每帧**强制全量重绘**并报告分阶段分位耗时。
   std::uint32_t bench{0};
-  /// 帧剖析采样帧数（`--perf-frames N`）。
-  std::uint32_t perf_report_frames{0};
-  /// 剖析报告落盘路径（`--perf-report PATH`；空 = 打到 stdout）。
-  std::string perf_report{};
-  int max_ms{0};
   /// 请求系统标题栏/边框（默认关：窗框一律自绘，见 `CONVENTIONS.md` §10 第 7 条）。
   bool decorations{false};
+  /// 覆盖率 gamma 的**小字号档**：通用表里没有它——只对"正文 + 小字"的界面有意义。
+  std::string text_gamma_small{"auto"};
 };
 
-[[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
-  Options options;
-  // 数值参数解析：**不抛异常**（`std::stoi/stod` 对非法值抛 `invalid_argument`，
-  // 未捕获即 `terminate` 崩溃——实测 `--scale abc` 直接崩；与框架公共解析器
-  // `parse_int/parse_float`（返回 `Result` 错误）同语义：报错 + exit 2）。
-  const auto int_or_die = [](const std::string& text, std::string_view name,
-                             int fallback) -> int {
-    try {
-      return std::stoi(text);
-    } catch (const std::exception&) {
-      st::log::err("gallery: {} 的取值不是整数: {}\n", name, text);
-      std::exit(2);
-    }
-    (void)fallback;
+/// 本应用特有参数表（框架通用开关**不在这里**，别重复声明）。
+[[nodiscard]] auto gallery_options() -> std::vector<st::app::AppOption> {
+  return {
+      {.name = "--bench",
+       .value_count = 1,
+       .help = "渲染基准：跑 N 帧强制定量重绘并报告分阶段耗时"},
+      {.name = "--decorations",
+       .value_count = 0,
+       .help = "使用系统标题栏/边框（默认自绘）"},
+      {.name = "--dpi",
+       .value_count = 1,
+       .help = "--scale 的旧名（等价）"},
+      {.name = "--text-gamma-small",
+       .value_count = 1,
+       .help = "小字号档的覆盖率 gamma（auto / off / 数值）"},
   };
-  const auto float_or_die = [](const std::string& text, std::string_view name,
-                               float fallback) -> float {
-    try {
-      const double parsed = std::stod(text);
-      if (parsed <= 0.0) {
-        st::log::err("gallery: {} 的取值不是正数: {}\n", name, text);
-        std::exit(2);
-      }
-      return static_cast<float>(parsed);
-    } catch (const std::exception&) {
-      st::log::err("gallery: {} 的取值不是正数: {}\n", name, text);
-      std::exit(2);
-    }
-    (void)fallback;
-  };
-  for (int index = 1; index < argc; ++index) {
-    const std::string_view raw = argv[index];
-    const auto next = [&](std::string fallback) -> std::string {
-      if (index + 1 < argc) return argv[++index];
-      return fallback;
-    };
-    if (raw == "--headless") options.headless = true;
-    // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
-    // 漏接的开关会被静默忽略——而"我明明指定了 wayland"变成谜案，正是本工程反复
-    // 记录的那类缺陷（静默失效字段）。**Linux 上验证 x11/wayland 后端全靠它**：
-    // 不接的话会走自动探测（有 DISPLAY 就选 x11），窗口后端根本没被换过。
-    else if (raw == "--backend") options.backend = next("");
-    else if (raw == "--width") options.width = int_or_die(next("1280"), "--width", 1280);
-    else if (raw == "--height") options.height = int_or_die(next("800"), "--height", 800);
-    else if (raw == "--renderer") options.renderer = next("auto");
-    else if (raw == "--text-lcd") options.text_lcd = next("auto");
-    else if (raw == "--text-fit") options.text_fit = next("auto");
-    // `--text-gamma` 必须接上：应用层有**自己的**参数解析（不经过 `st::app::parse_cli`），
-    // 漏接的字段会被静默忽略——日志里打印的还是默认值，而“我明明传了”无从察觉。
-    // 这正是本工程反复记录的那类缺陷（静默失效字段），所以每加一个文字开关都要两处一起加。
-    else if (raw == "--text-gamma") options.text_gamma = next("auto");
-    else if (raw == "--text-gamma-small") options.text_gamma_small = next("auto");
-    // 逐类覆盖率 gamma 与拟合字号上限：同属"加一个文字开关就要两处一起加"的那类
-    // （应用自带解析器，`st::app::parse_cli` 到不了这里）。
-    else if (raw == "--text-digit-gamma") options.text_digit_gamma = next("auto");
-    else if (raw == "--text-letter-gamma") options.text_letter_gamma = next("auto");
-    else if (raw == "--text-han-gamma") options.text_han_gamma = next("auto");
-    else if (raw == "--text-fit-max-size") options.text_fit_max_size = next("auto");
-    else if (raw == "--ui-font-scale") options.ui_font_scale = next("auto");
-    else if (raw == "--scale") options.scale = float_or_die(next("1"), "--scale", 1.0f);
-    else if (raw == "--dpi") options.scale = float_or_die(next("1"), "--dpi", 1.0f);
-    else if (raw == "--theme") options.theme = next("light");
-    else if (raw == "--decorations") options.decorations = true;
-    else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(int_or_die(next("0"), "--control-port", 0));
-    else if (raw == "--control-file") options.control_file = next("");
-    else if (raw == "--shots") options.shots = next("");
-    else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(int_or_die(next("0"), "--frames", 0));
-    else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(int_or_die(next("0"), "--bench", 0));
-    else if (raw == "--perf-frames") {
-      options.perf_report_frames =
-          static_cast<std::uint32_t>(int_or_die(next("0"), "--perf-frames", 0));
-      // 显式要采样就必须真的开探针（用户已经说“我要数据”）。
-      st::perf::set_enabled(true);
-    } else if (raw == "--perf-report") {
-      options.perf_report = next("");
-    }
-    else if (raw == "--ms") options.max_ms = int_or_die(next("0"), "--ms", 0);
-    else if (raw == "--theme-file") options.theme_file = next("");
-    else if (raw == "--help" || raw == "-h") {
-      st::log::out("用法: gallery [--headless] [--backend auto|x11|wayland|win32|headless] [--scale 2.0]\n"
-                "               [--width N] [--height N] [--theme dark] [--theme-file PATH] [--control-port 0]\n"
-                "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n"
-        "               [--perf-frames N] [--perf-report PATH]\n"
-                "               [--renderer auto|gpu|software] [--text-lcd auto|on|off] [--text-fit auto|off|light|normal]\n"
-                "               [--text-gamma auto|off|<数值>] [--ui-font-scale auto|<数值>]\n");
-      std::exit(0);
-    }
+}
+
+/// 解析命令行 → `(应用特有选项, 可直接交给 Application 的 AppOptions)`。
+///
+/// 出错时**不 `exit`**：返回 `Result` 让入口统一处理。上一版这里用的是
+/// `int_or_die`，实测 `--scale abc` 直接 `std::exit(2)`——把参数解析写成了
+/// "会杀进程"的形状，测试与嵌入场景都没法调用。
+///
+/// `--dpi` 是 `--scale` 的旧名：两个名字落两个地方就必然有"谁覆盖谁"的歧义，
+/// 所以在拼 `AppOptions` 之前先把别名折叠到同一个字段。
+[[nodiscard]] auto parse_options(int argc, char** argv)
+    -> st::Result<std::pair<Options, st::app::AppOptions>> {
+  st::app::CommonOptions common;
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(argc, argv, gallery_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("gallery", gallery_options()));
+    std::exit(0);
   }
-  return options;
+
+  // 框架已按白名单/数值规则校验过 `--scale`；这里只需处理别名。
+  if (const std::string dpi = values.get("--dpi"); !dpi.empty()) {
+    auto number = st::parse_f64(dpi);
+    if (!number.has_value() || *number <= 0.0) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("--dpi 的取值不是正数: {}", dpi));
+    }
+    common.app.scale = static_cast<float>(*number);
+  }
+
+  Options options;
+  options.common = common;
+  options.decorations = values.has("--decorations");
+  options.text_gamma_small = values.get("--text-gamma-small", "auto");
+  if (const std::string bench = values.get("--bench"); !bench.empty()) {
+    auto number = st::parse_i64(bench);
+    if (!number.has_value() || *number < 0) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("--bench 的取值不是非负整数: {}", bench));
+    }
+    options.bench = static_cast<std::uint32_t>(*number);
+  }
+
+  // 框架的解析结果**原样**成为启动参数：不再往下一层抄一遍。
+  st::app::AppOptions app = common.app;
+  app.title = "霜天 · 组件画廊";
+  app.text_gamma_small = options.text_gamma_small;
+  app.backend = !common.app.backend.empty()
+                    ? common.app.backend
+                    : (common.app.headless ? std::string("headless") : std::string{});
+  // `--theme` 既接受明暗两档，也接受**内置主题名**（`cyberpunk`/`ink`/`matrix`…）。
+  // 未知名字不静默回退——那会让"我选的主题没生效"变成谜——交由
+  // `compose_theme_with` 报错（`theme_name` 随参数一起传下去）。
+  app.theme = common.app.theme_name == "dark"    ? st::ui::ThemeMode::Dark
+              : common.app.theme_name == "light" ? st::ui::ThemeMode::Light
+                                                 : st::ui::ThemeMode::Dark;
+  return std::make_pair(std::move(options), std::move(app));
 }
 
 /// 导航项：图标 + 文字，左对齐（选中态由切页逻辑切 variant）。
@@ -345,25 +312,25 @@ void emit_perf_report(st::app::Application& app, const Options& options) {
   // 启动分解与帧剖析**独立**：前者不需要 `--perf-frames`（它答的是“首帧那 200ms 花在哪”），
   // 而 gallery 用自己的主循环（不走 `Application::run` 的收尾），所以在这里主动打一次。
   st::perf::log_startup_summary();
-  if (options.perf_report_frames == 0) return;
+  if (options.common.app.profile_frames == 0) return;
   const auto report = app.perf_report();
   if (!report.has_value()) {
     st::eprint("未生成性能报告：剖析未开启（需要 --perf-frames N）\n");
     return;
   }
   const std::string json = st::perf::to_json(*report);
-  if (options.perf_report.empty()) {
+  if (options.common.perf_report.empty()) {
     st::print("{}\n", json);
     return;
   }
-  if (const auto parent = st::fs::parent(options.perf_report); !parent.empty()) {
+  if (const auto parent = st::fs::parent(options.common.perf_report); !parent.empty()) {
     (void)st::fs::create_directories(parent);
   }
-  if (auto written = st::fs::write_text(options.perf_report, json); !written) {
-    st::eprint("性能报告写入失败（{}）: {}\n", options.perf_report, written.error().to_string());
+  if (auto written = st::fs::write_text(options.common.perf_report, json); !written) {
+    st::eprint("性能报告写入失败（{}）: {}\n", options.common.perf_report, written.error().to_string());
     return;
   }
-  st::print("性能报告: {}\n", options.perf_report);
+  st::print("性能报告: {}\n", options.common.perf_report);
 }
 
 [[nodiscard]] auto run_render_bench(st::app::Application& app, std::uint32_t frames) -> int {
@@ -453,44 +420,14 @@ void emit_perf_report(st::app::Application& app, const Options& options) {
 }
 
 auto run_app(int argc, char** argv) -> int {
-  const Options options = parse_options(argc, argv);
-
-  st::app::AppOptions app_options;
-  app_options.width = options.width;
-  app_options.height = options.height;
-  app_options.scale = options.scale;
-  // 帧剖析：把帧数传进应用（应用据此创建剖析器）；路径留在这里用（退出时落盘）。
-  app_options.profile_frames = options.perf_report_frames;
-  app_options.title = "霜天 · 组件画廊";
-  app_options.headless = options.headless;
-  app_options.backend = !options.backend.empty() ? options.backend
-                        : (options.headless ? std::string("headless") : std::string{});
-  // 渲染器交给应用选：`auto` 会**实测**两条路径再定（见 shell/backend.cpp 的 create_surface）
-  app_options.renderer = options.renderer;
-  app_options.text_lcd = options.text_lcd;
-      app_options.text_fit = options.text_fit;
-    app_options.text_gamma = options.text_gamma;
-  app_options.text_gamma_small = options.text_gamma_small;
-  app_options.text_digit_gamma = options.text_digit_gamma;
-  app_options.text_letter_gamma = options.text_letter_gamma;
-  app_options.text_han_gamma = options.text_han_gamma;
-  app_options.text_fit_max_size = options.text_fit_max_size;
-  app_options.ui_font_scale = options.ui_font_scale;
-  app_options.control_port = options.control_port;
-  app_options.control_file = options.control_file;
-  app_options.screenshot_dir = options.shots;
-  app_options.theme_file = options.theme_file;
-  // `--theme` 既接受明暗两档（`light`/`dark`），也接受**内置主题名**
-  // （`cyberpunk` / `ink` / `matrix` …，见 `st/ui/builtin_themes.hpp`）。
-  // 默认两档本身就是亚克力质感，所以没有单独的 `acrylic` 主题。
-  //
-  // 为何不拆成两个参数：对使用者来说“选主题”就是一件事；
-  // 内部区分“明暗基准”与“调色板”是实现细节。未知名字不静默回退——
-  // 那会让“我选的 vit 主题没生效”变成一个谜——交由 `compose_theme_with` 报错。
-  app_options.theme_name = options.theme;
-  app_options.theme = options.theme == "dark"   ? st::ui::ThemeMode::Dark
-                      : options.theme == "light" ? st::ui::ThemeMode::Light
-                                                 : st::ui::ThemeMode::Dark;
+  auto parsed = parse_options(argc, argv);
+  if (!parsed) {
+    st::log::err("gallery: {}\n", parsed.error().to_string());
+    return 2;
+  }
+  const Options options = parsed->first;
+  // 框架的解析结果**直接**就是启动参数——这里不再逐个字段抄一遍。
+  st::app::AppOptions app_options = std::move(parsed->second);
 
   // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
   st::app::icon::attach_png(app_options.window_icon_png,
@@ -852,7 +789,7 @@ auto run_app(int argc, char** argv) -> int {
     // 的前置动作，取完报告由外部发 `shutdown`（与 `--frames` 那条退路不同）。
     // 若没人来取，进程会一直空转——所以只在开了剖析时才留着
     // （`--bench` 单独用是命令行看数字的老用法，那时应当跑完就退）。
-    if (options.perf_report_frames > 0) {
+    if (options.common.app.profile_frames > 0) {
       while (!app.quit_requested()) {
         app.tick();
         app.pace_loop(st::time::now_ms());
@@ -876,8 +813,9 @@ auto run_app(int argc, char** argv) -> int {
     if (rebuilt > 0) app.request_repaint();
     app.tick();
     ++frames;
-    if (options.frames > 0 && frames >= options.frames) break;
-    if (options.max_ms > 0 && st::time::now_ms() - started_ms >= options.max_ms) break;
+    if (options.common.max_frames > 0 && frames >= options.common.max_frames) break;
+    if (options.common.max_ms > 0 &&
+        st::time::now_ms() - started_ms >= options.common.max_ms) break;
     // 节拍交给框架：有活 → 帧预算；空闲 → 4ms（控制通道响应节拍）。
     // 旧实现固定 `sleep_for(16ms)`：命令延迟被拉到 16~31ms（实测 ping p50=31ms）。
     app.pace_loop(frame_start_ms);

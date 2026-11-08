@@ -46,6 +46,8 @@
 #include "views.hpp"
 #include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
+#include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
+#include "st/core/string.hpp"   // parse_i64 / parse_f64（参数取值校验）
 #include "st/codec/png.hpp"
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
@@ -62,6 +64,10 @@
 #include "st/ui/dsl.hpp"
 
 namespace {
+
+using st::app::flag;
+using st::app::takes_value;
+using st::app::takes_values;
 
 /// 三维图层占画面的**面积比**（0~1，各场景取最大）。
 ///
@@ -119,12 +125,14 @@ using st::ui::Button;
 using st::ui::ScrollView;
 namespace dsl = st::ui::dsl;
 struct Options {
-  bool headless{false};
-  std::string backend{};
-  std::string theme{"light"};
-  std::uint16_t control_port{0};
-  std::string control_file{};
-  std::string shots{};
+  /// 框架的通用解析结果（`--headless`/`--theme`/`--backend`/`--control-*`/`--shots`…）。
+  ///
+  /// 为何整包带进来：这些开关的语义由框架定义，抄一遍就多一份口径。本文件原来的
+  /// 自写循环里，`--control-port` 用 `std::clamp(..., 0, 65535)` 就地夹取——
+  /// 而框架侧的口径是**越界就报错**（静默夹取会让"我指定了 8080 却监听在别的端口"
+  /// 变成谜案）。两处口径不同的开关，必有一处是错的。
+  st::app::CommonOptions common{};
+
   /// `--script <路径>`：启动即装载导演脚本（AI/CI 的入口）。
   std::string script{};
   /// 工程包（`.cypkg`）的建包/拍平/规范化（三个一次性动作，不启界面）。
@@ -144,16 +152,10 @@ struct Options {
   std::string usd_source{};
   std::string usd_target{};
   /// `--ai-control`：启动即进入 AI 控制态（人只能查看）。
-  ///
-  /// 为何要这个开关而不是“让 AI 自己发 edit_lock”：演示/人机同屏时，
-  /// **启动那一刻就不该给人工编辑留窗口**——先把界面摆对，再开始放片子。
   bool ai_control{false};
   /// `--strict`：脚本里有 **error 级** schema 诊断就拒绝应用（不出片、非 0 退出）。
-  ///
-  /// **默认开**：字段名拼错 / 类型不符一律失败。实测依据——三个官方样例与
-  /// `styles/` 下全部模板脚本在严格模式下**全部通过**，所以它不会误伤存量脚本；
-  /// 而它拦住的都是“看着像出片了、实际那行没生效”的静默错误。
-  /// 逐字段试效果时可用 `--no-strict` 关掉（不想被一个未登记键打断）。
+  /// **默认开**——实测三个官方样例与 `styles/` 全部模板在严格模式下全部通过，
+  /// 所以它不会误伤存量脚本；而它拦住的都是"看着像出片了、实际那行没生效"的静默错误。
   bool strict{true};
   /// `--render <输出 mp4>` + `--render-size WxH` + `--render-frames N`：启动即渲染。
   std::string render_output{};
@@ -167,191 +169,152 @@ struct Options {
   bool trajectory{false};
   /// `--keep-frames`：保留 PNG 帧序列（默认走管道直送 ffmpeg，不落盘）。
   bool keep_frames{false};
-  /// `--no-stats`：不采集画面质量统计（导出加速约 1.4 倍，见 `RenderJob::collect_stats`）。
+  /// `--no-stats`：不采集画面质量统计（导出加速约 1.4 倍）。
   bool no_stats{false};
   /// `--check-layout`：只做布局自检并退出（不渲染）。
   bool check_layout{false};
   /// `--preview-model <spec.json>`：素材预览与自检（渲染单帧 + 停非 0 退出）。
   std::string preview_model{};
-  /// `--out <png>`：预览图落盘路径
+  /// `--out <png>`：预览图落盘路径。
   std::string preview_out{};
-  std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
-  int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
+  std::string export_dir{};   ///< `--export-dir DIR`：出片的中间产物目录
+  /// --bench <秒>：按**秒**跑渲染基准（与本应用其它帧数口径不同，故单列）。
+  int bench_seconds{0};
 };
 
-/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"。
-auto print_usage(std::string_view program) -> void {
-  st::log::out(
-      "用法: {} [选项]\n"
-      "\n"
-      "窗口/主题\n"
-      "  --headless            无头模式（无窗口；控制通道照常可用）\n"
-      "  --theme light|dark    主题\n"
-      "\n"
-      "内容/自动化\n"
-      "  --script PATH         启动即装载导演脚本（JSON；缺省 = 内置歌白 10 秒宣传片）\n"
-  "  --ai-control          启动即进入 AI 控制态（人工编辑控件置灰，只能查看/播放）\n"
-      "  --strict              脚本有 error 级 schema 诊断则拒绝启动（**默认开**）\n"
-      "  --no-strict           关闭严格校验（手工逐字段试效果时用）\n"
-      "  --render PATH         启动即渲染成片（mp4；需本机有 ffmpeg）\n"
-      "  --render-size WxH     成片分辨率（缺省 1920x1080）\n"
-      "  --render-frames N     只渲染前 N 帧（快速试渲）\n"
-      "  --export-dir DIR      启动即导出 PNG 帧序列（320x180，无 ffmpeg 时的兜底）\n"
-      "  --keep-frames         保留 1080p PNG 帧序列（默认走管道直送 ffmpeg，不落盘）\n""  --no-stats            不采集画面质量统计（导出加速；诊断报告会省略）\n"
-      "  --check-layout        只做布局自检并退出（检查文字出界/溢出/遮挡，非 0 = 有错误）\n"
-      "  --preview-model FILE  素材预览与自检（渲染单帧 + 亮度/构图检查，配 --out 落 PNG）\n"
-      
-      "  --bench N             真开播放压测 N 秒后退出\n"
-      "  --control-port N      控制通道端口（0 = 自动）\n"
-      "  --control-file PATH   控制信息落盘路径\n"
-      "  --shots DIR           无头截图目录\n"
-      "  -h, --help            显示本帮助\n",
-      program);
+/// 本应用特有参数表（框架通用开关**不在这里**）。
+[[nodiscard]] auto caiyun_options() -> std::vector<st::app::AppOption> {
+  return {
+      takes_value("--script", "启动即装载导演脚本"),
+      // 三条“一对值”的参数：命令行的双值形式是既有语法（脚本/文档在用），
+      // 拆成两个开关会改变契约，所以框架侧用 `value_count = 2` 表达。
+      takes_values("--pack", 2, "建包：<脚本.json> <包目录>"),
+      takes_value("--flatten", "把一个包写成单文件脚本（标准输出）"),
+      takes_value("--check", "体检：意图偏差 + 素材漂移"),
+      takes_values("--snapshot", 2, "抽快照：<帧目录> <快照输出目录>"),
+      takes_values("--diff-snap", 2, "逐帧视觉比对：<快照A> <快照B>"),
+      takes_values("--export-usda", 2, "导出三维内容：<源.json> <输出.usda>"),
+      takes_value("--normalize", "规范化脚本并写标准输出"),
+      flag("--ai-control", "启动即进入 AI 控制态（人只能查看）"),
+      flag("--strict", "剧本 error 级诊断就拒绝应用（缺省开）"),
+      flag("--no-strict", "关掉严格模式（逐字段试效果时用）"),
+      takes_value("--render", "启动即渲染到指定 mp4"),
+      takes_value("--render-size", "渲染尺寸 WxH"),
+      takes_value("--render-frames", "渲染帧数"),
+      takes_value("--motion-blur", "运动模糊子采样数（1 = 关）"),
+      takes_value("--shutter-angle", "快门角度（度数）"),
+      flag("--track-elements", "导出元素轨迹（供连贯性验收）"),
+      flag("--keep-frames", "保留 PNG 帧序列"),
+      flag("--no-stats", "不采集画面质量统计（导出更快）"),
+      flag("--check-layout", "只做布局自检并退出"),
+      takes_value("--preview-model", "素材预览与自检（渲染单帧）"),
+      takes_value("--out", "预览图落盘路径"),
+      takes_value("--export-dir", "出片的中间产物目录"),
+      takes_value("--bench", "渲染基准帧数"),
+      flag("--dump-schema", "打印剧本 schema 并退出"),
+  };
 }
 
-auto parse_options(int argc, char** argv) -> Options {
-  Options options;
-  for (int i = 1; i < argc; ++i) {
-    const std::string raw = argv[i];
-    const auto value = [&](const char* fallback) -> std::string {
-      if (i + 1 < argc) return argv[++i];
-      return fallback;
-    };
-    // 数值参数统一走带校验的解析（承 gbcode 的纪律）：非法值必须与未知参数
-    // 同一条路径（报错可读、退出码稳定），不能"一快一崩"。
-    const auto parse_int = [&](const char* flag, std::int64_t fallback) -> std::int64_t {
-      const std::string text = value(std::format("{}", fallback).c_str());
-      std::int64_t parsed = 0;
-      std::size_t consumed = 0;
-      bool ok = false;
-      try {
-        parsed = std::stoll(text, &consumed);
-        ok = consumed == text.size();
-      } catch (const std::exception&) {
-        ok = false;
-      }
-      if (!ok) {
-        st::log::err("参数 {} 需要一个整数，收到「{}」\n", flag, text);
-        std::exit(2);
-      }
-      return parsed;
-    };
-    if (raw == "--headless") {
-      options.headless = true;
-    } else if (raw == "--theme") {
-      options.theme = value("light");
-    } else if (raw == "--backend") {
-      options.backend = value("");
-    } else if (raw == "--control-port") {
-      options.control_port = static_cast<std::uint16_t>(std::clamp(parse_int("--control-port", 0), 0LL, 65535LL));
-    } else if (raw == "--control-file") {
-      options.control_file = value("");
-    } else if (raw == "--shots") {
-      options.shots = value("");
-      } else if (raw == "--script") {
-    options.script = value("");
-  } else if (raw == "--pack") {
-    // 建包：`--pack <脚本.json> <包目录>`（两个值）。
-    options.pack_source = value("");
-    options.pack_target = value("");
-  } else if (raw == "--flatten") {
-    // 拍平：把一个包写成单文件脚本（标准输出，便于管道与 diff）。
-    options.flatten_source = value("");
-  } else if (raw == "--check") {
-    // 体检：意图偏差 + 素材漂移。
-    options.check_source = value("");
-  } else if (raw == "--snapshot") {
-    // 抽快照：`--snapshot <帧目录> <快照输出目录>`
-    options.snapshot_frames = value("");
-    options.snapshot_out = value("");
-  } else if (raw == "--diff-snap") {
-    // 视觉比对：`--diff-snap <快照A> <快照B>`
-    options.diff_a = value("");
-    options.diff_b = value("");
-  } else if (raw == "--export-usda") {
-    // 导出三维内容：`--export-usda <model_script.json> <输出.usda>`
-    options.usd_source = value("");
-    options.usd_target = value("");
-  } else if (raw == "--normalize") {
-    // 规范化：读脚本再按同一序列化器写回标准输出。
-    // 用途是给“包拍平 vs 原脚本”提供**同一口径的参照物**——
-    // 直接拿原文比会把排版差异误判成语义丢失。
-    options.normalize_source = value("");
-  } else if (raw == "--ai-control") {
-    options.ai_control = true;
-  } else if (raw == "--strict") {
-    options.strict = true;
-  } else if (raw == "--no-strict") {
-    options.strict = false;
-  } else if (raw == "--render") {
-      options.render_output = value("");
-    } else if (raw == "--export-dir") {
-      options.export_dir = value("");
-    } else if (raw == "--render-size") {
-      const std::string text = value("1920x1080");
-      const auto at = text.find('x');
-      if (at == std::string::npos) {
-        st::log::err("参数 --render-size 需要 WxH（如 1920x1080），收到「{}」\n", text);
-        std::exit(2);
-      }
-      try {
-        options.render_width = std::clamp(std::stoi(text.substr(0, at)), 64, 7680);
-        options.render_height = std::clamp(std::stoi(text.substr(at + 1)), 64, 4320);
-      } catch (const std::exception&) {
-        st::log::err("参数 --render-size 不是合法尺寸：「{}」\n", text);
-        std::exit(2);
-      }
-    } else if (raw == "--render-frames") {
-      options.render_frames = static_cast<int>(std::clamp(parse_int("--render-frames", 0), 0LL, 100000LL));
-    } else if (raw == "--motion-blur") {
-      // 子采样数：1 = 关闭（默认）；建议草稿 4~6、成片 8~12。
-      options.motion_samples = static_cast<int>(std::clamp(parse_int("--motion-blur", 1), 1LL, 16LL));
-    } else if (raw == "--shutter-angle") {
-      // 快门角度（度）：180 = 电影常用；0 或 360 以外的值按比例换算。
-      options.shutter = std::clamp(static_cast<double>(parse_int("--shutter-angle", 180)) / 360.0, 0.0, 1.0);
-    } else if (raw == "--track-elements") {
-      // 导出元素轨迹（trajectory.tsv）：供连贯性验收做“按元素追踪”。
-      options.trajectory = true;
-    } else if (raw == "--no-stats") {
-      options.no_stats = true;
-    } else if (raw == "--preview-model") {
-      options.preview_model = value("--preview-model");
-    } else if (raw == "--out") {
-      options.preview_out = value("--out");
-    } else if (raw == "--check-layout") {
-      // 只做布局自检并退出（不渲染、不建窗口）。
-      //
-      // ## 为何要一个独立开关（而不是只在加载时报日志）
-      //
-      // 智能体写剧本的循环是“写完 → 想知道对不对”。如果只能靠出片后看图，
-      // 一次迭代就是几十秒；而布局问题是**度量能算出来**的，不该等渲。
-      //
-      // 这个开关把“写得对吗”变成一个**廉价、可脚本化、非零退出码**的问题，
-      // 配合 CI / 智能体的自检环节用。
-      options.check_layout = true;
-    } else if (raw == "--keep-frames") {
-      // 保留 PNG 帧序列。默认走管道（RGBA 直送 ffmpeg），不落盘——
-      // 需要逐帧抽样的验收工具（ot_bench / carry_qa）必须显式打开它。
-      options.keep_frames = true;
-    } else if (raw == "--dump-schema") {
-      // 打印字段表后立即退出：给子 Agent 的 `script_schema` 工具用。
-      //
-      // 为何要一个专用参数而不是走控制通道：查字段是最频的动作，
-      // 而控制通道要求“应用先启动 + 连 token + 同一应用只允许一实例”。
-      // 离线批处理场景下 `--dump-schema` 一行就够，且没有清理负担。
-      st::log::out("{}", caiyun::schema_to_json());
-      std::exit(0);
-    } else if (raw == "--bench") {
-      options.bench_seconds = static_cast<int>(std::clamp(parse_int("--bench", 0), 0LL, 3600LL));
-    } else if (raw == "-h" || raw == "--help") {
-      print_usage(argv[0]);
-      std::exit(0);
-    } else {
-      st::log::err("未知参数：{}（用 --help 看可用项）\n", raw);
-      std::exit(2);
-    }
+auto parse_options(int argc, char** argv)
+    -> st::Result<std::pair<Options, st::app::AppOptions>> {
+  st::app::CommonOptions common;
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(argc, argv, caiyun_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("caiyun", caiyun_options()));
+    std::exit(0);
   }
-  return options;
+
+  Options options;
+  options.script = values.get("--script");
+  options.flatten_source = values.get("--flatten");
+  options.normalize_source = values.get("--normalize");
+  options.check_source = values.get("--check");
+  options.preview_model = values.get("--preview-model");
+  options.preview_out = values.get("--out");
+  options.export_dir = values.get("--export-dir");
+  options.render_output = values.get("--render");
+
+  // 三条“一对值”的参数：第二个值缺了就报错（不静默当成空路径）。
+  if (values.has("--pack")) {
+    options.pack_source = values.value_at("--pack", 0);
+    options.pack_target = values.value_at("--pack", 1);
+  }
+  if (values.has("--snapshot")) {
+    options.snapshot_frames = values.value_at("--snapshot", 0);
+    options.snapshot_out = values.value_at("--snapshot", 1);
+  }
+  if (values.has("--diff-snap")) {
+    options.diff_a = values.value_at("--diff-snap", 0);
+    options.diff_b = values.value_at("--diff-snap", 1);
+  }
+  if (values.has("--export-usda")) {
+    options.usd_source = values.value_at("--export-usda", 0);
+    options.usd_target = values.value_at("--export-usda", 1);
+  }
+
+  // `--strict` / `--no-strict`：同一件事的两个方向，**后出现者胜**。
+  for (auto entry = values.values.rbegin(); entry != values.values.rend(); ++entry) {
+    if (entry->first == "--strict") { options.strict = true; break; }
+    if (entry->first == "--no-strict") { options.strict = false; break; }
+  }
+  options.ai_control = values.has("--ai-control");
+  options.trajectory = values.has("--track-elements");
+  options.keep_frames = values.has("--keep-frames");
+  options.no_stats = values.has("--no-stats");
+  options.check_layout = values.has("--check-layout");
+
+  // 数值参数：框架只保证“能解析成数”，范围与语义在应用侧。
+  const auto number = [](std::string_view text, std::string_view flag)
+      -> st::Result<std::int64_t> {
+    auto parsed_number = st::parse_i64(text);
+    if (!parsed_number.has_value()) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("{} 需要一个整数，收到「{}」", flag, text));
+    }
+    return *parsed_number;
+  };
+  if (const std::string text = values.get("--bench"); !text.empty()) {
+    auto seconds = number(text, "--bench");
+    if (!seconds) return st::forward_error(seconds.error());
+    options.bench_seconds = static_cast<int>(*seconds);
+  }
+  if (const std::string text = values.get("--render-frames"); !text.empty()) {
+    auto frames = number(text, "--render-frames");
+    if (!frames) return st::forward_error(frames.error());
+    options.render_frames = static_cast<int>(*frames);
+  }
+  if (const std::string text = values.get("--motion-blur"); !text.empty()) {
+    auto samples = number(text, "--motion-blur");
+    if (!samples) return st::forward_error(samples.error());
+    options.motion_samples = static_cast<int>(*samples);
+  }
+  if (const std::string text = values.get("--shutter-angle"); !text.empty()) {
+    auto angle = st::parse_f64(text);
+    if (!angle.has_value() || *angle <= 0.0) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("--shutter-angle 需要一个正数，收到「{}」", text));
+    }
+    // 快门角度 → 快门比例（180° = 0.5）。
+    options.shutter = *angle / 360.0;
+  }
+  if (const std::string text = values.get("--render-size"); !text.empty()) {
+    const auto at = text.find('x');
+    if (at == std::string::npos) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("--render-size 需要 WxH 形式，收到「{}」", text));
+    }
+    options.render_width = std::atoi(text.substr(0, at).c_str());
+    options.render_height = std::atoi(text.substr(at + 1).c_str());
+  }
+
+  st::app::AppOptions app = common.app;
+  if (app.theme_name.empty()) app.theme_name = "light";
+  app.theme = app.theme_name == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
+  if (app.backend.empty() && app.headless) app.backend = "headless";
+  options.common = std::move(common);
+  return std::make_pair(std::move(options), std::move(app));
 }
 
 class CaiyunPage final : public dsl::Component {
@@ -1295,7 +1258,12 @@ class CaiyunPage final : public dsl::Component {
 }  // namespace
 
 auto run_app(int argc, char** argv) -> int {
-  const Options options = parse_options(argc, argv);
+  auto parsed_options = parse_options(argc, argv);
+  if (!parsed_options) {
+    st::log::err("caiyun: {}\\n", parsed_options.error().to_string());
+    return 2;
+  }
+  const Options options = parsed_options->first;
 
   // ── 工程包（`.cypkg`）的三个一次性动作 ──
   //
@@ -1567,17 +1535,11 @@ auto run_app(int argc, char** argv) -> int {
     return (report.error_count() > 0 || schema_errors > 0U) ? 1 : 0;
   }
 
-  st::app::AppOptions app_options;
-  app_options.width = 1180;
-  app_options.height = 900;
+  // 框架的解析结果**直接**成为启动参数；下面只补本应用的默认值。
+  st::app::AppOptions app_options = std::move(parsed_options->second);
+  if (app_options.width <= 0) app_options.width = 1180;
+  if (app_options.height <= 0) app_options.height = 900;
   app_options.title = "裁云 Nimbus · 霜天";
-  app_options.headless = options.headless;
-  app_options.backend = !options.backend.empty() ? options.backend
-                        : (options.headless ? std::string("headless") : std::string{});
-  app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
-  app_options.control_port = options.control_port;
-  app_options.control_file = options.control_file;
-  app_options.screenshot_dir = options.shots;
 
   // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
   st::app::icon::attach_png(app_options.window_icon_png,
@@ -1711,6 +1673,8 @@ auto run_app(int argc, char** argv) -> int {
   const std::int64_t bench_deadline =
       options.bench_seconds > 0 ? st::time::now_ms() + options.bench_seconds * 1000 : 0;
   std::int64_t last_ms = st::time::now_ms();
+  // --ms 退出判据的基准时刻（框架通用开关，见循环内注释）。
+  const std::int64_t started_ms = st::time::now_ms();
   while (!app.quit_requested()) {
     const std::int64_t frame_start = st::time::now_ms();
     const double delta = static_cast<double>(frame_start - last_ms) / 1000.0;
@@ -1720,6 +1684,22 @@ auto run_app(int argc, char** argv) -> int {
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;
+    // 一次性渲染作业：完成后收尾退出（CI/CLI 用）。
+    //
+    // ## 为何必须同时看 `elapsed_s` 与 `frames_done`（实测挂死）
+    //
+    // 判据曾只有 `!running && (finished||failed||cancelled)`。渲染线程在
+    // `finish()` 里先置 `status_.running=false`，**之后**才关 ffmpeg 管道
+    // 并等它写完 mp4（`ffmpeg_pipe->finish()`）。于是主线程会在“已经
+    // 认为完成了”而渲染线程还没收尾的那一瞬 `break`，跳出循环 → 局部对象
+    // 开
+    // --frames / --ms 是**框架通用开关**：统一入口之后它们对本应用也生效，
+    // 主循环必须真遵守——否则“传了但不停”就是谎报退出语义。
+    if (options.common.max_frames > 0 && frames >= options.common.max_frames) break;
+    if (options.common.max_ms > 0 &&
+        st::time::now_ms() - started_ms >= static_cast<std::int64_t>(options.common.max_ms)) {
+      break;
+    }
     // 一次性渲染作业：完成后收尾退出（CI/CLI 用）。
     //
     // ## 为何必须同时看 `elapsed_s` 与 `frames_done`（实测挂死）

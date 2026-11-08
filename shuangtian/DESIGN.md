@@ -3476,6 +3476,77 @@ std::vector<HighlightSpan> highlight(std::string_view code, std::string_view lan
 （`--headless` / `--backend` / `--width/--height` / `--scale` / `--title` / `--theme` /
 `--control-port` / `--control-file` / `--enable-script` / `--frames` / `--ms`）。
 
+#### 4.4.1.1 注册式统一入口：应用只声明自己的参数
+
+通用开关由框架定义，但**每个应用还有自己的参数**（gbcode 的 `--workspace`、裁云的
+`--pack A B`……）。所以入口是**注册式**的：应用交一张“特有参数表”，框架一次遍历
+同时处理两类参数。
+
+```cpp
+// ① 声明特有参数（通用开关**不要**重复声明）
+[[nodiscard]] auto myapp_options() -> std::vector<st::app::AppOption> {
+  return {
+      takes_value("--workspace", "工作区目录"),
+      takes_value("--language", "初始语言", {"cpp", "ts", "py"}),  // 白名单：拼错就报错
+      takes_values("--diff-snap", 2, "视觉比对：<A> <B>"),           // 一对值
+      flag("--ai-control", "启动即进入 AI 控制态"),                  // 布尔开关
+  };
+}
+
+// ② 解析：通用参数进 `common`，特有参数进 `values`
+auto parse_options(int argc, char** argv)
+    -> st::Result<std::pair<MyOptions, st::app::AppOptions>> {
+  st::app::CommonOptions common;
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(argc, argv, myapp_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("myapp", myapp_options()));
+    std::exit(0);
+  }
+  MyOptions options;
+  options.workspace = values.get("--workspace", ".");
+  options.language = values.get("--language", "cpp");
+  return std::make_pair(std::move(options), std::move(common.app));
+}
+```
+
+## 为何必须是一个入口，而不是“每个应用各写一份”
+
+本仓有 **7 个应用**，迁移前每个都自带一份 `argv` 循环。代价是实测过的三类缺陷：
+
+| 缺陷 | 具体表现（都是真踩到的） |
+|---|---|
+| **漏接开关 = 静默忽略** | gbcode 曾自带解析器不认新加的开关，表现是“三档渲染出来的图几乎一样”（实测 B vs C 只差 20 像素），差点被当成“三档观感接近”的结论 |
+| **口径分家** | 同一个 `--control-port`：gbcode 越界报错，裁云 `clamp` 夹取，相期 `stoi` 直接截断成 uint16——三处三个说法 |
+| **成对缺陷难对齐** | 同一句话（“非法值必须与未知参数同一条路径”）被复制到每个应用，改进只能逐个追 |
+
+## 三条口径（框架强制，应用不能改）
+
+1. **未知参数报错并点名**，永不静默忽略——静默忽略正是上表第一行的温床。
+2. **非法值 = 未知参数同一条路径**（可读报错 + 稳定退出码）。裸调 `std::stod/stoi`
+   抛 `std::invalid_argument` → `terminate`（实测退出码 `0xC0000409`，屏幕上一行
+   `what(): stod`），而同一命令行的 `--bogus-flag` 却是“报错 + exit 2”——一快一崩。
+3. **越界不静默截断**：`--control-port 99999` 曾被截成 `34463`，应用监听在用户完全
+   没要求的端口上；外部驱动方按控制文件去连，得到的是“连上了、但连的是意料之外的
+   一个端口”——比直接报错危险得多。
+
+## `value_count` 为什么是计数而不是布尔
+
+有的参数天然是一对（`--snapshot <帧目录> <输出目录>` / `--diff-snap <A> <B>`）。
+拆成两个开关会**改变命令行语法**（脚本与文档早已在用双值形式），让应用自己解析又
+会把“切令牌”的知识拆成两份——正是本节要消灭的东西。所以框架按声明吃掉恰好 N 个值。
+
+## 迁移时必须一并做的两件事
+
+1. **主循环要真遵守 `--frames` / `--ms`**。这两个是通用开关，统一入口之后它们对本应用
+   “也存在了”。自驱主循环（`start()` + `tick()`）不会替你数帧，不自己判就是
+   “传了但不停”——症状是**无头跑不停**（不是报错），CI 里直接挂到超时。
+   `louyue` / `xiangqi` / `caiyun` 迁移时都补了这段判据。
+2. **诊断开关的时序不能破**。`--log-file/--log-level/--crash-dir` 由
+   `startup_configure_diagnostics` 在**更早处**扫描（才能盖住启动早期日志）；
+   统一入口只负责“认识它、别当未知参数报错”。
+
 放进框架而不是让每个应用自己写，是因为**控制通道是"应用可被驱动"的入口，而它的端口与控制文件
 是命令行给的**：应用漏解析这两个参数，外部工具就只能去猜端口、等不到控制通道就绪
 （生成的工程模板踩过这个坑，`--control-port 0 --control-file X` 被静默忽略）。

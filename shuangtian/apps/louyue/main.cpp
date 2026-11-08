@@ -31,6 +31,7 @@
 #include "battery/embed.hpp"   // 编译期资源嵌入（stpm 生成）
 #include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
+#include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
 #include "st/codec/png.hpp"
 #include "st/math/geometry.hpp"
 #include "st/core/entry.hpp"   // `ST_MAIN`（跨平台入口：正规化 argv 编码）
@@ -60,97 +61,50 @@ namespace dsl = st::ui::dsl;
 
 /// 命令行选项（承 gallery/gbcode 的形态：只解析本示例关心的几个）。
 struct Options {
-  bool headless{false};
-  std::string backend{};
-  std::string theme{"light"};
-  std::uint16_t control_port{0};
-  std::string control_file{};
-  std::string shots{};
-  std::string open{};   ///< `--open <png>`：启动即打开一个真实 PNG 文件
+  /// 框架的通用解析结果（`--headless`/`--backend`/`--theme`/`--control-*`/
+  /// `--shots`/`--frames`/`--ms`…全在这里）。
+  ///
+  /// 为何整包带进来：这些开关的语义由框架定义，抄一遍就多一份口径。本文件原来自写
+  /// 一个 `argv` 循环，注释里还留着"承 gbcode 的同条纪律，逐字对齐"——那正是同一条
+  /// 规则被抄到第二个应用里的证据。现在只有一个解析器，规则不可能再分家。
+  st::app::CommonOptions common{};
+  /// `--open <png>`：启动即打开一个真实 PNG 文件。
+  std::string open{};
 };
 
-/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"
-///（承 gbcode 同名函数）。
-auto print_usage(std::string_view program) -> void {
-  st::log::out(
-      "用法: {} [选项]\n"
-      "\n"
-      "窗口/主题\n"
-      "  --headless            无头模式（无窗口；控制通道照常可用）\n"
-      "  --theme light|dark    主题\n"
-      "\n"
-      "内容/自动化\n"
-      "  --open PNG            启动即打开一个真实 PNG 文件\n"
-      "  --control-port N      控制通道端口（0 = 自动）\n"
-      "  --control-file PATH   控制信息落盘路径\n"
-      "  --shots DIR           无头截图目录\n"
-      "  -h, --help            显示本帮助\n",
-      program);
+/// 本应用特有参数表（框架通用开关**不在这里**）。
+[[nodiscard]] auto louyue_options() -> std::vector<st::app::AppOption> {
+  return {
+      {.name = "--open", .value_count = 1, .help = "启动即打开一个真实 PNG 文件"},
+  };
 }
 
-auto parse_options(int argc, char** argv) -> Options {
-  Options options;
-  for (int i = 1; i < argc; ++i) {
-    const std::string raw = argv[i];
-    const auto value = [&](const char* fallback) -> std::string {
-      if (i + 1 < argc) return argv[++i];
-      return fallback;
-    };
-    // —— 数值参数统一走带校验的解析（承 gbcode 的同条纪律，逐字对齐）——
-    //
-    // 为何不能裸调 `std::stoi`：传非数字（如 `--control-port abc`）时它抛
-    // `std::invalid_argument`，无人捕获 → `terminate`（实测退出码 0xC0000409，
-    // 屏幕上一行 what(): stoi）——用户看不懂、脚本拿不到码。而同一命令行里的
-    // `--bogus-flag` 走的是「报错 + exit 2」的干净路径。**非法值必须与未知参数
-    // 同一条路径**（报错可读、退出码稳定），不能一快一崩。
-    const auto parse_int = [&](const char* flag, std::int64_t fallback) -> std::int64_t {
-      const std::string text = value(std::format("{}", fallback).c_str());
-      std::int64_t parsed = 0;
-      std::size_t consumed = 0;
-      const bool ok = !text.empty() && [&] {
-        try {
-          parsed = std::stoll(text, &consumed);
-        } catch (const std::exception&) {
-          return false;
-        }
-        return consumed == text.size();   // 尾巴（如 `8x`）也是非法值
-      }();
-      if (!ok) {
-        st::log::err("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
-        std::exit(2);
-      }
-      return parsed;
-    };
-    if (raw == "--help" || raw == "-h") {
-      print_usage(argv[0]);
-      std::exit(0);
-    }
-    if (raw == "--headless") {
-      options.headless = true;
-    }
-    // ⚠ 独立 if 与下方 else-if 链的陷阱：命中独立 if 的参数若继续落进链尾
-    // else 兜底会被误判「未知参数」——所以 headless 必须与链同体（首个 else-if）。
-    else if (raw == "--backend") options.backend = value("");
-    else if (raw == "--theme") options.theme = value("light");
-    else if (raw == "--control-port") {
-      const std::int64_t port = parse_int("--control-port", 0);
-      if (port < 0 || port > 65535) {
-        st::log::err("参数 --control-port 超出端口范围：{}\n", port);
-        std::exit(2);
-      }
-      options.control_port = static_cast<std::uint16_t>(port);
-    }
-    else if (raw == "--control-file") options.control_file = value("");
-    else if (raw == "--shots") options.shots = value("");
-    else if (raw == "--open") options.open = value("");
-    // **未知参数报错，不静默忽略**（gbcode 实证过的温床：新加的开关被静默
-    // 吃掉，表现是"三档渲染出来的图几乎一样"，差点被当成结论）。
-    else {
-      st::log::err("未知参数：{}（用 --help 看可用项）\n", raw);
-      std::exit(2);
-    }
+/// 解析命令行 → `(应用特有选项, 可直接交给 Application 的 AppOptions)`。
+[[nodiscard]] auto parse_options(int argc, char** argv)
+    -> st::Result<std::pair<Options, st::app::AppOptions>> {
+  st::app::CommonOptions common;
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(argc, argv, louyue_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("louyue", louyue_options()));
+    std::exit(0);
   }
-  return options;
+
+  Options options;
+  options.open = values.get("--open");
+
+  st::app::AppOptions app = common.app;
+  app.width = 1180;
+  app.height = 760;
+  app.title = "镂月 Lunaris · 霜天";
+  app.backend = !common.app.backend.empty()
+                    ? common.app.backend
+                    : (common.app.headless ? std::string("headless") : std::string{});
+  app.theme = common.app.theme_name == "dark" ? st::ui::ThemeMode::Dark
+                                              : st::ui::ThemeMode::Light;
+  options.common = std::move(common);
+  return std::make_pair(std::move(options), std::move(app));
 }
 
 /// 主页面：整个编辑器是一个 `Component`。
@@ -1038,19 +992,14 @@ class LouyuePage final : public dsl::Component {
 }  // namespace
 
 auto run_app(int argc, char** argv) -> int {
-  const Options options = parse_options(argc, argv);
-
-  st::app::AppOptions app_options;
-  app_options.width = 1180;
-  app_options.height = 760;
-  app_options.title = "镂月 Lunaris · 霜天";
-  app_options.headless = options.headless;
-  app_options.backend = !options.backend.empty() ? options.backend
-                        : (options.headless ? std::string("headless") : std::string{});
-  app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
-  app_options.control_port = options.control_port;
-  app_options.control_file = options.control_file;
-  app_options.screenshot_dir = options.shots;
+  auto parsed = parse_options(argc, argv);
+  if (!parsed) {
+    st::log::err("louyue: {}\n", parsed.error().to_string());
+    return 2;
+  }
+  const Options options = parsed->first;
+  // 框架的解析结果**直接**就是启动参数。
+  st::app::AppOptions app_options = std::move(parsed->second);
 
   // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
   st::app::icon::attach_png(app_options.window_icon_png,
@@ -1146,6 +1095,10 @@ page->set_text_port(app.root().text_port());
   // （`tick_declarative_hosts`）——`DeclarativeHost` 登记的帧回调里已经内建
   // “先 pump_async 再判 dirty”的顺序，调用方不再重写（见 gallery 同段注释）。
   std::uint64_t frames = 0;
+  // `--frames` / `--ms` 是**框架通用开关**：统一入口之后它们对本应用也生效，
+  // 所以主循环必须真遵守——否则“传了但不停”就是谎报退出语义。
+  // （迁统一入口前本应用根本没有这两个开关，自然没这段判据。）
+  const std::int64_t started_ms = st::time::now_ms();
 while (!app.quit_requested() && !page->quit_requested()) {
   const std::int64_t frame_start_ms = st::time::now_ms();
   if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
@@ -1155,6 +1108,11 @@ while (!app.quit_requested() && !page->quit_requested()) {
   if (!page->is_view_fitted() && page->sync_poster_to_viewport()) app.request_repaint();
   app.tick();
   ++frames;
+  if (options.common.max_frames > 0 && frames >= options.common.max_frames) break;
+  if (options.common.max_ms > 0 &&
+      st::time::now_ms() - started_ms >= static_cast<std::int64_t>(options.common.max_ms)) {
+    break;
+  }
   app.pace_loop(frame_start_ms);
 }
   st::log::out("镂月退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,

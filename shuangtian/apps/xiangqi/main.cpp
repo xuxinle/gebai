@@ -77,6 +77,7 @@
 
 #include "../app_icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
+#include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
 #include "st/codec/png.hpp"
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
@@ -801,37 +802,6 @@ struct CardStore {
   }
 };
 
-struct Options {
-  bool headless{false};
-  bool watch{false};   ///< 改 XML/JS 即重载（常驻应用默认关：不每帧扫文件）
-  std::string theme{"light"};
-  /// `--theme` 是否显式给过：显式值优先于页面切过并持久化的主题
-  /// （`home/theme.txt`）——命令行是运维意图，不该被上次页面操作覆盖。
-  bool theme_explicit{false};
-  std::string ui_dir{"apps/xiangqi/ui"};
-  std::uint16_t control_port{0};
-  std::string control_file{};
-  std::string shots{};
-  std::string home{};
-  /// 渲染器：**空串 = 未指定**（跟框架缺省走，即允许延迟 GPU 升级）/
-  /// `auto` / `gpu` / `software`。
-  ///
-  /// 为何默认空串而不是 `auto`：两者在框架里语义不同——空串才允许
-  /// `defer_gpu`（窗口先用软件画布秒开）；写 `auto` 会被当成“显式指定”，
-  /// 于是 GPU 初始化又回到窗口露出之前的同步路径上。
-  std::string renderer{};
-  /// agent 控制器地址（`--agent` 或环境变量 `ST_XIANGQI_AGENT` 覆盖）。
-  ///
-  /// **空串 = 自动探测本地歌白**（见 `resolve_agent_url()`）。
-  ///
-  /// 为何不能把 `ws://127.0.0.1:7717/xiangqi` 硬编码当缺省：那是“控制器自己
-  /// listen 一个独立端口”时代的地址（方案 B 之前）。之后相期窗口改成连
-  /// **主服务同一个端口** 的 `/xiangqi`（默认 3000，可被 `GEBAI_PORT` 改），
-  /// 7717 已经没有任何人在听——手动启动相期时永远连不上，而现象是
-  /// “窗口开着、一直显示未连接”，看起来像服务挂了一样。
-  std::string agent_url{};
-};
-
 /**
  * 本地歌白的候选端口（按序探测）。
  *
@@ -878,48 +848,78 @@ auto resolve_agent_url(const std::string& explicit_url) -> std::string {
   return "ws://127.0.0.1:3000/xiangqi";
 }
 
-auto parse_options(int argc, char** argv) -> Options {
+struct Options {
+  /// 框架的通用解析结果（`--headless`/`--theme`/`--control-*`/`--shots`/
+  /// `--renderer`/`--frames`/`--ms`…全在这里）。
+  ///
+  /// 为何整包带进来：这些开关的语义由框架定义，抄一遍就多一份口径。本文件原来的
+  /// 自写循环里连 `--control-port` 的溢出都不校验（`std::stoi` 直接截断成 uint16），
+  /// 而框架侧刚补上范围校验——这就是"一处修、所有应用受益"的具体收益。
+  st::app::CommonOptions common{};
+
+  /// 改 XML/JS 即重载（常驻应用默认关：不每帧扫文件）。
+  bool watch{false};
+  /// `--theme` 是否显式给过：显式值优先于页面切过并持久化的主题（`home/theme.txt`）
+  /// ——命令行是运维意图，不该被上次页面操作覆盖。
+  bool theme_explicit{false};
+  /// 界面 XML/JS 目录（`--ui`）。
+  std::string ui_dir{"apps/xiangqi/ui"};
+  /// 应用数据目录（`--home`）。
+  std::string home{};
+  /// agent 控制器地址（`--agent` 或环境变量 `ST_XIANGQI_AGENT` 覆盖）。
+  /// **空串 = 自动探测本地歌白**（见 `resolve_agent_url()`）。
+  std::string agent_url{};
+};
+
+/// 本应用特有参数表（框架通用开关**不在这里**）。
+[[nodiscard]] auto xiangqi_options() -> std::vector<st::app::AppOption> {
+  return {
+      {.name = "--watch", .value_count = 0, .help = "改 XML/JS 即重载"},
+      {.name = "--no-watch", .value_count = 0, .help = "关闭热重载（缺省）"},
+      {.name = "--ui", .value_count = 1, .help = "界面 XML/JS 目录"},
+      {.name = "--home", .value_count = 1, .help = "应用数据目录"},
+      {.name = "--agent", .value_count = 1,
+       .help = "agent 控制器地址（缺省自动探测本地歌白）"},
+  };
+}
+
+/// 解析命令行 → `(应用特有选项, 可直接交给 Application 的 AppOptions)`。
+[[nodiscard]] auto parse_options(int argc, char** argv)
+    -> st::Result<std::pair<Options, st::app::AppOptions>> {
+  st::app::CommonOptions common;
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(argc, argv, xiangqi_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("xiangqi", xiangqi_options()));
+    std::exit(0);
+  }
+
   Options options;
+  // `--watch` / `--no-watch` 是两个方向：**先出现者被后出现者覆盖**。
+  // 用"哪个在表里存在"判不出顺序，所以两条都看一遍再按最后一次出现定——
+  // 而这在 `values` 里是一次线性扫描能办的：从后往前找第一条命中的。
+  for (auto entry = values.values.rbegin(); entry != values.values.rend(); ++entry) {
+    if (entry->first == "--watch") { options.watch = true; break; }
+    if (entry->first == "--no-watch") { options.watch = false; break; }
+  }
+  if (const std::string ui = values.get("--ui"); !ui.empty()) options.ui_dir = ui;
+  options.home = values.get("--home");
+  if (const std::string agent = values.get("--agent"); !agent.empty()) {
+    options.agent_url = agent;
+  }
   if (const char* env = std::getenv("ST_XIANGQI_AGENT"); env != nullptr && *env != '\0') {
     options.agent_url = env;
   }
-  for (int i = 1; i < argc; ++i) {
-    const std::string_view arg{argv[i]};
-    auto next = [&]() -> std::string { return (i + 1 < argc) ? std::string{argv[++i]} : std::string{}; };
-    if (arg == "--headless") {
-      options.headless = true;
-    } else if (arg == "--watch") {
-      options.watch = true;
-    } else if (arg == "--no-watch") {
-      options.watch = false;
-    } else if (arg == "--theme") {
-      options.theme = next();
-      options.theme_explicit = true;
-    } else if (arg == "--ui") {
-      options.ui_dir = next();
-    } else if (arg == "--control-port") {
-      const std::string text = next();
-      try {
-        options.control_port = static_cast<std::uint16_t>(std::stoi(text));
-      } catch (...) {
-        std::fprintf(stderr, "[相期] --control-port 不是合法端口：%s\n", text.c_str());
-      }
-    } else if (arg == "--control-file") {
-      options.control_file = next();
-    } else if (arg == "--shots") {
-      options.shots = next();
-    } else if (arg == "--home") {
-      options.home = next();
-    } else if (arg == "--renderer") {
-      options.renderer = next();
-      } else if (arg == "--agent") {
-    options.agent_url = next();
-  }
-  }
-  // 解析完参数才知道有没有显式给：未给则自动探测本地歌白（端口从缺省开始试）。
+  // 主题是否显式给过：框架用空串表示"没给"（`theme_name` 缺省为空）。
+  options.theme_explicit = !common.app.theme_name.empty();
+
+  st::app::AppOptions app = common.app;
+  // 解析完参数才知道有没有显式给；未给则自动探测本地歌白。
   // 放在这里而不是成员缺省值里：探测要连 TCP，不该在构造 Options 时隐式做。
   options.agent_url = resolve_agent_url(options.agent_url);
-  return options;
+  options.common = std::move(common);
+  return std::make_pair(std::move(options), std::move(app));
 }
 
 /// 篆书「卿」的字形轮廓（**从实物图片矢量化而来**，不是手绘描摹）。
@@ -1376,14 +1376,22 @@ auto resolve_home(const std::string& requested) -> std::string {
 }
 
 auto run_app(int argc, char** argv) -> int {
-  const Options options = parse_options(argc, argv);
+  auto parsed = parse_options(argc, argv);
+  if (!parsed) {
+    st::log::err("xiangqi: {}\\n", parsed.error().to_string());
+    return 2;
+  }
+  const Options options = parsed->first;
   const std::string ui_dir = resolve_resource_dir(options.ui_dir);
   const std::string home = resolve_home(options.home);
 
-  st::app::AppOptions app_options;
+  // 框架的解析结果**直接**成为启动参数；下面只补本应用的默认值。
+  st::app::AppOptions app_options = std::move(parsed->second);
   // 主题优先级：`--theme`（显式）> 页面切过并持久化的 `home/theme.txt` > light。
   // 读文件失败/名字不在库里部静默落回 light——持久化是偏好，不是契约。
-  std::string theme_choice = options.theme;
+  std::string theme_choice = options.common.app.theme_name.empty()
+                                ? std::string("light")
+                                : options.common.app.theme_name;
   if (!options.theme_explicit) {
     if (const auto saved = st::fs::read_text(st::fs::join(home, "theme.txt"));
         saved.has_value()) {
@@ -1403,9 +1411,7 @@ auto run_app(int argc, char** argv) -> int {
   // 用户看到的是“窗口没有圆角”（实际是窗口比屏幕还大，圆角在屏外）。
   app_options.fill_work_area = false;
   app_options.title = "相期";
-  app_options.headless = options.headless;
-  app_options.backend = options.headless ? "headless" : std::string{};
-  app_options.renderer = options.renderer;
+  if (app_options.backend.empty() && app_options.headless) app_options.backend = "headless";
   // 主题：内置主题库的名字（nebula/qinhan/…）也能用 `--theme` 指定。
   // 之前只认 dark，其余名字全部落回 light——用户逃了 `--theme qinhan` 得到的
   // 却是亮色默认观感，而没有任何告警（“我逃的没生效”是最难排查的那类）。
@@ -1421,15 +1427,13 @@ auto run_app(int argc, char** argv) -> int {
     app_options.theme = theme_choice == "dark" ? st::ui::ThemeMode::Dark
                                                 : st::ui::ThemeMode::Light;
   }
-  app_options.control_port = options.control_port;
-  app_options.control_file = options.control_file;
-  app_options.screenshot_dir = options.shots;
+  // --control-port / --control-file / --shots 已由框架直接写进 app_options，不再抄。
   app_options.enable_script = true;
   // 托盘（常驻形态）：无头模式不启（没有通知区，且 e2e 不需要它）。
   //
   // 图标与窗口图标共用一份：常驻面板在任务栏与通知区应当是同一个记号，
   // 否则用户会以为它们是两个东西。
-  if (!options.headless) {
+  if (!app_options.headless) {
     app_options.tray_enabled = true;
     // 窗口用 **128px** 源图：Windows 在任务栏/图标栏实际要的是 32/16，
     // 而框架的 `make_icon` 会**面积平均**缩到目标尺寸（128→32 是 4 倍缩幅，足够干净）。
@@ -1638,6 +1642,8 @@ auto run_app(int argc, char** argv) -> int {
   // 非阻塞 try_read 的开销远小于引入线程+锁的复杂度。
   std::uint64_t frames = 0;
   std::uint64_t handled = 0;
+  // --ms 退出判据的基准时刻（框架通用开关，见循环内注释）。
+  const std::int64_t started_ms = st::time::now_ms();
   while (!app.quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
 
@@ -1765,6 +1771,14 @@ auto run_app(int argc, char** argv) -> int {
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;
+    // `--frames` / `--ms` 是**框架通用开关**：统一入口之后它们对本应用也生效，
+    // 主循环必须真遵守——否则“传了但不停”就是谎报退出语义。
+    if (options.common.max_frames > 0 && frames >= options.common.max_frames) break;
+    if (options.common.max_ms > 0 &&
+        st::time::now_ms() - started_ms >=
+            static_cast<std::int64_t>(options.common.max_ms)) {
+      break;
+    }
     // 低频心跳（约 20 秒一次）：常驻应用需要"它还活着"的可观测证据。
     // 探测/可读两个计数用于区分"没有消息"与"有数据但读不出"——
     // 后者是 WS 客户端最容易出的问题（实测踩过一次，无任何报错）。

@@ -51,6 +51,9 @@
 
 namespace {
 
+using st::app::flag;
+using st::app::takes_value;
+
 using gedou::Difficulty;
 using gedou::GameView;
 using gedou::MoveId;
@@ -82,82 +85,76 @@ struct Options {
   std::string policy_path{};
 };
 
+/// 本应用特有参数表（框架通用开关**不在这里**）。
+[[nodiscard]] auto gedou_options() -> std::vector<st::app::AppOption> {
+  return {
+      takes_value("--record", "把对战录到指定目录"),
+      flag("--ai-vs-ai", "双方都交给 AI"),
+      flag("--dummy", "木桩（对手不还手）"),
+      flag("--paused", "开局暂停"),
+      flag("--hitbox", "显示判定框"),
+      takes_value("--policy", "用训练好的神经网络策略接管对手侧"),
+      takes_value("--difficulty", "难度：easy / normal / hard"),
+      takes_value("--left", "左侧角色档（0~1）"),
+      takes_value("--right", "右侧角色档（0~1）"),
+  };
+}
+
 [[nodiscard]] auto parse_options(int argc, char** argv) -> st::Result<Options> {
   Options options{};
-
-  // 先把自己的选项“抹掉”，再把剩下的交给框架的通用解析。
-  //
-  // 为何要滤：`st::app::parse_common_options` 对**未知参数直接报错退出**——
-  // 直接把带 `--dummy` 的命令行交给它，应用会以“未知参数”结束（而外部驱动方
-  // 看到的是“控制通道等不到”，两者差得很远）。
-  std::vector<std::string> kept{argv[0] != nullptr ? argv[0] : "gedou"};
-  for (int index = 1; index < argc; ++index) {
-    const std::string_view argument{argv[index]};
-    const auto next = [&]() -> std::string_view {
-      if (index + 1 >= argc) return {};
-      ++index;
-      return std::string_view{argv[index]};
-    };
-    if (argument == "--record" && index + 1 < argc) {
-      options.record_dir = argv[++index];
-      continue;
-    }
-    if (argument == "--ai-vs-ai") {
-      options.ai_vs_ai = true;
-      continue;
-    }
-    if (argument == "--dummy") {
-      options.dummy = true;
-    } else if (argument == "--paused") {
-      options.paused = true;
-    } else if (argument == "--hitbox") {
-      options.hitbox = true;
-    } else if (argument == "--policy") {
-      const std::string_view value = next();
-      if (value.empty()) return st::unexpected(st::ErrorCode::Invalid, "--policy 缺少取值");
-      options.policy_path = std::string{value};
-    } else if (argument == "--difficulty") {
-      const std::string_view value = next();
-      if (value.empty()) return st::unexpected(st::ErrorCode::Invalid, "--difficulty 缺少取值");
-      options.difficulty = gedou::difficulty_from_name(std::string{value}.c_str());
-    } else if (argument == "--left" || argument == "--right") {
-      const std::string_view value = next();
-      if (value.empty()) {
-        return st::unexpected(st::ErrorCode::Invalid, std::format("{0} 缺少取值", argument));
-      }
-      int number = 0;
-      try {
-        number = std::stoi(std::string{value});
-      } catch (...) {
-        return st::unexpected(st::ErrorCode::Invalid, std::format("{0} 只接受整数", argument));
-      }
-      if (number < 0 || static_cast<std::size_t>(number) >= gedou::kFighterCount) {
-        return st::unexpected(st::ErrorCode::Invalid,
-                              std::format("{0} 超出角色范围（0~{1}）", argument,
-                                          gedou::kFighterCount - 1));
-      }
-      (argument == "--left" ? options.left_profile : options.right_profile) =
-          static_cast<std::size_t>(number);
-    } else {
-      kept.emplace_back(argument);
-    }
-  }
-
-  // 再让框架解析通用选项（--headless/--control-port/--shots…全部要认，
-  // 否则外部驱动方等不到控制通道就绪）。
-  std::vector<char*> filtered;
-  filtered.reserve(kept.size());
-  for (std::string& item : kept) filtered.push_back(item.data());
   st::app::CommonOptions common;
-  if (auto status = st::app::parse_common_options(static_cast<int>(filtered.size()),
-                                                  filtered.data(), common);
-      !status) {
-    return st::unexpected(status.error().code, status.error().message);
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(argc, argv, gedou_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("gedou", gedou_options()));
+    std::exit(0);
   }
+
+  options.record_dir = values.get("--record");
+  options.ai_vs_ai = values.has("--ai-vs-ai");
+  options.dummy = values.has("--dummy");
+  options.paused = values.has("--paused");
+  options.hitbox = values.has("--hitbox");
+  options.policy_path = values.get("--policy");
+  if (const std::string difficulty = values.get("--difficulty"); !difficulty.empty()) {
+    options.difficulty = gedou::difficulty_from_name(difficulty.c_str());
+  }
+
+  // 角色档：范围校验留在应用侧（0~kFighterCount-1 是领域知识，框架不该知道）。
+  const auto profile = [](std::string_view text, std::string_view flag,
+                          std::size_t& target) -> st::Status {
+    std::int64_t number = 0;
+    try {
+      number = std::stoll(std::string{text});
+    } catch (const std::exception&) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("{} 只接受整数，收到「{}」", flag, text));
+    }
+    if (number < 0 || static_cast<std::size_t>(number) >= gedou::kFighterCount) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("{} 超出角色范围（0~{}）", flag,
+                                        gedou::kFighterCount - 1));
+    }
+    target = static_cast<std::size_t>(number);
+    return st::ok();
+  };
+  if (values.has("--left")) {
+    if (auto status = profile(values.value_at("--left", 0), "--left", options.left_profile);
+        !status) {
+      return st::forward_error(status.error());
+    }
+  }
+  if (values.has("--right")) {
+    if (auto status = profile(values.value_at("--right", 0), "--right", options.right_profile);
+        !status) {
+      return st::forward_error(status.error());
+    }
+  }
+
   options.app = common.app;
   options.frames = common.max_frames;
   options.max_ms = common.max_ms;
-  options.show_help = common.show_help;
   return options;
 }
 

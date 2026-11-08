@@ -57,6 +57,7 @@
 #include <vector>
 
 #include "st/app/app.hpp"
+#include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
@@ -106,50 +107,16 @@ using namespace gbcode_ui;
 // ════════════════════════════════════════════════════════════════════════════
 
 struct Options {
-  bool headless{false};
-  std::string backend{};
-  float scale{0.0f};
-  /// 工作区逻辑尺寸覆盖（0 = 问后端）；`--work-area WxH`。
-  float work_area_w{0.0f};
-  float work_area_h{0.0f};
-  std::string theme{"light"};
-  std::string language{"cpp"};
-  std::string text_lcd{"auto"};
-  std::string text_fit{"auto"};
-  /// 覆盖率 gamma 预校正：auto/off/数值（见 AppOptions::text_gamma）。
+  /// 框架的通用解析结果（`--headless`/`--scale`/`--renderer`/`--text-*`/
+  /// `--control-*`/`--frames`/`--ms`/`--perf-*`/诊断开关…全在这里）。
   ///
-  /// 与 `--text-lcd`/`--text-fit` 同一姿态：应用层有自己的参数解析，
-  /// 框架侧的 `st::app::parse_cli` 到不了这里——**漏接就是静默忽略**。
-  std::string text_gamma{"auto"};
-  std::string text_gamma_small{};
-  /// 拟合的适用字号上限（物理 px；auto = 不限）。见 `AppOptions::text_fit_max_size`。
-  std::string text_fit_max_size{"auto"};
-  /// 逐字形类的覆盖率 gamma（auto = 内置默认档）。见 `AppOptions::text_digit_gamma`。
-  std::string text_digit_gamma{"auto"};
-  std::string text_letter_gamma{"auto"};
-  std::string text_han_gamma{"auto"};
-  /// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
-  ///
-  /// 与 `--text-*` 同一姿态：应用层有自己的参数解析，框架侧的
-  /// `st::app::parse_cli` 到不了这里——**漏接就是静默忽略**。
-  std::string ui_font_scale{"auto"};
-  /// 编辑器字号档位（`--editor-font-scale`）：相对正文 `font_base` 的倍数，auto = 用内置默认。
-  ///
-  /// 与 `--ui-font-scale` 的区别：后者按主题整体缩放（`Theme::scaled`，影响**所有**文字），
-  /// 本项只动编辑器（代码区与行号）。两者可叠加。
-  std::string editor_font_scale{"auto"};
-  /// 编辑器**行距倍数**（`--editor-line-spacing`）：auto = 组件默认。
-  std::string editor_line_spacing{"auto"};
-  std::uint16_t control_port{0};
-  std::string control_file{};
-  /// 渲染器选型（`--renderer`）：空 = 后端缺省（窗口后端为 `auto` 实测选优）。
-  std::string renderer{};
-  std::string shots{};
-  std::uint32_t frames{0};
-  int max_ms{0};
-  bool enable_script{false};
-  /// 请求系统标题栏/边框（默认关：窗框一律自绘）。仅给排查用。
-  bool decorations{false};
+  /// 为何整个带进来而不抄成一个个字段：这些开关的语义由框架定义，抄一遍就多一份
+  /// 口径。本文件曾为此吃过两次代价——漏接的开关**被静默忽略**（实测“三档渲染
+  /// 出来的图几乎一样”、以及加了 `--log-file` 后整个命令行被拒），而注释里那句
+  /// “框架侧的解析到不了这里”正是病根。现在只有一个解析器。
+  st::app::CommonOptions common{};
+
+  // —— 以下是本应用特有（框架不认识也不该认识）——
   /// 工作区目录：资源管理器/打开/保存全部走 `st::fs` 真实读写。
   /// 缺省 = 当前工作目录（正式形态：不再回退内存样例）。
   std::string workspace{};
@@ -157,237 +124,118 @@ struct Options {
   std::string open_path{};
   /// 霜天仓库根（`--tool-root`）：跑任务/构建时找 `st` 工具链用。
   std::string tool_root{};
+  /// 初始语言（`--language`）。编辑器组件自己的词表，不属于框架的通用开关。
+  std::string language{"cpp"};
+  /// 工作区逻辑尺寸覆盖（0 = 问后端）；`--work-area WxH`。
+  /// 用于复现“小屏 + 高 DPI”下可用空间不够（无头环境否则永远模拟不出来）。
+  float work_area_w{0.0f};
+  float work_area_h{0.0f};
+  /// 编辑器字号档位（`--editor-font-scale`）：相对正文的倍数，auto = 内置默认。
+  /// 与 `--ui-font-scale`（整体缩放、影响所有文字）可叠加。
+  std::string editor_font_scale{"auto"};
+  /// 编辑器行距倍数（`--editor-line-spacing`）：auto = 组件默认。
+  std::string editor_line_spacing{"auto"};
+  /// 小字号的覆盖率 gamma（`--text-gamma-small`）：通用表里没有它——
+  /// 只对“正文 + 小字并存”的编辑器界面有意义。
+  std::string text_gamma_small{"auto"};
 };
 
-/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"。
-auto print_usage(std::string_view program) -> void {
-  st::log::out(
-      "用法: {} [选项]\n"
-      "\n"
-      "窗口/主题\n"
-      "  --headless            无头模式（无窗口；控制通道照常可用）\n"
-      "  --scale N             DPI 缩放（如 2.0）\n"
-      "  --renderer MODE       渲染器：auto / gpu / software（缺省 auto 实测选优）\n"
-      "  --theme light|dark    主题\n"
-      "  --decorations         用系统标题栏（默认自绘）\n"
-      "\n"
-      "字体与字形（观感调参）\n"
-      "  --editor-font-scale N 编辑器字号**档位**（相对正文的倍数，默认 1.0 = 与正文同级）\n"
-      "  --editor-line-spacing N 编辑器行距倍数（相对字体自然行高，默认 1.15）\n"
-      "  --ui-font-scale N     界面整体字号缩放（auto = 跟随系统/默认；影响所有文字）\n"
-      "  --text-fit-max-size N 拟合的适用字号上限（物理 px，0 = 不限）\n"
-      "  --text-digit-gamma V  数字类的覆盖率 gamma（auto = 内置默认）\n"
-      "  --text-letter-gamma V 字母类的覆盖率 gamma（auto = 内置默认）\n"
-      "  --text-han-gamma V    汉字类的覆盖率 gamma（auto = 内置默认）\n"
-      "  --text-fit MODE       网格拟合：auto / off / light / normal\n"
-      "  --text-lcd MODE       亚像素抗锯齿：auto / on / off\n"
-      "  --text-gamma V        覆盖率 gamma（auto / off / 数值）\n"
-      "  --text-gamma-small V  小字号的覆盖率 gamma（同上）\n"
-      "\n"
-      "内容/自动化\n"
-      "  --language NAME       初始语言（默认 cpp；--list-languages 可列）\n"
-      "  --workspace DIR       工作区目录（缺省 = 当前目录）\n"
-      "  --tool-root DIR       霜天仓根（PATH 无 st 时到它下面 build/bin/st 找；跑任务用）\n"
-      "  --control-port N      控制通道端口（0 = 自动）\n"
-      "  --control-file PATH   控制信息落盘路径\n"
-      "  --shots DIR           无头截图目录\n"
-      "  --frames N / --ms N   跑够 N 帧 / N 毫秒后退出\n"
-      "  --enable-script       开启进程内脚本能力（默认关）\n"
-      "  -h, --help            显示本帮助\n",
-      program);
+/// 本应用特有参数表（框架通用开关**不在这里**，别重复声明）。
+[[nodiscard]] auto gbcode_options() -> std::vector<st::app::AppOption> {
+  return {
+      {.name = "--workspace", .value_count = 1, .help = "工作区目录（缺省 = 当前目录）"},
+      {.name = "--open", .value_count = 1, .help = "启动即打开的文件"},
+      {.name = "--tool-root", .value_count = 1,
+       .help = "霜天仓根（PATH 无 st 时到它下面 build/bin/st 找）"},
+      {.name = "--language", .value_count = 1, .help = "初始语言（默认 cpp）"},
+      {.name = "--work-area", .value_count = 1,
+       .help = "模拟工作区尺寸 WxH（逻辑像素，如 960x540）"},
+      {.name = "--editor-font-scale", .value_count = 1,
+       .help = "编辑器字号档位（相对正文倍数，auto = 默认）"},
+      {.name = "--editor-line-spacing", .value_count = 1,
+       .help = "编辑器行距倍数（auto = 默认）"},
+      {.name = "--text-gamma-small", .value_count = 1,
+       .help = "小字号的覆盖率 gamma（auto / off / 数值）"},
+  };
 }
 
-[[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
+/// 解析命令行 → `(应用特有选项, 可直接交给 Application 的 AppOptions)`。
+///
+/// 出错时返回 `Result` 让入口统一处理（不在这里 `exit`：参数解析不该杀进程）。
+[[nodiscard]] auto parse_options(int argc, char** argv)
+    -> st::Result<std::pair<Options, st::app::AppOptions>> {
+  st::app::CommonOptions common;
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(argc, argv, gbcode_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("gbcode", gbcode_options()));
+    std::exit(0);
+  }
+
   Options options;
-  for (int index = 1; index < argc; ++index) {
-    const std::string_view raw = argv[index];
-    const auto value = [&](std::string fallback) {
-      return index + 1 < argc ? std::string(argv[++index]) : std::move(fallback);
-    };
-    // —— 数值参数统一走带校验的解析 ——
-    //
-    // 为何不能裸调 `std::stod`/`stoi`：传非数字（如 `--scale abc`）时它们抛
-    // `std::invalid_argument`，无人捕获 → `terminate`（实测退出码 0xC0000409，
-    // 屏幕上一行 what(): stod）——用户看不懂、脚本拿不到码。而同一命令行里的
-    // `--bogus-flag` 走的是「报错 + exit 2」的干净路径。**非法值必须与未知参数
-    // 同一条路径**（报错可读、退出码稳定），不能一快一崩。
-    const auto parse_double = [&](const char* flag, double fallback) -> double {
-      const std::string text = value(std::format("{}", fallback));
-      double parsed = 0.0;
-      std::size_t consumed = 0;
-      const bool ok = !text.empty() && [&] {
-        try {
-          parsed = std::stod(text, &consumed);
-        } catch (const std::exception&) {
-          return false;
-        }
-        return consumed == text.size();   // 尾巴（如 `1.5x`）也是非法值
-      }();
-      if (!ok) {
-        st::log::err("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
-        std::exit(2);
-      }
-      return parsed;
-    };
-    const auto parse_int = [&](const char* flag, std::int64_t fallback) -> std::int64_t {
-      const std::string text = value(std::format("{}", fallback));
-      std::int64_t parsed = 0;
-      std::size_t consumed = 0;
-      const bool ok = !text.empty() && [&] {
-        try {
-          parsed = std::stoll(text, &consumed);
-        } catch (const std::exception&) {
-          return false;
-        }
-        return consumed == text.size();
-      }();
-      if (!ok) {
-        st::log::err("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
-        std::exit(2);
-      }
-      return parsed;
-    };
-    if (raw == "--help" || raw == "-h") {
-      print_usage(argv[0]);
-      std::exit(0);
-    }
-    // `--headless` 必须接在 else-if 链的链首：独立 if 会在设置 headless 后
-    // 继续落入链尾的「未知参数」分支（实测 `--headless` 报 exit 2，
-    // 而所有 gbcode e2e 的启动参数都以它开关头——整条 e2e 生态全灭）。
-    if (raw == "--headless") options.headless = true;
+  options.workspace = values.get("--workspace", ".");
+  options.open_path = values.get("--open");
+  options.tool_root = values.get("--tool-root");
+  if (const std::string language = values.get("--language"); !language.empty()) {
+    options.language = language;
+  }
+  options.editor_font_scale = values.get("--editor-font-scale", "auto");
+  options.editor_line_spacing = values.get("--editor-line-spacing", "auto");
+  options.text_gamma_small = values.get("--text-gamma-small", "auto");
 
-    // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
-
-    // 漏接的开关会被静默忽略——"我明明指定了 x11/wayland"会变成谜案
-
-    //（Linux 上验证两个窗口后端全靠它）。
-
-    else if (raw == "--backend") options.backend = value("");
-    else if (raw == "--enable-script") options.enable_script = true;
-    // `--scale` 夹到 [0.1, 10]：0 会让一切尺寸归零（窗口/字号/命中区全灭），
-    // 负数在多数后端是非法 DPI。夹取而非报错——意图明确（想大想小），只是数值过头。
-    else if (raw == "--scale") {
-      options.scale = static_cast<float>(std::clamp(parse_double("--scale", 1.0), 0.1, 10.0));
-    }
-    // 模拟“另一块屏幕的工作区”（逻辑像素，如 `960x540`）——用于复现“小屏 + 高 DPI”
-    // 下可用空间不够的场景（否则无头环境永远模拟不出来，DPI 适配只能靠猜）。
-    else if (raw == "--work-area") {
-      const std::string text_value = value("");
-      const auto sep = text_value.find('x');
-      if (sep != std::string::npos) {
-        options.work_area_w = static_cast<float>(std::atof(text_value.substr(0, sep).c_str()));
-        options.work_area_h = static_cast<float>(std::atof(text_value.substr(sep + 1).c_str()));
-      }
-    }
-    else if (raw == "--theme") options.theme = value("light");
-    else if (raw == "--language") options.language = value("cpp");
-    else if (raw == "--text-lcd") options.text_lcd = value("auto");
-    else if (raw == "--text-fit") options.text_fit = value("auto");
-    else if (raw == "--text-fit-max-size") options.text_fit_max_size = value("auto");
-    else if (raw == "--text-digit-gamma") options.text_digit_gamma = value("auto");
-    else if (raw == "--text-letter-gamma") options.text_letter_gamma = value("auto");
-    else if (raw == "--text-han-gamma") options.text_han_gamma = value("auto");
-    else if (raw == "--text-gamma") options.text_gamma = value("auto");
-    else if (raw == "--text-gamma-small") options.text_gamma_small = value("auto");
-    else if (raw == "--ui-font-scale") options.ui_font_scale = value("auto");
-    else if (raw == "--editor-font-scale") options.editor_font_scale = value("auto");
-    else if (raw == "--editor-line-spacing") options.editor_line_spacing = value("auto");
-    else if (raw == "--control-port") {
-      const std::int64_t port = parse_int("--control-port", 0);
-      if (port < 0 || port > 65535) {
-        st::log::err("参数 --control-port 超出端口范围：{}\n", port);
-        std::exit(2);
-      }
-      options.control_port = static_cast<std::uint16_t>(port);
-    }
-    else if (raw == "--control-file") options.control_file = value({});
-    // 渲染器选型：`auto`（实测选优，缺省）/ `gpu` / `software`。
-    //
-    // 为何示例也要暴露它：这个开关是**复现窗口呈现类缺陷的唯一手段**——
-    // 两条路的呈现机制完全不同（GPU 走 swapchain 直接 return；软件走 GDI blit，
-    // 中间多一层惰性 DIB）。只能靠 `auto` 碰运气的话，`software` 分支在某些机器上
-    // （GPU 实测更快）永远走不到，那里的缺陷也就永远不发作、也永远测不到。
-    else if (raw == "--renderer") options.renderer = value("auto");
-    else if (raw == "--shots") options.shots = value({});
-    else if (raw == "--frames") {
-      const std::int64_t frames = parse_int("--frames", 0);
-      if (frames < 0) {
-        st::log::err("参数 --frames 不能为负：{}\n", frames);
-        std::exit(2);
-      }
-      options.frames = static_cast<std::uint32_t>(frames);
-    }
-    else if (raw == "--ms") {
-      const std::int64_t ms = parse_int("--ms", 0);
-      if (ms < 0) {
-        st::log::err("参数 --ms 不能为负：{}\n", ms);
-        std::exit(2);
-      }
-      options.max_ms = static_cast<int>(ms);
-    }
-    else if (raw == "--workspace") options.workspace = value(".");
-    // `--open <path>`：启动即打开一个文件（编辑器历来都有这条——`code file.cpp`）。
-    // 缺它时“打开某个文件”只能靠 UI 点，自动化与命令行使用都不方便。
-    else if (raw == "--open") options.open_path = value({});
-    else if (raw == "--tool-root") options.tool_root = value("");
-    else if (raw == "--decorations") options.decorations = true;
-    // 诊断开关（--log-file/--log-level/--crash-dir）：由 `startup_configure_diagnostics`
-    // 在 `main` 更早处生效（才能盖住启动早期日志）。这里只“认识它”并把值吃掉，
-    // 否则下面那句“未知参数”会把整个命令行拒掉——实测踩到：
-    // 加了这些开关后 `--log-file X` 直接 exit 2。
-    else if (raw == "--log-file" || raw == "--log-level" || raw == "--crash-dir") {
-      (void)value("");
-    }
-    // **未知参数报错，不静默忽略**：本应用曾经自带一份参数解析器（不走
-    // `parse_common_options`），于是新加的开关被静默吃掉——
-    // 表现是"三档渲染出来的图几乎一样"（实测 B vs C 只差 20 像素），
-    // 差点被当成"三档观感接近"的结论。静默忽略未知参数正是这类事故的温床。
-    else {
-      st::log::err("未知参数：{}（用 --help 看可用项）\n", raw);
-      std::exit(2);
+  // `--work-area WxH`：故意宽松（非数字按 0 = 不模拟），与迁移前一致——
+  // 它是**复现工具**，写错的代价只是“没生效”，不该让整个应用起不来。
+  if (const std::string area = values.get("--work-area"); !area.empty()) {
+    const auto separator = area.find('x');
+    if (separator != std::string::npos) {
+      options.work_area_w = static_cast<float>(std::atof(area.substr(0, separator).c_str()));
+      options.work_area_h =
+          static_cast<float>(std::atof(area.substr(separator + 1).c_str()));
     }
   }
-  return options;
+
+  // `--scale` 夹到 [0.1, 10]：0 会让一切尺寸归零（窗口/字号/命中区全灭），
+  // 负数在多数后端是非法 DPI。**夹取而非报错**——意图明确（想大想小），
+  // 只是数值过头；框架那边只保证“是正数”。
+  if (common.app.scale > 0.0f) {
+    common.app.scale = std::clamp(common.app.scale, 0.1f, 10.0f);
+  }
+
+  st::app::AppOptions app = common.app;
+  // 无头时后端若未显式指定，交给 headless（与迁移前同一判定）。
+  if (app.backend.empty() && app.headless) app.backend = "headless";
+  options.common = std::move(common);
+  return std::make_pair(std::move(options), std::move(app));
 }
 
 auto run_app(int argc, char** argv) -> int {
-  const Options options = parse_options(argc, argv);
-  register_custom_language();
-
-  st::app::AppOptions app_options;
+  auto parsed = parse_options(argc, argv);
+  if (!parsed) {
+    st::log::err("gbcode: {}\n", parsed.error().to_string());
+    return 2;
+  }
+  const Options options = parsed->first;
+  // 框架的解析结果**直接**就是启动参数；下面只补本应用的默认值。
+  st::app::AppOptions app_options = std::move(parsed->second);
   // 期望尺寸（逻辑像素）：**由 Application 夹到屏幕工作区内**（见下面的 `fit_window`）。
   //
   // 为何不能直接写死：逻辑尺寸与 DPI 无关，而**可用逻辑空间随 DPI 缩小**。
   // 13 寸 1080p 屏开 200% 缩放时，工作区只有 ≈960×540 逻辑像素——写死
-  // 1280×800 会**超出屏幕**，窗口被系统裁切/挤压，界面于是“错乱且不可用”。
-  // 期望值只表达“在大屏上我希望能多宽敞”，能不能给到由屏幕决定。
-  app_options.width = 1440;
-  app_options.height = 900;
+  // 1280×800 会**超出屏幕**，窗口被系统裁切/挤压，界面于是"错乱且不可用"。
+  // 期望值只表达"在大屏上我希望能多宽敞"，能不能给到由屏幕决定。
+  //
+  // 这里用 `if` 覆盖而不是无条件赋值：`--width/--height` 是**通用开关**，
+  // 用户显式给了就该听用户的（迁移前 gbcode 不收这两个参数，接入框架后自然支持）。
+  if (app_options.width <= 0) app_options.width = 1440;
+  if (app_options.height <= 0) app_options.height = 900;
   app_options.work_area_override = st::math::Size{options.work_area_w, options.work_area_h};
-  app_options.scale = options.scale;
   app_options.title = "歌白代码 · 霜天";
-  app_options.headless = options.headless;
-  // 窗框一律自绘：窗口不带系统标题栏（`CONVENTIONS.md` §10 第 7 条）。
-  // 装饰开关仍留给宿主——`--decorations` 是给"就想看系统窗框"的排查场景用的。
-  app_options.decorations = options.decorations;
-  app_options.backend = !options.backend.empty() ? options.backend
-                        : (options.headless ? std::string("headless") : std::string{});
-  app_options.renderer = options.renderer;
-  // 脚本能力显式开启：默认关闭，控制通道的 `script` 方法仅在开启后可用
-  app_options.enable_script = options.enable_script;
-  app_options.text_lcd = options.text_lcd;
-  app_options.text_fit = options.text_fit;
-  app_options.text_gamma = options.text_gamma;
+  app_options.enable_script = options.common.app.enable_script;
   app_options.text_gamma_small = options.text_gamma_small;
-  app_options.text_fit_max_size = options.text_fit_max_size;
-  app_options.text_digit_gamma = options.text_digit_gamma;
-  app_options.text_letter_gamma = options.text_letter_gamma;
-  app_options.text_han_gamma = options.text_han_gamma;
-  app_options.ui_font_scale = options.ui_font_scale;
-  app_options.control_port = options.control_port;
-  app_options.control_file = options.control_file;
-  app_options.screenshot_dir = options.shots;
-  app_options.theme = options.theme == "dark" ? ThemeMode::Dark : ThemeMode::Light;
+  // `--theme` 既接受明暗两档，也接受内置主题名（与 gallery 同口径）。
+  app_options.theme = options.common.app.theme_name == "dark" ? ThemeMode::Dark
+                                                             : ThemeMode::Light;
 
   // —— 品牌资产（编译期嵌入，两处各取所需）——
   //
@@ -430,11 +278,11 @@ auto run_app(int argc, char** argv) -> int {
   // `stod` 裸抛（与 parse_options 里的口径一致——两处都是用户可传入的数值）。
   const auto parse_late_double = [](const char* flag, const std::string& text,
                                    [[maybe_unused]] double fallback) -> double {
-    double parsed = 0.0;
+    double number = 0.0;
     std::size_t consumed = 0;
     const bool valid = !text.empty() && [&] {
       try {
-        parsed = std::stod(text, &consumed);
+        number = std::stod(text, &consumed);
       } catch (const std::exception&) {
         return false;
       }
@@ -444,7 +292,7 @@ auto run_app(int argc, char** argv) -> int {
       st::log::err("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
       std::exit(2);
     }
-    return parsed;
+    return number;
   };
   // 工作区缺省 = **当前工作目录**（正式形态）。
   //
@@ -910,8 +758,9 @@ auto run_app(int argc, char** argv) -> int {
     page->update_terminal();
     app.tick();
     ++frames;
-    if (options.frames > 0 && frames >= options.frames) break;
-    if (options.max_ms > 0 && st::time::now_ms() - started_ms >= options.max_ms) break;
+    if (options.common.max_frames > 0 && frames >= options.common.max_frames) break;
+    if (options.common.max_ms > 0 &&
+        st::time::now_ms() - started_ms >= options.common.max_ms) break;
     app.pace_loop(frame_start_ms);
   }
   // 退出前先收终端：可能在跑的作业得停掉并 join 读线程，

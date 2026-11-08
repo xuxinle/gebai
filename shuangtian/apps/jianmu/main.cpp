@@ -45,6 +45,8 @@
 #include <vector>
 
 #include "st/app/app.hpp"
+#include "st/app/cli.hpp"
+#include "st/core/string.hpp"   // parse_i64（参数取值校验）   // 通用参数解析（框架统一入口；本应用只声明特有参数）
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/json.hpp"
@@ -67,82 +69,118 @@ using st::Json;
 
 /// 命令行选项（与其它示例同一套形态：`--key=value`）。
 struct Options {
+  /// 框架的通用解析结果（`--headless`/`--width`/`--height`/`--theme`/
+  /// `--control-*`/`--shots`/`--frames`…全在这里）。
+  ///
+  /// 为何整包带进来：这些开关的语义由框架定义，抄一遍就多一份口径——本文件原来
+  /// 把它们逐个手写了**两遍**（分离式 + 等号式两条 if 链），改一个开关要动四处。
+  st::app::CommonOptions common{};
+
+  /// 场景目录（`--dir`）。
   std::string dir{};
+  /// 启动即打开的场景文件（`--scene`）。
   std::string scene{};
+  /// 监控场景文件并在保存时热重载（缺省**开**：本应用的核心工作流就是边写边看）。
   bool watch{true};
-  int width{1100};
-  int height{760};
-  std::string theme{"dark"};
-  int control_port{0};
-  std::string control_file{};
-  std::string shots{};
-  std::uint32_t max_frames{0};
-  bool headless{false};
+  /// 帧剖析采样帧数（`--profile-frames`）：本应用的剖析入口，与框架的
+  /// `--perf-frames` 同义但保留旧名（工具脚本在用）。
   int probe_frames{0};
 };
 
-auto parse_options(int argc, char** argv) -> Options {
-  Options options;
-  // ## 同时支持 `--key=value` 与 `--key value`
-  //
-  // 只支持前者是一个**真踩到的坑**：框架的 e2e 脚本（以 caiyun 为模版）用的是
-  // 分离形式 `--control-file PATH`，而本程序只认 `= 形式`——于是控制文件
-  // 永远不落盘，e2e 在 60 秒后报“应用未写出控制文件”，看起来像启动失败。
-  //
-  // 两种都收：分离式是 Unix 惯例（脚本/工具链在用），等号式是个人习惯。
-  bool boolean_flag = false;
-  for (int i = 1; i < argc; ++i) {
-    const std::string_view arg(argv[i]);
-    (void)boolean_flag;
-    const auto next_value = [&]() -> std::string {
-      if (i + 1 >= argc) return {};
-      return argv[++i];
-    };
-    // 先处理分离形式（键名完全匹配）
-    if (arg == "--dir") { options.dir = next_value(); continue; }
-    if (arg == "--scene") { options.scene = next_value(); continue; }
-    if (arg == "--width") { options.width = std::atoi(next_value().c_str()); continue; }
-    if (arg == "--height") { options.height = std::atoi(next_value().c_str()); continue; }
-    if (arg == "--theme") { options.theme = next_value(); continue; }
-    if (arg == "--control-port") {
-      options.control_port = std::atoi(next_value().c_str());
-      continue;
-    }
-    if (arg == "--control-file") { options.control_file = next_value(); continue; }
-    if (arg == "--screenshot-dir" || arg == "--shots") {
-      options.shots = next_value();
-      continue;
-    }
-    if (arg == "--frames") { options.max_frames = static_cast<std::uint32_t>(std::atoi(next_value().c_str())); continue; }
-    if (arg == "--profile-frames") { options.probe_frames = std::atoi(next_value().c_str()); continue; }
-    if (arg == "--headless") { options.headless = true; continue; }
-    if (arg == "--no-watch") { options.watch = false; continue; }
+/// 本应用特有参数表（框架通用开关**不在这里**）。
+[[nodiscard]] auto jianmu_options() -> std::vector<st::app::AppOption> {
+  return {
+      {.name = "--dir", .value_count = 1, .help = "场景目录"},
+      {.name = "--scene", .value_count = 1, .help = "启动即打开的场景文件"},
+      {.name = "--watch", .value_count = 0, .help = "监控场景文件并热重载（缺省开）"},
+      {.name = "--no-watch", .value_count = 0, .help = "关闭热重载"},
+      {.name = "--profile-frames", .value_count = 1, .help = "帧剖析采样帧数"},
+      {.name = "--screenshot-dir", .value_count = 1, .help = "--shots 的别名"},
+  };
+}
 
-    // 再处理等号形式
-    const auto value_of = [&](std::string_view key) -> std::string {
-      if (arg.size() <= key.size() + 1) return {};
-      return std::string(arg.substr(key.size() + 1));
-    };
-    if (arg.rfind("--dir=", 0) == 0) options.dir = value_of("--dir");
-    else if (arg.rfind("--scene=", 0) == 0) options.scene = value_of("--scene");
-    else if (arg.rfind("--width=", 0) == 0) options.width = std::atoi(value_of("--width").c_str());
-    else if (arg.rfind("--height=", 0) == 0) options.height = std::atoi(value_of("--height").c_str());
-    else if (arg.rfind("--theme=", 0) == 0) options.theme = value_of("--theme");
-    else if (arg.rfind("--control-port=", 0) == 0) {
-      options.control_port = std::atoi(value_of("--control-port").c_str());
-    } else if (arg.rfind("--control-file=", 0) == 0) {
-      options.control_file = value_of("--control-file");
-    } else if (arg.rfind("--screenshot-dir=", 0) == 0) {
-      options.shots = value_of("--screenshot-dir");
-    } else if (arg.rfind("--shots=", 0) == 0) {
-      options.shots = value_of("--shots");
-    } else if (arg.rfind("--frames=", 0) == 0) {
-      options.max_frames = static_cast<std::uint32_t>(std::atoi(value_of("--frames").c_str()));
-    } else if (arg.rfind("--profile-frames=", 0) == 0) {
-      options.probe_frames = std::atoi(value_of("--profile-frames").c_str());
+/// 把 `--key=value` 归一化成 `--key` `value` 两个 argv。
+///
+/// 为何要这一层：本应用历来**同时收**分离式与等号式。这不是习惯问题——只认等号式
+/// 时框架 e2e 传的 `--control-file PATH` 被无视，控制文件永不落盘，e2e 等到 60 秒
+/// 报"应用未写出控制文件"，看起来像启动失败（真事故）。
+///
+/// 放在入口处做，而不是让框架认识 `=`：**全仓参数口径必须一致**，多一种语法就要
+/// 在每个应用、每个脚本、每份文档里多考虑一次。归一化只服务本应用的历史用法。
+[[nodiscard]] auto expand_equals_forms(int argc, char** argv)
+    -> std::pair<std::vector<std::string>, std::vector<const char*>> {
+  std::vector<std::string> storage;
+  storage.reserve(static_cast<std::size_t>(argc) * 2);
+  storage.emplace_back(argc > 0 ? argv[0] : "jianmu");
+  for (int index = 1; index < argc; ++index) {
+    const std::string argument(argv[index]);
+    // 只拆 `--name=value`：单个 `-` 开头或没有 `=` 的原样保留。
+    const auto equals = argument.find('=');
+    if (equals != std::string::npos && equals > 2 && argument[0] == '-' &&
+        argument[1] == '-') {
+      storage.push_back(argument.substr(0, equals));
+      storage.push_back(argument.substr(equals + 1));
+      continue;
     }
+    storage.push_back(argument);
   }
-  return options;
+  std::vector<const char*> pointers;
+  pointers.reserve(storage.size());
+  for (const std::string& item : storage) pointers.push_back(item.c_str());
+  return {std::move(storage), std::move(pointers)};
+}
+
+/// 解析命令行 → `(应用特有选项, 可直接交给 Application 的 AppOptions)`。
+[[nodiscard]] auto parse_options(int argc, char** argv)
+    -> st::Result<std::pair<Options, st::app::AppOptions>> {
+  // ⚠ 归一化结果的两个容器要**活到解析结束**：`pointers` 里存的是
+  // `storage` 中每个字符串的 `data()`，提前析构就是悬垂指针。
+  auto expanded = expand_equals_forms(argc, argv);
+  // storage 看着没被读，但它是 pointers 里每个 data() 的**所有者**——
+  // 提前析构就是悬垂指针。用 (void) 明说这是生命周期担保而非无用变量。
+  const std::vector<std::string>& storage = expanded.first;
+  (void)storage;
+  const std::vector<const char*>& pointers = expanded.second;
+
+  st::app::CommonOptions common;
+  st::app::AppOptionValues values;
+  auto parsed = st::app::parse_options(static_cast<int>(pointers.size()),
+                                      const_cast<char**>(pointers.data()),
+                                      jianmu_options(), common, values);
+  if (!parsed) return st::forward_error(parsed.error());
+  if (common.show_help) {
+    st::log::out("{}", st::app::options_usage("jianmu", jianmu_options()));
+    std::exit(0);
+  }
+
+  Options options;
+  options.dir = values.get("--dir");
+  options.scene = values.get("--scene");
+  // `--watch` / `--no-watch` 是同一件事的两个方向：**后出现者胜**（从后往前找）。
+  for (auto entry = values.values.rbegin(); entry != values.values.rend(); ++entry) {
+    if (entry->first == "--watch") { options.watch = true; break; }
+    if (entry->first == "--no-watch") { options.watch = false; break; }
+  }
+  if (const std::string frames = values.get("--profile-frames"); !frames.empty()) {
+    auto number = st::parse_i64(frames);
+    if (!number.has_value() || *number < 0) {
+      return st::unexpected(st::ErrorCode::Invalid,
+                            std::format("--profile-frames 的取值不是非负整数: {}", frames));
+    }
+    options.probe_frames = static_cast<int>(*number);
+  }
+  // `--screenshot-dir` 是 `--shots` 的别名：给后者作废前者的优先。
+  if (const std::string alias = values.get("--screenshot-dir"); !alias.empty()) {
+    common.app.screenshot_dir = alias;
+  }
+
+  st::app::AppOptions app = common.app;
+  if (app.width <= 0) app.width = 1100;
+  if (app.height <= 0) app.height = 760;
+  if (app.theme_name.empty()) app.theme_name = "dark";
+  if (app.backend.empty() && app.headless) app.backend = "headless";
+  options.common = std::move(common);
+  return std::make_pair(std::move(options), std::move(app));
 }
 
 /// 一个场景文件的登记项。
@@ -387,7 +425,12 @@ void install_bridge(st::ui::ScriptBridge& bridge, LabState& state) {
 }  // namespace
 
 auto run_app(int argc, char** argv) -> int {
-  const Options options = parse_options(argc, argv);
+  auto parsed = parse_options(argc, argv);
+  if (!parsed) {
+    st::log::err("jianmu: {}\\n", parsed.error().to_string());
+    return 2;
+  }
+  const Options options = parsed->first;
 
   // 场景目录：默认相对可执行文件/工作目录的几个常见位置都试
   //
@@ -404,17 +447,16 @@ auto run_app(int argc, char** argv) -> int {
     if (scene_dir.empty()) scene_dir = "apps/jianmu/scenes";
   }
 
-  st::app::AppOptions app_options;
+  // 框架的解析结果**直接**成为启动参数；下面只补本应用的默认值。
+  st::app::AppOptions app_options = std::move(parsed->second);
   app_options.title = "建木 · 三维建模与演示";
-  app_options.width = options.width;
-  app_options.height = options.height;
-  app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
-  app_options.control_port = static_cast<std::uint16_t>(std::clamp(options.control_port, 0, 65535));
-  app_options.control_file = options.control_file;
-  app_options.screenshot_dir = options.shots;
-  app_options.max_frames = options.max_frames;
-  app_options.profile_frames = static_cast<std::uint32_t>(options.probe_frames);
-  app_options.headless = options.headless;
+  if (app_options.theme_name.empty()) app_options.theme_name = "dark";
+  app_options.theme = app_options.theme_name == "dark" ? st::ui::ThemeMode::Dark
+                                                       : st::ui::ThemeMode::Light;
+  app_options.max_frames = options.common.max_frames;
+  if (options.probe_frames > 0) {
+    app_options.profile_frames = static_cast<std::uint32_t>(options.probe_frames);
+  }
   // 脚本宿主：本示例的界面联动靠 JS（与 xmlapp 同一形态）
   app_options.enable_script = true;
 
@@ -523,6 +565,8 @@ auto run_app(int argc, char** argv) -> int {
   // ── 状态栏内容（每帧或状态变化时更新） ──
   std::string last_status_text;
   std::uint64_t ticks = 0;
+  // --ms 退出判据的基准时刻（框架通用开关，见循环内注释）。
+  const std::int64_t started_ms = st::time::now_ms();
   while (!app.quit_requested()) {
     // ## `max_frames` 要自己判
     //
@@ -530,7 +574,13 @@ auto run_app(int argc, char** argv) -> int {
     // 本应用用 `start()` + `tick()` 自驱（因为要在每帧做文件监听），
     // 那条路不会替你数帧。不自判的话 `--frames=N` 完全无效——
     // 而症状是“无头跑不停”（不是报错），CI 里会直接挂到超时。
-    if (options.max_frames > 0 && ticks >= options.max_frames) break;
+    if (options.common.max_frames > 0 && ticks >= options.common.max_frames) break;
+    // --ms 同属框架通用开关：同样要自己判（理由同上）。
+    if (options.common.max_ms > 0 &&
+        st::time::now_ms() - started_ms >=
+            static_cast<std::int64_t>(options.common.max_ms)) {
+      break;
+    }
     const std::int64_t frame_start = st::time::now_ms();
 
     // 文件监听：只在开了 watch 时轮询（未开时是常数级判断）
