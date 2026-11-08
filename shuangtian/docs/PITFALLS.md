@@ -317,6 +317,8 @@
 | **判据的分辨率决定了能验收什么** | 32×18 网格在 1080p 下每格 60px，1~2px 位移被格内平均抹掉（微动改了半天数据仍为 0.00）；要验收细微观感得换细网格或元素追踪 | 同上 |
 | **「元素小」不等于「内容少」** | 实测把卡片做成占画面 60%，而参照片是点 14px + 留白 85%——前者是「笨」不是「满」；高级感来自**元素细 + 内容满 + 留白多** | `caiyun_motion_acceptance.md` |
 | **强运动段要「长」不是「快」** | 0.4s 快闪峰值只有 4.8，1.6s 长横掠有 48.8（10 倍）；一帧内飞出画面 = 观众只看到东西消失 | 同上 |
+| **「最后一帧」口径的指标，不核对帧号前进就完全不可信**〔量具〕 | `metrics.paint_ms` / `last_frame_ms` 报的是**最后一帧**。应用空闲（帧循环已收敛）时它会把同一个旧值**一直重复报**——实测读四次都是 `43.505ms`、`frames` 一直停在 4，于是被当成“每帧 43ms 的稳态”，据此推出“默认路径比显式 `--renderer gpu` 慢 8 倍、靶子是文字混合”，整条归因链的前提都是假的（真实稳态 **2.6~3.0ms**，两条路径一致）。**判据：读这类值必须先记下 `frames`，触发一次真改像素的操作，**等 `frames` 真的增大**再读**；否则你量的是“它没在动” | `src/control/server.cpp` 的 `handle_metrics`；`tmp/gbcode_renderer_ab.py` 的 `next_frame()`；实测 2026-11-08（同一帧被读四次；变帧后 auto 43.9→3.0 / gpu 6.0→2.7） |
+| **采样间隔比现象还慢 = 没异议的“没测到”**〔量具〕 | 用屏幕 `BitBlt` 查一段 100~133ms 的黑屏，实测**单次 `BitBlt` 阻塞 262ms**（DWM 合成内部同步）、采样间隔 130~350ms——比待测现象还长，于是“没采到黑”完全可以只是没抽中。而同样条件下 `DwmFlush()` 加不加都一样（阻塞不在那里）。**先在空转里量一次单次采集成本**，确认它远小于现象时宽，否则换通道（应用内 `capture`/日志埋点）而不是加压采样 | `tmp/gbcode_startup_black_probe2.py` 与 `gbcode_black_fast.py` 的实测；本次代价：前面几版“0ms 结论”全部作废 |
 
 ## 场景 10：写文档 / 提交
 
@@ -442,6 +444,7 @@
 | 坑 | 一句话 | 出处 |
 |---|---|---|
 | **早退守卫会跟「惰性重建」互锁** | `blit()` 的第一步就是 `ensure_dib()`（重建责任在它身上），而 `resize_buffers_in_place()` 会**故意** `release_dib()` 惰性丢弃。于是调用方多加一句 `if (dib_ == nullptr) return;` 就构成死锁：丢掉 → 早退 → `blit()` 不执行 → 永不重建 → **窗口从此一片空白**。三处同时存在才彻底发作（`present` / `show_when_ready` / `WM_PAINT`）——只回退一处时系统重绘还能抢救回来，所以「只修一处」也能看着好了。**规矩：惰性资源的**唯一重建入口**不许被调用方的前置守卫绕过** | `src/shell/platform_win32.cpp` 的 `present()` 注释；`tools/present_software_verify.py` |
+| **「画布」不等于「画布里有内容」**〔窗口〕 | `Surface::resize` 后的新缓冲内容**未定义**（实测全零），而 `WM_PAINT` 会无条件 `blit()`/`present()`——于是**一块全零画布被贴上去**，盖掉 `show_early` 刚涂好的主题底色，用户看到一段纯黑（实测 1.5x 下 **133ms**、1.0x 下 **99ms**，时长随画布面积增长 = 首帧绘制耗时）。触发链是「`SetWindowPos` 改尺寸 → `WM_SIZE` → `resize_buffers_in_place` → 丢 DIB / 清空画布 → 系统发 `WM_PAINT`」。**修法：用一个单独的状态位回答“画布里有有效内容吗”**（`resize`/重建置假；应用取走画布或 `present` 一帧置真），无内容时贴**主题底色**而不是贴空画布；GPU 路径下无内容时**不要走 swapchain**（交上去就是整窗黑）。⚠ **千万别退回 `if (dib_ != nullptr) return;`**——上一行的死锁就是它 | `src/shell/platform_win32.cpp` 的 `canvas_painted_` / `fill_dib_with_matte` / `WM_PAINT`；实测 2026-11-08（引入点：`347b157e` 去掉 `dib_` 守卫那天） |
 | **机器差异让缺陷只在一部分机器上发作** | 同一份代码「别的机器好的」，差别往往在**渲染器最终走了哪条呈现路径**：GPU 路径走 `presenter_->present()`（`DXGI` swapchain）直接 return，**到不了**软件路径那段 GDI blit 代码。回归用例必须**显式 `--renderer software` 或 `--renderer gpu`**，不能依赖缺省——否则在另一条路径更快的机器上**恒绿** | `tools/present_software_verify.py` 头部；本例实测 2026-10-20 |
 | **缺省不是「选一条」而是「先软后硬」** | 不传 `--renderer` 时日志第一行写的是 `渲染器选型：software · 显式指定软件光栅器`——**这一行不代表最终状态**。`defer_gpu_`（默认 true）让人先用软件画布秒开，约 500ms 后后台 D3D11 就绪再 `try_upgrade_to_gpu()` 升级。**判当前后端要看 `已升级到 GPU 画布` 那一行或 `metrics.renderer`，不是选型行**；只看首行判“这台机器选了软件”是本仓真实发生过的误读 | `src/shell/platform_win32.cpp` 的 `allocate_buffers`（`wanted` 计算）与 `try_upgrade_to_gpu`；实测 2026-10-30（不传 `--renderer`：`software 1.9ms` → 502ms 后 `已升级到 GPU 画布`） |
 | **「调用花了多久」不等于「送出去了」** | `present_ms` 度量的是调用耗时，**提前 return 也照样有值**。旧指标里“每帧都没上屏”与“每帧都正常”完全不可区分（这正是空白窗口难查的根因）。上屏与否必须**单独计数**（`present_skipped`），并在控制通道暴露 | `include/st/control/control.hpp` 的 `present_skipped`；`src/control/server.cpp` |

@@ -744,10 +744,12 @@ class Win32Backend final : public Backend {
     // **已由 `show_early` 显过**：不重复 `ShowWindow`/抢焦点，但**必须补一次 present**
     // ——那正是首帧内容贴上去的时机（`show_early` 只填了底色）。
     if (shown_) {
-      if (presenter_ != nullptr) {
+      if (canvas_painted_ && presenter_ != nullptr) {
         (void)presenter_->present(*surface_, surface_->physical_width(),
                                   surface_->physical_height());
       } else if (surface_ != nullptr) {
+        // 内容还没画（或只有软件画布）：走 GDI——`blit()` 会在画布无内容时
+        // 用主题底色顶上，而不是把全零画布贴出去。
         (void)blit();
       }
       ::UpdateWindow(window_);
@@ -765,7 +767,7 @@ class Win32Backend final : public Backend {
     // 它本来就是「需要就建」的语义。多加一道 `dib_` 非空守卫，等于要求调用方
     // 先保证 DIB 存在——而 `resize_buffers_in_place()` 会**故意**把 DIB 丢掉
     // （惰性重建），于是窗口从此再也不上屏（见 `present()` 处的完整说明）。
-    if (presenter_ != nullptr) {
+    if (canvas_painted_ && presenter_ != nullptr) {
       (void)presenter_->present(*surface_, surface_->physical_width(), surface_->physical_height());
     } else if (surface_ != nullptr) {
       (void)blit();
@@ -796,6 +798,9 @@ class Win32Backend final : public Backend {
     // `present_region_` 每帧消费后清零的时序保证“尺寸变化那帧必是全量”
     //（WM_SIZE → repaint_for_resize → present 时 app 尚未设新区域）。
     const bool full_frame = present_region_.is_empty();
+    // 应用自己交了一帧 = 画布里有它画的内容（软件路径的 present 与「画完了」同义）。
+    // GPU 路径同理：能走到这里就说明换型与绘制都已就位。
+    canvas_painted_ = true;
     if (presenter_ != nullptr) {
       if (auto presented = presenter_->present(*surface_, surface_->physical_width(),
                                                surface_->physical_height());
@@ -1229,6 +1234,13 @@ class Win32Backend final : public Backend {
     // 随后就在这块画布上排版与绘制——在这里换，本帧画的就是新画布，
     // 不会出现“画在旧画布、present 新画布”的错位（与尺寸重建同一条时序纪律）。
     try_upgrade_to_gpu();
+    // 应用**取走画布** = 接下来就要往里画。
+    //
+    // 为何在这里置位而不只在 `present()`：`WM_PAINT` 随时可能插入（系统重绘），
+    // 而「应用正在画」与「画布里有上帧内容」必须在同一个事实面上——否则
+    // 尺寸变化后系统重绘抢在首帧绘制之前，就会把全零画布贴出去（本类修改的起因）。
+    // 置真之后即使内容只画了一半，也比一块纯黑更接近真实（且下一帧就补齐）。
+    canvas_painted_ = true;
     return *surface_;
   }
 
@@ -1564,6 +1576,8 @@ class Win32Backend final : public Backend {
     renderer_name_ = std::move(choice.name);
     renderer_note_ = renderer_base_note_;
     surface_->clear(math::Color{0, 0, 0, 0});
+    // 刚建的画布是**空的**（上面这行就是把它清成全零）：同样不允许当内容贴出去。
+    canvas_painted_ = false;
 
     // GPU 画布 + 真实窗口 → 建 swapchain 呈现器（这一步是"零拷贝上屏"的全部前提）
     presenter_.reset();
@@ -1597,6 +1611,8 @@ class Win32Backend final : public Backend {
     if (auto status = surface_->resize(physical_width, physical_height); !status) {
       return status;
     }
+    // 新缓冲内容**未定义**（实测全零）——在应用重画之前不允许把它当内容贴出去。
+    canvas_painted_ = false;
     // swapchain 跟着改：`ResizeBuffers` 只换后备缓冲（不重建 swapchain，不会闪一下）。
     // 失败就把呈现器丢掉：下一次 `present()` 会自动落到 GDI blit（语义与旧行为一致），
     // 而不是让一个尺寸错的后备缓冲继续呈现（那正是"拉伸发糊"的老病根）。
@@ -1865,11 +1881,27 @@ class Win32Backend final : public Backend {
     // ① 让 GDI 按掩码自己解读（`BI_BITFIELDS`）：通道正确，但它内部逐像素重打包，
     //    `BitBlt` 从 0.245 ms 涨到 **14.4 ms**（`tools/dib_bitfields_probe.cpp` 实测）；
     // ② 改画布像素格式为 BGRA：会动到整个绘制/合成层的字节序假设，风险远大于 3 ms。
-    for (int row = 0; row < area.height; ++row) {
-      const std::size_t offset = static_cast<std::size_t>(area.y + row) * stride +
-                                 static_cast<std::size_t>(area.x);
-      if (offset + count > source.size()) break;
-      raster::simd::rotate_bgra_row(dib_pixels_ + offset, source.data() + offset, count);
+    if (canvas_painted_) {
+      for (int row = 0; row < area.height; ++row) {
+        const std::size_t offset = static_cast<std::size_t>(area.y + row) * stride +
+                                   static_cast<std::size_t>(area.x);
+        if (offset + count > source.size()) break;
+        raster::simd::rotate_bgra_row(dib_pixels_ + offset, source.data() + offset, count);
+      }
+    } else {
+      // 画布尚无有效内容（刚 resize/刚建，像素全零）：贴**主题底色**，不贴空画布。
+      //
+      // 为何不 "什么都不做"：那样窗口内容就停在上一帧/未定义状态（系统发 `WM_PAINT`
+      // 正是因为他认为这块客户区需要重画）。贴底色既满足了系统，又让观感与
+      // `show_early` 连续——用户看到的是"底色停留一会，然后界面出现"，而不是满屏黑。
+      fill_dib_with_matte(area);
+      // 只报一次：启动期这条日志就是"黑屏被换成底色"的**可观测证据**，
+      // 而每帧刷屏会把其它信息涅没（同 `present_fallback_logged_` 的姿态）。
+      if (!matte_logged_) {
+        matte_logged_ = true;
+        ST_LOG_INFO("上屏：画布尚无内容，本次贴主题底色 {:#08X}（{}x{}）而不是空画布",
+                    chrome_edge_rgb_, area.width, area.height);
+      }
     }
     // 只 BitBlt 脏区行带：整帧时 area 覆盖全画布，行为与旧实现完全一致。
     HDC window_dc = ::GetDC(window_);
@@ -1878,6 +1910,38 @@ class Win32Backend final : public Backend {
              SRCCOPY);
     ::ReleaseDC(window_, window_dc);
     return true;
+  }
+
+  /// 用**主题底色**填充 DIB 的指定区域（画布尚无有效内容时的上屏替身影）。
+  ///
+  /// 为何不是「什么都不做」：不发上屏就什么都不发生，但 `WM_PAINT` 场景下窗口已被
+  /// 系统要求重画（背景可能被错掉）；而「先把底色刷上去」是 `show_early` 的同一
+  /// 手法，视觉上前后一致、无闪变。
+  ///
+  /// 为何不“把画布清成底色”：那是改应用的数据——画布的清屏颜色由主题与 UI 层管，
+  /// 后端不应当先替它做决定（下一帧 `canvas.clear()` 会重写，白费一次整屏写）。
+  void fill_dib_with_matte(math::IntRect area) {
+    if (dib_pixels_ == nullptr || area.is_empty()) return;
+    const int width = std::max(0, area.width);
+    const std::size_t row_pixels = static_cast<std::size_t>(width);
+    if (row_pixels == 0) return;
+    // DIB 是 `0xAARRGGBB`（内存序 B,G,R,A）。A=0xFF，否则 GDI 会当透明色处理。
+    const std::uint32_t value = 0xFF000000U |
+                                ((chrome_edge_rgb_ & 0xFFU) << 16U) |   // B
+                                (chrome_edge_rgb_ & 0xFF00U) |          // G
+                                ((chrome_edge_rgb_ >> 16U) & 0xFFU);    // R
+    std::vector<std::uint32_t> row(row_pixels, value);
+    for (int line = 0; line < area.height; ++line) {
+      const std::size_t offset = static_cast<std::size_t>(area.y + line) *
+                                     static_cast<std::size_t>(surface_->physical_width()) +
+                                 static_cast<std::size_t>(area.x);
+      if (offset + row_pixels >
+          static_cast<std::size_t>(surface_->physical_width()) *
+              static_cast<std::size_t>(surface_->physical_height())) {
+        break;
+      }
+      std::memcpy(dib_pixels_ + offset, row.data(), row_pixels * sizeof(std::uint32_t));
+    }
   }
 
   /// 拖动/缩放中：**同步重建缓冲 + 重绘一帧 + 送显**。
@@ -2125,7 +2189,11 @@ class Win32Backend final : public Backend {
         ::EndPaint(window, &paint);
         // 系统要求重绘：GPU 画布用 swapchain 重呈（blit 会触发 GPU→CPU 回读，白花几毫秒），
         // 软件画布才走 GDI blit。
-        if (presenter_ != nullptr) {
+        //
+        // ⚠ **画布尚无有效内容时不走 swapchain**（2026-11-08，黑屏直接起因）：
+        // 新 resize/新建的画布是全零的，把 swapchain 的后备缓冲交上去就是**整窗纯黑**。
+        // 走 GDI 路径——`blit()` 会用主题底色填 DIB，与 `show_early` 的视觉连续。
+        if (canvas_painted_ && presenter_ != nullptr) {
           (void)presenter_->present(*surface_, surface_->physical_width(),
                                     surface_->physical_height());
         } else if (surface_ != nullptr) {
@@ -2658,10 +2726,26 @@ class Win32Backend final : public Backend {
   /// 运行时会因 DWM 不接受而转 `false`（见 `create_window`）。
   bool shadow_enabled_{true};
 
-  // ── 窗口底色（用于 `WM_ERASEBKGND` 的背景刷）──
+  // ── 窗口底色（用于 `WM_ERASEBKGND` 的背景刷、`show_early` 的填充、以及
+  //    **画布尚无有效内容时的上屏替身**）──
   //
   // 圆角与外阴影均交给 DWM（见 `create_window`），这里仅剩窗口底色一项需要。
   std::uint32_t chrome_edge_rgb_{0xF7F7FAU};
+  /// 画布里是否已有**被应用绘制过**的内容（`canvas_painted_`）。
+  ///
+  /// 为什么需要这个位：画布会**变空**而不只是变尺寸——`resize_buffers_in_place()`
+  /// 调 `Surface::resize` 后新缓冲内容未定义（实测全零），而 `WM_PAINT` 会立刻
+  /// 无条件 `blit()`。于是「一块全零画布」被贴到屏幕上，盖掉了 `show_early`
+  /// 刚涂好的主题底色，用户看到一段纯黑（实测 1.5x 下 133ms、1.0x 下 99ms，
+  /// 时长随画布面积增长——那正是首帧绘制的耗时）。
+  ///
+  /// 何时置真：应用通过 `framebuffer()` 取走画布（= 接下来就要往里画），
+  /// 或应用 `present()` 了一帧（在软件路径上 present 与「画完了」同义）。
+  /// 何时置假：任何让缓冲内容失效的操作——`Surface::resize`（快路径）与
+  /// 整块重建（`allocate_buffers`）。
+  bool canvas_painted_{false};
+  /// 上一条日志只报一次（见 `blit()` 的底色分支）。
+  bool matte_logged_{false};
   HDC memory_dc_{nullptr};
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};
