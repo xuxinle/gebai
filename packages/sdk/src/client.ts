@@ -69,9 +69,22 @@ export interface GebaiClientOptions {
 /** WS 建连超时（毫秒）：服务不可达/代理挂起时快速失败，避免初始化永久等待。 */
 const CONNECT_TIMEOUT = 8000
 /** WS 心跳间隔（毫秒）：低于常见代理闲置断开阈值，pong 未归判定死连。 */
-const HEARTBEAT_INTERVAL_MS = 5_000
-/** 心跳应答（pong）超时（毫秒）：代理静默掐断连接时快速感知并触发重连。 */
-const HEARTBEAT_TIMEOUT_MS = 10_000
+const HEARTBEAT_INTERVAL_MS = 2_000
+/**
+ * 心跳应答（pong）超时（毫秒）：代理静默掐断连接时快速感知并触发重连。
+ *
+ * 这组取值（2s/5s）的两端都是实测出来的：
+ * - 判死延迟**实测 6.5s**（三跑一致；上一拍已发出、等着 pong，下一拍超时即判死）——
+ *   原 5s/10s 为 14.9s，半死链路期间界面要谎报「已连接」将近 15 秒；
+ * - **误杀边界是 RTT ≥ timeout，与 interval 无关**：`sendHeartbeat` 在
+ *   `heartbeatPending` 时直接返回，每拍 ping 用自己的超时计时，而不是「两拍之间必须回来」。
+ *   所以把 interval 调小不会降低 RTT 容忍度（实测 5900ms 往返在 2s/5s 与 5s/10s 下
+ *   都长时间稳定不断）。
+ *
+ * 代价是心跳频率：2s 一拍 = 30 条/分钟（原 12 条）。流式输出期间服务端每拍都要走一趟
+ * 请求-应答，单条只几十字节；若部署在极窄上行链路上可上调 interval 而不影响判死速度。
+ */
+const HEARTBEAT_TIMEOUT_MS = 5_000
 /** WS 意外断开后的自动重连退避（毫秒）：1s → 2s → 4s … 上限 30s。 */
 const RECONNECT_BASE_MS = 1000
 const RECONNECT_MAX_MS = 30_000
@@ -387,9 +400,11 @@ export class GebaiClient {
   private sendHeartbeat(): void {
     const ws = this.ws
     if (!ws || ws.readyState !== WebSocket.OPEN || this.manualClose) return
-    // 上一拍 pong 未归：不立即判死（判死阈值是 heartbeatTimeoutMs，不是下一拍间隔——
-    // interval < timeout 的高延迟链路上，pong 5~10s 往返会被间隔误杀成「连上→杀→重连」循环），
-    // 交给该拍请求自身的超时 onError 触发关闭
+    // 上一拍 pong 未归：跳拍。每拍 ping 用自己的 `timeoutMs` 计时（下面的 send），
+    // 下一拍的间隔到达并不参与判死——所以「判死阈值」恒等于 heartbeatTimeoutMs，
+    // **误杀边界是 RTT ≥ timeout，与 interval 无关**（实测：5900ms 往返在 2s/5s 与 5s/10s
+    // 下都长时间稳定；此前这里的推断是「interval < timeout 会被间隔误杀」，已实测否定）。
+    // 跳拍是为了不在超时前堆叠请求：一拍未归时再发只会多一个必超时的请求。
     if (this.heartbeatPending) return
     this.heartbeatPending = true
     this.send(

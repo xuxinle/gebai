@@ -308,8 +308,9 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
   所以 `online` → **先 `hurryReconnect()` 打断退避立即建连，再自检核对真值**。
 
 **自检本身在弱网下的可靠性约束**（`web/src/attach.ts` 的 `verifyConnection`）：
-- 节流用**时间戳**（`VERIFY_MIN_GAP_MS` = 1.5s）而不用布尔锁：布尔量一旦因异常路径没复位，后面的自检就全被静默吃掉（“看着在自检、实际形同没有”）；
-- 单次自检有**总预算**（`VERIFY_BUDGET_MS` = 8s，`Promise.race`）：内部虽已改用心跳口径短超时，外层再加一道，超预算即视为链路不可用并 `hurryReconnect()`；
+- 节流用**时间戳**（`VERIFY_MIN_GAP_MS` = 1s）而不用布尔锁：布尔量一旦因异常路径没复位，后面的自检就全被静默吃掉（“看着在自检、实际形同没有”）；
+- 单次自检有**总预算**（`VERIFY_BUDGET_MS` = 12s，`Promise.race`）：内部虽已改用心跳口径短超时，外层再加一道，超预算即视为链路不可用并 `hurryReconnect()`；预算必须大于内部超时之和，否则正常链路的慢一拍也会被当成不可用；
+- **周期（3s）小于预算（12s）**，所以必须防并发堆叠：在途标记带**自愈截止时间**（`verifyBusyUntil`）——在途时跳拍，但过了截止允许新一拍接手（防异常路径永久停摆）；
 - `client.verify()` **未连接时不再空转返回**——它会推进重连（否则断网期每拍自检都是空转，网络恢复后还得干等退避）。
 
 **挂事件的对象**：`online`/`offline` 是 **window** 的事件；`navigator` 只有只读的 `onLine`、
@@ -367,7 +368,7 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 
 **请求-应答机制（RPC）**：客户端每个请求带自增 `id`，服务端应答回带同一 `id` + `ok`/`error`；SDK 按 `id` 匹配，把应答自动分派到发送时注册的成功/失败回调（`send()` 的 `onOk`/`onError`，应答错误/超时/断线均走失败回调），也提供 Promise 版 `request()`。适用于**一次性操作**（会话管理、审批决策、心跳 ping 等，应答即终态）。**对持续增长的内容不适用**——流式输出（`event.message.delta`/`reasoning` 等）由服务端以无 `id` 的 `event.*` 推送承载（带 seq 可重放、断线补偿），`session.prompt` 的应答仅确认任务接收，内容全部经事件通道回流；**应答语义如实**：启动期失败（会话不存在/任务已在运行/限流）在应答中返回 `ok:false` + 协议错误码（`code: session_not_found | already_running | rate_limited | prompt_required`），客户端按错误码判定（补发幂等识别 `already_running`，不再依赖错误文案正则——跨包隐式契约），任务运行期错误仍经 `event.task.error` 推送。
 
-**心跳保活**：客户端连接建立后周期性发送 `ping`（默认 5s 间隔，构造参数可调）——**心跳复用请求-应答机制**（`send()` 注册回调，`timeoutMs` 取心跳超时），服务端应答 `pong`（payload `{pong:true}`），防止 Nginx 等代理按闲置时间静默断连；pong 应答超时（默认 10s）或应答错误判定连接已死（代理掐断后的半开 TCP），客户端主动断开并触发指数退避自动重连。
+**心跳保活**：客户端连接建立后周期性发送 `ping`（默认 **2s** 间隔，构造参数可调）——**心跳复用请求-应答机制**（`send()` 注册回调，`timeoutMs` 取心跳超时），服务端应答 `pong`（payload `{pong:true}`），防止 Nginx 等代理按闲置时间静默断连；pong 应答超时（默认 **5s**）或应答错误判定连接已死（代理掐断后的半开 TCP），客户端主动断开并触发指数退避自动重连。
 
 **消息按序处理（每连接串行）**：服务端对同一连接的请求**按到达顺序串行处理**（前一条处理完成后再处理下一条）。Bun 对 async `websocket.message` 处理器不保证串行（前一条 await 磁盘/网络 I/O 时下一条即并发进入），因此服务端在 `/ws` 入口以每连接 promise 链强制串行——保证 `auth.login` 的 `conn.set(user)` 先于其后任何请求生效（否则紧跟在认证后的请求会以未登录态并发抢先执行，被拒 `unauthorized: login required`），也保证 `session.switch` 等有状态操作对后续请求可见（SDK 依赖该契约：建连后先发认证、再冲刷离线队列）。
 
@@ -1243,9 +1244,9 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | 交互等待心跳 | 25 秒 | 等待用户作答（审批/选择/填值/画图/捕获）期间周期发布 `event.interaction.alive`（`INTERACTION_ALIVE_MS`，等待结束即停）；前端看门狗另按「已连接 + 无待决交互」两重豁免，断线或长时间思考不得杀后台任务 |
 | 任务受理宽限窗口 | 15 秒 | SDK 任务受理后不据快照判定任务已结束（排除引擎登记运行态前的起跑竞态）；构造函数选项 `acceptSettleMs` 可调（测试） |
 | REST 请求超时 | 15 秒 | SDK 内部 `rest()` 统一出口（构造函数选项 `requestTimeoutMs` 可调）；默认 `fetch` **不超时**，弱网/代理挂起时会永久悬挂（实测 20s 未返回） |
-| WS 心跳间隔/超时 | 5 秒 / 10 秒 | `heartbeatIntervalMs`/`heartbeatTimeoutMs`；同时是自检内部快照/重放的超时口径（不用 60s 的 RPC 默认值，否则一次挂住吃掉 6 拍自检） |
+| WS 心跳间隔/超时 | 2 秒 / 5 秒 | `heartbeatIntervalMs`/`heartbeatTimeoutMs`；同时是自检内部快照/重放的超时口径（不用 60s 的 RPC 默认值，否则一次挂住吃掉 6 拍自检）。**判死延迟实测 6.5s**（三跑一致）。**误杀边界是 RTT ≥ timeout，与 interval 无关**：`sendHeartbeat` 在 `heartbeatPending` 时直接返回，每拍 ping 用自己的超时计时，而不是「两拍之间必须回来」（实测 5900ms 往返在 2s/5s 与 5s/10s 下都长时间稳定）——所以调小 interval 不降低 RTT 容忍度；代价是心跳频率（30 条/分钟，原 12 条） |
 | 重连退避 | 1s → 30s | `RECONNECT_BASE_MS`/`RECONNECT_MAX_MS`；`hurryReconnect()` 可打断并复位序列 |
-| 前端自检节流/预算 | 1.5 秒 / 8 秒 | `VERIFY_MIN_GAP_MS`/`VERIFY_BUDGET_MS`（`web/src/attach.ts`）；节流用时间戳不用布尔锁，超预算即推进重连 |
+| 前端自检节流/预算/周期 | 1 秒 / 12 秒 / 3 秒 | `VERIFY_MIN_GAP_MS`/`VERIFY_BUDGET_MS`/`VERIFY_INTERVAL_MS`（`web/src/attach.ts`）。两条配套约束（由 `heartbeat-contract.test.ts` 盯住）：**周期必须小于判死延迟**（否则变红要等「判死 + 下一拍自检」）；**预算必须大于内部超时之和**（否则正常链路的慢一拍被误判为不可用）。在途自检用带自愈截止的标记：周期（3s）小于单次预算（12s）时并发多拍会自己堆死自己 |
 | 启动期 REST 超时 | 8 秒 | `BOOT_REST_TIMEOUT_MS`（`web/src/boot-guard.ts`）：启动链上每个 REST 的上限，失败降级而非挂死 |
 | 子Agent 调用超时 | 不设 | 子Agent 调用不设整体超时（执行进度实时可见，中止仅由父任务取消传播；`SUBAGENT_TIMEOUT` 已移除） |
 | 子Agent 递归深度 | 3 层 | 子Agent 嵌套调用最大深度 |

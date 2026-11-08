@@ -44,16 +44,34 @@ function scheduleAttachRetry(sessionId: string, attempt = 1): void {
 }
 setRunningAttach(attachRunningSession)
 
-/** 自检节流：一次核对在途时不再叠一次（定时器与回前台事件可能同时到达）。
- *  用**时间戳**而非布尔量：布尔量一旦因异常路径没有复位（或某次核对被长超时挂住），
- *  后面的自检就全部被静默吃掉（弱网下就是“看着在自检、实际形同没有”）。 */
+/** 自检节流：一次核对在途时不再叠一次（定时器与回前台/online 可能同时到达）。
+ *  用**时间戳**而非纯布尔量：布尔量一旦因异常路径没有复位（或某次核对被长超时挂住），
+ *  后面的自检就全部被静默吃掉（弱网下就是“看着在自检、实际形同没有”）。
+ *  但**只靠时间戳也不够**：自检周期（3s）小于单次预算（12s）时，同一个慢链路会让好几拍
+ *  同时跑——每拍都发 ping+快照+重放，在弱网上就是自己把自己堆死。
+ *  所以两者并用：在途就跳（不堆叠），但在途标记带**自愈截止时间**（不会卡死）。 */
 let lastVerifyAt = 0
+/** 在途自检的截止时刻（0 = 无在途）：超过它即认为上一拍已异常丢失并允许新一拍。 */
+let verifyBusyUntil = 0
 /** 自检节流窗口（毫秒）：小于它视为重复触发（定时器与回前台/online 同时到达）。 */
-export const VERIFY_MIN_GAP_MS = 1_500
-/** 单次自检的时长上限（毫秒）：内部已经用短超时，这里再加一道，保证不会挂住整个自检链路。 */
-export const VERIFY_BUDGET_MS = 8_000
-/** 可见时自检的周期（毫秒）：手机后台回来是「半死连接」，靠它把攒住的事件与真相补上。 */
-export const VERIFY_INTERVAL_MS = 10_000
+export const VERIFY_MIN_GAP_MS = 1_000
+/**
+ * 单次自检的时长上限（毫秒）：超预算即视为链路不可用并推进重连。
+ *
+ * 需大于内部各段请求的超时之和（心跳探针一次 + 快照 + 重放，均用心跳口径 timeout）。
+ * SDK 默认心跳 timeout 为 5s，全走最坏路径约 15s；这里取到能覆盖常见两段（10s）以上，
+ * 否则正常链路卡顿一拍时会被当成「不可用」，白白把好连接断掉重连。
+ */
+export const VERIFY_BUDGET_MS = 12_000
+/**
+ * 可见时自检的周期（毫秒）。
+ *
+ * 它是「半死连接」不被及时发现的上限：手机后台冻结时 visibilitychange 不触发、定时器也停摆，
+ * 靠恢复后的首拍兵底。取 3s 而不是 10s：心跳判死已缩到 6.5s，自检再隔 10s 就变成新瓶颈
+ * （变红要等「判死 + 下一拍自检」，最坏 7s + 10s）。
+ * 自检开销是一次 ping + 一次快照，不可见时不跑（省电省流量），且置有一个节流窗口。
+ */
+export const VERIFY_INTERVAL_MS = 3_000
 
 /**
  * 核对连接与运行态真相（回前台 / pageshow / 定时自检三处共用这一个入口）。
@@ -71,7 +89,10 @@ export const VERIFY_INTERVAL_MS = 10_000
 export async function verifyConnection(): Promise<void> {
   const now = Date.now()
   if (now - lastVerifyAt < VERIFY_MIN_GAP_MS) return
+  // 已有在途且未过截止：跳过（不堆叠）；过了截止说明上一拍异常失联，允许新一拍接手
+  if (now < verifyBusyUntil) return
   lastVerifyAt = now
+  verifyBusyUntil = now + VERIFY_BUDGET_MS
   try {
     const r = await Promise.race([
       client.verify(),
@@ -110,6 +131,8 @@ export async function verifyConnection(): Promise<void> {
   } catch {
     /* 自检失败不改动界面：连接状态由 SDK 状态回调如实呈现；但推一把重连，别让恢复干等退避 */
     client.hurryReconnect()
+  } finally {
+    verifyBusyUntil = 0
   }
 }
 
