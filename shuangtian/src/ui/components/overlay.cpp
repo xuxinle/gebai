@@ -212,7 +212,9 @@ auto Dialog::on_event(const RenderContext& context, Event& event) -> bool {
       }
       return false;
     case EventKind::MouseDown:
-    case EventKind::Click: {
+    case EventKind::Click:
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
       if (!card_.is_empty() && card_.contains(event.position)) {
         return true;  // 卡片内部：按钮已先行命中，其余区域不响应
       }

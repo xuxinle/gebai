@@ -72,6 +72,7 @@
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
 #include "backend_util.hpp"
+#include "click_gesture.hpp"
 
 namespace st::shell {
 namespace {
@@ -1821,19 +1822,18 @@ class X11Backend final : public Backend {
           return;
         }
         // 双击/三击：X11 **没有** Win32 的 `CS_DBLCLKS`，必须自己按时间 + 位移算。
-        // 阈值取桌面通行值（400ms / 4px，与 GTK 同量级）。
-        const auto now = std::chrono::steady_clock::now();
-        const bool near = std::abs(button.x - last_press_x_) <= 4 &&
-                          std::abs(button.y - last_press_y_) <= 4;
-        const bool quick = (now - last_press_at_) < std::chrono::milliseconds(400);
-        if (button.detail == 1 && near && quick) {
-          ++click_streak_;
+        // 判据收在 `detail::ClickStreak`（与 Win32/Wayland 共用同一份）——
+        // 三个后端对“双击算几下”必须是同一笔账，否则同一个应用在三个平台上手感不同。
+        const double at_ms = static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count()) /
+                             1000.0;
+        if (button.detail == 1) {
+          left_clicks_.press(at_ms, to_logical(button), click_config());
         } else {
-          click_streak_ = 1;
+          left_clicks_.reset();   // 右键/中键打断了左键连击
         }
-        last_press_at_ = now;
-        last_press_x_ = button.x;
-        last_press_y_ = button.y;
         push_button(ui::EventKind::MouseDown, button);
         return;
       }
@@ -1842,16 +1842,14 @@ class X11Backend final : public Backend {
         last_input_time_ = button.time;
         if (button.detail == 4 || button.detail == 5) return;  // 滚轮的"松开"不派发
         push_button(ui::EventKind::MouseUp, button);
-        // 与 Win32 同一份事件序列（Down → Up → Click）：`Element::activate()` 只在
-        // `UiRoot::dispatch` 的 `Click` 分支里被调用——只发 Down/Up 会让按钮
-        // "有按压效果但点了没反应"（那边有实测记录）。双击/三击按 `click_streak_` 升级。
+        // 与 Win32 同一份事件序列（Down → Up → **恰好一条**点击族）：`Element::activate()`
+        // 只在 `UiRoot::dispatch` 的 `Click` 分支里被调用——只发 Down/Up 会让按钮
+        // "有按压效果但点了没反应"（那边有实测记录）。
         if (button.detail == 1) {
           ui::Event click = make_event(button);
-          click.kind = click_streak_ >= 3 ? ui::EventKind::TripleClick
-                      : click_streak_ == 2 ? ui::EventKind::DoubleClick
-                                           : ui::EventKind::Click;
+          click.kind = left_clicks_.click_kind();
           click.button = 1;
-          click.click_count = click_streak_;
+          click.click_count = left_clicks_.count() > 0 ? left_clicks_.count() : 1;
           events_.push_back(std::move(click));
         }
         return;
@@ -1942,6 +1940,9 @@ class X11Backend final : public Backend {
         static_cast<float>(static_cast<double>(source.y) / static_cast<double>(scale_))};
   }
 
+  /// 连击阈值。X11 没有系统级双击时间可问（那是工具包层的设置），用桌面通行值。
+  [[nodiscard]] static auto click_config() -> detail::ClickConfig { return detail::ClickConfig{}; }
+
   void push_button(ui::EventKind kind, const XInputEvent& source) {
     ui::Event event = make_event(source);
     event.kind = kind;
@@ -1954,7 +1955,7 @@ class X11Backend final : public Backend {
       case 3: event.button = 2; break;  // X11 右键 → 框架右键
       default: event.button = static_cast<int>(source.detail); break;
     }
-    event.click_count = click_streak_;
+    event.click_count = left_clicks_.count() > 0 ? left_clicks_.count() : 1;
     events_.push_back(std::move(event));
   }
 
@@ -2091,10 +2092,8 @@ bool window_resizable_{true};
   /// `_NET_WM_MOVERESIZE` 两者都要（WM 拿时间戳校验"是否对应一次真实按下"）。
   XTime last_input_time_{0};
   math::Point last_input_root_{0.0f, 0.0f};
-  std::chrono::steady_clock::time_point last_press_at_{};
-  int last_press_x_{0};
-  int last_press_y_{0};
-  int click_streak_{0};
+  /// 左键连击账（与 Win32/Wayland 共用 `detail::ClickStreak`）。
+  detail::ClickStreak left_clicks_{};
 };
 
 }  // namespace

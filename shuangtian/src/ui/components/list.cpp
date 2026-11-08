@@ -194,7 +194,9 @@ void ListItem::activate() {
 
 auto ListItem::on_event(const RenderContext& context, Event& event) -> bool {
   (void)context;
-  if (event.kind != EventKind::Click) return false;
+  // 点击族同权（一次按放恰好一条，见 `is_click_family`）：只认 `Click` 会让双击/三击
+  // 落在行上时“点了没反应”。
+  if (!is_click_family(event.kind)) return false;
   // 与 `invoke(click)` / 脚本 `ui_invoke` 共用同一条路径（见头文件注释）
   activate();
   event.handled = true;

@@ -560,7 +560,9 @@ auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::MouseUp:
-    case EventKind::Click: {
+    case EventKind::Click:
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
       if (!dragging_) return false;
       dragging_ = false;
       // 松手后悬停态按真实指针位置重判（下一次 MouseMove 会把它算对；

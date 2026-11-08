@@ -337,7 +337,8 @@ auto Tree::on_event(const RenderContext& context, Event& event) -> bool {
       }
       return false;
     case EventKind::Click:
-    case EventKind::DoubleClick: {
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
       const auto index = row_index_at(event.position);
       if (!index.has_value()) return false;
       activate_row(*index);

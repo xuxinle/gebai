@@ -249,7 +249,8 @@ auto ThemePanel::on_event(const RenderContext& context, Event& event) -> bool {
       //（实测：点色卡模态关了、卡没选中）。
       return true;
     case EventKind::Click:
-    case EventKind::DoubleClick: {
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
       const std::size_t index = hit_card(event.position);
       // 同一张卡才选：按下与结算落在同一卡且不是卡外。
       const bool picked =
@@ -434,6 +435,7 @@ auto ThemePicker::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseUp:
     case EventKind::Click:
     case EventKind::DoubleClick:
+    case EventKind::TripleClick:
       if (open_) close();
       else (void)open();
       return true;

@@ -384,13 +384,16 @@ auto CompletionPopup::on_event(const RenderContext& context, Event& event) -> bo
       }
       return false;
     case EventKind::MouseDown:
-    case EventKind::Click: {
+    case EventKind::Click:
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
+      const bool clicked = is_click_family(event.kind);
       if (!bounds_.contains(event.position)) {
         // 点弹层外面 = 取消（与菜单面板同一手感）。
-        if (event.kind == EventKind::Click && on_dismiss) on_dismiss(false);
+        if (clicked && on_dismiss) on_dismiss(false);
         return true;
       }
-      if (event.kind != EventKind::Click) return true;
+      if (!clicked) return true;
       const auto row =
           static_cast<std::ptrdiff_t>((event.position.y - list_.y + scroll_y_) / kRowHeight);
       if (row >= 0 && static_cast<std::size_t>(row) < visible_items_.size()) {

@@ -185,7 +185,8 @@ auto SelectPanel::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseDown:
     case EventKind::MouseUp:
     case EventKind::Click:
-    case EventKind::DoubleClick: {
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
       const int index = index_at(event.position);
       if (index < 0) return true;
       // 先自我隐藏再回调：回调可能触发摘除（甚至析构本对象）。
@@ -452,6 +453,7 @@ auto Select::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseUp:
     case EventKind::Click:
     case EventKind::DoubleClick:
+    case EventKind::TripleClick:
       if (cycle_consumed_) return true;  // down+up+click 三帧只切换一次
       cycle_consumed_ = true;
       set_open(!open_);

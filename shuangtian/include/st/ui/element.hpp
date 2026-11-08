@@ -239,6 +239,22 @@ enum class EventKind : std::uint8_t {
   ImeComposition,
 };
 
+/// 点击族：一次按放收尾时那**一条**事件（按连击数升到 Click/DoubleClick/TripleClick）。
+///
+/// ## 为何需要这个谓词（实测代价）
+///
+/// 窗口后端保证：**每一次物理按放恰好产生一条**点击族事件
+/// （唯一真源是 `src/shell/click_gesture.hpp`）。因此“按一下就激活一次”的控件
+/// 必须对三种**同等**处理——只认 `Click` + `DoubleClick` 的控件会让“连点三下”的
+/// 第三下**静默丢失**：实测 `Button` 三连点只触发 2 次，用户看到的是“第三下没反应”。
+///
+/// 反过来，需要区分击数的控件（代码区双击选词/三击选行、标题栏双击最大化、
+/// 文件列表双击进入）仍按 `EventKind` 各自分支——它们要的不是“激活一次”。
+[[nodiscard]] constexpr auto is_click_family(EventKind kind) noexcept -> bool {
+  return kind == EventKind::Click || kind == EventKind::DoubleClick ||
+         kind == EventKind::TripleClick;
+}
+
 /// 鼠标指针形态（**语义名**，不是平台常量）。
 ///
 /// 为何用语义而不是直接存 Win32 的 `IDC_*` / XCursor 名：同一个意图在三个平台上

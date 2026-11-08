@@ -44,6 +44,8 @@
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
 
+#include "click_gesture.hpp"   // 连击计数（三个后端共用一份，见头文件里的实测代价）
+
 namespace st::shell {
 namespace {
 
@@ -2549,10 +2551,51 @@ class Win32Backend final : public Backend {
     event.position = to_logical(lparam);
     event.button = button;
     event.click_count = clicks;
+    apply_mouse_modifiers(event);
+    events_.push_back(std::move(event));
+  }
+
+  void apply_mouse_modifiers(ui::Event& event) const {
     event.ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
     event.shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
     event.alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
-    events_.push_back(std::move(event));
+  }
+
+  /// 当前时刻（毫秒，单调）。连击判定用它，而不是消息里的 `time`：
+  /// 后者是 32 位、约 49 天回绕，做减法就会出现“跨越回绕点算成负数”的自由度数。
+  [[nodiscard]] static auto now_ms() -> double {
+    using clock = std::chrono::steady_clock;
+    return static_cast<double>(
+        std::chrono::duration_cast<std::chrono::microseconds>(clock::now().time_since_epoch())
+            .count()) /
+           1000.0;
+  }
+
+  [[nodiscard]] auto click_config() const -> detail::ClickConfig {
+    detail::ClickConfig config;
+    // `GetDoubleClickTime()` 是**用户可在系统设置里调**的双击阈值（默认 500ms）。
+    // 写死 400 会让“把双击调慢到 700ms”的用户永远点不出双击。
+    config.window_ms = static_cast<double>(::GetDoubleClickTime());
+    return config;
+  }
+
+  /// 一次左键按下的公共收尾：登记连击账 + 送 `MouseDown`。
+  ///
+  /// `WM_LBUTTONDBLCLK` 与 `WM_LBUTTONDOWN` 都走它——系统用前者**代替**了第二次的
+  /// 按下消息，而“按下的归属”（`UiRoot::mouse_down_target_`）、按住态、
+  /// 焦点转移全都要在按下那一刻生效。旧实现只给 `DBLCLK` 发了 `DoubleClick`，
+  /// 于是第二次按下在框架里**根本不存在**：实测一次双击 `mousedown=1 / mouseup=2`。
+  void begin_primary_press(LPARAM lparam, bool confirmed_repeat) {
+    const math::Point point = to_logical(lparam);
+    const int streak = left_clicks_.press(now_ms(), point, click_config(), confirmed_repeat);
+    push_mouse(ui::EventKind::MouseDown, lparam, 1, streak);
+  }
+
+  /// 一次左键松手的公共收尾：`MouseUp` + **恰好一条**点击族事件。
+  void end_primary_press(LPARAM lparam) {
+    const int streak = left_clicks_.count() > 0 ? left_clicks_.count() : 1;
+    push_mouse(ui::EventKind::MouseUp, lparam, 1, streak);
+    push_mouse(left_clicks_.click_kind(), lparam, 1, streak);
   }
 
   void push_key(ui::EventKind kind) {
@@ -2682,8 +2725,7 @@ class Win32Backend final : public Backend {
     }
   }
 
-  auto handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {
-    // 托盘图标事件（自定义消息）：
+  auto handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {    // 托盘图标事件（自定义消息）：
     // - 左键单击/双击 = “把我叫回来”（计数，应用主循环取走）
     // - 右键 = 弹出系统菜单（打开主界面 / 退出）——托盘常驻应用的退出入口
     if (message == kTrayMessage) {
@@ -3007,30 +3049,27 @@ class Win32Backend final : public Backend {
       }
       case WM_LBUTTONDOWN:
         ::SetCapture(window);
-        push_mouse(ui::EventKind::MouseDown, lparam, 1, 1);
+        begin_primary_press(lparam, /*confirmed_repeat=*/false);
         return 0;
       case WM_LBUTTONUP:
         ::ReleaseCapture();
-        // 先 MouseUp，再补一个 **Click**：按钮的激活发生在 `Element::activate()`，
-        // 而它只在 `UiRoot::dispatch` 的 `Click` 分支里被调用——只发 Down/Up 的话
-        // 按钮会"有焦点、有按压效果，但点了没反应"（实测就是这么发现的）。
-        // 与协议 `input.mouse{kind:"click"}` 的事件序列保持一致（Down → Up → Click）。
-        push_mouse(ui::EventKind::MouseUp, lparam, 1, 1);
-        push_mouse(ui::EventKind::Click, lparam, 1, 1);
+        end_primary_press(lparam);
         return 0;
       case WM_LBUTTONDBLCLK:
-        // 双击由系统识别（窗口类带 `CS_DBLCLKS`）。
+        // 系统识别出的“又一次按下”。
         //
-        // **不再补发 `Click`**：一次物理双击的真实消息序列是
-        // `LBUTTONDOWN, LBUTTONUP, **LBUTTONDBLCLK**, LBUTTONUP`——
-        // 系统用 `DBLCLK` **代替**了第二次的 `DOWN`（不是额外多一条）。
-        // 原先在 `DBLCLK` 与第二个 `UP` 两处**各补一个 `Click`**，于是一次双击
-        // 产生 **3 个 Click**（第一个 UP 一个 + DBLCLK 一个 + 第二个 UP 一个）。
-        // 对按钮无妨（重复激活只是多跑一次），但对**toggle 语义**的控件是致命的：
-        // 菜单栏“点一下开、再点一下关”，连点两下＝开了又关——用户看到的就是
-        // “点菜单秒退”。这类“一次手势多次计数”的账必须记在后端，
-        // 不能让每个组件各自用标志位去猜（那样每新一个组件就再踩一次）。
-        push_mouse(ui::EventKind::DoubleClick, lparam, 1, 2);
+        // **`DBLCLK` 代替了第二次的 `LBUTTONDOWN`**（不是额外多一条）：真实序列是
+        // `DOWN, UP, **DBLCLK**, UP`。所以它必须**当一次按下**处理——
+        // 送 `MouseDown` 并把连击数推到 2。
+        //
+        // 旧实现在这里只发 `DoubleClick`（并在 `UP` 里再补一个 `Click`），后果有两半：
+        //   ｜ 第二次按下在框架里根本不存在 ⇒ 实测一次双击 `mousedown=1 / mouseup=2`，
+        //   ｜ 按下归属、按住态、焦点转移全部跳过；
+        //   ｜ 一次双击产出 `Click` + `DoubleClick` + `Click` **三个**点击族事件，
+        //   ｜ `Button` 在 `Click` 与 `DoubleClick` 上都激活 ⇒ 用户点一次被触发 **3** 次。
+        // “一次手势算几次点击”的账只能由后端记（`ClickStreak`，三个平台共用一份），
+        // 让每个组件自己用标志位去猜，就是每新增一个组件就再踩一次。
+        begin_primary_press(lparam, /*confirmed_repeat=*/true);
         return 0;
       case WM_RBUTTONDOWN:
         push_mouse(ui::EventKind::MouseDown, lparam, 2, 1);
@@ -3348,6 +3387,9 @@ class Win32Backend final : public Backend {
   /// 为何每次 move 都要问一遍而不是订阅一次永久有效：`TME_LEAVE` 在触发
   /// （或窗口失活被系统撤销）后自动失效，标志位跟着清——下次进窗重新订阅。
   bool tracking_mouse_leave_{false};
+  /// 左键连击账（一次按放 = 一条 `MouseDown` + 一条 `MouseUp` + **恰好一条**点击族事件）。
+  /// 与 X11/Wayland 共用同一份实现：三个平台对“双击算几下”必须是同一笔账。
+  detail::ClickStreak left_clicks_{};
   ui::MouseCursor cursor_{ui::MouseCursor::Arrow};
   int logical_width_{1280};   ///< 逻辑尺寸（取整；用于"改窗口尺寸"时的换算与日志）
   int logical_height_{720};

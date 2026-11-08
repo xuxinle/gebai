@@ -207,6 +207,7 @@ auto Checkbox::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseUp:
     case EventKind::Click:
     case EventKind::DoubleClick:
+    case EventKind::TripleClick:
       mark_dirty();
       if (cycle_consumed_) return true;  // 同一按压周期内只切换一次
       cycle_consumed_ = true;
@@ -355,6 +356,7 @@ auto Radio::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseUp:
     case EventKind::Click:
     case EventKind::DoubleClick:
+    case EventKind::TripleClick:
       mark_dirty();
       if (cycle_consumed_) return true;
       cycle_consumed_ = true;
@@ -542,6 +544,7 @@ auto Switch::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseUp:
     case EventKind::Click:
     case EventKind::DoubleClick:
+    case EventKind::TripleClick:
       mark_dirty();
       if (cycle_consumed_) return true;
       cycle_consumed_ = true;

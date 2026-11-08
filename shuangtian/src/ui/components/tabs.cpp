@@ -855,7 +855,8 @@ auto Tabs::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseDown:
     case EventKind::MouseUp:
     case EventKind::Click:
-    case EventKind::DoubleClick: {
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
       if (!enabled_) return false;
       // 尾部动作钮、「+」与溢出箭头优先于标签（都在右缘固定区，不随滚动动）。
       if (event.kind == EventKind::Click) {

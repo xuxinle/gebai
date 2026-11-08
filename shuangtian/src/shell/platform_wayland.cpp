@@ -68,6 +68,7 @@
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
 #include "backend_util.hpp"
+#include "click_gesture.hpp"
 #include "wayland_protocol.hpp"
 
 namespace st::shell {
@@ -490,6 +491,8 @@ class WaylandBackend final : public Backend {
 
   void apply_modifiers(ui::Event& event) const;
   [[nodiscard]] auto to_logical(std::int32_t sx, std::int32_t sy) const -> math::Point;
+  /// 连击阈值。Wayland 同样没有系统级双击时间可问，用桌面通行值（与 X11 一致）。
+  [[nodiscard]] static auto click_config() -> detail::ClickConfig { return detail::ClickConfig{}; }
   void teardown();
 
   // —— 数据 ——
@@ -569,10 +572,8 @@ class WaylandBackend final : public Backend {
   float server_scale_{1.0f};
   std::uint64_t frames_{0};
   std::uint32_t last_input_serial_{0};
-  int click_streak_{0};
-  std::chrono::steady_clock::time_point last_press_at_{};
-  std::int32_t last_press_x_{0};
-  std::int32_t last_press_y_{0};
+  /// 左键连击账（与 Win32/X11 共用 `detail::ClickStreak`）。
+  detail::ClickStreak left_clicks_{};
   std::int32_t last_pointer_x_{0};
   std::int32_t last_pointer_y_{0};
   bool pointer_inside_{false};
@@ -1727,28 +1728,29 @@ void WaylandBackend::on_pointer_button(std::uint32_t serial, std::uint32_t butto
   event.button = code;
   apply_modifiers(event);
   if (pressed) {
-    // 双击/三击：与 X11 后端同一套自算逻辑（Wayland 也没有 Win32 的 `CS_DBLCLKS`）
-    const auto now = std::chrono::steady_clock::now();
-    const bool near = std::abs(last_pointer_x_ - last_press_x_) <= 4 &&
-                      std::abs(last_pointer_y_ - last_press_y_) <= 4;
-    const bool quick = (now - last_press_at_) < std::chrono::milliseconds(400);
-    click_streak_ = (code == 1 && near && quick) ? click_streak_ + 1 : 1;
-    last_press_at_ = now;
-    last_press_x_ = last_pointer_x_;
-    last_press_y_ = last_pointer_y_;
+    // 双击/三击：与 X11 后端同一套自算逻辑（Wayland 也没有 Win32 的 `CS_DBLCLKS`）。
+    // 判据收在 `detail::ClickStreak`（三个后端共用一份，见该头文件）。
+    const double at_ms = static_cast<double>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count()) /
+                         1000.0;
+    if (code == 1) {
+      left_clicks_.press(at_ms, event.position, click_config());
+    } else {
+      left_clicks_.reset();   // 其它键打断了左键连击
+    }
   }
   events_.push_back(std::move(event));
   if (!pressed && code == 1) {
-    // 与 win32/x11 同一份事件序列（Down → Up → Click）：`Element::activate()` 只在
-    // `UiRoot::dispatch` 的 `Click` 分支里被调用——只发 Down/Up 会让按钮
+    // 与 win32/x11 同一份事件序列（Down → Up → **恰好一条**点击族）：`Element::activate()`
+    // 只在 `UiRoot::dispatch` 的 `Click` 分支里被调用——只发 Down/Up 会让按钮
     // "有按压效果但点了没反应"。
     ui::Event click;
-    click.kind = click_streak_ >= 3 ? ui::EventKind::TripleClick
-                : click_streak_ == 2 ? ui::EventKind::DoubleClick
-                                     : ui::EventKind::Click;
+    click.kind = left_clicks_.click_kind();
     click.position = to_logical(last_pointer_x_, last_pointer_y_);
     click.button = 1;
-    click.click_count = click_streak_;
+    click.click_count = left_clicks_.count() > 0 ? left_clicks_.count() : 1;
     apply_modifiers(click);
     events_.push_back(std::move(click));
   }

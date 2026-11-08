@@ -991,11 +991,6 @@ auto Button::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseDown:
       mark_dirty();
       return true;
-    case EventKind::Click:
-    case EventKind::DoubleClick:
-      mark_dirty();
-      activate();
-      return true;
     case EventKind::KeyDown: {
       if (event.key == "Enter" || event.key == " " || event.key == "Space") {
         activate();
@@ -1004,7 +999,15 @@ auto Button::on_event(const RenderContext& context, Event& event) -> bool {
       return false;
     }
     default:
-      return false;
+      // 点击族（三种同权）：**一次按放恰好一条**（后端契约，见 `shell/click_gesture.hpp`），
+      // 所以这里就是“按一下就激活一次”。
+      //
+      // 旧写法只列 `Click` + `DoubleClick`，于是连点三下的**第三下静默丢失**
+      // （实测：三连点只触发 2 次，用户看到“第三下没反应”）。
+      if (!is_click_family(event.kind)) return false;
+      mark_dirty();
+      activate();
+      return true;
   }
 }
 

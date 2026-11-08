@@ -197,8 +197,11 @@ auto Slider::on_event(const RenderContext& context, Event& event) -> bool {
       return false;
     case EventKind::MouseDown:
     case EventKind::Click:
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick:
     case EventKind::MouseUp:
       // 按下/点击即跳到该位置；随后按住移动继续跟随。
+      // 双击/三击也当一次点击（一次按放只来一条点击族事件，旧写法把它们吃掉）
       set_value(value_at_x(context, event.position.x), true);
       return true;
     case EventKind::MouseMove:

@@ -273,6 +273,8 @@ auto MenuPanel::on_event(const RenderContext& context, Event& event) -> bool {
     // 离开面板后必须仍高亮（否则 Enter 不知道会激活哪项）。面板本身是模态
     // 浮层：失焦/外点即关，不存在"高亮残留到下一次打开"的窗口。
     case EventKind::Click:
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick:
     case EventKind::MouseDown: {
       const std::size_t index = item_at_point(event.position);
       if (index == kNoIndex) return true;  // 面板空白：吞掉（模态）
@@ -742,8 +744,11 @@ auto ContextMenu::on_event(const RenderContext& context, Event& event) -> bool {
       if (on_close) on_close();
       return true;
     }
-    // 双击是我们认识的手势（不是“两次独立的单击”）：收下，不冒泡。
+    // 双击/三击是我们认识的手势（不是“两次独立的单击”）：收下，不冒泡。
+    // 首次按放的 `Click` 已经把条目激活并关了面板，这里只负责别把第二条
+    // 点击族事件漏给下层。
     case EventKind::DoubleClick:
+    case EventKind::TripleClick:
       event.handled = true;
       return true;
     default:

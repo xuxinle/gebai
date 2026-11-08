@@ -430,13 +430,14 @@ void Chip::paint_content(const RenderContext& context, raster::Surface& canvas) 
 
 auto Chip::on_event(const RenderContext& context, Event& event) -> bool {
   (void)context;
-  if (event.kind == EventKind::MouseDown || event.kind == EventKind::Click) {
+  const bool clicked = is_click_family(event.kind);
+  if (event.kind == EventKind::MouseDown || clicked) {
     if (closable_ && close_area().contains(event.position)) {
       if (on_close) on_close();
       event.handled = true;
       return true;
     }
-    if (event.kind == EventKind::Click && bounds_.contains(event.position)) {
+    if (clicked && bounds_.contains(event.position)) {
       if (on_click) on_click();
       event.handled = true;
       return true;

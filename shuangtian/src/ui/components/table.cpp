@@ -598,7 +598,8 @@ auto Table::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseDown:
       return bounds_.contains(event.position);
     case EventKind::Click:
-    case EventKind::DoubleClick: {
+    case EventKind::DoubleClick:
+    case EventKind::TripleClick: {
       const std::size_t row = row_at(event.position);
       if (row == kNoRow) return false;  // 表头 / 空白区不视为行点击
       if (on_row_click_) on_row_click_(row);
