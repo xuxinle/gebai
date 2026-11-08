@@ -1508,7 +1508,9 @@ struct LanguageFlags {
     return unexpected(ErrorCode::Invalid, report);
   }
   if (cache_hits > 0 || cache_stores.load() > 0) {
-    ST_LOG_INFO("对象缓存：命中 {} · 新写入 {}", cache_hits, cache_stores.load());
+    // 说清是哪一层缓存：这是**共享对象缓存**（跨工程复用的 .o，按内容哈希寻址），
+    // 与“链接跳过”是两回事。日志里两个都叫“缓存”就会把排查方向带偏。
+    ST_LOG_INFO("共享对象缓存：复用 {} · 新写入 {}", cache_hits, cache_stores.load());
   }
   return done.load();
 }
@@ -3307,6 +3309,19 @@ if (target->kind == "group") {
     return stamp.has_value() && *stamp == link_fingerprint;
   }();
   if (up_to_date) {
+    // ## 把“为何不重链”记成一句人读的话（2026-11-08）
+    //
+    // 旧输出只有一句“链接已跳过（产物最新）”。而人能看到的三个数
+    //（单元数 / 重编数 / 命中缓存数）全是**编译段**的，
+    // 于是“重编 0 + 链接已跳过”会被读成“整个构建都最新了”——
+    // 即使真实情形是“编译成功但链接因 exe 被占用而没能写产物”。
+    //
+    // 这里把理由写明（两种可分辨的情形），CLI 直接展示，不靠人从数字里推。
+    if (stats.units_rebuilt == 0 && rebuilt == 0) {
+      stats.link_skip_reason = "对象与链接标志均未变（无需重链）";
+    } else {
+      stats.link_skip_reason = "链接指纹未变（产物比参与链接的全部输入新）";
+    }
     write_source_stamp();
     stats.artifact = output;
     stats.runs_on_host = toolchain->runs_on_host();

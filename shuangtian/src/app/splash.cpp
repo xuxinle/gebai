@@ -1,4 +1,4 @@
-/// 启动卡绘制（见 `include/st/app/splash.hpp` 的设计说明）。
+﻿/// 启动卡绘制（见 `include/st/app/splash.hpp` 的设计说明）。
 ///
 /// ## 为什么这里不用 UI 树
 ///
@@ -584,3 +584,4 @@ void paint_splash_card(raster::Canvas& canvas, const SplashState& state, const S
 }
 
 }  // namespace st::app
+

@@ -339,15 +339,44 @@ auto command_build(const Arguments& arguments) -> int {
     std::fprintf(stderr, "%s\n", stats.error().message.c_str());
     return 1;
   }
-  st::log::out("构建完成 [{}] 单元 {}（重编 {} / 命中缓存 {}）\n", options.profile,
+  // ════════════════════════════════════════════════════════════════════════
+  // 输出口径：**把三层不同的“缓存”拆开说**（2026-11-08）
+  // ════════════════════════════════════════════════════════════════════════
+  //
+  // 旧输出的歧义（真实踩过两次）：
+  //
+  //   “构建完成 [dev] 单元 335（重编 1 / 命中缓存 334）”
+  //   “  编译 8.2s · 链接已跳过（产物最新）· 总 9.1s · 并行 28 路”
+  //
+  // 两层问题：
+  //
+  // ① **“命中缓存 N”只描述编译段**。链接要不要重做是另一个判据，
+  //    而人把“命中缓存 334”读成“整个构建都最新了”。
+  //    实测现场：改了 `.cpp` → 编译成功 → **链接因 exe 被占用而失败**，
+  //    输出里仍写着“命中缓存 334”，看上去像“什么都没发生”。
+  // ② **“缓存”指什么没说清**。同一个词在这个工具里指三件事：
+  //
+  //    | 名字 | 是什么 | 判据 | 在哪看 |
+  //    |---|---|---|---|
+  //    | **对象复用** | 不重编 .o | 源内容哈希未变 | `units_cached` |
+  //    | **链接跳过** | 不重跑链接器 | 产物比全部链接输入新 | `linked` / `link_skip_reason` |
+  //    | 内容哈希缓存 | 一次构建内不重复读同一文件的哈希 | 进程内 map | 不可见（内部优化） |
+  //
+  // 所以现在：
+  //   · 第一行只说**编译段**，并直接把概念写在标签里（“对象复用”，不是“命中缓存”）；
+  //   · 第二行只说**链接段**：真的重链了（给耗时）/ 跳过了（给**理由**）。
+  st::log::out("构建完成 [{}] · 编译段：单元 {}（重编 {} / 对象复用 {}）\n", options.profile,
               stats->units_total, stats->units_rebuilt, stats->units_cached);
-  st::log::out("  编译 {} · {} · 总 {} · 并行 {} 路{}\n",
-              st::time::format_duration_ns(stats->compile_ms * 1'000'000),
-              stats->linked ? std::format("链接 {}",
-                                          st::time::format_duration_ns(stats->link_ms * 1'000'000))
-                            : std::string("链接已跳过（产物最新）"),
-              st::time::format_duration_ns(st::time::now_ns() - start), stats->workers,
-              stats->pch_used ? " · PCH" : "");
+  st::log::out("  编译 {} · 总 {}", st::time::format_duration_ns(stats->compile_ms * 1'000'000),
+              st::time::format_duration_ns(st::time::now_ns() - start));
+  if (stats->linked) {
+    st::log::out(" · 链接 {}\n", st::time::format_duration_ns(stats->link_ms * 1'000'000));
+  } else {
+    st::log::out(" · 链接已跳过 · {}\n",
+                stats->link_skip_reason.empty() ? std::string("产物已是最新")
+                                                : stats->link_skip_reason);
+  }
+  st::log::out("  并行 {} 路{}\n", stats->workers, stats->pch_used ? " · PCH" : "");
   // 并发决策必须可见："为什么是 14 路而不是 28"是运维/排查会问的第一个问题
   if (!stats->concurrency_reason.empty()) {
     st::log::out("  并发依据: {}（超大单元上限 {}）\n", stats->concurrency_reason,

@@ -1748,13 +1748,11 @@ auto Application::start() -> Status {
       // 在这里它会把每一次机会都筛掉（实测：首帧期间 diff 恒为 0）。
       pump.tick_forced();
     };
-    // 首帧开始前再多泵几帧：布局/绘制那 310ms 里泵点只拿得到 1~2 次机会，
-    // 而用户在窗口刚出现的那一瞬就已经在看它了。
+    // ## 首帧开始前先泵几帧（用户能看到“它真的在动”）
     //
-    // 为何是 4 帧（约 66ms）：
-    // - 1 帧看不出“在动”（单张静图）；
-    // - 太多则纯粹推迟首帧（每帧 ~10ms）；
-    // - 4 帧覆盖 ~1/3 个脉冲周期，能看出环在扩散。
+    // 为何不是无限泵：每帧 ~10ms 都从首帧时间里借。
+    // 而**真正让慢启动能看清动画的**不是这里，而是 `run_splash_animation`
+    // 的“跟随真实耗时”策略（见 `ST_SPLASH_FOLLOW=1`）。
     for (int index = 0; index < 4; ++index) {
       splash_pump->tick_forced();
       platform::sleep_ms(16);
@@ -1883,17 +1881,19 @@ void Application::run_splash_animation(shell::BackdropSupport backdrop) {
   // 后台 GPU 预热（实测 390ms）也同样被灋在启动卡之后才开始（主线程要画卡）。
   // 结果不是“填住空白”，而是“额外多等 341ms”。那种“优化”不该默认开。
   //
-  // 所以默认 0 = 不跑。真要用（截图演示/录屏/特定活动）显式给 `ST_SPLASH_MS`。
-  // 要它真正“无代价”的前提是先把首帧拆成可中断的分段（字体预热/排版/绘制/建表）——
-  // 那时动画能插在段与段之间，而不是挡在所有事前面。那是另一件事（见���研稿 §4-D）。
-  double k_max_ms = 0.0;
+  // ## `ST_SPLASH_MS` 的语义：**最短**显示时长（不封顶）
+  //
+  // 演示/录屏时想“看清楚动画”，就要让卡至少活这么久；而启动本身慢时，
+  // 它本来就会继续播到首帧完成（不因为超时就强行切走——那才是用户报的
+  // “动画一闪而过”）。所以它叫**最短**时长，不是上限。
+  double min_ms = 0.0;
   if (const auto override_ms = st::fs::read_env("ST_SPLASH_MS");
       override_ms.has_value() && !override_ms->empty()) {
     if (const auto parsed = parse_f64(*override_ms); parsed.has_value() && *parsed > 0.0) {
-      k_max_ms = *parsed;
+      min_ms = *parsed;
     }
   }
-  if (k_max_ms <= 0.0) return;
+  if (min_ms <= 0.0) return;
   if (impl_->backend == nullptr || impl_->backend->headless()) return;
   const ui::Theme& theme = root_.theme();
   SplashState state{};
@@ -1922,12 +1922,12 @@ void Application::run_splash_animation(shell::BackdropSupport backdrop) {
   std::uint32_t painted = 0;
   while (true) {
     const double elapsed_ms = static_cast<double>(time::now_ms()) - started_ms;
-    if (elapsed_ms > k_max_ms) break;
+    if (elapsed_ms > min_ms) break;
     state.elapsed_seconds = elapsed_ms / 1000.0;
     // 进度提示：**不是进度条**，只影响环的亮度/扩散幅度（见 `splash.hpp`）。
     // 用"已过时间 / 320ms"推，并夹到 0.85——留一点"还没到底"的意味，
     // 而不是把用户钓到一个永远差一格的 100%。
-    state.progress = static_cast<float>(std::min(0.85, elapsed_ms / k_max_ms));
+    state.progress = static_cast<float>(std::min(0.85, elapsed_ms / std::max(1.0, min_ms)));
     raster::Surface& canvas = impl_->backend->framebuffer();
     // 启动卡走的是**软件画布路径**：`paint_splash_card` 需要可逐像素写的 Canvas。
     // 若后端当前画布是 GPU（显式 `--renderer gpu`），就用它自己的软件退路——
