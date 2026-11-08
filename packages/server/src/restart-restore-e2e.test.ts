@@ -20,7 +20,24 @@ let tmp = ""
 let first: ServerHandle | null = null
 let second: ServerHandle | null = null
 let base = ""
-const originalTmp = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR, NODE_ENV: process.env.NODE_ENV, CH_DISABLE: process.env.GEBAI_CHANNELS_DISABLE, XIANGQI: process.env.XIANGQI_AUTO }
+const originalTmp = {
+  TEMP: process.env.TEMP,
+  TMP: process.env.TMP,
+  TMPDIR: process.env.TMPDIR,
+  NODE_ENV: process.env.NODE_ENV,
+  CH_DISABLE: process.env.GEBAI_CHANNELS_DISABLE,
+  XIANGQI: process.env.XIANGQI_AUTO,
+  /**
+   * 启动前的全部 `GEBAI_` 变量快照（**不是几个具名变量**）。
+   *
+   * 为何要整类快照：本用例把 NODE_ENV 换成 production（要的就是那条真实启动路径），
+   * 于是 `loadConfig` 会把**仓库 `.env` 整份**注入 process.env——而 bun 的 preload
+   * 只在进程启动瞬间清一次，用例内注入的会留给**同一分片的后续文件**。
+   * 实测：`.env` 里 `GEBAI_PERSONA_OUTBOUND_REVIEW=false` 会让同分片的出站审校用例
+   * 整批断言变成 “disabled”（现象像功能坏了，实际是测试污染）。
+   */
+  GEBAI: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("GEBAI_")).map(([k, v]) => [k, v as string])),
+}
 
 /** 让本进程的 tmpdir() 指向测试目录（restartDir 与恢复逻辑都按它定位登记文件）。 */
 function useTmpDir(dir: string) {
@@ -62,6 +79,12 @@ afterAll(() => {
     }
   }
   process.env.NODE_ENV = originalTmp.NODE_ENV
+  // 把 loadConfig 从仓库 .env 注入的 `GEBAI_` 变量全部抹掉，再恢复本用例开工前的值——
+  // 否则它们会泄漏给同分片的后续测试文件（“本地 .env 改了断言”的那类幽灵失败）。
+  for (const k of Object.keys(process.env)) {
+    if (k.startsWith("GEBAI_")) delete process.env[k]
+  }
+  for (const [k, v] of Object.entries(originalTmp.GEBAI)) process.env[k] = v
   if (originalTmp.CH_DISABLE === undefined) delete process.env.GEBAI_CHANNELS_DISABLE
   else process.env.GEBAI_CHANNELS_DISABLE = originalTmp.CH_DISABLE
   if (originalTmp.XIANGQI === undefined) delete process.env.XIANGQI_AUTO
