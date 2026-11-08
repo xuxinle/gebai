@@ -86,13 +86,17 @@ inline constexpr std::array<std::string_view, 7> kGalleryLazy{
 /// 【待补卡】清单已随三包补卡全部清零：首包 Tree/Tooltip/ColorPicker/Viewport，
 /// 二包 CodeEditor/DiffView/CompletionPopup/CommandPalette，
 /// 三包 TimelineView/MergeView/MenuBar/ContextMenu/FileDialog/Terminal）。
-inline constexpr std::array<std::pair<std::string_view, std::string_view>, 5>
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 6>
     kGalleryExempt{
         std::pair{"Spacer", "布局占位：无可视内容，无展示价值"},
         std::pair{"ListItem", "父组件注入：List::add_item 内建创建（list.cpp:291），列表卡随之展示，不单独立卡"},
         std::pair{"ScrollBar", "父组件注入：ScrollView 构造内建（scroll.cpp:156），页面滚动随之展示，不单独立卡"},
         std::pair{"MenuPanel", "父组件注入：MenuBar::make_panel 内建创建（menu.cpp:386），有 MenuBar 卡即随之展示（菜单栏/右键菜单两卡的面板都是它）"},
         std::pair{"SlowContent", "异步排版壳（2026-10-19）：无独立视觉形态，包裹内容组件用；骨架占位随包裹内容展示，不单独立卡"},
+        // 2026-11-08 新增（组件自注册改造后暴露）：`SelectPanel` 是 `Select` 开面板时
+        // **框架懒注入**的实例（select.cpp：点开才建），没有“独立摆一张卡”的形态。
+        // 组件页有 `Select` 卡，面板随它开合而展示（同 type、不同实例）。
+        std::pair{"SelectPanel", "框组件注入：Select 开面板时才创建（懒注入），无独立展示形态；有 Select 卡即随之"},
     };
 
 }  // namespace gallery

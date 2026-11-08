@@ -49,6 +49,7 @@
 // 很难反推到本头。详见 `st/core/json_fwd.hpp` 的里注释。
 #include "st/core/json_fwd.hpp"
 #include "st/core/log.hpp"
+#include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/styling.hpp"
 #include "st/ui/ui_root.hpp"
@@ -701,13 +702,19 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
 ///
 /// 声明式元素类型名（与 `make_element` 的注册名一致）。
 ///
-/// `custom<T>` 用它把 C++ 类型转成注册名。**与 `make_element` 同源**（组件清单
-/// `ST_COMPONENT_LIST` 的两处展开，见 `dsl.cpp`）——不再存在“两张类型表”的可能。
+/// `custom<T>` 用它把 C++ 类型转成注册名。**与 `make_element` 同源**——两边都查
+/// `st/ui/component_registry.hpp` 那张表，所以不存在"两张类型表"的可能。
 ///
 /// 为什么要显式取 type 名而不是 `T{}.type()`：组件构造函数参数各异（`Button(label)`、
-/// `Table(columns)`），`T{}` 不成立。取 type 名的正道是**问工厂**（`make_element` 的
-/// 注册表就是权威），但那里需要 type 字符串——所以提供这个特化表（特化定义在
-/// `dsl.cpp`，那里能看到全部组件类型）。新增组件时在源文件补一行。
+/// `Table(columns)`），`T{}` 不成立。取 type 名的正道是**问注册表**（那里就是权威），
+/// 而注册表的内容由每个组件头的 `ST_UI_COMPONENT(TYPE, "名字")` 在静态初始化期填写。
+///
+/// ## 2026-11-08：这张表不再需要手写
+///
+/// 原先它是 `dsl.cpp` 里由 `ST_COMPONENT_LIST` 展开的特化表（一个组件一行、
+/// 忘了加就静默失效）。现在**注册名随组件本身走**（`ST_UI_COMPONENT` 里就写着
+/// 类型与名字），所以 `type_name<T>` 只剩一个声明——它的定义在 `dsl.cpp`，
+/// 内容就是"查 token 表"（与 `element_type_name<T>` 完全同一条路）。
 template <class T>
 [[nodiscard]] auto type_name() -> std::string;
 
@@ -719,10 +726,14 @@ namespace detail {
 ///
 /// 为何不用 `typeid`/`type_index` 做键：动态库各自持一份 type_info 时同一类型会有
 /// 多个键，那会让“注册了却查不到”以最难查的形式出现。地址折叠不受此影响。
+///
+/// 实现转发到 `component_registry::type_token<T>()`——**必须是同一个函数**：
+/// 若这里另写一份 inline static，两处的 token 地址不同，于是组件头登记的
+/// （在 `component_registry` 那边）与 `custom<T>` 查的（在这里）就对不上，
+/// 表现为"注册了却查不到"（本仓踩过这个坑的同类）。
 template <class T>
 auto element_type_token() -> const void* {
-  static const char tag = 0;
-  return &tag;
+  return ::st::ui::component_registry::type_token<T>();
 }
 
 /// 按 token 登记类型名（实现在 `dsl.cpp`）。
@@ -1226,7 +1237,32 @@ auto register_element_type(std::string type) -> bool {
 /// `dsl.cpp` 内部使用**，头文件路径不再碰它。
 template <class T>
 [[nodiscard]] auto element_type_name() -> std::string {
+  // 两条来源都要查：
+  // ① 组件头自注册（`ST_UI_COMPONENT`）→ `component_registry` 的 token 表；
+  // ② 示例级注册（`register_element_type<T>`）→ `detail` 的外部 token 表。
+  // 先查①：自注册是"include 了那个头"的直接后果，比运行期注册更权威。
+  if (auto name = ::st::ui::component_registry::type_name_of(detail::element_type_token<T>());
+      !name.empty()) {
+    return name;
+  }
   return detail::lookup_element_type(detail::element_type_token<T>());
+}
+
+/// `type_name<T>()` 的定义（2026-11-08 起与 `element_type_name` **完全同一条路**）。
+///
+/// ## 为何不再是一张手写特化表
+///
+/// 原先它是 `dsl.cpp` 里由 `ST_COMPONENT_LIST` 展开的特化表（一个组件一行，
+/// 忘了加 → `custom<T>` 报「未注册」）。现在**注册名就在组件自己的头里**
+/// （`ST_UI_COMPONENT(::st::ui::Button, "Button")`），它在静态初始化期通过
+/// `register_element_type_by_token` 把「类型 token → 名字」登进同一张表。
+/// 于是 `type_name<T>` 只是"查那张表"，与 `element_type_name<T>` **同一个函数体**。
+///
+/// 为何两个名字都保留：`type_name` 是既有公开面（单测与文档里都按它写），
+/// `element_type_name` 是 `custom<T>` 的实际入口。合成一个会改公开 API，收益为零。
+template <class T>
+[[nodiscard]] auto type_name() -> std::string {
+  return element_type_name<T>();
 }
 
 /// 全部可声明组件的注册名（内置 + 已注册的外部类型，按清单顺序）。

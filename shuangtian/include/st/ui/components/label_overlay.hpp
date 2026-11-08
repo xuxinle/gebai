@@ -165,3 +165,12 @@ class LabelOverlay : public Element {
 };
 
 }  // namespace st::ui
+
+// ── 本组件**不进声明式注册表** ─────────────────────────────────────────
+//
+// 它是三维族：构造本身不报错，但声明式创建（`dsl::make_element`）在无头环境
+// 没有意义，而且 gallery 对账要求"注册了就得上卡或写豁免"。它由 C++ 直接
+// `new` 并挂树，不走 `make_element`。
+//
+// 需要它参与声明式创建时：加 `ST_UI_COMPONENT` + `.cpp` 里 `ST_UI_COMPONENT_IMPL`，
+// 并在 `gallery_exhibits.hpp` 补一张卡（或写一条豁免理由）。

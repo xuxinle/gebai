@@ -588,6 +588,57 @@ auto absolute(std::string_view path) -> Result<std::string> {
   return normalize(from_std_path(resolved));
 }
 
+auto canonical_or_self(std::string_view path) -> std::string {
+  // 先做字串归一：`canonical` 对带 `..` / 多余分隔符的输入也能处理，
+  // 但路径**不存在**时它会报错退回原串——那个原串应当是干净的形式。
+  const std::string cleaned = normalize(path);
+  std::error_code ec;
+  auto resolved = sys::weakly_canonical(to_std_path(cleaned), ec);
+  std::string text = ec ? cleaned : from_std_path(resolved);
+  if (text.empty()) text = cleaned;
+  // **Windows 另需一次长名展开**：`weakly_canonical` 在 Windows 上**不展开 8.3 短名**
+  // （实测：`C:/Users/ADMINI~1/AppData/Local/Temp` 原样返回，而 `GetLongPathNameW`
+  // 给的是 `C:/Users/Administrator/...`）。而"两者是同一目录"这类判断（例：落盘白名单）
+  // 恰恰卡在这里——短名与长名逐字节不同。系统头只在 `platform_fs_path.cpp` 里（§10）。
+  //
+  // ⚠ **路径不存在时 `GetLongPathNameW` 会失败**（返回 0）。而白名单校验恰恰
+  // 常碰到不存在的目标（“要把基线写到这里”——文件当然还没生成）。于是这里
+  // 做一次**逐级上查**：把末尾成分逐个退回，直到找到一个**存在的**祖先，
+  // 展开它的长名，再把退回的成分拼回去。
+  //
+  // 为何一定要这么做（2026-11-08 实测）：否则
+  // `Temp/ADMINI~1/st-xxx/baseline.png` 与
+  // `Temp/Administrator/st-xxx/baseline.png` 会被判成两个目录，
+  // 合法写入被拒（`visual.diff` 的基线落盘红）。
+  if (auto widened = platform_long_path_name(text); widened.has_value()) {
+    text = std::move(*widened);
+  } else {
+    // 逐级上查：拆出末尾成分，直到祖先存在
+    std::string head = text;
+    std::vector<std::string> tail;
+    while (true) {
+      const std::size_t slash = head.find_last_of("/\\");
+      if (slash == std::string::npos || slash == 0) break;
+      if (fs::exists(head)) break;   // 自己存在：直接用
+      tail.push_back(head.substr(slash + 1));
+      head = head.substr(0, slash);
+      if (auto up = platform_long_path_name(head); up.has_value()) {
+        head = std::move(*up);
+        break;
+      }
+    }
+    if (!tail.empty()) {
+      std::string joined = head;
+      for (auto it = tail.rbegin(); it != tail.rend(); ++it) {
+        if (!joined.empty() && joined.back() != '/' && joined.back() != '\\') joined.push_back('/');
+        joined.append(*it);
+      }
+      text = std::move(joined);
+    }
+  }
+  return normalize(text);
+}
+
 auto parent(std::string_view path) -> std::string {
   std::string text = normalize(path);
   const std::size_t pos = text.find_last_of('/');

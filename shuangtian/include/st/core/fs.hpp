@@ -126,6 +126,32 @@ struct DirEntry {
 [[nodiscard]] auto join(std::string_view base, std::string_view leaf) -> std::string;
 [[nodiscard]] auto normalize(std::string_view path) -> std::string;
 [[nodiscard]] auto absolute(std::string_view path) -> Result<std::string>;
+/// **能解析就解析成真实绝对路径，解析不了就原样返回**（永不失败）。
+///
+/// ## 为什么需要它（而不是一律用 `absolute`）
+///
+/// 判断“两个路径是不是同一位置”时，字串比较不够用：Windows 上
+/// `C:/Users/ADMINI~1/AppData/Local/Temp` 与 `C:/Users/Administrator/AppData/Local/Temp`
+/// 是**同一个目录**（8.3 短名），只有文件系统自己知道它们等价。
+/// 而这类判断（例：控制通道 `capture` 的落盘白名单）往往发生在**路径可能还不存在**的
+/// 时刻（截图文件尚未创建），所以不能用会报错的严格 `canonical`——
+/// 否则“临时目录解析失败”会把所有写入都拒掉。
+///
+/// 实测代价（2026-11-08，册府图谱 e2e）：白名单存短名、客户端传长名，
+/// 合法路径全被拒，而报错只说“不在白名单内”——看上去像安全策略太紧，
+/// 实际是路径身份没归一。
+[[nodiscard]] auto canonical_or_self(std::string_view path) -> std::string;
+
+/// 平台实现：路径的**长名**（Windows 展开 8.3 短名）；无法展开返回 `nullopt`。
+///
+/// 为什么单独立一个平台函数（而不是在 `fs.cpp` 里 `#if defined(_WIN32)` 直调 Win32）：
+/// `CONVENTIONS` §10 规定**系统头只能出现在 `src/*/platform_*.cpp`**——
+/// 那条规则就是为了让"换平台时要改哪里"可枚举。`fs.cpp` 是全框架被引用最多的
+/// 文件之一，把 `windows.h` 拉进它的包含图会伤所有下游。
+///
+/// POSIX 实现恒返回 `nullopt`（没有短名别名这回事，长名就是路径本身）。
+[[nodiscard]] auto platform_long_path_name(const std::string& path)
+    -> std::optional<std::string>;
 [[nodiscard]] auto parent(std::string_view path) -> std::string;
 [[nodiscard]] auto file_name(std::string_view path) -> std::string;
 [[nodiscard]] auto stem(std::string_view path) -> std::string;

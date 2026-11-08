@@ -8,6 +8,10 @@
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
+// 拆头后：`Dialog` 要用 `Button` 当默认按钮，而 `overlay.hpp` 不再（也不该）把它拉进来——
+// 依赖写在用它的那个实现文件里。这正是“一组件一头”想要的效果：
+// 谁用谁 include，而不是整个组件族被迫连带。
+#include "st/ui/components/button.hpp"
 #include "st/ui/text_port.hpp"
 
 #include "components_internal.hpp"
@@ -454,3 +458,21 @@ auto Toast::property_names() const -> std::vector<std::string_view> {
 }
 
 }  // namespace st::ui
+
+// ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────
+//
+// 两件事都在**这个 TU 里**完成，因为它们互相依赖：
+//  ① 定义登记器（`ST_UI_COMPONENT_IMPL_*`）——完整特化只能出现在这里；
+//  ② 调 `import_components<T>()` 把它登记进注册表。
+//
+// ② 必须在**函数体**里：命名空间作用域下以模板实参开头的表达式会被当成声明
+//（实测：`expected unqualified-id before 'void'`）。
+ST_UI_COMPONENT_IMPL(::st::ui::Dialog);
+ST_UI_COMPONENT_IMPL(::st::ui::Toast);
+
+namespace {
+[[maybe_unused]] const bool st_ui_imported_overlay_cpp = []() {
+  st::ui::import_components<::st::ui::Dialog, ::st::ui::Toast>();
+  return true;
+}();
+}  // namespace

@@ -9,6 +9,8 @@
 #include "st/perf/frame.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
+#include "st/ui/component_registry.hpp"   // Panel / Spacer 的登记（文件末尾）
+#include "st/ui/components/panel.hpp"      // `component_meta<Panel/Spacer>` 的声明
 #include "st/ui/line_layout.hpp"
 
 namespace st::ui {
@@ -1265,3 +1267,12 @@ void Spacer::arrange(const RenderContext& context, math::Rect rect) {
 }
 
 }  // namespace st::ui
+
+// ── 基础框架容器的登记（`st/ui/component_registry.hpp`）────────────────────
+//
+// `Panel` / `Spacer` 定义在本文件（基类布局代码要用它们，搬到组件头会形成环），
+// 但它们的**登记**同样要走这条路：声明在 `st/ui/components/panel.hpp`，
+// 定义在这里。于是 `dsl::make_element("Panel")` 能造 `<Row>` / `<Column>`。
+ST_UI_COMPONENT_IMPL_NAMED(::st::ui::Panel, "Panel")
+ST_UI_COMPONENT_IMPL_NAMED(::st::ui::Spacer, "Spacer")
+

@@ -330,3 +330,12 @@ void SlowContent::paint_content(const RenderContext& context, raster::Surface& c
 }
 
 }  // namespace st::ui
+// ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────
+ST_UI_COMPONENT_IMPL(::st::ui::SlowContent);
+
+namespace {
+[[maybe_unused]] const bool st_ui_imported_slow_content_cpp = []() {
+  st::ui::import_components<::st::ui::SlowContent>();
+  return true;
+}();
+}  // namespace

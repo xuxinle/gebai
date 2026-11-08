@@ -17,35 +17,11 @@
 #include "st/core/log.hpp"
 #include "st/core/print.hpp"
 #include "st/ui/actions.hpp"
-#include "st/ui/components/basic.hpp"
-#include "st/ui/components/code_editor.hpp"
-#include "st/ui/components/completion_popup.hpp"
-#include "st/ui/components/diff_view.hpp"
-#include "st/ui/components/command_palette.hpp"
-#include "st/ui/components/feedback.hpp"
-#include "st/ui/components/file_dialog.hpp"
-#include "st/ui/components/input.hpp"
-#include "st/ui/components/list.hpp"
-#include "st/ui/components/markdown_view.hpp"
-#include "st/ui/components/slow_content.hpp"
-#include "st/ui/components/terminal.hpp"
-#include "st/ui/components/menu.hpp"
-#include "st/ui/components/overlay.hpp"
-#include "st/ui/components/scroll.hpp"
-#include "st/ui/components/viewport.hpp"
-#include "st/ui/components/color_picker.hpp"
-#include "st/ui/components/merge_view.hpp"
-#include "st/ui/components/timeline_view.hpp"
-#include "st/ui/components/select.hpp"
-#include "st/ui/components/theme_picker.hpp"
-#include "st/ui/components/slider.hpp"
-#include "st/ui/components/split_view.hpp"
-#include "st/ui/components/table.hpp"
-#include "st/ui/components/tabs.hpp"
-#include "st/ui/components/title_bar.hpp"
-#include "st/ui/components/toggle.hpp"
-#include "st/ui/components/tree.hpp"
-#include "st/ui/components/window_frame.hpp"
+// 声明式包装函数（`row` / `button` / `tabs` …）要**强类型**地用具体组件，
+// 所以这里一次性拿全部组件头——**这是本文件自己的需要，不是框架的默认**。
+// 应用不需要跟着全量：它们可以只 include 自己要的那几个头并调
+// `st::ui::import_components<T>()`（见 `st/ui/components/all.hpp`）。
+#include "st/ui/components/all.hpp"
 
 #include "st/core/json.hpp"
 
@@ -1367,138 +1343,44 @@ void Composer::sweep_overlays() {
 auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
 // ── 元素工厂（type → 构造；dsl 内部 + 后续协议/脚本共用）─────────────────
 
-// ── 组件注册表：**类型身份的唯一真源**（结构评审 A1） ─────────────────────
+// ── 组件注册表：**由每个组件头自注册**（2026-11-08 重构）
 //
-// 背景：同一份「组件类型」原先散在**两处**，谁也不认识谁——
-//   ① `type_name<T>()` 特化表（38 行，给 `custom<T>` 用）；
-//   ② `make_element` 的 `if (type == "...")` 链（42 行，给协议/脚本/属性填装用）。
-// 新增组件漏改一边就是**静默失效**（`custom<T>` 报「未注册」，或 `make_element` 返回空
-// → 声明式节点凭空消失），而编译器不会提醒。
+// ## 这次重构把什么搬走了
 //
-// 现在**一份清单、两处派生**：清单是唯一的类型身份表，`ST_COMPONENT_LIST` 之外没有第二份。
+// 原先这里有一份集中的 `ST_COMPONENT_LIST`（X-macro 一次列出 50 个组件）+
+// 文件顶部无条件 include 全部组件头。后果是"按需导入"从来没成立过：
+// 本文件对每个组件构造器都有引用，静态库的按成员拉取被一击穿透——
+// 实测（`nm -C` 册府产物）连 `Terminal` / `CodeEditor` / `DiffView` 这些
+// 册府根本不用的组件都在二进制里。
 //
-//   - `ST_DSL_REGISTRY`：清单 → `kComponents` 表（`make_element` 按注册名查表）；
-//   - `ST_DSL_TYPENAME`：清单 → `type_name<T>()` 特化（`custom<T>` 按类型取名字）。
+// 现在：**每个组件头自己登记自己**（`ST_UI_COMPONENT(TYPE, "注册名")`，
+// 见 `st/ui/component_registry.hpp`）。本文件只认识注册表，不认识任何具体组件。
+// 于是"include 这个组件头"与"这个组件可用且被链进产物"是同一件事。
 //
-// 于是「新增一个可声明组件」= 在清单里加**一行**。
+// ## 类型身份仍然只有一份
 //
-// 注册名是**对外契约**（属性面 / 控制协议 / 脚本都按它寻址），改名属破坏性变更；
-// 特别注意 `IconView` 的注册名是 `"Icon"`、`TextArea`/`CommandPalette` 与类名同名——
-// 这些都不是笔误，而是既有对外契约。名字唯一性与两处派生的一致性由单测钉住
-// （`tests/ui_dsl_test.cpp` 的 `dsl_registry_*`）。
+// 结构评审 A1 的老问题（`type_name<T>` 特化表 与 `make_element` 的 if 链
+// 两张表互不认识、漏改一边就是静默失效）现在**不可能复发**：两条路都查同一张
+// 注册表——`type_name<T>()` 不再是一张手写特化表，而是"注册时顺手登记的类型名"
+// （见下方 `detail::register_element_type_by_token` 与 `element_type_name<T>`）。
 //
-// 为什么用 X-macro 而不是模板：组件的构造函数签名各异（`Button(label)`、`Table(columns)`、
-// `MenuPanel(items)`），没有统一的 `T{}` 形态，因此无法只靠模板从类型推出实例化方式。
-// X-macro 是「一份清单、多次展开」在 C++ 里的标准解法——这里是 `CONVENTIONS` §8 认可的
-// 机械重复压缩用途（与 `ST_DSL_TYPE` 原用法同类）。
-
-// 组件清单：`(C++ 类型, 注册名, 构造表达式)`。**新增组件只改这里一行。**
-#define ST_COMPONENT_LIST(X) /* lint-allow: L3 一份清单多处展开（X-macro） */ \
-  X(Panel, "Panel", std::make_unique<Panel>())                            \
-  X(Text, "Text", std::make_unique<Text>())                               \
-  X(Heading, "Heading", std::make_unique<Heading>())                      \
-  X(IconView, "Icon", std::make_unique<IconView>())                       \
-  X(Button, "Button", std::make_unique<Button>(""))                       \
-  X(Card, "Card", std::make_unique<Card>())                               \
-  X(Divider, "Divider", std::make_unique<Divider>())                      \
-  X(KeyValueRow, "KeyValueRow", std::make_unique<KeyValueRow>("", ""))     \
-  X(Spacer, "Spacer", std::make_unique<Spacer>())                         \
-  X(Input, "Input", std::make_unique<Input>())                            \
-  X(TextArea, "TextArea", std::make_unique<TextArea>())                   \
-  X(Checkbox, "Checkbox", std::make_unique<Checkbox>(""))                 \
-  X(Radio, "Radio", std::make_unique<Radio>(""))                          \
-  X(Switch, "Switch", std::make_unique<Switch>(""))                       \
-  X(Slider, "Slider", std::make_unique<Slider>())                         \
-  X(Select, "Select", std::make_unique<Select>())                         \
-  X(ThemePicker, "ThemePicker", std::make_unique<ThemePicker>())           \
-  X(List, "List", std::make_unique<List>())                               \
-  X(ListItem, "ListItem", std::make_unique<ListItem>("", ""))             \
-  X(Table, "Table", std::make_unique<Table>())                            \
-  X(Tree, "Tree", std::make_unique<Tree>())                               \
-  X(ScrollView, "ScrollView", std::make_unique<ScrollView>())             \
-  X(ScrollBar, "ScrollBar", std::make_unique<ScrollBar>())                \
-  X(SplitView, "SplitView", std::make_unique<SplitView>())                \
-  X(Viewport, "Viewport", std::make_unique<Viewport>())                  \
-  X(ColorPicker, "ColorPicker", std::make_unique<ColorPicker>())        \
-  X(MergeView, "MergeView", std::make_unique<MergeView>())              \
-  X(TimelineView, "TimelineView", std::make_unique<TimelineView>())    \
-  X(Tabs, "Tabs", std::make_unique<Tabs>())                               \
-  X(ProgressBar, "ProgressBar", std::make_unique<ProgressBar>())          \
-  X(Spinner, "Spinner", std::make_unique<Spinner>())                      \
-  X(Badge, "Badge", std::make_unique<Badge>())                            \
-  X(Chip, "Chip", std::make_unique<Chip>())                               \
-  X(Avatar, "Avatar", std::make_unique<Avatar>())                         \
-  X(Tooltip, "Tooltip", std::make_unique<Tooltip>())                      \
-  X(Dialog, "Dialog", std::make_unique<Dialog>())                         \
-  X(Toast, "Toast", std::make_unique<Toast>())                            \
-    X(MenuBar, "MenuBar", std::make_unique<MenuBar>())                                \
-  X(MenuPanel, "MenuPanel", std::make_unique<MenuPanel>(std::vector<MenuItem>{})) \
-  X(ContextMenu, "ContextMenu", std::make_unique<ContextMenu>(math::Point{}, std::vector<MenuItem>{})) \
-  X(FileDialog, "FileDialog", std::make_unique<FileDialog>())             \
-  X(Terminal, "Terminal", std::make_unique<Terminal>())                   \
-  X(CodeEditor, "CodeEditor", std::make_unique<CodeEditor>())             \
-  X(DiffView, "DiffView", std::make_unique<DiffView>())                   \
-  X(CommandPalette, "CommandPalette", std::make_unique<CommandPalette>()) \
-  X(CompletionPopup, "CompletionPopup", std::make_unique<CompletionPopup>()) \
-  X(MarkdownView, "MarkdownView", std::make_unique<MarkdownView>())       \
-  X(SlowContent, "SlowContent", std::make_unique<SlowContent>())          \
-  X(TitleBar, "TitleBar", std::make_unique<TitleBar>())                   \
-  X(WindowFrame, "WindowFrame", std::make_unique<WindowFrame>())
-
-//lint-allow: L3 组件清单的 X-macro 展开（一份清单多处派生；无模板替代形式）
-#define ST_DSL_REGISTRY(TYPE, NAME, CONSTRUCT) /* lint-allow: L3 同上 */ \
-  { NAME, []() -> std::unique_ptr<Element> { return CONSTRUCT; } },
-
-/// 注册表条目：注册名 → 构造器。
-struct ComponentEntry {
-  std::string_view name;
-  std::unique_ptr<Element> (*create)();
-};
-
-/// 全部可声明组件（由清单展开，**不手工维护**）。
-const ComponentEntry kComponents[]{ST_COMPONENT_LIST(ST_DSL_REGISTRY)};
-
-//lint-allow: L3 同上（清单的第二处展开）
-#define ST_DSL_TYPENAME(TYPE, NAME, CONSTRUCT) /* lint-allow: L3 同上 */                \
-  template <>                                                                      \
-  [[nodiscard]] auto type_name<TYPE>() -> std::string { return NAME; }              \
-  static_assert(true, "type_name 特化定义需要分号终止");
-
-ST_COMPONENT_LIST(ST_DSL_TYPENAME)
-
-#undef ST_DSL_REGISTRY
-#undef ST_DSL_TYPENAME
-
-// 把内置类型也登进 **token 表**：这样 `element_type_name<T>()` 有**唯一**一条查表路径
-// （内置与外部同构）——而不必在运行时二选一。
+// ## 注册名是**对外契约**
 //
-// 为什么不能写成“先查外部表、没有则回退 `type_name<T>()`”：那是一个**运行时**
-// 分支，被调用的两支都会被 ODR-use；而外部类型没有 `type_name<T>` 特化（只有声明），
-// 链接期就报未定义符号（实测：`undefined symbol type_name<CanvasView>`）。
-// 启动期注册把选择从“运行时”提到“登记时”，这条路就通了。
-// lint-allow: L3 排除说明见下一行（行内豁免需与 #define 同行）
-#define ST_DSL_REGISTER_TOKEN(TYPE, NAME, CONSTRUCT) /* lint-allow: L3 清单的第三处展开（X-macro） */ \
-  namespace {                                                                          \
-  const bool st_element_token_##TYPE = [] {                                             \
-    detail::register_element_type_by_token(detail::element_type_token<TYPE>(), NAME);    \
-    return true;                                                                        \
-  }();                                                                                  \
-  }  // namespace
-
-ST_COMPONENT_LIST(ST_DSL_REGISTER_TOKEN)
-
-#undef ST_DSL_REGISTER_TOKEN
+// 属性面 / 控制协议 / 脚本 / XML 标签都按它寻址，改名属破坏性变更；
+// 特别注意 `IconView` 的注册名是 `"Icon"`、`SelectPanel` / `TextArea` 与类名同名——
+// 这些都不是笔误。名字唯一性与「注册名 == 元素自己的 type()」由单测钉住
+// （`tests/ui_dsl_registry_test.cpp`、`tests/ui_component_contract_test.cpp`）。
 
 namespace {
 
 /// 外部（示例级）组件注册表。
 ///
 /// 为何是**函数内 static** 而不是命名空间作用域对象：跨 TU 的初始化顺序未定是老问题，
-/// 而这里由启动期显式调 `register_element_type` 填写——函数内 static 保证“第一
-/// 次用时已构造”。
+/// 而这里由启动期显式调 `register_element_type` 填写——函数内 static 保证"第一
+/// 次用时已构造"。
 ///
 /// 为何不做成可变全局（会被 lint L8 报）：它确实是进程级注册表，但表**只在启动期
-/// 写、之后只读**——与 L8 要拦的“业务逻辑里的可变共享状态”不是一回事。
+/// 写、之后只读**——与 L8 要拦的"业务逻辑里的可变共享状态"不是一回事。
 /// 行内豁免并写明理由（同 `icon.cpp` 的 `warn_unknown_icon_once`）。
 // lint-allow: L8 启动期注册、之后只读的注册表（不含业务态）
 using ExternalEntry = std::pair<std::string, std::function<std::unique_ptr<Element>()>>;
@@ -1509,7 +1391,7 @@ auto external_elements() -> std::vector<ExternalEntry>& {  // NOLINT
 
 /// 外部类型名注册表：**类型 token（地址）→ 注册名**。
 ///
-/// 为什么以地址为键（而不是 typeid/名字）：见头文件里 `element_type_token` 的说明
+/// 为什么以地址为键（而不是 typeid/名字）：见 `dsl.hpp` 里 `element_type_token` 的说明
 /// ——动态库边界下 type_info 可能不唯一，而 inline 函数 static 的地址折叠是可靠的。
 // lint-allow: L8 同上（启动期写、之后只读）
 using TypeNameEntry = std::pair<const void*, std::string>;
@@ -1520,12 +1402,45 @@ auto external_type_names() -> std::vector<TypeNameEntry>& {  // NOLINT
 
 }  // namespace
 
+/// 保证**框架自带的全部组件**已导入（一次）。
+///
+/// ## 为何需要它
+///
+/// 本文件是 `dsl` 层（声明式/协议/脚本）的共同入口，它的包装函数
+/// （`row` / `button` / `tabs` …）本来就强类型地用到全部组件——所以“全部组件在
+/// 产物里”在这里是**既成事实**，不是它造成的结果。既然如此，就该把登记也做完整：
+/// 否则会出现“代码在产物里但注册表查不到”这种最迷惑的形态。
+///
+/// ## 为何不影呐应用侧的“按需导入”
+///
+/// 应用不必调本文件：它只 include 自己要的组件头，并在自己的 `.cpp` 里写
+/// `st::ui::import_components<T>()`。没被引用的组件本来就不会进它的产物
+/// （`tools/import_probe.cpp` 就是这件事的可执行证据）。
+///
+/// ## 为何用函数而不是静态对象
+///
+/// 静态初始化的执行时机相对其他 TU 不可靠（实测：本文件那一份在测试用例之前
+/// 没跑到，注册表还是空的）。惰性函数调用则总是在“用之前”。
+void ensure_builtin_components_imported() {
+  static const bool imported = []() {
+    import_all_components();
+    return true;
+  }();
+  (void)imported;
+}
+
 auto make_element(std::string type) -> std::unique_ptr<Element> {
-  for (const ComponentEntry& entry : kComponents) {
-    if (entry.name == type) return entry.create();
-  }
-  // 外部（示例级）注册（见 `register_element_type`）：内置表优先——重名时外部
-  // 注册根本进不来（注册时就挡住了），所以这里的顺序只是双保险。
+  // ⓪ 保证**框架自带的全部组件**已导入（一次，惰性）。理由见
+  // `ensure_builtin_components_imported` 的注释。
+  ensure_builtin_components_imported();
+
+  // ① 注册表（组件实现文件登记；内置与外部示例组件同一个口径）
+  if (auto built = component_registry::create(type); built != nullptr) return built;
+  // ② 外部（示例级）注册：`dsl::register_element_type<T>` 登记的那些。
+  //
+  // 两条路并存是**有意的**：自注册要求"改那个组件的头"，而示例级组件不该为了
+  // 能被声明式创建去改框架头。顺序上自注册优先——重名时外部注册进不来
+  //（`register_external_element` 会在注册时就挡住），所以这里只是双保险。
   for (const auto& [name, create] : external_elements()) {
     if (name == type) return create();
   }
@@ -1552,10 +1467,8 @@ auto detail::lookup_element_type(const void* token) -> std::string {  // NOLINT
 auto detail::register_external_element(std::string type,
                                        std::function<std::unique_ptr<Element>()> create) -> bool {  // NOLINT
   if (type.empty() || create == nullptr) return false;
-  // 与内置名重名 → 拒绝（否则 `make_element` 先命中内置表，这次注册**静默失效**）
-  for (const ComponentEntry& entry : kComponents) {
-    if (entry.name == type) return false;
-  }
+  // 与**任何已注册**的名字重名 → 拒绝（否则 `make_element` 先命中注册表，这次注册静默失效）
+  if (component_registry::contains(type)) return false;
   auto& table = external_elements();
   for (auto& [name, slot] : table) {
     if (name == type) {
@@ -1569,10 +1482,18 @@ auto detail::register_external_element(std::string type,
 }
 
 auto registered_element_types() -> std::vector<std::string> {
-  std::vector<std::string> names;
-  names.reserve(std::size(kComponents) + external_elements().size());
-  for (const ComponentEntry& entry : kComponents) names.emplace_back(entry.name);
-  for (const auto& [name, create] : external_elements()) names.push_back(name);
+  // 真源是注册表本身（不再有第二份清单可以漂移）。
+  //
+  // 先保证导入过：查询"有哪些组件"必须看到全部已编译进来的组件，
+  // 不能取决于调用方是否碰巧先建过一个元素（`make_element` 里也会触发导入，
+  // 但那不该是查询的前提）。
+  ensure_builtin_components_imported();
+  std::vector<std::string> names = component_registry::names();
+  names.reserve(names.size() + external_elements().size());
+  for (const auto& [name, create] : external_elements()) {
+    (void)create;
+    names.push_back(name);
+  }
   return names;
 }
 

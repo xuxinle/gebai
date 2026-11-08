@@ -37,6 +37,10 @@
 #include <vector>
 
 #include "st/ui/dsl.hpp"
+// ⚠ 全量组件头（含**导入**）：本文件测的是"注册表与展呈清单是否一致"，
+// 所以必须真的把全部组件登记进来。`all.hpp` + `import_all_components()`
+// 是这件事的标准写法（按需场景则是逐个 `import_components<T>()`）。
+#include "st/ui/components/all.hpp"
 // 支撑头引用形态随仓库先例（ui_text_selection_readonly_test.cpp：
 // "../tests/support/..."——靠 TU 目录规则解析，不依赖工程根 -I）。
 #include "../tests/support/gallery_exhibits.hpp"
@@ -91,9 +95,21 @@ ST_TEST(gallery_parity_exhibits_and_exemptions_are_disjoint) {
   }
 }
 
+/// ⓪ **准备**：导入全部组件。
+///
+/// 为何要显式做：注册发生在 **`.cpp` 的一次导入调用**里，而不是 include 头时
+/// （理由见 `st/ui/component_registry.hpp` 文件头）。这个文件要对比
+/// "注册表 vs 展呈清单"，所以每个用例开头先把全部组件真的登记进来。
+///
+/// 为何不用静态对象做一次：静态初始化的执行时机相对"其他 TU 的静态对象"不可靠
+/// （实测：放在 namespace 作用域时本文件的用例会在它之前跑到，注册表还是空的）。
+/// 而 `import_components` 内部有幂等保护，反复调只是一次哈希表大小的开销。
+inline void ensure_components_imported() { st::ui::import_all_components(); }
+
 /// ② 豁免集里每个名字都真实存在于注册表（拼错/组件改名 → 豁免静默失效，
 /// 缺卡重新变回「对不上但对账不响」——豁免清单自己先烂掉）。
 ST_TEST(gallery_parity_exemptions_all_exist_in_registry) {
+  ensure_components_imported();
   const std::vector<std::string> registered = st::ui::dsl::registered_element_types();
   const std::set<std::string> registry(registered.begin(), registered.end());
   for (const std::string& name : exemptions()) {
@@ -103,6 +119,7 @@ ST_TEST(gallery_parity_exemptions_all_exist_in_registry) {
 
 /// ③ 展示集里每个名字都真实存在于注册表（登记口径漂移即红）。
 ST_TEST(gallery_parity_exhibits_all_exist_in_registry) {
+  ensure_components_imported();
   const std::vector<std::string> registered = st::ui::dsl::registered_element_types();
   const std::set<std::string> registry(registered.begin(), registered.end());
   for (const std::string& name : exhibits()) {

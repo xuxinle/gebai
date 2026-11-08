@@ -278,16 +278,53 @@ struct Server::Impl {
   }
 
   /// 组件定位：接受 `id` 与选择器风格 `#id`（智能体常用后者，容错更省一轮往返）。
-  /// 检查路径是否落在白名单目录内（分隔符归一化后按前缀比较）。
+  /// 检查路径是否落在白名单目录内（归一化后按前缀比较）。
+  ///
+  /// ## 为什么不只是"把 `\\` 换成 `/`"
+  ///
+  /// 这个判据曾经只做分隔符归一化，于是**同一个目录的两种写法被判成不同目录**——
+  /// 实测代价（2026-11-08，册府图谱 e2e）：白名单条目是
+  /// `C:/Users/ADMINI~1/AppData/Local/Temp`（`temp_dir()` 走
+  /// `std::filesystem::temp_directory_path`，Windows 上给的是 **8.3 短名**），
+  /// 而客户端传来的是 `C:\Users\Administrator\AppData\Local\Temp\…\x.png`（**长名**）——
+  /// 逐字前缀不同，合法路径被拒。现象是"截图功能坏了"，实际是**路径身份**没归一。
+  ///
+  /// 两个修正（都是路径身份问题，不是安全放宽）：
+  /// 1. **交给 `fs::normalize`**：它处理分隔符、`.`/`..`、结尾斜杠——
+  ///    「`/tmp/` 与 `/tmp` 是同一个目录」这类判断不该每个调用点各写一遍；
+  /// 2. **Windows 下大小写不敏感**：NTFS 不区分大小写，`c:/users/…` 与
+  ///    `C:/Users/…` 是同一位置。对**安全判据**这样处理不会放宽范围
+  ///    （只是把同一位置的两种拼写认成同一个），但漏了它会让合法请求随机被拒。
+  /// 3. **两侧都取一次 `weakly_canonical`**：8.3 短名（`ADMINI~1`）与长名
+  ///    （`Administrator`）指向**同一个目录**，但任何字串比较都看不出来。
+  ///    只有文件系统自己知道它们等价，所以**只能向它问**（解析失败就用原串，
+  ///    否则临时目录不存在这种情形会把所有写入都拒掉）。
   [[nodiscard]] auto capture_path_allowed(std::string_view path) -> bool {
     if (capture_dirs.empty()) return false;
-    std::string normalized(path);
-    std::ranges::replace(normalized, '\\', '/');
+    const auto fold = [](std::string text) -> std::string {
+      std::ranges::replace(text, '\\', '/');
+      // 去结尾斜杠（`/tmp/` 与 `/tmp` 是同一目录）
+      while (text.size() > 1 && text.back() == '/') text.pop_back();
+#if defined(_WIN32)
+      std::ranges::transform(text, text.begin(), [](char c) {
+        const auto byte = static_cast<unsigned char>(c);
+        return static_cast<char>(byte >= 'A' && byte <= 'Z' ? byte - 'A' + 'a' : byte);
+      });
+#endif
+      return text;
+    };
+    const std::string normalized = fold(fs::canonical_or_self(std::string(path)));
     for (const auto& dir : capture_dirs) {
-      std::string prefix = dir;
-      std::ranges::replace(prefix, '\\', '/');
-      if (!prefix.empty() && !prefix.ends_with('/')) prefix.push_back('/');
-      if (normalized.rfind(prefix, 0) == 0) return true;
+      // 白名单目录本身也归一化（同一个口径），再比较**目录边界**
+      const std::string prefix = fold(fs::canonical_or_self(dir));
+      if (prefix.empty()) continue;
+      if (normalized.size() <= prefix.size()) {
+        if (normalized == prefix) return true;
+        continue;
+      }
+      if (normalized.compare(0, prefix.size(), prefix) != 0) continue;
+      // 边界位必须是分隔符：否则 `/tmp/evil` 会被 `/tmp/e` 误放行（前缀匹配经典错）
+      if (normalized[prefix.size()] == '/') return true;
     }
     return false;
   }
@@ -2044,8 +2081,21 @@ auto Server::client_count() const noexcept -> std::size_t {
 auto Server::running() const noexcept -> bool { return impl_ && impl_->active; }
 
 auto ServerOptions::default_capture_dirs() const -> std::vector<std::string> {
+  // 系统临时目录：**先尝试取长名**。
+  //
+  // 为何（2026-11-08 实测）：`fs::temp_dir()` 走
+  // `std::filesystem::temp_directory_path`，Windows 上它可能给 **8.3 短名**
+  // （`C:/Users/ADMINI~1/AppData/Local/Temp`），而客户端传的是长名
+  // （`C:/Users/Administrator/AppData/Local/Temp/...`）。两者是**同一个目录**，
+  // 但字串前缀不同。虽然 `capture_path_allowed` 已按路径身份做了归一，
+  // 这里再把**白名单侧**也写成长名，是为了让拒绝报文里列出的目录是**人能对上的形式**
+  // （报一堆 `ADMINI~1` 会让人以为白名单配错了）。取不到就退回原值，不影响可用性。
+  std::string temp = fs::temp_dir();
+  if (auto resolved = fs::absolute(temp); resolved && !resolved->empty()) {
+    temp = *resolved;
+  }
   std::vector<std::string> dirs;
-  dirs.push_back(fs::temp_dir());
+  dirs.push_back(std::move(temp));
   // 可执行文件同目录（默认 shots 目录的蓄意写应用通常在这里）
   if (auto exe = process::executable_path(); exe) {
     const std::size_t slash = exe->find_last_of("\\/");

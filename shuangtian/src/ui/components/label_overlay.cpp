@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>  // 显式（原先靠间接包含；组件头收紧后暴露）
 #include <string>
 #include <unordered_map>
 #include <vector>
