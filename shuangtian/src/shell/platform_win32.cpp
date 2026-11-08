@@ -528,6 +528,48 @@ class Win32Backend final : public Backend {
       class_registered_ = true;
     }
 
+    // ## 建窗即铺到工作区（可选，`fill_work_area_on_create`）
+    //
+    // 旧路径让启动期画布分配 **4 次**：先按请求尺寸建窗（1920×1080）→
+    // `fit_work_area` 铺开（3533×1921，重分配 27MB）→ 启动期小窗（510×483）→
+    // 恢复真实尺寸（3533×1922）。前两次可以合并：**工作区在建窗前就能算**
+    //（`MonitorFromPoint` + `rcWork`，不需要窗口存在）。
+    //
+    // ⚠ 默认关闭：建窗尺寸是“黑框/白闪”历史缺陷高发区，改了要跟真窗口验证。
+    if (options.fill_work_area_on_create) {
+      // 主屏（窗口还不存在，只能拿默认屏；多屏下先落在主屏再被 `center_window` 修正）
+      POINT probe{0, 0};
+      const HMONITOR monitor = ::MonitorFromPoint(probe, MONITOR_DEFAULTTOPRIMARY);
+      MONITORINFO info{};
+      info.cbSize = sizeof(MONITORINFO);
+      if (monitor != nullptr && ::GetMonitorInfoW(monitor, &info) != 0) {
+        // ⚠ **建窗前拿不到真实 DPI**（`GetDpiForWindow` 要窗口），
+        // 但屏幕 DC 的 `LOGPIXELSX` 已经够用——它就是系统缩放的那个值
+        //（`GetDpiForWindow` 在单屏下与它一致；多屏下建窗后还会再校一次）。
+        float s = scale_;
+        if (HDC dc = ::GetDC(nullptr); dc != nullptr) {
+          const int dpi = ::GetDeviceCaps(dc, LOGPIXELSX);
+          ::ReleaseDC(nullptr, dc);
+          if (dpi > 0) s = static_cast<float>(dpi) / 96.0f;
+        }
+        if (s <= 0.0f) s = 1.0f;
+        // 与 `fit_window_to_work_area` 同一口径：工作区 92%，但夹在 [最小, 92%] 之间。
+        // ⚠ **`rcWork` 是物理像素，而 `logical_width_` 是逻辑像素**：必须除以 s。
+        // 实测漏了这一步：工作区 3840 被当成逻辑宽，得到的窗口物理宽 5300（超屏）。
+        const float w = static_cast<float>(info.rcWork.right - info.rcWork.left) / s;
+        const float h = static_cast<float>(info.rcWork.bottom - info.rcWork.top) / s;
+        const math::Size min_size = min_logical_size();
+        const float target_w = std::max(min_size.width, w * 0.92f);
+        const float target_h = std::max(min_size.height, h * 0.92f);
+        logical_width_ = static_cast<int>(std::lround(std::min(target_w, w)));
+        logical_height_ = static_cast<int>(std::lround(std::min(target_h, h)));
+        ST_LOG_INFO("建窗即铺开：工作区 {}x{} 物理 / 缩放 {:.2f} → 窗口 {}x{} 逻辑",
+                    static_cast<int>(info.rcWork.right - info.rcWork.left),
+                    static_cast<int>(info.rcWork.bottom - info.rcWork.top),
+                    static_cast<double>(s), logical_width_, logical_height_);
+      }
+    }
+
     // 客户区要正好等于逻辑尺寸 × 缩放：先算"含边框的整体尺寸"再创建
     const int physical_width = static_cast<int>(std::lround(static_cast<float>(logical_width_) * scale_));
     const int physical_height = static_cast<int>(std::lround(static_cast<float>(logical_height_) * scale_));

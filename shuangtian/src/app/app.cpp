@@ -1174,6 +1174,14 @@ auto Application::start() -> Status {
   shell::WindowOptions window;
   window.width = options_.width;
   window.height = options_.height;
+  // ## 建窗即铺到工作区（2026-11-08，建窗一次到位）
+  //
+  // 开了它，后端会**在建窗前**算出工作区尺寸——省掉“先按请求尺寸分配 1 次画布、
+  // 再铺开时分配第 2 次”的那一次 27MB 重分配（实测启动期共 4 次）。
+  //
+  // ⚠ 仅当应用要铺开（`fill_work_area`）时开：相期那类常驻面板的尺寸是它自己的
+  // 语义（“一张 460×620 的卡片”），铺开就毁了。
+  window.fill_work_area_on_create = options_.fill_work_area;
   window.work_area_width = static_cast<int>(options_.work_area_override.width);
   window.work_area_height = static_cast<int>(options_.work_area_override.height);
   window.scale = options_.scale;
