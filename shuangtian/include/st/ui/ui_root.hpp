@@ -652,6 +652,18 @@ class UiRoot : public Element::HostFocus {
   /// 已清空；而**只有 Click、没有 down/up**的派发（控制通道 `input.mouse{kind:"click"}`、
   /// 单测夹具）里 `pressed_at_` 是无效默认值——直接比对会把普通点击误判成拖动（实测踩到）。
   bool last_release_dragged_{false};
+  /// **本次按放的归属**（MouseDown 时锁定，随后的 Click 消费后清空）。
+  ///
+  /// 为何需要：后端在 `LBUTTONUP` 之后**无条件补发一个 Click**，而有些按放会在
+  /// 按下与 Click 之间**改变几何**（点最大化 → 窗口重排 → 标题栏按钮整体右移）。
+  /// Click 若按落点重新命中，就会落到新位置上的**另一个控件**并把它 `activate()`。
+  /// 实测（用户 2026-11-08）：「gallery 点最大化，DPI 从 1.5x 变成 2x」——同一个逻辑点
+  /// (2286.3, 17.0) 在窗口化布局里够不着任何按钮，窗口一放大就落进「DPI 1.5x」
+  /// 的 bounds `[2193.3, 2293.8]`。
+  ///
+  /// 只在**有先导 down/up** 时才有值；无先导的 Click（控制通道
+  /// `input.mouse{kind:"click"}`、单测夹具）仍走按位置命中——那是协议语义。
+  Element* mouse_down_target_{nullptr};
   /// 「拖动过」的位移阈值（逻辑 px）：超过它就不再把这次松手当点击。
   ///
   /// 取手柄命中区的同一量级（SplitView 手柄 8px）：太小会把手抖误判成拖动

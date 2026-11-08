@@ -102,6 +102,7 @@ void UiRoot::set_content(std::unique_ptr<Element> content) {
   focused_ = nullptr;
   hovered_ = nullptr;
   pressed_ = nullptr;
+  mouse_down_target_ = nullptr;   // 整棵内容树被换：上一次按放的归属也失效
   hover_chain_.clear();   // 整棵内容树被换：链上的观察者全部失效（不发 HoverOut——对象即将销毁）
   pointer_state_dirty_ = true;   // 整棵内容换了：按新树重算悬浮/光标（若有指针在窗内）
   mark_dirty_all();
@@ -1152,10 +1153,16 @@ auto UiRoot::dispatch(Event& event) -> bool {
         // 归属**——旧实现只在这一支里赋值，而按下命中不到就不该改变已有状态。
         // 实测：滑块拖拽用例在一次 `MouseDown`（命中不到）之后，
         // 后续 `MouseMove` 全部失效（值停在 0.5 不动），看着像“滑块坏了”。
+        //
+        // 但**按放的归属要清**：否则上一次遗留的 `mouse_down_target_` 会被
+        // 随后的 Click 拿去激活一个本次根本没按到的控件（不一致）。归零后 Click
+        // 回到按位置命中——正是“在空白处按下”应有的语义。
+        mouse_down_target_ = nullptr;
         break;
       }
       pressed_ = target;
       pressed_at_ = event.position;   // 拖动判定基准（见 Click 分支的兑底拦截）
+      mouse_down_target_ = target;    // 本次按放的归属（Click 用它，见那条长注释）
       if (target->focusable() && focused_ != target) set_focus(target);
       // 鼠标按下**不给焦点环**（见 `focus_ring_visible()`）：点一下就在按钮上
       // 留一圈边框不是任何人要的，而且它会一直留着。键盘一按就回来
@@ -1208,26 +1215,43 @@ auto UiRoot::dispatch(Event& event) -> bool {
     case EventKind::Click:
     case EventKind::DoubleClick:
     case EventKind::TripleClick: {
-      Element* target = hit_test(event.position);
+      // ## 目标 = **按下时锁定的那个元素**，而不是“按落点重新命中的那个”
+      //
+      // 真实缺陷（用户 2026-11-08）：“gallery 点最大化，DPI 从 1.5x 变 2x”。三件事叠起来：
+      //   ① 后端在 `LBUTTONUP` 后**无条件补发一个 `Click`**（`platform_win32.cpp`）；
+      //   ② 点最大化会**当场改变几何**（视口 2355 → 2560 逻辑，标题栏右端按钮整体右移，
+      //      实测 `#dpi-toggle` 从 x=1988.6 到 x=2193.3）；
+      //   ③ 旧写法在这里重新 `hit_test(event.position)`——同一个屏幕点在新布局里落到了
+      //      **另一个控件**上，把它 `activate()` 了（那一点正好掉进“DPI 1.5x”按钮）。
+      //   于是“点最大化”顺手把 DPI 切到 2.0（窗口宽度不同就差几十像素，所以时有时无）。
+      //
+      // 语义依据：一次按放是一个**手势**，归属在 MouseDown 那一刻就定了（与 `pressed_`
+      // 的拖拽归属同一契约）；Up/Click 是它的收尾，不是新的一次命中。
+      //
+      // ⚠ **不能改成“Click 一律不激活”**：没有先导 down/up 的 Click（控制通道
+      // `input.mouse{kind:"click"}`、单测夹具）本来就没有归属，必须回到按位置命中——
+      // 那是协议语义（`tests/control_protocol_test.cpp` 覆盖），丢了就是“点了没反应”。
+      Element* pressed = mouse_down_target_;
+      mouse_down_target_ = nullptr;   // 一次性：下一次按放重新锁定
+      // 拖动过的松手**不是点击**：这种按放回到老路径（按落点命中），不动本次按放的
+      // 归属——拖动后激活“按下的那个元素”是错的（在按钮上按下、拖出窗外松手不该触发）。
+      // （这道护栏原本挡在下面的兜底 activate() 上；目标改成“锁定的元素”后，
+      // 组件自己消费 `Click` 就不再经过兜底了，所以必须提到选目标这一步。）
+      const bool dragged = event.kind == EventKind::Click && last_release_dragged_;
+      last_release_dragged_ = false;   // 一次性：下一次按放重新结算
+      Element* target = (pressed != nullptr && !dragged) ? pressed : hit_test(event.position);
       if (pressed_ != nullptr) {
         pressed_->set_pressed(false);
         pressed_->mark_dirty();
       }
       pressed_ = nullptr;
       handled = target != nullptr && dispatch_to(*target, event);
-      // ⚠ 拖动过的松手**不是点击**：后端在 `LBUTTONUP` 后无条件补发 `Click`
-      //（`platform_win32.cpp`），而本分支的兑底 `activate()` 不加区分的话，
-      // 「拖 SplitView 手柄松手」会被当成激活——`SplitView::activate()` 是双击归位
-      // （0.5），于是面板拖完就回弹到一半（实测正是用户报的缺陷）。
+      // 兜底激活：组件没自己消费 `Click` 时才由这里 `activate()`。
       //
-      // 判据：按下→本次事件的位移超过阈值 = 拖动过，不再兑底激活。
-      // 这是**手势语义**的账，只能记在 UiRoot：拖拽归属已在本类（`pressed_`），
-      // 每个组件自己猜会重复踩坑（ScrollBar 拖完、未来任何可拖组件）。
-      // 组件显式消费 `Click` 的不受影响（那条路在上面 `dispatch_to` 已返回）。
-      // 「刚结束的这次按放拖动过」才拦（`last_release_dragged_` 由 MouseUp 结算；
-      // 纯 Click 派发没有先导 down/up，`pressed_at_` 无效——那种情况不拦，兜底照常）。
-      const bool dragged = event.kind == EventKind::Click && last_release_dragged_;
-      last_release_dragged_ = false;   // 一次性：下一次按放重新结算
+      // 拖动过的松手**不走兜底**（Win32 在 `LBUTTONUP` 后无条件补发 `Click`）：
+      // 「拖 SplitView 手柄松手」曾被当成激活 → `SplitView::activate()` 归位到
+      // `default_ratio`，表现是面板拖完弹回一半（实测用户报的那个缺陷）。
+      // 判据已在上面**选目标之前**算好（`dragged`，并且已消费复位）。
       if (!handled && !dragged && target != nullptr && event.kind == EventKind::Click) {
         target->activate();
         handled = true;
@@ -1400,7 +1424,8 @@ auto UiRoot::query(const Selector& selector, std::size_t limit) -> std::vector<E
 
 void UiRoot::prune_stale_pointers() {
   if (focused_ == nullptr && hovered_ == nullptr && pressed_ == nullptr &&
-      hint_target_ == nullptr && hint_bubble_raw_ == nullptr && hover_chain_.empty()) {
+      mouse_down_target_ == nullptr && hint_target_ == nullptr &&
+      hint_bubble_raw_ == nullptr && hover_chain_.empty()) {
     return;
   }
   // 只做指针相等比较：候选指针可能已指向销毁的元素，**绝不能解引用**
@@ -1422,6 +1447,9 @@ void UiRoot::prune_stale_pointers() {
   if (!on_tree(focused_)) focused_ = nullptr;
   if (!on_tree(hovered_)) hovered_ = nullptr;
   if (!on_tree(pressed_)) pressed_ = nullptr;
+  // 按放归属同治：声明式重组会销毁重建元素（按下与补发的 Click 之间正好嵌着一次
+  // 重组），悬垂的指针拿去 `dispatch_to` 就是 use-after-free。
+  if (!on_tree(mouse_down_target_)) mouse_down_target_ = nullptr;
   // 悬浮链同治：链上的元素可能已被重建（声明式每帧重组），悬垂的不光不能
   // 解引用——还必须在下一次链比较前摘掉，否则新链里的同位新实例会被误判为
   // "新进入"（发重复 HoverIn）而旧实例的 HoverOut 永远发不出去。

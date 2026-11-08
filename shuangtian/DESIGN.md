@@ -5369,6 +5369,46 @@ class Compositor {                                  // UI 图层 → GPU 合成
 - 标题栏按钮级悬浮（`hovered_button`/`hovered_caption`）在最小化/关闭动作后一并复位
   （窗口即将不可见，恢复回来时不该带旧高亮）；两者暴露为只读属性供自动化断言。
 
+#### 5.0.2.2 按放的归属：「点下去的是谁」在 MouseDown 那一刻就定了（2026-11-08）
+
+真实缺陷（用户报）：「gallery 点最大化，DPI 从 1.5x 变成 2x」。三件事叠在一起：
+
+1. **后端在 `LBUTTONUP` 之后无条件补发一个 `Click`**（`platform_win32.cpp`：
+   Down → Up → Click，与协议 `input.mouse{kind:"click"}` 同一序列）；
+2. **有些按放会在 down 与 click 之间改变几何**——点最大化会当场改窗口尺寸
+   （视口 2355 → 2560 逻辑），标题栏右端的按钮整体右移（实测 `#dpi-toggle`
+   从 x=1988.6 到 x=2193.3）；
+3. 旧实现里 `Click` 分支**重新 `hit_test(event.position)`**——同一个屏幕点在新布局
+   里落到了**另一个控件**上，把它 `activate()` 了。实测落点逻辑 (2286.3, 17.0)：
+   窗口化布局下那里谁都够不着，窗口一放大就正好掉进「DPI 1.5x」按钮的 bounds
+   `[2193.3, 2293.8]`。于是「点最大化」顺手把 DPI 切到 2.0
+   （窗口宽度不同就差几十像素，所以这个缺陷时有时无）。
+
+**契约（`UiRoot`）**：一次按放是一个**手势**，归属在 `MouseDown` 那一刻确定——
+与 `pressed_` 的拖拽归属同一条口径。`MouseUp` / `Click` 是它的收尾，**不是新的一次命中**。
+
+| 输入 | 目标元素 | 理由 |
+|---|---|---|
+| `MouseDown` | `hit_test(pos)` → 记入 `pressed_` 与 `mouse_down_target_` | 归属起点 |
+| `MouseUp` | `pressed_`（不处理才回落命中元素） | 拖拽释放不能因指针移出而丢 |
+| `Click` / `DoubleClick` / `TripleClick` | **`mouse_down_target_`**（消费后清空） | 收尾，不重新命中 |
+| `Click`（**无先导 down/up**） | `hit_test(pos)` | 控制通道/单测常态：本来就没有归属 |
+| 拖动过的松手补发的 `Click` | `hit_test(pos)`，且**不走兜底 `activate()`** | 拖 SplitView 手柄松手不该归位 |
+
+三条护栏（都有用例钉住）：
+
+- **不能“Click 一律不激活”**：无先导按放的 `Click` 是协议语义（`input.mouse{kind:"click"}`），
+  丢了就是「点了没反应」；
+- **`MouseDown` 命中不到任何元素时要清 `mouse_down_target_`**（但那支仍不动 `pressed_`——
+  见 §5.0.2 的滑块拖拽教训）；否则上一次遗留的归属会被本次 `Click` 拿去激活一个
+  本次根本没按到的控件；
+- **悬垂安全**：`prune_stale_pointers()` / 内容树整体替换都一并清 `mouse_down_target_`——
+  声明式重组会销毁重建元素，而按下与补发的 `Click` 之间正好可能嵌着一次重组。
+
+**验证**：`tests/ui_click_after_relayout_test.cpp`（4 用例：主用例 + 普通点击不受影响
++ 无先导 Click 仍按命中 + 拖动释放仍不算点击）；真窗口端到端（真实鼠标连点 3 轮
+最大化/还原，`device_scale` 全程 1.5、日志里零次「DPI 缩放已切换」）。
+
 #### 5.0.2.1 悬浮链（hover chain）：离开通知的真值源
 
 上表的四类时刻都要做同一件事——**告诉元素「指针不在你身上了」**。这件事有
