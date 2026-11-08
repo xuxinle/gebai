@@ -722,6 +722,24 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "关键帧动画：分镜图（8 帧）+ 导出带动画的 .glb 并读回验证采样值"
     },
+    "splash_probe": {
+      "kind": "executable",
+      "sources": ["tools/splash_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "启动卡离屏渲染：出 10 张 PNG + 三条断言（磨砂档卡外全透明 / 无磨砂档卡外不透明 / 帧间有动效）。为何不用截图：卡只活 320ms，而一次屏抓要 250ms，且 DWM acrylic 内容用 GetDC 抓不到"
+    },
+    "brand_probe": {
+      "kind": "executable",
+      "sources": ["tools/brand_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "启动卡品牌标记候选：6 个方案 × 1x/1.5x/2x 三档对照图（图标是纯观感物，必须小尺寸也认得出）"
+    },
+    "splash_anim_probe": {
+      "kind": "executable",
+      "sources": ["tools/splash_anim_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "启动卡动画的离屏验证：8 帧时间序列 + 三条断言（相邻帧有变化 / 不溢到卡外）。为何不用截图：磨砂档走分层窗口，GetDC 抓到的是纯黑（实测全部采样帧中心 (0,0,0)），看着像“动画没动”"
+    },
     "composite_pivot_probe": {
       "kind": "executable",
       "sources": ["tools/composite_pivot_probe.cpp"],

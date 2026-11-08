@@ -2163,6 +2163,58 @@ gallery 的阶梯外字号从 49 处降到 0。两点值得继续看：
    的变体（现在它只往画布混），否则精度在源头就丢了——8 位还是 16 位都救不了。
 3. **`show_when_ready` 91~150 ms 的构成未拆**（与渲染无关，属启动路径）。
 
+### P1：启动体验——窗口创建 / 首帧前空白 / 启动卡（2026-11-08，**启动卡已落地**）
+
+完整调研（含实测账本与复现命令）：**`docs/STARTUP_UX_STUDY_20261108.md`**。
+落地记录（磨砂路线对比 / 四个真缺陷 / 代价账）：**`docs/STARTUP_SPLASH_LANDED_20261108.md`**。
+
+**已落地的部分**：
+- `Backend::set_window_background`：底色跟随主题（原先硬编码 `0xF7F7FA`，暗色主题会白闪）；
+- 启动卡（`st/app/splash.hpp` + `src/app/splash.cpp`）：磨砂玻璃卡 + 脉冲环 + 扫光，
+  磨砂走 `SetWindowCompositionAttribute(ACRYLICBLURBEHIND)` + `WS_EX_LAYERED` + `UpdateLayeredWindow`；
+- `Backend::refresh_early` / `pause_deferred_upgrade` / `set_backdrop_blur` 三个可选能力口；
+- 验证：`tests/app_splash_test.cpp`（4 条）、`tools/splash_probe.cpp`（三条断言）、
+  `tools/startup_ux_probe.py`（墙钟量尺）。
+
+**实测代价（诚实）**：启动卡是**净增 ~22ms**（绘制 6.6ms + 上屏 19ms），不是“填满等待”。
+总启动 422 → 445ms。原因是首帧（373ms）与后台 GPU 预热（390ms）本来可以并行，
+而主线程上跑的任何东西都会把它们排到后面（动画跑 341ms ⇒ 总启动 748ms）。
+
+**剩下的（未做）**：
+
+- [ ] **动画“无代价”**：把首帧拆成可中断分段（字体预热 / 排版 / 绘制 / 建表），
+  把动效插在段与段之间。这是启动卡目前“净增 22ms”的根因，也是调研稿 §4-D 那条。
+  *为何值得做*：做完之后才能默认开动画而不是静态卡。
+- [ ] **`show_early` / 启动卡的跨平台缺口**：只有 win32 实现，x11/wayland 仍是
+  “首帧画完才映射”（`platform_x11.cpp:787` / `platform_wayland.cpp:1251`）。
+  修：能力位 `virtual bool can_show_early() const`，app 层据此决定“播卡”还是“等首帧”。
+- [ ] **建窗一次到位**：启动期画布被分配 **3 次**（1920×1080 → 3533×1921 → 3533×1921）。
+  根因：`fill_work_area` 到 `app.cpp:1193` 才铺开，而画布已在 `create_window` 里按请求尺寸分过。
+  修：把“铺开工作区”下移给后端（`WindowOptions` 加字段），`create_window` 内只分配一次。
+  *风险*：这段是“黑框/白闪”历史缺陷高发区，必须真窗口跑响应性探针 + 截图对照。
+- [ ] **应用侧启动打点缺口**：`log_startup_summary()` 只在 `Application::run_loop()` 里调，
+  而 gallery/相期/裁云/gbcode **都自己写主循环**（只有 gallery 补调了）
+  ⇒ 小窗口应用的启动成本目前是黑箱（`ST_PERF_STARTUP=1 xiangqi.exe --frames 2` 无输出）。
+
+**新增量具**：`tools/startup_ux_probe.py`（父进程侧墙钟量“建窗 / 可见 / 内容”三时刻，顺带验底色）、
+`tools/splash_probe.cpp`（启动卡离屏出图 + 三条断言）。用法见两份文档。
+
+### P2：启动成本已量化——**两段大头均不可动**（2026-10-20 实测，附口径陷阱）
+
+> 旧的 P1 条目已被上方“启动体验”合并；这里只留当时的分段数字供考古。
+
+**已量到的现状**（win32 / RTX 4080 SUPER / 3533×1921@1.5 / dev 档 / gallery）：
+
+| 事件（墙钟，含进程启动） | 中位 |
+|---|---|
+| 窗口对象存在 | **33~36ms** |
+| 窗口可见（`show_early` 填底色） | **58~62ms** |
+| 内容出现（首帧 present） | **452~454ms** |
+| **纯底色停顿（静止、无任何像素变化）** | **~395ms** ← 启动动画要填的就是这段 |
+
+进程内 `first_frame` = **390~402ms**（scale 1.5）／267~270ms（scale 1.0）／134~168ms（显式 `--renderer gpu`）；
+首帧 `paint` 冷 **389ms** vs 稳态 **2.2ms** ⇒ 是**一次性建表**，不是每帧成本。
+
 ### P2：启动成本已量化——**两段大头均不可动**（2026-10-20 实测，附口径陷阱）
 
 #### 先把口径说清（否则数字不可比）

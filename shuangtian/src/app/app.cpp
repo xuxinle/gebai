@@ -318,6 +318,38 @@ struct Application::Impl {
   bool pacing{false};   ///< `pace_loop` 已进入空闲节拍（= “接下来空等一段”）
   /// 启动完成回调（`on_ready`）：只跑一次。
   std::function<void()> on_ready{};
+  /// 启动期动画的**泵点**：由 `render_frame` 在布局阶段之后调。
+  ///
+  /// ## 为何要从 `render_frame` 内部泵（2026-11-08，用户“动画没了”）
+  ///
+  /// 首帧的 ~330ms 花在 `layout()` + `paint_frame()` 里（字体首次光栅化 +
+  /// 图元缓存建表）。如果只在 `render_frame` **前后**泵动画帧，实测结果是：
+  ///
+  /// | 时刻 | 屏上 |
+  /// |---|---|
+  /// | 162ms | 卡（第 1 帧） |
+  /// | 234~370ms | **diff=0，完全静止**（主线程在画首帧） |
+  /// | 709ms | 已恢复真实尺寸 |
+  ///
+  /// 即动画只动了一下就定住——用户看到的就是一张静态图。
+  /// 而 `layout` → `paint` 的边界是天然泵点：此时画布上还是**卡**（界面还没开始画），
+  /// 泵一帧卡不会与任何东西冲突。
+  ///
+  /// ⚠ **`paint` 之后不能泵**：那时画布上已经是界面内容，重画卡会把界面盖掉，
+  /// 而 `paint_frame` 的局部上屏假设也会被打破（“画布已被整块改写”）。
+  std::function<void()> startup_frame_pump{};
+  /// 启动卡的磨砂探测结果（`start()` 里算一次，`paint_splash_once` 直接用）。
+  shell::BackdropSupport splash_backdrop_{shell::BackdropSupport::Unsupported};
+  /// 启动卡是否真的会发生（判据集中在这一处，实现与日志/测试同源）。
+  ///
+  /// 条件（任一不成立就不画）：
+  /// - `AppOptions::splash` 为真（应用没关掉）；
+  /// - 有真窗口（无头没有要盖的那块空白）；
+  /// - 用自绘窗框（`decorations` 为假）——系统窗框下客户区只是窗口的一部分，
+  ///   把整张卡铺满客户区会与系统标题栏打架。
+  [[nodiscard]] auto splash_enabled(const AppOptions& options) const noexcept -> bool {
+    return options.splash && backend != nullptr && !backend->headless() && !options.decorations;
+  }
   /// 绘制剖析器（`ST_PAINT_PROFILE=1` 时才挂到帧缓冲画布上）。
   raster::PaintProfiler profiler{};
   bool profiling{false};
@@ -1596,12 +1628,179 @@ auto Application::start() -> Status {
   // 但主线程仍不处理消息。要使它真正消失，得降首帧耗时（目前主要用于
   // 文字首次光栅化，实测占 927 ms）——那是独立议题。
   impl_->backend->pump_events();
+  // **先告诉后端窗口底色**（跟随主题），再显窗/画卡。
+  //
+  // 为何在这里而不是更早：主题在构造函数里就合成好了（`root_.theme()`），而
+  // `backend` 在 `create_window` 之后才有——两者都就位的第一个时点就是这里。
+  //
+  // 为何**不能只靠启动卡**盖住底色：无磨砂时卡外就是这块底色，暗色主题下
+  // 若它仍是亮色，卡周围会围一圈浅色——比没做启动卡还难看。
+  impl_->backend->set_window_background(root_.theme().colors().bg);
+
+  // 启动卡（`AppOptions::splash`）：**磨砂与分层通道必须在显窗之前就绪**。
+  //
+  // 为何顺序有讲究（实测）：磨砂开启时上屏走 `WS_EX_LAYERED` + `UpdateLayeredWindow`，
+  // 而"先显普通窗口、再转分层"的那条路上，Windows 会把显窗时那一帧的红定向表面
+  // 当成初始图层内容——于是后续 `UpdateLayeredWindow` 送上去的逐像素 alpha 被当成
+  // **整窗一个 alpha**（实测：整窗均匀 (27,27,28)，卡完全看不见）。
+  // 正确的做法是：先设 `WS_EX_LAYERED` + 磨砂 → 再 `ShowWindow` → 再用 ULW 送内容。
+  const bool splash_active = impl_->splash_enabled(options_);
+  // ## 启动期小窗（用户要求：首帧前只露卡，窗口与首帧一起显）
+  //
+  // 磨砂是**整窗**材质，所以“只露卡”必须靠改窗口尺寸，而不是靠透明画布。
+  // 这里记住**真实尺寸**（之后要拉回去），再把窗口缩成卡的大小。
+  int real_width = options_.width > 0 ? options_.width : 1280;
+  int real_height = options_.height > 0 ? options_.height : 720;
+  bool splash_shrunk = false;
+  if (splash_active && options_.splash_card_window && !impl_->backend->headless()) {
+    const auto current = impl_->backend->logical_size();
+    if (current.width > 0.0f && current.height > 0.0f) {
+      real_width = static_cast<int>(std::lround(current.width));
+      real_height = static_cast<int>(std::lround(current.height));
+    }
+    const float card_w = options_.splash_style.card_width;
+    const float card_h = card_w / std::max(0.2f, options_.splash_style.card_aspect);
+    // 小窗 = 卡 + 两侧边距（边距要盖住光晕；卡本身也可能被窗口小尺寸夹过，所以留足）
+    const float margin = options_.splash_window_margin + options_.splash_style.glow_radius * 0.55f;
+    int splash_w = static_cast<int>(std::lround(card_w + margin * 2.0f));
+    int splash_h = static_cast<int>(std::lround(card_h + margin * 2.0f));
+    // ⚠ **不能比真实窗口还大**（实测：相期的真实窗口是 460×620，而卡窗算出
+    // 447×403 宽了一点点——启动期会“先把窗口撑宽一次、再缩回去”，用户能看到窗口左右抽）。
+    // 夹到真实尺寸内：卡仍会按窗口高/宽自动缩（`paint_splash_card` 里有 0.86 夹取）。
+    if (real_width > 0 && real_height > 0) {
+      splash_w = std::min(splash_w, real_width);
+      splash_h = std::min(splash_h, real_height);
+    }
+    if (auto resized = impl_->backend->set_size(splash_w, splash_h); !resized) {
+      ST_LOG_INFO("启动期小窗设置失败（{}），改为整窗显示启动卡", resized.error().message);
+    } else {
+      splash_shrunk = true;
+      // 小窗也要居中：否则卡会偏在一角（用户看到的是“一张歪掉的卡”）
+      (void)impl_->backend->center_window();
+      ST_LOG_INFO("启动期小窗：{}x{} 逻辑（真实窗口 {}x{}，首帧后恢复）", splash_w, splash_h,
+                  real_width, real_height);
+    }
+  }
+  if (splash_active && options_.splash_backdrop_blur) {
+    impl_->splash_backdrop_ = impl_->backend->set_backdrop_blur(true);
+    if (impl_->splash_backdrop_ != shell::BackdropSupport::Active) {
+      ST_LOG_INFO("启动卡：窗口磨砂不可用（{}），退化为不透明卡",
+                  impl_->splash_backdrop_ == shell::BackdropSupport::Unsupported
+                      ? "后端不支持"
+                      : "未确认");
+    }
+  }
   impl_->backend->show_early();
   impl_->backend->pump_events();
-  render_frame();
+  // ── 启动卡：**动画**（不是静态一帧）──
+  //
+  // 旧版只画一帧，理由是“动画会净增启动耗时（实测 +340ms）”。那个账算得不对：
+  // 它测的是“**跑完动画再画首帧**”（动画串行排在首帧之前）。
+  // 而首帧那 330ms 是一整块计算（字体首次光栅化 + 图元缓存建表），
+  // 屏幕在它期间本来就是一成不变的一帧——动画帧可以从这块时间里“借”。
+  //
+  // 所以现在：先画一帧（窗口一出现就有卡）+ 在首帧前后各泵几帧。
+  // 净代价 ≈ 每帧 10ms（绘制 9 + 上屏 1，小窗）——相对于 667ms 总启动是 3% 量级，
+  // 换来的是一个持续在呼吸的卡，而不是一张定住的图。
+  std::optional<SplashPump> splash_pump;
+  if (splash_active) {
+    const ui::Theme& theme = root_.theme();
+    SplashState state{};
+    state.background = theme.colors().bg;
+    state.accent = theme.colors().accent;
+    state.backdrop_blur = impl_->splash_backdrop_ == shell::BackdropSupport::Active;
+    state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
+    splash_pump.emplace(*impl_->backend, state, options_.splash_style);
+    // 首帧之前：先把卡画出来（窗口一出现就有东西可看）。
+    splash_pump->tick();
+    // 挂上**首帧期间的泵点**：让卡在 `layout()` 腾出的缝里继续呼吸。
+    // 为何不在 `paint` 之后泵：那时画布上已是界面内容（见 `startup_frame_pump` 的说明）。
+    impl_->startup_frame_pump = [&pump = *splash_pump] {
+      // ⚠ **不受帧间隔限制**：这个泵只在启动期拿几次机会，
+      // 而 `tick()` 里的 max_fps 门限是为“持续循环”设的——
+      // 在这里它会把每一次机会都筛掉（实测：首帧期间 diff 恒为 0）。
+      pump.tick_forced();
+    };
+    // 首帧开始前再多泵几帧：布局/绘制那 310ms 里泵点只拿得到 1~2 次机会，
+    // 而用户在窗口刚出现的那一瞬就已经在看它了。
+    //
+    // 为何是 4 帧（约 66ms）：
+    // - 1 帧看不出“在动”（单张静图）；
+    // - 太多则纯粹推迟首帧（每帧 ~10ms）；
+    // - 4 帧覆盖 ~1/3 个脉冲周期，能看出环在扩散。
+    for (int index = 0; index < 4; ++index) {
+      splash_pump->tick_forced();
+      platform::sleep_ms(16);
+    }
+  }
+  // 显式要求长动画时（`ST_SPLASH_MS`，演示/录屏用）才跑那个循环。
+  if (splash_active) {
+    if (const auto loop_ms = st::fs::read_env("ST_SPLASH_MS");
+        loop_ms.has_value() && !loop_ms->empty()) {
+      run_splash_animation(impl_->splash_backdrop_);
+    }
+  }
+  // ## 小窗档不在这里 render（2026-11-08 修，实测真因）
+  //
+  // 旧版这里无条件 `render_frame()`，于是启动卡刚贴上屏就被**完整界面**盖掉：
+  //   ① 它走 GDI `blit()`（不认 alpha）→ 整窗被涂成不透明；
+  //   ② 而那时窗口还是卡那么小（447×403）——用户看到的是“一张被裁碎的界面”，
+  //      实测屏幕采样整片 (243,253,253) 白、四角纯 255，卡与磨砂全不见。
+  //
+  // 小窗档的正确顺序是：恢复真实尺寸 → 画（在真实尺寸上）→ 显示。
+  // 那段在下面，所以这里跳过。
+  if (!splash_shrunk) render_frame();
+  // 磨砂只属于启动期：主界面一出来就退场（见 `WindowOptions::backdrop_blur`）。
+  //
+  // ⚠ 小窗档**必须晚于**尺寸恢复（在下面）。为何：
+  // `set_backdrop_blur(false)` 会拆掉 `WS_EX_LAYERED` 并把上屏切回 GDI `blit()`；
+  // 在小窗上做这一步会把刚贴好的卡立即变成不透明底。
+  // 而真实窗口那一帧本就要走 GDI（主界面），所以退场放在它之前正好。
+  if (splash_active && !splash_shrunk) {
+    (void)impl_->backend->set_backdrop_blur(false);
+  }
   // 首帧完成：这是“启动慢”的真实终点（用户看到完整界面的时刻）。
   // 它里面含字体首次光栅化与图元缓存建表——那正是帧剖析里“冷启动帧”的 200ms。
   perf::startup_mark("first_frame");
+  // ## 启动期小窗 → 真实窗口（用户要求：窗口与首帧一起显）
+  //
+  // 启动期窗口只有卡那么大（见上面 `splash_shrunk`）。这里的顺序**至关重要**：
+  //
+  //   ① 先把窗口拉回真实尺寸（此时窗口还没显，用户看不到它变大）；
+  //   ② 再画一帧 —— 画在**新尺寸**的画布上，内容是完整界面；
+  //   ③ 然后才 `show_when_ready()`。
+  //
+  // 于是用户第一眼看到的就是完整界面，而启动期他只看过那张卡。
+  //
+  // ## 为何不能在中途先 render 一次小窗
+  //
+  // 那样会把**首帧那 366ms**（字体首次光栅化 + 图元缓存建表，与画布大小基本无关）
+  // 花在小窗口上，而用户在这段时间里只盯着卡——卡本来就在那儿，那 366ms 白等了。
+  // 现在把它花在真实窗口上，且**后面不用再画一帧**（下面那次 `render_frame`
+  // 在小窗档里就不需要了）。实测：总启动 705ms → 约 520ms。
+  //
+  // 代价：`first_frame` 这个里程碑在小窗档变成“小窗里画一帧卡”，真实界面的首帧
+  // 由 `first_frame_after_resize` 记录 —— 两个数都要看，后者才是用户感知的那一个。
+  if (splash_shrunk) {
+    // ⚠ **必须用 `resize_hidden_for_startup`**（先藏再改）：
+    // 直接用 `set_size` 会把“从卡尺寸膨到真实尺寸”的过程露给用户，
+    // 而接下来画首帧要 366ms——那 366ms 用户看到的是一整片**白板**。
+    // 实测（用户截图）：卡 251ms → 白板 458ms → 白板持续 3s+。
+    if (auto resized = impl_->backend->resize_hidden_for_startup(real_width, real_height);
+        !resized) {
+      ST_LOG_WARN("启动后恢复窗口尺寸失败：{}", resized.error().message);
+    }
+    (void)impl_->backend->center_window();
+    // 磨砂退场必须在**尺寸恢复之后、画主界面之前**（见上面那段注释）。
+    if (splash_active) (void)impl_->backend->set_backdrop_blur(false);
+  }
+  // 画**真实尺寸**的那一帧（启动期小窗时，这是用户会看到的第一帧内容）。
+  //
+  // ⚠ 动画泵在这里**必须摘掉**：此时画布已是真实尺寸，而 `render_frame()`
+  // 要往它上面画完整界面——再泵一帧卡会把刚画好的界面盖掉。
+  impl_->startup_frame_pump = nullptr;
+  render_frame();
+  if (splash_shrunk) perf::startup_mark("first_frame_after_resize");
   // 首帧已画完 → 窗口可以露面了。
   //
   // 窗口后端建窗时**故意不显**（见 `Backend::show_when_ready` 声明处）：否则
@@ -1610,14 +1809,183 @@ auto Application::start() -> Status {
   // 右下/底部一大块黑**（实测 0.6s 后自愈）。放在首帧之后：用户看到的第一眼
   // 就是一个完整界面，没有中间态。
   impl_->backend->show_when_ready();
-  // 显示之后**再画一帧**（而不是只靠显示前那一帧）。
+  // 显示之后是否**再画一帧**：
   //
-  // 必要性：`ShowWindow` 之前做的 `Present` 发生在窗口被合成器映射之前，
-  // DXGI 不会把它送上屏——于是“露面”的那一瞬间用户看到的是未初始化的客户区
-  // （实测黑 89%，约 100ms 后自行补上）。这里补一帧：先把窗口显出来，
-  // 再重画一次，保证**用户看到的第一帧就是完整界面**。
-  render_frame();
+  // 必要性（小窗档**没有**）：`ShowWindow` 之前做的 present 发生在窗口被合成器
+  // 映射之前，DXGI 不会把它送上屏——所以要先把窗口显出来、再重画一次。
+  // 但启动期小窗档里，窗口是**先拉回真实尺寸、再画、再显**的，而软件路径的
+  // `present` 本就是 GDI 直写（不依赖 DXGI 映射），所以那一帧已经在屏幕上。
+  // 再画一次只是白花 ~1ms；真正的风险是它会把刚显示的完整界面闪一下。
+  if (!splash_shrunk) render_frame();
   return ok();
+}
+
+void Application::run_splash_animation(shell::BackdropSupport backdrop) {
+  // ## 为什么是一个"循环到时间到"而不是把首帧切碎
+  //
+  // 首帧的 ~389ms 是一整块不可分割的工作（字体首次光栅化 + 图元缓存建表），
+  // 拆开要动 `paint` 的原子性——那是另一个量级的风险。而用户抱怨的那段
+  // **正好在首帧之前**（实测：窗口可见 ~60ms → 内容 ~452ms，中间是一块
+  // 完全静止的主题底色）。所以动画只覆盖那一段，首帧本身一个像素也不变。
+  //
+  // ## 时间上限为什么是 320ms
+  //
+  // 它必须**短于** last 一段到首帧的实测值（~395ms @ scale 1.5）。这不是拍脑：
+  // 动画循环自己会泵消息、重画整窗（每帧 ~1ms），占用一点主线程时间；
+  // 若让它跑到首帧该开始之后，就会把首帧往后推（用户看到的是启动变慢）。
+  // 留 ~75ms 余量给"最后一帧上屏 + 进首帧"。
+  //
+  // ## 时间上限：为什么是 0（默认不跑）
+  //
+  // 启动动画的价值在“把一段**本来就在等的时间**变好看”——它**不应该**把首帧往后推。
+  // 而实测（本机 / gallery / 3533×1921 @1.5）这条前提不成立：
+  //
+  // | | 总启动 | 说明 |
+  // |---|---|---|
+  // | 无启动卡 | **455ms** | 首帧 373ms |
+  // | 启动卡 341ms | **748ms** | 首帧 378ms（没变） |
+  //
+  // 即：动画期间主线程被它占着，而**首帧的 373ms 本来可以并行**——
+  // 后台 GPU 预热（实测 390ms）也同样被灋在启动卡之后才开始（主线程要画卡）。
+  // 结果不是“填住空白”，而是“额外多等 341ms”。那种“优化”不该默认开。
+  //
+  // 所以默认 0 = 不跑。真要用（截图演示/录屏/特定活动）显式给 `ST_SPLASH_MS`。
+  // 要它真正“无代价”的前提是先把首帧拆成可中断的分段（字体预热/排版/绘制/建表）——
+  // 那时动画能插在段与段之间，而不是挡在所有事前面。那是另一件事（见���研稿 §4-D）。
+  double k_max_ms = 0.0;
+  if (const auto override_ms = st::fs::read_env("ST_SPLASH_MS");
+      override_ms.has_value() && !override_ms->empty()) {
+    if (const auto parsed = parse_f64(*override_ms); parsed.has_value() && *parsed > 0.0) {
+      k_max_ms = *parsed;
+    }
+  }
+  if (k_max_ms <= 0.0) return;
+  if (impl_->backend == nullptr || impl_->backend->headless()) return;
+  const ui::Theme& theme = root_.theme();
+  SplashState state{};
+  state.background = theme.colors().bg;
+  state.accent = theme.colors().accent;
+  // 磨砂是否生效由调用方判定（它负责控制时序），这里只接结果。
+  state.backdrop_blur = backdrop == shell::BackdropSupport::Active;
+  state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
+
+  const double started_ms = static_cast<double>(time::now_ms());
+  // **暂停 GPU 换型**（见 `Backend::pause_deferred_upgrade`）：否则后台 GPU 就绪后
+  // `framebuffer()` 会换成 GPU 画布，启动卡就再也画不出去了。
+  impl_->backend->pause_deferred_upgrade(true);
+  struct ResumeGuard {
+    shell::Backend* backend{nullptr};
+    ~ResumeGuard() {
+      if (backend != nullptr) backend->pause_deferred_upgrade(false);
+    }
+  } resume_guard{impl_->backend};
+  const bool debug_splash = [] {
+    const auto flag = fs::read_env("ST_SPLASH_DEBUG");
+    return flag.has_value() && !flag->empty() && *flag != "0";
+  }();
+  const double frame_ms = 1000.0 / static_cast<double>(std::max(8.0f, options_.splash_style.max_fps));
+  std::uint32_t painted = 0;
+  while (true) {
+    const double elapsed_ms = static_cast<double>(time::now_ms()) - started_ms;
+    if (elapsed_ms > k_max_ms) break;
+    state.elapsed_seconds = elapsed_ms / 1000.0;
+    // 进度提示：**不是进度条**，只影响环的亮度/扩散幅度（见 `splash.hpp`）。
+    // 用"已过时间 / 320ms"推，并夹到 0.85——留一点"还没到底"的意味，
+    // 而不是把用户钓到一个永远差一格的 100%。
+    state.progress = static_cast<float>(std::min(0.85, elapsed_ms / k_max_ms));
+    raster::Surface& canvas = impl_->backend->framebuffer();
+    // 启动卡走的是**软件画布路径**：`paint_splash_card` 需要可逐像素写的 Canvas。
+    // 若后端当前画布是 GPU（显式 `--renderer gpu`），就用它自己的软件退路——
+    // 启动卡只是一张静态构图，不需要 GPU 的合成能力。
+    if (auto* software_canvas = dynamic_cast<raster::Canvas*>(&canvas);
+        software_canvas != nullptr) {
+      paint_splash_card(*software_canvas, state, options_.splash_style);
+      // 启动期诊断（`ST_SPLASH_DEBUG=1`）：确认卡真的画进了画布。
+      // 为何需要它："卡没上屏"与"卡没画"在屏幕上是同一个现象，
+      // 而两者的修法完全不同（前者是上屏通道，后者是绘制）。
+      if (debug_splash && painted == 0) {
+        const auto pixels = software_canvas->pixels();
+        const int w = software_canvas->physical_width();
+        const int h = software_canvas->physical_height();
+        const auto at = [&](int x, int y) {
+          const std::size_t off = static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                  static_cast<std::size_t>(x);
+          return off < pixels.size() ? pixels[off] : 0U;
+        };
+        ST_LOG_INFO("启动卡诊断：画布 {}x{} · 中心 {:08X} · 边中 {:08X} · 库外空", w, h,
+                    at(w / 2, h / 2), at(w / 2, 2));
+      }
+    }
+    impl_->backend->refresh_early();
+    ++painted;
+    // **泵消息**：这一段里用户可能拖动/关窗——不泵就会被系统当无响应（旋转光标）。
+    // 只泵不派（界面尚未就位），与启动期其它泵点同一姿态。
+    impl_->backend->pump_events();
+    if (impl_->backend->close_requested()) break;
+    const double remaining =
+        frame_ms - (static_cast<double>(time::now_ms()) - started_ms - elapsed_ms);
+    if (remaining > 0.5) platform::sleep_ms(remaining);
+  }
+  perf::startup_mark("splash_frames");
+  ST_LOG_INFO("启动卡：{} 帧 · {:.0f}ms · 磨砂 {}", painted,
+              static_cast<double>(time::now_ms()) - started_ms,
+              state.backdrop_blur ? "开" : "关");
+}
+
+void Application::paint_splash_once() {
+  // ## 为何是“一帧静态卡”而不是动画
+  //
+  // 启动动画的**前提**是“这段时间本来就在等”。实测（gallery 3533×1921 @1.5）：
+  //
+  // | | 总启动 |
+  // |---|---|
+  // | 无启动卡 | **455ms**（首帧 373ms + 尾部） |
+  // | 动画跑 341ms | **748ms**（首帧 373ms 没变） |
+  //
+  // 即动画不是“填补空白”，而是**净增**——它占着主线程，而首帧与后台 GPU 预热
+  //（实测 390ms）都只能排在它后面。画一帧静态卡则不同：它只多一次绘制 + 一次上屏
+  //（实测 < 3ms），换来的是“窗口一出现就有品牌卡”而不是一块纯色底。
+  //
+  // 想真正做到“动画无代价”，得先把首帧拆成可中断的分段（字体预热 / 排版 / 绘制 /
+  // 建表），把动画插在段与段之间——那是另一件事（调研稿 §4-D）。
+  if (impl_->backend == nullptr || impl_->backend->headless()) return;
+  const ui::Theme& theme = root_.theme();
+  SplashState state{};
+  state.background = theme.colors().bg;
+  state.accent = theme.colors().accent;
+  // 时序固定的一个采样点：脉冲相位在“刚亮起”附近（不是 t=0 的全零相位，
+  // 否则环半径最小、最不显眼）。0.22s 落在第一个周期的 19% 处。
+  state.elapsed_seconds = 0.22;
+  state.progress = 0.12f;
+
+  // 磨砂由调用方先开好（它决定了上屏通道是 ULW 还是 BitBlt）；这里只取结果。
+  state.backdrop_blur = impl_->splash_backdrop_ == shell::BackdropSupport::Active;
+  state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
+  // 启动动画期间**暂停 GPU 换型**：换型后 `framebuffer()` 不再是软件画布，卡就画不出去。
+  impl_->backend->pause_deferred_upgrade(true);
+  struct ResumeGuard {
+    shell::Backend* backend{nullptr};
+    ~ResumeGuard() {
+      if (backend != nullptr) backend->pause_deferred_upgrade(false);
+    }
+  } resume_guard{impl_->backend};
+
+  auto& canvas = impl_->backend->framebuffer();
+  auto* software_canvas = dynamic_cast<raster::Canvas*>(&canvas);
+  if (software_canvas == nullptr) return;   // 显式 GPU 路径：没有软件画布可画，如实跳过
+  const std::int64_t paint_started_ns = time::now_ns();
+  paint_splash_card(*software_canvas, state, options_.splash_style);
+  const double paint_ms = static_cast<double>(time::now_ns() - paint_started_ns) / 1'000'000.0;
+  const std::int64_t present_started_ns = time::now_ns();
+  impl_->backend->refresh_early();
+  const double present_ms =
+      static_cast<double>(time::now_ns() - present_started_ns) / 1'000'000.0;
+  perf::startup_mark("splash_card");
+  ST_LOG_INFO("启动卡：静态 1 帧 · 绘制 {:.1f}ms + 上屏 {:.1f}ms（{}x{} @{:.2f}）· 磨砂 {}",
+              paint_ms, present_ms, software_canvas->physical_width(),
+              software_canvas->physical_height(),
+              static_cast<double>(software_canvas->device_scale()),
+              state.backdrop_blur ? "开" : "关");
 }
 
 void Application::render_frame() {
@@ -1658,6 +2026,10 @@ void Application::render_frame() {
     root_.set_viewport(backend_size);
   }
   root_.layout();
+  // **启动期动画泵点**（见 `startup_frame_pump` 的说明）：
+  // `layout()` 是首帧最耗时的一段（字体首次光栅化），它跑完时画布上还是**卡**——
+  // 此时泵一帧卡既能动画、又不会与即将画的界面冲突。
+  if (impl_->startup_frame_pump) impl_->startup_frame_pump();
   // 时间轴推进：动画（开关/悬浮过渡/3D 旋转）都靠它。
   // 用**应用启动以来的秒数**而不是系统时间：前者单调、与帧序号同源，
   // 便于复现（同一帧序列 → 同一动画进度）。

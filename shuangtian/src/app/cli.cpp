@@ -46,6 +46,7 @@ auto common_options_usage(std::string_view program) -> std::string {
   return std::format(
       "用法: {} [选项]\n"
       "  --headless            不创建窗口（无显示环境的默认姿态）\n"
+    "  --no-splash           不开启动卡（截图/基准要确定性首帧）\n"
       "  --backend NAME        headless / win32 / x11 / wayland\n"
       "  --width N --height N  逻辑尺寸（默认 {}x{}）\n"
       "  --scale F             DPI 缩放（物理像素 = 逻辑 × scale；缺省跟随系统显示缩放）\n"
@@ -80,6 +81,10 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
 
     if (argument == "--help" || argument == "-h") {
       options.show_help = true;
+    } else if (argument == "--no-splash") {
+      // 关掉启动卡。为何需要它：截图/基准要**确定性首帧**（启动卡会多一次绘制+上屏，
+      // 且多一帧上屏会让“首帧时刻”这个指标不可比）。
+      options.app.splash = false;
     } else if (argument == "--headless") {
       options.app.headless = true;
     } else if (argument == "--backend") {
@@ -224,6 +229,17 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());
       options.app.theme = *parsed == "dark" ? ui::ThemeMode::Dark : ui::ThemeMode::Light;
+      // ⚠ **必须同时记下名字**（2026-11-08 修的真缺陷）。
+      //
+      // 旧版只设枚举 `theme`，`theme_name` 一直是空串。而“用户显式给过主题没有”
+      // 这个判据是用 `theme_name.empty()` 判的（见相期的 `theme_explicit`），
+      // 于是 `--theme dark` 被当成“没给”，被持久化的偏好（`home/theme.txt`）
+      // 或应用默认的 light 盖掉——实测：`xiangqi --theme dark` 启动后日志
+      // 写的是“已应用内置主题 light”，而没有任何告警。这是“我设了没生效”那一类。
+      //
+      // 名字还兼作**内置主题库的 id**（qinhan/nebula/…）：只设枚举会让那些
+      // 名字完全不可用（否则得靠应用自己再解析一遍 argv）。
+      options.app.theme_name = *parsed;
     } else if (argument == "--theme-file") {
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());

@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "st/app/splash.hpp"
 #include "st/core/async.hpp"
 #include "st/control/control.hpp"
 #include "st/ext/script.hpp"
@@ -226,6 +227,37 @@ struct AppOptions {
   /// 于是 `--renderer gpu` 仍是“一开始就用 GPU”的严格语义，
   /// 测试/基准拿到的仍然是一条确定的路径。
   bool defer_gpu{true};
+  /// **启动卡**（首帧画完前那张「磨砂 + 品牌 + 脉冲」的画面，见 `st/app/splash.hpp`）。
+  ///
+  /// 默认开：它填的是实测 **~395ms 的纯底色停顿**（`docs/STARTUP_UX_STUDY_20261108.md`）。
+  /// 关掉只用于两类场合：① 截图/基准要**确定性首帧**（启动卡会多出几帧，
+  /// 帧序号与耗时分布都会变）；② 嵌进别人进程的宿主（观感该由宿主决定）。
+  ///
+  /// 无头后端与 `decorations=true`（系统窗框）自动不生效。
+  bool splash{true};
+  /// 启动卡的调参（不填就用 `SplashStyle` 的默认档）。
+  ///
+  /// 为何放在 `AppOptions` 而不是只给环境变量：观感参数属于产品决策，
+  /// 要能被**应用自己**声明（裁云的片头风格与 gbcode 的编辑器风格不该一样）。
+  SplashStyle splash_style{};
+  /// 启动卡的**磨砂底**（Win32: DWM Acrylic）。默认开。
+  ///
+  /// 关掉时启动卡退化为“主题底色 + 近不透明卡”（仍比一块静止底色好，但没有玻璃感）。
+  /// 后端不支持（旧系统/无合成器/远程会话/x11/wayland）时也走这条退路。
+  bool splash_backdrop_blur{true};
+  /// 启动期的**小窗口**（用户要求：首帧没出来前不要露出整个窗口，只露出那张卡）。
+  ///
+  /// ## 为何必须改窗口尺寸，而不是把卡画在透明窗口里
+  ///
+  /// 磨砂（Acrylic）是**整窗**材质：即使画布 alpha=0，磨砂层也会把整个窗口显形。
+  /// 所以“只显示卡”唯一干净的做法是让**启动期的窗口本身就是卡的尺寸**；
+  /// 首帧画完后先把窗口拉回真实尺寸、再显示，两件事同一帧完成（用户看不到中间态）。
+  ///
+  /// 意外的好处：画布从 6.8MP 降到 ~0.15MP，启动卡的绘制与上屏降到 1/45 量级
+  ///（实测上屏 19ms → <1ms）。
+  bool splash_card_window{true};
+  /// 启动期小窗在卡外留的边距（逻辑像素；要给光晕留空间，否则光晕被窗口边切掉）。
+  float splash_window_margin{26.0f};
   /// 是否让窗口系统画标题栏/边框（默认 `false` = 自绘，见 `CONVENTIONS.md` §10 第 7 条）。
   bool decorations{false};
   /// 是否可缩放（拖边改尺寸）。
@@ -555,6 +587,19 @@ class Application final : public control::Host, public ui::WindowControl {
  private:
   /// 主循环（`run()` 的公共部分）。
   auto run_loop() -> Result<int>;
+  /// 启动动画泵：把**启动卡**逐帧画进画布并推到窗口，直到接近首帧时刻。
+  ///
+  /// 为何是一个"跑到时间到就返回"的循环，而不是把首帧拆成多帧：
+  /// 首帧的 389ms 是一整块**不可分割**的工作（字体首次光栅化 + 图元缓存建表），
+  /// 把它拆开要动 `paint` 的原子性，那是另一个量级的风险（见 `docs/STARTUP_UX_STUDY_20261108.md` §2.4）。
+  /// 所以动画只覆盖"首帧**之前**"那段——而那正好就是用户盯着一块静态底色的 395ms。
+  ///
+  /// 返回前会把窗口底色恢复成"卡"的状态，调用方紧接着就调 `render_frame()`。
+  /// 启动卡：**只画一帧静态画面**（见 `paint_splash_once` 的说明）。
+  /// 不增加启动耗时（实测 < 3ms），且能在先于 `show_early` 时就能上屏。
+  void paint_splash_once();
+  /// 启动动画泵（仅在显式 `ST_SPLASH_MS` 时跑，用于演示/录屏）。
+  void run_splash_animation(shell::BackdropSupport backdrop);
   /// 装载 `--theme-file` / `ST_THEME_FILE` 指定的自定义主题（构造函数末尾调用）。
   void apply_theme_file();
   /// 重新构造生效主题（内置基准 + 文件覆盖 + 运行期覆盖）。

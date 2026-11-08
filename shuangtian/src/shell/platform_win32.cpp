@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
+#include "st/core/fs.hpp"
 #include "st/core/log.hpp"
 #include "st/codec/png.hpp"
 #include "st/raster/canvas.hpp"
@@ -76,6 +77,13 @@ constexpr DWORD kDwmwaBorderColor = 34;             // Win11+
 constexpr DWORD kDwmColorNone = 0xFFFFFFFE;         // DWMWA_COLOR_NONE
 constexpr int kDwmCornerDoNotRound = 1;             // DWMWCP_DONOTROUND
 constexpr int kDwmCornerRound = 2;                  // DWMWCP_ROUND
+/// 背景磨砂（`DWMWA_SYSTEMBACKDROP_TYPE`，Win11 22H2+；未进 mingw 头）。
+///
+/// 取值与实测结论见 `Win32Backend::set_backdrop_blur` 的注释：只有 `TRANSIENTWINDOW`
+///（Acrylic）能"透出窗口身后那块内容并模糊"，`MAINWINDOW`（Mica）只采桌面壁纸。
+constexpr DWORD kDwmwaSystemBackdropType = 38;
+constexpr int kDwmBackdropNone = 1;                 // DWMSBT_NONE
+constexpr int kDwmBackdropTransient = 3;            // DWMSBT_TRANSIENTWINDOW（Acrylic）
 
 /// 是否让 DWM 画外阴影。`false` 只用于"确实要系统窗框"的宿主与远程会话诊断。
 struct ShadowOptions {
@@ -612,6 +620,16 @@ class Win32Backend final : public Backend {
       ST_LOG_INFO("win32 窗口 DPI 与请求不同：请求 {:.2f} → 实际 {:.2f}（窗口已按实际缩放调整）",
                 static_cast<double>(requested_scale), static_cast<double>(scale_));
     }
+    // 背景磨砂（`WindowOptions::backdrop_blur`）：**在建窗末尾、显窗之前**开。
+    //
+    // 为何不能晚于 `show_early`：那之后窗口已可见，开磨砂会让"纯底色 → 磨砂"
+    // 在屏上闪一下（实测：磨砂开启时会把已有不透明底色顶掉，需要 `InvalidateRect` 重绘）。
+    // 失败不影响启动（旧系统/远程会话），但要留日志让人查得到。
+    if (options.backdrop_blur) {
+      if (set_backdrop_blur(true) == BackdropSupport::Unsupported) {
+        ST_LOG_INFO("窗口磨砂未启用（DWM 不接受或读回不一致：旧系统/无合成/远程会话）");
+      }
+    }
     // 以**客户区为准**分配：窗口尺寸可能被系统调整过，逻辑尺寸反过来迁就它
     if (auto status = sync_buffers_to_client(scale_); !status) return status;
     ST_LOG_INFO("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
@@ -801,6 +819,10 @@ class Win32Backend final : public Backend {
     // 应用自己交了一帧 = 画布里有它画的内容（软件路径的 present 与「画完了」同义）。
     // GPU 路径同理：能走到这里就说明换型与绘制都已就位。
     canvas_painted_ = true;
+    // **磨砂退场**：应用交出了真帧，启动卡阶段结束——磨砂留着会让"主界面本来是
+    // 不透明的"变成一扇磨砂窗（产品口径：磨砂只属于启动期，见 `WindowOptions::backdrop_blur`）。
+    // 只做一次（`backdrop_active_` 随之置假，不会每帧重复调用）。
+    if (backdrop_active_) (void)set_backdrop_blur(false);
     if (presenter_ != nullptr) {
       if (auto presented = presenter_->present(*surface_, surface_->physical_width(),
                                                surface_->physical_height());
@@ -863,21 +885,343 @@ class Win32Backend final : public Backend {
     ::ShowWindow(window_, SW_SHOWNOACTIVATE);
     // 用主题背景色填一帧：`HWND` 背景刷足够，不需要走画布与交换链
     // （那一步要等 GPU 就绪，正是我们要避开的那 1.4s）。
+    //
+    // ⚠ **磨砂开启时不填**：填一块不透明色会盖住 DWM 刚垫上的模糊层，
+    // 而那时画布还是空的——用户看到的会是"磨砂闪一下又变成纯色块"。
+    if (!backdrop_active_) paint_early_matte();
+    ::SetForegroundWindow(window_);
+  }
+
+  /// 用主题底色把客户区涂满（`show_early` 的兜底，也是无磨砂时的视觉连续手段）。
+  void paint_early_matte() {
+    if (window_ == nullptr) return;
     RECT client{};
-    if (::GetClientRect(window_, &client) != 0) {
-      HDC dc = ::GetDC(window_);
-      if (dc != nullptr) {
-        HBRUSH brush = ::CreateSolidBrush(RGB((chrome_edge_rgb_ >> 16) & 0xFF,
-                                             (chrome_edge_rgb_ >> 8) & 0xFF,
-                                             chrome_edge_rgb_ & 0xFF));
-        if (brush != nullptr) {
-          ::FillRect(dc, &client, brush);
-          ::DeleteObject(brush);
-        }
-        ::ReleaseDC(window_, dc);
+    if (::GetClientRect(window_, &client) == 0) return;
+    HDC dc = ::GetDC(window_);
+    if (dc == nullptr) return;
+    HBRUSH brush = ::CreateSolidBrush(RGB((chrome_edge_rgb_ >> 16) & 0xFF,
+                                         (chrome_edge_rgb_ >> 8) & 0xFF,
+                                         chrome_edge_rgb_ & 0xFF));
+    if (brush != nullptr) {
+      ::FillRect(dc, &client, brush);
+      ::DeleteObject(brush);
+    }
+    ::ReleaseDC(window_, dc);
+  }
+
+  /// 窗口底色（**跟随主题**）。
+  ///
+  /// 早先它是成员初值 `0xF7F7FA`，等于把"亮色"写死进了后端——暗色主题的应用
+  /// 启动时会先白闪一块再跳深色（实测：`--theme dark` 采样到的启动底色仍是 `F7F7FA`）。
+  /// 底色是**产品口径**，由应用层按主题告知。
+  void set_window_background(math::Color color) override {
+    const std::uint32_t rgb = (static_cast<std::uint32_t>(color.r) << 16U) |
+                              (static_cast<std::uint32_t>(color.g) << 8U) |
+                              static_cast<std::uint32_t>(color.b);
+    // ## 顺带把磨砂色调也钉到主题上（2026-11-08）
+    //
+    // 底色与磨砂色调必须同源：它们共同决定"窗口在启动期长什么样"。
+    // 具体色取 `bg` 的 R/G/B 压深一档（磨砂层只提供材质，真正的颜色由启动卡的
+    // 17% 白去抬）——所以暗色主题得到暗色玻璃、亮色主题得到亮色，无需分岔判断。
+    //
+    // alpha 60%：低于它就挡不住身后的高频内容（文字会“扎”出来），
+    // 高于它玻璃感变弱、更像一块灰板（实测 0x99 是分界点）。
+    constexpr std::uint32_t kTintAlpha = 0x99U;
+    const auto dim = [](std::uint8_t channel) -> std::uint32_t {
+      return static_cast<std::uint32_t>(channel) * 3U / 4U;
+    };
+    acrylic_tint = (kTintAlpha << 24U) | (dim(color.b) << 16U) | (dim(color.g) << 8U) |
+                   dim(color.r);   // 注意 `ABGR` 字节序
+    // 暗/亮由底色亮度判（同一个判据同时决定磨砂材质与卡片观感）。
+    acrylic_dark_ = (static_cast<int>(color.r) * 299 + static_cast<int>(color.g) * 587 +
+                     static_cast<int>(color.b) * 114) / 1000 < 96;
+    if (rgb == chrome_edge_rgb_) return;
+    chrome_edge_rgb_ = rgb;
+    // 已经显过窗时才需要立刻重涂（尚未显窗时由 `show_early` 用新底色涂）。
+    if (shown_ && !backdrop_active_ && surface_ != nullptr && !canvas_painted_) {
+      paint_early_matte();
+    }
+  }
+
+  /// 窗口背景磨砂（DWM Acrylic）。
+  ///
+  /// ## 为何是 Acrylic（`DWMSBT_TRANSIENTWINDOW`）而不是 Mica
+  ///
+  /// 实测（`tmp/backdrop_probe3.py`，本仓同形态窗口、背景铺红/绿/蓝三色条）：
+  ///
+  /// | 档位 | 窗口内三点 RGB | 一行内色值数 | 读法 |
+  /// |---|---|---|---|
+  /// | `none` | 红 / 绿 / 蓝 | 3 | 直接透出背景，无模糊 |
+  /// | `mica` | 全 `(236,246,249)` | 2 | **看不见身后的窗口**（只采桌面壁纸） |
+  /// | **`acrylic`** | `(255,123,123)` / `(95,255,95)` / `(132,132,255)` | **219** | **透出背景且带模糊过渡带** |
+  /// | `tabbed` | 全 `(203,223,230)` | 3 | 同 mica |
+  ///
+  /// 所以 Mica 对本需求（启动卡要透出**它身后那块桌面/上一个窗口**）是无效档位。
+  ///
+  /// ## 为何不用 `--` 别的路线
+  ///
+  /// 自绘 `Canvas::blur_region` 只能模糊**自己画布里已有的像素**（启动时画布是空的），
+  /// 对"透出窗口背后的东西"无能为力。分层窗口（`WS_EX_LAYERED`）能把四角变成真透明，
+  /// 但实测每帧 +2.8ms 且把上屏从异步变同步（`docs/BACKLOG.md` 的代价表）。
+  /// 而 Acrylic 是合成器在做，应用侧**零每帧成本**。
+  [[nodiscard]] auto set_backdrop_blur(bool enabled) -> BackdropSupport override {
+    if (window_ == nullptr) return BackdropSupport::Unsupported;
+    // ## 为何用 `SetWindowCompositionAttribute` 而不是 `DWMWA_SYSTEMBACKDROP_TYPE`
+    //
+    // 实测（`tmp/backdrop_probe3.py` / `4` / `5`）：两个接口都能把背景模糊出来，
+    // 但对我们这种"自绘窗框 + 应用内容"的窗口行为不同：
+    //
+    // | 通路 | 背景模糊 | 应用内容（GDI 上屏） | 应用内容（分层上屏） |
+    // |---|---|---|---|
+    // | `DWMWA_SYSTEMBACKDROP_TYPE`（Mica/Acrylic） | 有（Mica 只采桌面墙纸） | **被盖掉** | 可用 |
+    // | `SetWindowCompositionAttribute(ACRYLICBLURBEHIND)` | 有 | **被盖掉** | **可用（选它）** |
+    //
+    // 两条的共同点：开了磨砂 + `DwmExtendFrameIntoClientArea(-1)` 后客户区变成"玻璃"，
+    // **GDI 往窗口 DC 上 BitBlt 的像素不参与合成**（实测屏幕采样为一片纯色）。
+    // 而 `WS_EX_LAYERED` + `UpdateLayeredWindow`（逐像素预乘 alpha）能共存：
+    // 实测层上 alpha=0 处透出模糊背景、alpha=255 处显示我们画的内容。
+    // 所以启动卡走磨砂时**必须同时切到分层上屏**（见 `refresh_early`）。
+    if (!enabled) {
+      if (!backdrop_active_) return BackdropSupport::Active;
+      AccentPolicy policy{};
+      policy.accent_state = kAccentDisabled;
+      (void)apply_accent_policy(&policy);
+      backdrop_active_ = false;
+      // 退回普通窗口：分层位去掉，上屏回到 GDI `blit()`（主界面就是这条路）。
+      // 不去掉会让主界面的 `blit()` 也不参与合成（黑屏）。
+      set_layered(false);
+      return BackdropSupport::Active;
+    }
+
+    // ## 先告诉 DWM “这是暗色窗口”（2026-11-08 实测真因）
+    //
+    // 本机系统是暗色（`AppsUseLightTheme=0`），但旧版启动卡窗口采样到的是
+    // **(243,253,253) 整片白**——根因就在缺这一步：
+    // legacy Acrylic 的**基础材质颜色取自窗口框架的深浅色**，而`DWMWA_USE_IMMERSIVE_DARK_MODE`
+    // 没设时 DWM 一律当亮色窗口处理。于是暗色主题 + 亮色玻璃 = 一块白板，
+    // `policy.gradient_color` 的深色染色被那层白底冲掉（肉眼上像“设置没生效”）。
+    //
+    // 必须先于 Acrylic 设置：材质颜色在建合成表面时就定了，之后改窗口属性不会重算。
+    set_dark_frame(acrylic_dark_);
+
+    // 磨砂要求"整窗都是客户区"：把边框延伸进客户区（与本仓自绘窗框同一手法）。
+    const MARGINS margins{-1, -1, -1, -1};
+    (void)::DwmExtendFrameIntoClientArea(window_, &margins);
+
+    AccentPolicy policy{};
+    policy.accent_state = kAccentEnableAcrylicBlurBehind;
+    // 染色：低 alpha 的深色（磨砂层只提供"材质"，颜色由我们画的卡控制）。
+    policy.gradient_color = acrylic_tint;
+    policy.accent_flags = 0;
+    // 返回值不可靠（Win10 1803+ 才有；镜像/远程会话静默忽略），调用失败就视为不支持。
+    if (!apply_accent_policy(&policy)) return BackdropSupport::Unsupported;
+    // **上屏通道切到分层**：否则接下来画的卡会被玻璃层盖掉（见上面那张对比表）。
+    // 必须在 `show_early` 之前设：先显普通窗口再转分层会闪一下。
+    set_layered(true);
+    backdrop_active_ = true;
+    return BackdropSupport::Active;
+  }
+
+  /// 切换 `WS_EX_LAYERED`（分层窗口位）。
+  ///
+  /// 为何要按阶段切它：磨砂档需要 `UpdateLayeredWindow` 上屏（逐像素 alpha），
+  /// 而它**要求 `WS_EX_LAYERED`**；主界面走 GDI `blit()`，带着这一位会让
+  /// 主界面也不参与合成（黑屏）。
+  ///
+  /// ⚠ `SetWindowLongPtrW(GWL_EXSTYLE)` 后必须 `SetWindowPos(..., SWP_FRAMECHANGED)`，
+  /// 否则新样式不会立即生效（经典的"改了样式看起来没变"）。
+  void set_layered(bool enabled) {
+    if (window_ == nullptr) return;
+    const LONG_PTR current = ::GetWindowLongPtrW(window_, GWL_EXSTYLE);
+    const bool is_layered = (current & WS_EX_LAYERED) != 0;
+    if (is_layered == enabled) return;
+    const LONG_PTR updated =
+        enabled ? (current | WS_EX_LAYERED)
+                : (current & ~static_cast<LONG_PTR>(WS_EX_LAYERED));
+    ::SetWindowLongPtrW(window_, GWL_EXSTYLE, updated);
+    ::SetWindowPos(window_, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+  }
+
+  /// 窗口磨砂的 WCA（Window Composition Attribute）私有接口。
+  ///
+  /// 为何用它：这是"背景磨砂 + 前景自有内容"的**唯一**可用通路（对比见
+  /// `set_backdrop_blur` 的注释）。它是未文档化接口，但自 Win10 1803 起稳定存在，
+  /// Win11 仍可用；`user32` 里没有导出声明，所以 `GetProcAddress` 动态取。
+  struct AccentPolicy {
+    int accent_state{0};
+    int accent_flags{0};
+    std::uint32_t gradient_color{0};
+    int animation_id{0};
+  };
+  struct WindowCompositionAttributeData {
+    int attribute{0};
+    void* data{nullptr};
+    std::size_t size{0};
+  };
+
+  static constexpr int kAccentDisabled = 0;
+  static constexpr int kAccentEnableAcrylicBlurBehind = 4;
+  static constexpr int kWcaAccentPolicy = 19;
+  /// 亚克力色调（`AABBGGRR`）：alpha 越低越透明。
+///
+/// ## 为何是成员而不是常量（2026-11-08 修）
+///
+/// 旧版写死 `0x99202020`（深灰 32/32/32、alpha 60%）。在**暗色主题 + 卡片只有
+/// 17% 白**时，那个偏灰的中性底色被卡片抬一下就变成了**浅灰白板**——
+/// 实测在深色桌面上像一张白纸，完全不是“暗色玻璃”。
+/// 磨砂色调必须跟随主题：暗色主题给暗色，亮色主题给亮色。
+/// 由 `set_window_background` 顺带设（它已经是“主题色 ⇒ 后端”的那个入口）。
+  std::uint32_t acrylic_tint{0x99202020U};
+  /// 磨砂窗口是否要走**暗色框架**（跟主题走，由 `set_window_background` 定）。
+  ///
+  /// 为何必须有它：legacy Acrylic 的基础材质色取自窗口框架的深浅；
+  /// 不告诉 DWM“这是暗色窗口”，暗色主题下会得到一块**白板**（实测 243,253,253）。
+  bool acrylic_dark_{true};
+
+  /// 告诉 DWM 框架该用深色还是浅色（Win10 1809+ / Win11）。
+  ///
+  /// 属性号：20 = `DWMWA_USE_IMMERSIVE_DARK_MODE`（19 是 1809~1903 的旧号），
+  /// 两个都试一遍——不同小版本号不一样，而失败只是“颜色不如预期”，不该硬失败。
+  void set_dark_frame(bool dark) {
+    if (window_ == nullptr) return;
+    const BOOL value = dark ? TRUE : FALSE;
+    if (::DwmSetWindowAttribute(window_, 20, &value, sizeof(value)) != S_OK) {
+      (void)::DwmSetWindowAttribute(window_, 19, &value, sizeof(value));
+    }
+  }
+
+  bool apply_accent_policy(const AccentPolicy* policy) {
+    using SetWindowCompositionAttributeFn = int (*)(HWND, WindowCompositionAttributeData*);
+    // lint-allow: L8 进程级函数指针缓存（动态加载，不重建）
+    static const auto setter = [] {
+      const HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+      if (user32 == nullptr) return SetWindowCompositionAttributeFn{nullptr};
+      return reinterpret_cast<SetWindowCompositionAttributeFn>(
+          reinterpret_cast<void*>(::GetProcAddress(user32, "SetWindowCompositionAttribute")));
+    }();
+    if (setter == nullptr) return false;
+    WindowCompositionAttributeData data{};
+    data.attribute = kWcaAccentPolicy;
+    data.data = const_cast<AccentPolicy*>(policy);
+    data.size = sizeof(AccentPolicy);
+    return setter(window_, &data) != 0;
+  }
+
+  /// 启动动画帧上屏：**只上屏，不改任何状态位**（见接口声明处的说明）。
+  ///
+  /// 走的是与 `blit()` 同一条通道，但**不**置 `canvas_painted_`、也**不**碰
+  /// `present_region_`——启动卡不属于"应用的一帧"。
+  void refresh_early() override {
+    if (window_ == nullptr || surface_ == nullptr) return;
+    early_content_active_ = true;   // 让 `WM_PAINT`/`blit` 重贴卡而不是涂底色
+    if (backdrop_active_) {
+      // 磨砂档：**必须走分层窗口通道**（`UpdateLayeredWindow`）。
+      //
+      // 为何不能用 GDI BitBlt（实测，`tmp/backdrop_probe*.py`）：
+      // 一旦给窗口开了磨砂（Acrylic/Mica 任一接口）+ `DwmExtendFrameIntoClientArea(-1)`，
+      // 客户区就变成"玻璃"，**GDI 往窗口 DC 上 BitBlt 的像素不参与合成**——
+      // 屏幕采样到的是背景模糊层（实测 211,211,211 / 255,255,255），卡完全看不到。
+      // 而 `UpdateLayeredWindow` 是应用把**每个像素的 alpha** 交给合成器的公开通路，
+      // 实测两者能共存：层上 alpha=0 处透出模糊背景，alpha=255 处显示内容。
+      present_early_layered();
+    } else {
+      present_early_canvas();
+    }
+    ::UpdateWindow(window_);
+  }
+
+  /// 把启动卡按**逐像素预乘 alpha** 交给合成器（分层窗口通道）。
+  ///
+  /// 画布本身就是预乘 `0xRRGGBBAA`，而 `UpdateLayeredWindow` 要的
+  /// 正是预乘 BGRA（`AC_SRC_ALPHA`）——但**字节序不同**：
+  /// 画布是 RGBA 序、DIB 是 BGRA 序，所以仍需一次通道重排（与 `blit()` 同一条 SIMD 路径）。
+  void present_early_layered() {
+    if (window_ == nullptr || surface_ == nullptr) return;
+    if (!ensure_dib()) return;
+    const std::span<const std::uint32_t> source = surface_->pixels();
+    const int width = surface_->physical_width();
+    const int height = surface_->physical_height();
+    const std::size_t count = static_cast<std::size_t>(width);
+    // ⚠ **不能用 `rotate_bgra_row`**：它末尾是 `| 0xFF000000U`——把 alpha 强制成
+    // 不透明（GDI `BitBlt` 不认 alpha，必须全不透明，那是它存在的理由）。
+    // 而 `UpdateLayeredWindow` 要的正是**真实 alpha**。用它就是这个后果：
+    // 整窗被当成 100% 不透明，屏幕上只剩一片纯主题底色（实测 (27,27,28) 均匀一块，
+    // 卡完全看不见——而且 `UpdateLayeredWindow` 返回成功，不看像素根本发现不了）。
+    //
+    // 这里做的是**保留 alpha** 的同一种字节循环：
+    //   画布 `0xRRGGBBAA`（预乘）→ DIB 内存序 BGRA（预乘）= uint32 `0xAARRGGBB`
+    // 即 uint32 意义上的循环右移 8 位（与 `rotate_bgra_row` 只差 alpha 那一个字节）。
+    //
+    // **只重排非空行**（实测：整窗重排占上屏 19ms 的绝大部分，是启动卡的最后一笔成本）：
+    // 启动卡只占窗口中间一小块，其余行的 alpha 全是 0（= 完全透明），
+    // 而 DIB 是**保留型**的，那些行上一帧已经是 0——不必再写一遍。
+    // 代价：必须是“本帧要覆盖的矩形”内的行才扫（参数给出）。
+    const auto row_is_blank = [&](int row) {
+      const std::uint32_t* src = source.data() + static_cast<std::size_t>(row) * count;
+      for (std::size_t index = 0; index < count; ++index) {
+        if ((src[index] & 0xFFU) != 0U) return false;
+      }
+      return true;
+    };
+    for (int row = 0; row < height; ++row) {
+      if (row_is_blank(row)) continue;
+      const std::size_t offset = static_cast<std::size_t>(row) * count;
+      if (offset + count > source.size()) break;
+      std::uint32_t* dst = dib_pixels_ + offset;
+      const std::uint32_t* src = source.data() + offset;
+      for (std::size_t index = 0; index < count; ++index) {
+        dst[index] = (src[index] >> 8U) | ((src[index] & 0xFFU) << 24U);
       }
     }
-    ::SetForegroundWindow(window_);
+    RECT rect{};
+    ::GetWindowRect(window_, &rect);
+    POINT destination{rect.left, rect.top};
+    SIZE size{width, height};
+    POINT origin{0, 0};
+    // 诊断：把**真正要交给 ULW 的 DIB 像素**读出来（不是画布）。
+    // 为何要这一步："画布对"与"送给 ULW 的位对"是两件事，而我们已实测踩到
+    // 两者不一致的坑（`rotate_bgra_row` 强制 alpha=255）。
+    if (const auto flag = ::st::fs::read_env("ST_SPLASH_DEBUG");
+        flag.has_value() && !flag->empty() && *flag != "0") {
+      const std::uint32_t mid = dib_pixels_[static_cast<std::size_t>(height / 2) *
+                                            static_cast<std::size_t>(width) +
+                                            static_cast<std::size_t>(width / 2)];
+      const std::uint32_t corner = dib_pixels_[2U * static_cast<std::size_t>(width) + 2U];
+      ST_LOG_INFO("启动卡诊断：ULW 位 {}x{} · DIB 中心 {:08X} · DIB 边中 {:08X} · layered={}",
+                  width, height, mid, corner,
+                  (::GetWindowLongPtrW(window_, GWL_EXSTYLE) & WS_EX_LAYERED) != 0);
+    }
+    // `SourceConstantAlpha = 255` + `AC_SRC_ALPHA` = "按像素 alpha 合成"。
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    const BOOL ok = ::UpdateLayeredWindow(window_, nullptr, &destination, &size, memory_dc_, &origin,
+                                          0, &blend, ULW_ALPHA);
+    if (!ok && !layered_fail_logged_) {
+      layered_fail_logged_ = true;
+      ST_LOG_WARN("启动卡：UpdateLayeredWindow 失败（错误码 {}）", ::GetLastError());
+    }
+  }
+
+  /// 把画布当前像素整块推到窗口（启动卡用；**不碰任何状态位**）。
+  void present_early_canvas() {
+    if (window_ == nullptr || surface_ == nullptr) return;
+    if (!ensure_dib()) return;
+    const std::span<const std::uint32_t> source = surface_->pixels();
+    const int width = surface_->physical_width();
+    const int height = surface_->physical_height();
+    const std::size_t count = static_cast<std::size_t>(width);
+    for (int row = 0; row < height; ++row) {
+      const std::size_t offset = static_cast<std::size_t>(row) * count;
+      if (offset + count > source.size()) break;
+      raster::simd::rotate_bgra_row(dib_pixels_ + offset, source.data() + offset, count);
+    }
+    HDC window_dc = ::GetDC(window_);
+    if (window_dc == nullptr) return;
+    ::BitBlt(window_dc, 0, 0, width, height, memory_dc_, 0, 0, SRCCOPY);
+    ::ReleaseDC(window_, window_dc);
   }
 
   void set_title(std::string_view title) override {
@@ -1228,11 +1572,7 @@ class Win32Backend final : public Backend {
       size_dirty_ = false;
       (void)sync_buffers_to_client(scale_);
     }
-    // 延迟升级：后台 GPU 就绪后，在这里换型。
-    //
-    // 为何放在帧边界（本函数）：`render_frame` 的第一件事就是取画布，
-    // 随后就在这块画布上排版与绘制——在这里换，本帧画的就是新画布，
-    // 不会出现“画在旧画布、present 新画布”的错位（与尺寸重建同一条时序纪律）。
+    // 延迟升级：后台 GPU 就绪后，在这里换型（被 `upgrade_paused_` 暂停时不动）。
     try_upgrade_to_gpu();
     // 应用**取走画布** = 接下来就要往里画。
     //
@@ -1248,6 +1588,9 @@ class Win32Backend final : public Backend {
   void set_resize_repaint(std::function<void()> repaint) override {
     repaint_ = std::move(repaint);
   }
+
+  /// 启动动画期间**暂停 GPU 换型**（见 `Backend::pause_deferred_upgrade`）。
+  void pause_deferred_upgrade(bool paused) override { upgrade_paused_ = paused; }
 
   [[nodiscard]] auto renderer_name() const noexcept -> std::string_view override {
     return renderer_name_;
@@ -1298,6 +1641,26 @@ class Win32Backend final : public Backend {
   [[nodiscard]] auto min_logical_size() const noexcept -> math::Size override {
     return math::Size{640.0f, 400.0f};
   }
+  /// 启动期改尺寸：**先藏窗口、再改，且无论成败都把 `shown_` 复位**。
+  ///
+  /// 为何把 `shown_` 也复位：那个位是“窗口已露过面”的判据，
+  /// 隐藏后它就不再为真；不复位会让后面的 `show_when_ready()` 走幂等分支
+  /// （只补 present 不再 `ShowWindow`）——窗口就永远不出来了。
+  [[nodiscard]] auto resize_hidden_for_startup(int width_logical, int height_logical)
+      -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    const bool was_shown = shown_;
+    if (was_shown) {
+      ::ShowWindow(window_, SW_HIDE);
+      shown_ = false;
+    }
+    const auto resized = set_size(width_logical, height_logical);
+    // 失败也把 `shown_` 归零：此时窗口已经藏了，不归零就再也不会被显出来。
+    // 宁可“尺寸没改对但界面能看到”，不要“尺寸改了但窗口消失”。
+    shown_ = false;
+    return resized;
+  }
+
   /// 把窗口移到**它所在那块显示器工作区的中心**（尺寸不动）。
   ///
   /// 为何单独成一个方法、且用 `MonitorFromWindow` 而不是主屏：多显示器下窗口可能落在
@@ -1735,6 +2098,10 @@ class Win32Backend final : public Backend {
   /// 失败就静默保留软件画布——“升级失败”不应该让应用变形或崩溃。
   void try_upgrade_to_gpu() {
     if (!defer_gpu_ || upgraded_ || window_ == nullptr) return;
+    // **启动动画期间不换型**：换型会把软件画布换成 GPU 画布，而启动卡只能在
+    // `raster::Canvas` 上画（GPU 画布回读很贵且语义不同）。不暂停的后果实测：
+    // 第 12 帧（GPU 就绪 ~410ms）起启动卡直接不再绘制，屏幕上只剩磨砂底。
+    if (upgrade_paused_) return;
     // acquire：与后台线程的 release 配对（见 `start_gpu_prewarm`）。
     if (!gpu_ready_.load(std::memory_order_acquire)) return;
     upgraded_ = true;   // 无论成败都只试一次
@@ -1888,13 +2255,43 @@ class Win32Backend final : public Backend {
         if (offset + count > source.size()) break;
         raster::simd::rotate_bgra_row(dib_pixels_ + offset, source.data() + offset, count);
       }
-    } else {
-      // 画布尚无有效内容（刚 resize/刚建，像素全零）：贴**主题底色**，不贴空画布。
+    } else if (early_content_active_) {
+      // 启动卡阶段：画布里有**卡**（非应用的一帧，`canvas_painted_` 因此还是假）。
       //
-      // 为何不 "什么都不做"：那样窗口内容就停在上一帧/未定义状态（系统发 `WM_PAINT`
-      // 正是因为他认为这块客户区需要重画）。贴底色既满足了系统，又让观感与
-      // `show_early` 连续——用户看到的是"底色停留一会，然后界面出现"，而不是满屏黑。
-      fill_dib_with_matte(area);
+      // ⚠ **磨砂档不能走这条 GDI 路**（2026-11-08 实测真因）：
+      // 分层窗口 + `BitBlt` 会把整个窗口 DC 当成**不透明**位图——
+      // 而 `rotate_bgra_row` 本来就把 alpha 强制成 255。屏幕上一整片白。
+      // 系统每次 `WM_PAINT`（启动期至少有 2~3 条）都会重贴一次，所以哪怕
+      // `refresh_early()` 先贴对了，也会立刻被涂白。
+      //
+      // 磨砂档的像素**只能**经 `UpdateLayeredWindow` 进屏，所以这里重新走它。
+      if (backdrop_active_) {
+        present_early_layered();
+        return true;
+      }
+      for (int row = 0; row < area.height; ++row) {
+        const std::size_t offset = static_cast<std::size_t>(area.y + row) * stride +
+                                   static_cast<std::size_t>(area.x);
+        if (offset + count > source.size()) break;
+        raster::simd::rotate_bgra_row(dib_pixels_ + offset, source.data() + offset, count);
+      }
+    } else if (backdrop_active_) {
+      // ## 磨砂档且画布还没内容：**什么都不贴**（2026-11-08 修）
+      //
+      // 旧版这里走 `fill_dib_with_matte`，把主题底色用 `BitBlt` 贴上去。
+      // 但磨砂档里客户区是“玻璃”，**GDI 贴上去的像素不参与合成**；
+      // 而分层窗口（`WS_EX_LAYERED`）下 `BitBlt` 会把整个窗口 DC 弄成一个
+      // 不透明白块——实测：启动卡窗口整片 (243,253,253)、四角纯 255，
+      // 卡与磨砂全都不见了。
+      //
+      // 正确姿态：磨砂档的像素**只能**经 `UpdateLayeredWindow` 进屏，
+      // 而那是 `refresh_early()` 的职责。这里一旦没内容就什么都不做，
+      // 让 DWM 保持它已经合成好的（磨砂 + 上一次 ULW 的卡）。
+      if (!layered_paint_skipped_logged_) {
+        layered_paint_skipped_logged_ = true;
+        ST_LOG_INFO("上屏：磨砂档画布无内容，本次不贴（交由 UpdateLayeredWindow）");
+      }
+    } else {
       // 只报一次：启动期这条日志就是"黑屏被换成底色"的**可观测证据**，
       // 而每帧刷屏会把其它信息涅没（同 `present_fallback_logged_` 的姿态）。
       if (!matte_logged_) {
@@ -2725,11 +3122,28 @@ class Win32Backend final : public Backend {
   /// 是否给窗口挂 DWM 外阴影（`WindowOptions::window_shadow`）。
   /// 运行时会因 DWM 不接受而转 `false`（见 `create_window`）。
   bool shadow_enabled_{true};
+  /// 背景磨砂是否已确认生效（`set_backdrop_blur` 读回成功才置位）。
+  ///
+  /// `show_early` 靠它决定要不要涂不透明底色：磨砂开着的时候涂底色会把
+  /// DWM 刚垫上的模糊层盖掉（用户会看到"磨砂闪一下变纯色块"）。
+  bool backdrop_active_{false};
+  /// 画布里当前是**启动卡**（非应用的一帧）。
+  ///
+  /// 为何要与 `canvas_painted_` 分开：`canvas_painted_` 的语义是"里面的内容可信，
+  /// 系统任何 `WM_PAINT` 都可以拿它重贴"——而启动卡确实是可信的，但它**不属于应用**。
+  /// 合成一个位会让后者（“应用已交出第一帧”）失去判据（那正是黑屏守卫的锚点）。
+  bool early_content_active_{false};
+  /// 磨砂档“画布无内容、本次不贴”的日志只报一次。
+  bool layered_paint_skipped_logged_{false};
+  /// `UpdateLayeredWindow` 失败只报一次（否则每帧刷屏）。
+  bool layered_fail_logged_{false};
 
   // ── 窗口底色（用于 `WM_ERASEBKGND` 的背景刷、`show_early` 的填充、以及
   //    **画布尚无有效内容时的上屏替身**）──
   //
-  // 圆角与外阴影均交给 DWM（见 `create_window`），这里仅剩窗口底色一项需要。
+  // 圆角与外阴影均交给 DWM（见 `create_window`），底色那么也要跟主题走
+  // （`set_window_background`），这里只留一个**兜底初值**：
+  // 它只在应用尚未告知前生效（如创建就失败的早期路径）。
   std::uint32_t chrome_edge_rgb_{0xF7F7FAU};
   /// 画布里是否已有**被应用绘制过**的内容（`canvas_painted_`）。
   ///
@@ -2835,6 +3249,8 @@ class Win32Backend final : public Backend {
   std::atomic<bool> gpu_ok_{false};
   /// 是否已尝试过升级（无论成败都只试一次）。
   bool upgraded_{false};
+  /// 启动动画期间置真：**暂停 GPU 换型**（否则启动卡画到一半画布就换了）。
+  bool upgrade_paused_{false};
   std::thread gpu_worker_{};
   /// 是否已 `NIM_ADD`（决定下次是 ADD 还是 MODIFY）。
   bool tray_added_{false};
