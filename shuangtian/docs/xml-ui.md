@@ -97,6 +97,11 @@ hot.refresh_all();      // 主循环里再加一句 `if (hot.poll() > 0) app.req
 | `absolute` + `left` / `top` / `right` / `bottom` | `true`/`false` / 数字 | **叠放定位**：脱离 flex 流，按父内容盒左上角定位（`right`/`bottom` 非负时改按右/底缘锤定） |
 | `animate` / `animate_delay` | 预设名 / 秒 | **入场动画**（见下） |
 | `transition` | 秒 | **属性过渡**：值变化时补间（`transition: all` 语义） |
+| `elevation` | `flat`/`raised`/`overlay`/`modal` | **抬升档**：表面阶 + 阴影档 + 顶部高光三联动 |
+| `variant` | `plain`/`neutral`/`primary`/`accent`/`success`/`warning`/`danger`/`ghost` | **语气变体**（背景/描边/文字三色一套） |
+| `radius_mode` | `none`/`sm`/`md`/`lg`/`xl`/`pill` | **圆角档**（跟随主题 token，不写死数值） |
+| `control_size` | `sm`/`md`/`lg`（也收 `small`/`medium`/`large`） | **控件尺寸**：高 + 字 + 图标三联动 |
+| `density` | `compact`/`regular`/`comfortable` | **密度**：padding/gap 乘 0.85 / 1.0 / 1.15 |
 
 **② 组件自己的属性面**：`label`（Button）、`value`（Input/Progress）、`checked`（Checkbox）、
 `placeholder`、`icon`、`variant`/`size`（Button 档位）、`text`（Text）…每个组件
@@ -133,9 +138,23 @@ hot.refresh_all();      // 主循环里再加一句 `if (hot.poll() > 0) app.req
 2. **拼错预设名会报**（`X.animate 的值没被接受`），不会静默当“没设”——
    否则现象是“动画写了但不动”。
 
-**写不了的**（如实说）：样式系统那五个（`elevation` / `variant` / `radius_mode` /
-`control_size` / `density`）与 `intercepts` 仍在待办——它们不在 `apply_properties`
-的落点里（`BoxProps` 走的是 `apply_appearance`，XML 走的是 `apply_properties`）。
+**样式系统五档**（`elevation` / `variant` / `radius_mode` / `control_size` / `density`）：
+写的是**档位名**而不是数值，落位时过主题 token 解析：
+
+```xml
+<Card elevation="raised" radius_mode="lg">
+  <Row density="compact" gap="8">
+    <Button variant="primary" control_size="sm">确定</Button>
+  </Row>
+</Card>
+```
+
+它们与上表的布局属性不冲突，可以组合（多个 `apply_appearance` 字段会累积，
+不会互相覆盖）。
+
+> **`surface` 在所有元素上都生效**（包括 Button/Card/Input 这些自己写底色的组件）。
+> 优先级：**显式声明 > 组件默认**——组件先写自己的变体色，显式 `surface` 最后落。
+> 所以给主按钮加 `surface="base"` 会得到“主按钮形状 + 普通底色”，而不是无效。
 
 ### 文本
 

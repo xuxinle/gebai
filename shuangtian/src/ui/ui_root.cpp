@@ -162,7 +162,10 @@ void UiRoot::layout(bool force) {
   // 代价是每个元素一次颜色赋值 + `mark_dirty`（实测 90 节点树为微秒级），
   // 换来的是“上树就一定拿到当前主题”不依赖 luck。
   const auto apply_theme_tree = [](auto&& self, Element& element, const Theme& theme) -> void {
-    element.apply_theme(theme);
+    // `refresh_theme`（非虚）而不是 `apply_theme`（虚）：它先派发组件自己的样式，
+    // 再统一回放**显式声明**。用虚函数就会把“统一层要不要跑”变成组件的自觉——
+    // 实测代价：72 个覆写里 65 个忘了转调基类，`surface` 在它们上静默失效。
+    element.refresh_theme(theme);
     for (std::size_t index = 0; index < element.children().size(); ++index) {
       self(self, *element.child_at(index), theme);
     }

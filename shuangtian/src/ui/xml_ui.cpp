@@ -87,6 +87,10 @@ const std::unordered_set<std::string>& box_prop_names() {
       // 动画（2026-11-10）：三个都不进属性面，而是在 `apply_one` 里单独处理——
       // 起播是**动作**（重置起点/标脏/请求续帧），做成属性会在声明式里每帧重播。
       "animate",  "animate_delay", "transition",
+      // 样式系统（`Appearance`）：档位语义，过 `Tokens` 解析后落 `style_`。
+      // 名字用全名：`radius_mode`/`control_size` 是为了与 `Style::radius`（数值）
+      // 和 `Button::size`（组件自己的尺寸档）区分开——同名不同义是排查灾难。
+      "variant",  "elevation", "radius_mode", "control_size", "density",
   };
   return names;
 }

@@ -1792,6 +1792,56 @@ JS 声明式（`declarative.js`）。前者要求会 C++，后者只能经 JS �
 语法上的小毛病（少个 `</Row>`）容错，**语义上的错**（`<Buton>`、`colorr="red"`）必须说出来——
 否则界面只是“少了一个按钮”，而没人知道为什么。
 
+**两类拒因必须分开**：`X.foo`（名字不认识）与 `X.foo 的值没被接受`（名字认得、值不合法）
+的修复动作完全不同（查文档换真名 vs 查枚举表改值），所以 `RejectReason` 把它们
+分成 `unknown_name` / `invalid_value` 两类。
+
+**三个特殊点（都不是“普通属性”）**：
+
+| 属性 | 处理位置 | 为何不能当普通属性 |
+|---|---|---|
+| `animate` / `animate_delay` | `apply_one` 里直调 `Element` | 起播带副作用（重置起点/标脏/请求续帧），做成属性会“每帧重设 = 每帧重播” |
+| `elevation` / `variant` / `radius_mode` / `control_size` / `density` | `apply_properties` → `Appearance` | 是**档位**不是数值：要过 token 解析（抬升=表面+阴影+高光三联动） |
+| `surface` | `Element::apply_declared_overrides` | 必须在组件自己的 `apply_theme` **之后**回放，否则被变体色盖掉 |
+
+### 4.2.20.1 主题派发两层：`refresh_theme` / `apply_theme`（2026-11-10）
+
+**缺陷与根因**：`<Button surface="alt"/>` 报“应用成功”、`surface()` 读回也对，
+但 `style().background` 仍是变体色——**静默失效，报告干净**。
+
+根因是结构性的：72 个组件覆写 `apply_theme`，其中**只有 7 个转调基类**。
+而基类里那三层统一处理（`apply_surface` / `apply_appearance` 回放 / `apply_text_overrides`）
+就在 `apply_theme` 里——于是它们在其余 **65 个组件上全是死代码**。
+
+**不采用的修法**：让 72 个组件都记得转调基类。那是靠**约定**保护的不变式，
+新人加组件时必漏（那 65 个就是历史证据）。
+
+**采用的修法**：把调度点拆成两步，第二步只在一处：
+
+```cpp
+void refresh_theme(const Theme& theme) {      // 非虚：唯一调度入口
+  apply_theme(theme);                         // 虚：组件写自己的变体色/尺寸
+  apply_declared_overrides(theme);            // 非虚：统一回放显式声明
+}
+```
+
+顺序就是语义，且必须固定：
+
+1. **组件自己的 `apply_theme`**——写变体色/默认尺寸（Button 的主色、Card 的描边…）
+2. **`surface`**——显式要求的底，盖组件默认
+3. **`appearance` 规则回放**——CSS 级声明，再盖一层
+4. **文本覆盖最后**——任何路径写进去的颜色都不该盖过用户直接设的
+
+于是优先级变成**结构保证**：**显式声明 > 组件默认**。
+
+`apply_theme` 仍自己做一遍统一层（单测/不上树的元素直接调它时行为不变）；
+两处都是幂等赋值，重复跑无副作用。`UiRoot::layout` 的 `apply_theme_tree` 调
+`refresh_theme`（不是 `apply_theme`）——这一行就是全部缺陷的分界。
+
+**回归**：`tests/xml_ui_test.cpp` 的 `surface_lands_on_components_that_own_their_background`
+必须**走 `UiRoot::layout()` 真实链路**。直接调 `refresh_theme` 会绕过调度点，
+于是“调度点调错函数”测不出来（实测：把调度退回 `apply_theme` 后直调版测试仍全绿）。
+
 ### 4.2.21 脚本桥（`st::ui::ScriptBridge`）：JS 调 C++（2026-10-11）
 
 **补的是哪一块**：在此之前脚本只能读快照/写属性/绑事件（`script_api.js`）与声明式建树

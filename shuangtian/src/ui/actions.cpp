@@ -13,9 +13,73 @@
 #include "st/ui/svg.hpp"   // parse_color（色值解析：与 DSL 的 hex_color 同一份）
 
 #include "st/core/json.hpp"
+#include "st/ui/styling.hpp"   // Appearance / apply_appearance（样式系统落位）
 
 namespace st::ui {
 namespace {
+
+/// —— 样式系统（`Appearance`）的属性名与落位 ——
+///
+/// 这五个是**档位**（`raised`/`compact`/`pill`…）而不是数值。落位必须过
+/// `Tokens` 解析：抬升要同时给出表面阶/阴影档/顶部高光，尺寸要三联动（高+字+图标），
+/// 密度要乘到 padding/gap。自己拼数值就是这层样式系统要消灭的“40 处各自为政”。
+[[nodiscard]] auto is_appearance_name(std::string_view name) -> bool {
+  return name == "variant" || name == "elevation" || name == "radius_mode" ||
+         name == "control_size" || name == "density";
+}
+
+/// 把一个属性写进 `Appearance`（只改它自己那个字段，其余保持）。
+///
+/// 名字与 `Appearance` 字段名一致，**只多了 `radius_mode`/`control_size` 两个**：
+/// 那两个字段在结构体里叫 `radius`/`size`（短名在 DSL 里更顺手），而属性面用全名
+/// 避免与 `Style::radius`（数值）、`Button::Size`（组件自己的尺寸档）混淆——
+/// 两个同名不同义的东西同时出现在 XML/协议里是排查灾难。
+[[nodiscard]] auto apply_appearance_field(Appearance& appearance, std::string_view name,
+                                          const st::Json& value) -> bool {
+  const std::string text = st::json_as_string(value, "");
+  if (name == "variant") {
+    if (text == "plain") appearance.variant = Variant::Plain;
+    else if (text == "neutral") appearance.variant = Variant::Neutral;
+    else if (text == "primary") appearance.variant = Variant::Primary;
+    else if (text == "accent") appearance.variant = Variant::Accent;
+    else if (text == "success") appearance.variant = Variant::Success;
+    else if (text == "warning") appearance.variant = Variant::Warning;
+    else if (text == "danger") appearance.variant = Variant::Danger;
+    else if (text == "ghost") appearance.variant = Variant::Ghost;
+    else return false;
+  } else if (name == "elevation") {
+    if (text == "flat") appearance.elevation = Elevation::Flat;
+    else if (text == "raised") appearance.elevation = Elevation::Raised;
+    else if (text == "overlay") appearance.elevation = Elevation::Overlay;
+    else if (text == "modal") appearance.elevation = Elevation::Modal;
+    else return false;
+  } else if (name == "radius_mode") {
+    // 档名用 `sm`/`md`/`lg`/`xl`/`pill`/`none`；**另外接受 `s`/`m`/`l` 短写**，
+    // 因为 `radius_mode="md"` 与 `size="md"` 在 XML 里只差前缀，手写时很易把
+    // `md` 敲成 `m`——而“值被拒”的报错已经足够把定错方向，不必再添一份碎碎的事
+    // 让它静默通过。
+    if (text == "none") appearance.radius = RadiusMode::None;
+    else if (text == "sm" || text == "s") appearance.radius = RadiusMode::SM;
+    else if (text == "md" || text == "m") appearance.radius = RadiusMode::MD;
+    else if (text == "lg" || text == "l") appearance.radius = RadiusMode::LG;
+    else if (text == "xl") appearance.radius = RadiusMode::XL;
+    else if (text == "pill") appearance.radius = RadiusMode::Pill;
+    else return false;
+  } else if (name == "control_size") {
+    if (text == "sm" || text == "small") appearance.size = ControlSize::Small;
+    else if (text == "md" || text == "medium") appearance.size = ControlSize::Medium;
+    else if (text == "lg" || text == "large") appearance.size = ControlSize::Large;
+    else return false;
+  } else if (name == "density") {
+    if (text == "compact") appearance.density = Density::Compact;
+    else if (text == "regular") appearance.density = Density::Regular;
+    else if (text == "comfortable") appearance.density = Density::Comfortable;
+    else return false;
+  } else {
+    return false;
+  }
+  return true;
+}
 
 /// 对齐枚举的名字 → 值（与 XML 属性面**同一份口径**：都用名字，不靠数字）。
 [[nodiscard]] auto parse_align(const std::string& text, Align& out) -> bool {
@@ -313,6 +377,25 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
       style.right = as_float();
     } else if (name == "bottom") {
       style.bottom = as_float();
+    } else if (is_appearance_name(name)) {
+      // 样式系统（`Appearance`）：五个字段都是**档位语义**，不是具体数值——
+      // 落位要过 `Tokens` 解析（抬升→表面+阴影+高光、尺寸→高+字+图标三联动、
+      // 密度→padding/gap 倍率），所以不能在这里直接写 `style_`。
+      //
+      // 走 `apply_appearance` 而不自己拼数值的理由：跨 token 的联动规则只能有
+      // 一处（否则同一档位在不同组件上长得不一样——那正是这层存在的原因）。
+      Appearance appearance{};
+      // 已有声明要**先读回来**：`apply_appearance` 是整体存档，只传一个新字段
+      // 会把之前的声明抹掉（“先写 elevation 再写 density，抬升就没了”）。
+      if (auto declared = element.appearance(); declared.has_value()) appearance = *declared;
+      if (!apply_appearance_field(appearance, name, value)) return false;
+      // `apply_appearance` 的返回值是“**样式值变了没**”，不是“**属性收下了没**”。
+      // 两者在“声明了一个与当前值相同的档位”时不一致——实测 `radius_mode="none"`
+      // 在默认 radius=0 的元素上落位成功但 `changed=false`，拿它当成功判据就会
+      // 把这一个合法声明报成“值没被接受”。声明是**状态**（存档供主题重放），
+      // 它总是成功的；只有档位名认不出才是失败（上一行已判）。
+      (void)element.apply_appearance(appearance);
+      return true;
     } else {
       return false;
     }

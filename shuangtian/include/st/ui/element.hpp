@@ -824,7 +824,27 @@ class Element {
   // —— 布局与绘制 ——
   [[nodiscard]] auto bounds() const noexcept -> math::Rect { return bounds_; }
   [[nodiscard]] auto measured_size() const noexcept -> math::Size { return measured_; }
-  /// 从主题刷新 `style_`（UiRoot 在布局前按脏标记调用）：组件据此把 token 落到具体样式。
+  /// 主题刷新入口（**UiRoot 每帧整树调用这一个**）：先虚派发组件样式，
+  /// 再统一回放框架级声明。
+  ///
+  /// 为何需要两层而不是一个虚函数：72 个组件覆写 `apply_theme`，其中**只有 7 个
+  /// 转调基类**——基类里那三层统一处理（`surface` / `apply_appearance` 回放 /
+  /// `apply_text_overrides`）在其余 65 个上就是**死代码**。实测：
+  /// `<Button surface="alt"/>` 报“应用成功”、`surface()` 读回也对，
+  /// 但 `style().background` 仍是变体色——静默失效，报告干净，最难查的一类。
+  ///
+  /// 为什么不“让 72 个组件都记得转调基类”：那是靠**约定**保护的不变式，
+  /// 新人加组件时必漏。把顺序改成结构性保证（调度点拆成两步，第二步只在本处），
+  /// 就不存在“忘了”这件事。
+  ///
+  /// 优先级也因此变得确定：**显式声明 > 组件默认**。组件先写自己的变体色，
+  /// 显式 `surface` / `appearance` / 文本覆盖最后落——盖过组件默认。
+  void refresh_theme(const Theme& theme) {
+    apply_theme(theme);
+    apply_declared_overrides(theme);
+  }
+
+  /// 从主题刷新 `style_`（组件据此把 token 落到具体样式）。
   ///
   /// ⚠ 覆写时**必须把显式覆盖放回去**（见 `apply_text_overrides`）：
   /// `apply_theme` 是每帧从主题重算颜色/字号/字重的地方，而 DSL 的
@@ -834,20 +854,27 @@ class Element {
   /// 基类实现统一处理**语义表面档位**（`set_surface`）：容器（`Panel`）不覆写
   /// `apply_theme`，所以“背景色跟着主题走”这件事只能在这里做——否则应用侧
   /// 要么硬编码颜色（主题一切换就错）、要么自己读色板（依赖方向反了）。
-  virtual void apply_theme(const Theme& theme) {
-    apply_surface(theme);
-    apply_text_overrides();
-    // 外观规则回放（声明过 `apply_appearance` 的元素在此跟随主题：
-    // Tokens 从新主题现解析——换肤一致性只在 `apply_appearance` 一处发生）。
-    if (extras_ != nullptr && extras_->appearance.has_value()) {
-      const Tokens tokens(theme);
-      (void)ui::apply_appearance(*this, tokens, *extras_->appearance);
-      apply_text_overrides();   // 文本显式覆盖最后回放（盖过 variant 的 text）
-    }
+  ///
+  /// **独立使用时**（不接 `UiRoot`、直接调它）本函数自己就把统一层跑完了；
+  /// 上树后统一层由 `refresh_theme` 最后再跑一遍——显式声明必须盖过组件默认。
+  /// 两处都是幂等赋值，重复跑无副作用。
+  virtual void apply_theme(const Theme& theme) { apply_declared_overrides(theme); }
+
+  /// 读回已声明的外观规则（未声明则为 nullopt）。
+  ///
+  /// 为什么需要读回：`apply_appearance` 是**整体存档**（声明的语义就是“一组规则”），
+  /// 于是“只改其中一个字段”必须拿旧值补齐其余字段。没有读回口的话，
+  /// 调用方只能每次重建一份完整 `Appearance`——协议/XML/脚本各自要记得自己缓存，
+  /// 那又是四份会漂移的状态。
+  ///
+  /// 按值返回（`Appearance` 是几个 `optional<enum>`，拷贝成本可忽略）：
+  /// 引用返回要在“未声明”时造一个 static 空值，没必要。
+  [[nodiscard]] auto appearance() const -> std::optional<Appearance> {
+    return extras_ != nullptr ? extras_->appearance : std::nullopt;
   }
 
   /// 声明外观规则（CSS 级主题化的入口）：规则存档 + **立即**落位一次
-  ///（后续每次 `apply_theme` 自动回放——主题切换无需组件配合）。
+  ///（后续每次 `refresh_theme` 自动回放——主题切换无需组件配合）。
   ///
   /// 语义字段见 `Appearance`；未设的字段不干预（与现有 style 共存）。
   /// 返回是否改变了样式（调用方可据此决定是否请求重排）。
@@ -859,7 +886,6 @@ class Element {
   }
 
   /// 容器的**语义表面档位**（背景色跟着主题走，而不是硬编码）。
-  ///
   /// 存在理由：工作台的横向条带（标题栏 / 活动栏 / 状态栏）必须同色——它们
   /// 合起来是一圈“外壳”，色不一致会在拐角处露馅。标题栏的颜色由 `TitleBar`
   /// 自己取 `surface_alt`；而活动栏/状态栏是通用 `Panel`，没有地方表达
@@ -882,16 +908,43 @@ class Element {
 
   /// 设语义表面档位（`Surface::None` = 不画底色）。
   ///
-  /// 需在下一次 `apply_theme` 前调用（UiRoot 每帧按需调）——若在首帧之后改变，
+  /// 需在下一次主题刷新前调用（`UiRoot` 每帧按需调）——若在首帧之后改变，
   /// 本次改变在下一帧的主题刷新时生效（`Panel` 的透明默认值与 `None` 一致，
   /// 所以“先构造后设置”的正常用法没有可见延迟）。
+  ///
+  /// **对任何元素都生效**（包括自画底色的 Button/Card/Input）：它在
+  /// `apply_declared_overrides` 里回放，时序在组件自己的 `apply_theme` 之后。
   void set_surface(Surface surface) noexcept { extras().surface = surface; }
   [[nodiscard]] auto surface() const noexcept -> Surface {
     return extras_ != nullptr ? extras_->surface : Surface::None;
   }
 
  protected:
-  /// 把表面档位落到 `style_.background`（基类 `apply_theme` 调；组件覆写时请转调）。
+  /// **框架级统一层**：先虚派发组件自己的主题样式，再回放所有**显式声明**。
+  ///
+  /// 顺序是这里唯一的语义，且必须固定：
+  /// 1. 组件自己的 `apply_theme` —— 写变体色/默认尺寸（Button 的主色、Card 的描边…）
+  /// 2. `surface` —— 显式要求的底，盖组件默认
+  /// 3. `appearance` 规则回放 —— CSS 级声明，再盖一层
+  /// 4. 文本覆盖最后 —— 任何路径写进去的颜色都不该盖过用户直接设的，
+  ///    包括 `appearance` 里带 `text` 的情形
+  ///
+  /// 为何做成**非虚的单一入口**：见 `refresh_theme` 的注释（72 组件里 65 个
+  /// 不转调基类，统一层在它们上就是死代码）。
+  void apply_declared_overrides(const Theme& theme) {
+    apply_surface(theme);
+    apply_text_overrides();
+    // 外观规则回放（声明过 `apply_appearance` 的元素在此跟随主题：
+    // Tokens 从新主题现解析——换肤一致性只在 `apply_appearance` 一处发生）。
+    if (extras_ != nullptr && extras_->appearance.has_value()) {
+      const Tokens tokens(theme);
+      (void)ui::apply_appearance(*this, tokens, *extras_->appearance);
+      apply_text_overrides();   // 文本显式覆盖最后回放（盖过 appearance 的 text）
+    }
+  }
+
+  /// 把表面档位落到 `style_.background`（由 `apply_declared_overrides` 调，
+  /// **不在** 组件要记得转调的路径上）。
   void apply_surface(const Theme& theme) {
     if (extras_ == nullptr || extras_->surface == Surface::None) return;
     const Palette& colors = theme.colors();
