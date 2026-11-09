@@ -1,13 +1,14 @@
 #include "st/ui/xml_ui.hpp"
-
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <string>
+#include <string_view>
 #include <unordered_set>
-
 #include "st/core/fs.hpp"
 #include "st/core/json.hpp"
 #include "st/ui/actions.hpp"
+#include "st/ui/animation.hpp"
 #include "st/ui/dsl.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/ui_root.hpp"
@@ -83,6 +84,9 @@ const std::unordered_set<std::string>& box_prop_names() {
       // 实测代价：图谱覆盖层被 flex 排到 0 尺寸而遭剔除，现象是
       // “这个容器从树里消失”，排查绕了一大圈。
       "absolute", "left",     "top",       "right",      "bottom",
+      // 动画（2026-11-10）：三个都不进属性面，而是在 `apply_one` 里单独处理——
+      // 起播是**动作**（重置起点/标脏/请求续帧），做成属性会在声明式里每帧重播。
+      "animate",  "animate_delay", "transition",
   };
   return names;
 }
@@ -117,6 +121,43 @@ auto apply_one(UiRoot& root, Element& element, const std::string& name,
   }
   if (name == "hint") {
     element.set_hint(std::string(node.attr_or("hint", "")));
+    return true;
+  }
+  // —— 动画：**起播是动作，不是属性** ——
+  //
+  // 为什么不能走 `apply_properties`：那里是“改一个值”，而 `animate` 的语义是
+  // “从此刻起播”（带副作用：重置起点、标脏、请求续帧）。做成属性会让“每帧重新
+  // 下发同一个值”变成**每帧重播**——动画永远播不完（声明式路径下必然踩到）。
+  //
+  // 所以这里直调 `Element` 的两个入口，而不经属性面：
+  //   `animate="fadeInUp"`  → set_preset_animation(名字)
+  //   `animate_delay="0.08"` → set_animation_delay(秒)
+  // 顺序敏感：delay 必须在预设之后（`set_animation_delay` 在未设动画时是空操作）。
+  // XML 属性是**按书写顺序**遍历的，所以下面把它们拆成两支，并在 `animate` 分支里
+  // 主动去拉同一个节点上的 `animate_delay`（不依赖书写顺序）。
+  if (name == "animate") {
+    const std::string preset(node.attr_or(source_name, ""));
+    if (preset.empty() || preset == "none") return true;   // `none` = 显式声明“不动”
+    if (!element.set_preset_animation(preset)) return false;
+    const std::string_view delay_text = node.attr_or("animate_delay", "");
+    if (!delay_text.empty()) {
+      element.set_animation_delay(std::strtod(std::string(delay_text).c_str(), nullptr));
+    }
+    return true;
+  }
+  if (name == "animate_delay") {
+    // 已经在 `animate` 那一支里消费过了；单独出现时（XML 里没写 animate）
+    // **不算错**：它就是个“无宿主的参数”，如实报“没落上”会误导人。
+    // 返回 true 但不开播——没动画名时它确实什么也做不了。
+    return true;
+  }
+  if (name == "transition") {
+    // `transition="0.35"`：值变化时补间（空 `properties` = `transition: all`）。
+    anim::Transition transition{};
+    transition.duration = std::strtod(std::string(node.attr_or(source_name, "")).c_str(), nullptr);
+    if (transition.duration <= 0.0) return false;
+    transition.easing = anim::Easing::ease_out();
+    element.set_transition(transition);
     return true;
   }
   st::Json props = st::Json::object();

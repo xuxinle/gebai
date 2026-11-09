@@ -94,6 +94,9 @@ hot.refresh_all();      // 主循环里再加一句 `if (hot.poll() > 0) app.req
 | `bg` / `fg` | `#rgb`/`#rrggbb`/`#rrggbbaa` / CSS 色名 | 背景 / 文字色（字面值） |
 | `radius` / `border_width` / `border_color` / `opacity` | 数字 / 色值 | 外观 |
 | `font_size` / `font_weight` / `text_align` / `monospace` | — | 排版 |
+| `absolute` + `left` / `top` / `right` / `bottom` | `true`/`false` / 数字 | **叠放定位**：脱离 flex 流，按父内容盒左上角定位（`right`/`bottom` 非负时改按右/底缘锤定） |
+| `animate` / `animate_delay` | 预设名 / 秒 | **入场动画**（见下） |
+| `transition` | 秒 | **属性过渡**：值变化时补间（`transition: all` 语义） |
 
 **② 组件自己的属性面**：`label`（Button）、`value`（Input/Progress）、`checked`（Checkbox）、
 `placeholder`、`icon`、`variant`/`size`（Button 档位）、`text`（Text）…每个组件
@@ -101,6 +104,38 @@ hot.refresh_all();      // 主循环里再加一句 `if (hot.poll() > 0) app.req
 
 未识别的属性**进报告**（含标签名与行号）——"点了没反应"最常见的原因就是属性名打错，
 静默忽略会让排查从"看日志"变成"读源码"。
+
+> 报告里两种说法差别很大：
+> - `X.foo` → **名字不认识**（查文档换真名）
+> - `X.foo 的值没被接受` → **名字认识、取值不合法**（查枚举表改值）
+>
+> 两者修复动作完全不同，所以刻意分开（`RejectReason` 的 `unknown_name` / `invalid_value`）。
+
+### 动画
+
+```xml
+<Column id="list" animate="fadeInUp" animate_delay="0.08">
+  <Text>第一项</Text>
+</Column>
+
+<!-- 值变化时补间（改样式/换数据时它是滑过去的） -->
+<Row transition="0.35" bg="#2563eb"/>
+```
+
+预设名：`fadeIn` `fadeInUp` `fadeOut` `modalIn` `slideInLeft` `slideInRight` `pulse` `shake`
+（时长/循环/缓动都已给好，详见 `include/st/ui/animation.hpp`）。
+
+两个必知点：
+
+1. **`animate` 是“起播”不是“属性”**——它在 `apply_one` 里直调 `set_preset_animation`，
+   不走 `apply_properties`。差别在**副作用**：起播会重置起点、标脏、请求续帧；
+   做成属性就会“每帧重设 = 每帧重播”（动画永远播不完）。
+2. **拼错预设名会报**（`X.animate 的值没被接受`），不会静默当“没设”——
+   否则现象是“动画写了但不动”。
+
+**写不了的**（如实说）：样式系统那五个（`elevation` / `variant` / `radius_mode` /
+`control_size` / `density`）与 `intercepts` 仍在待办——它们不在 `apply_properties`
+的落点里（`BoxProps` 走的是 `apply_appearance`，XML 走的是 `apply_properties`）。
 
 ### 文本
 

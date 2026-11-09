@@ -242,3 +242,91 @@ ST_TEST(xml_ui_multiple_top_level_nodes_warn_but_use_first) {
   ST_CHECK_EQ(report.elements, std::size_t{3});
   ST_CHECK_EQ(tree->child_count(), std::size_t{2});
 }
+
+// ── 叠放定位（=`absolute`）─────────────────────────────────────────
+
+ST_TEST(xml_ui_absolute_positioning_lands_on_style) {
+  // 缺陷回归（2026-11-10）：`absolute/left/top/right/bottom` 一直在
+  // `xml_ui.cpp` 的白名单里（还带着一段“上次漏了它导致图谱覆盖层消失”的注释），
+  // 但 `apply_properties` 里**没有对应分支**——于是 XML 写 `absolute="true"`
+  // 得到的是“的值没被接受”，把人往“值写错了”的方向引，而真相是这一层没实现。
+  //
+  // 夹具用**非零值**：全零时“溶上了”与“没溶”完全等价，回退修复后仍然全绿。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(
+      R"(<Column absolute="true" left="12" top="34" right="56" bottom="78"/>)", &report);
+  ST_REQUIRE(tree != nullptr);
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
+  ST_CHECK(report.clean());   // 名字与值都该被接受
+  ST_CHECK(tree->style().absolute);
+  ST_CHECK_NEAR(tree->style().left, 12.0f, 0.001f);
+  ST_CHECK_NEAR(tree->style().top, 34.0f, 0.001f);
+  ST_CHECK_NEAR(tree->style().right, 56.0f, 0.001f);
+  ST_CHECK_NEAR(tree->style().bottom, 78.0f, 0.001f);
+}
+
+ST_TEST(xml_ui_absolute_actually_changes_layout) {
+  // 上一条只验“属性进了 Style”。而 `absolute` 的意义是**改变摆放**——
+  // 验不到这条就只是“写进去了但没人用”，与 `id` 那类元数据毫无区别。
+  //
+  // 判据：同一棵树里，一个绝对定位块应当**叠在**第一个块上（而不是排在它下面）。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(R"(
+<Column width="200" height="200">
+  <Row id="base" width="200" height="100"/>
+  <Row id="overlay" absolute="true" left="10" top="20" width="50" height="30"/>
+</Column>)",
+                                     &report);
+  ST_REQUIRE(tree != nullptr);
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
+  ST_CHECK(report.clean());
+  UiRoot root;
+  root.set_content(std::move(tree));
+  root.layout(true);
+  st::ui::Element* base = root.find("base");
+  st::ui::Element* overlay = root.find("overlay");
+  ST_REQUIRE(base != nullptr);
+  ST_REQUIRE(overlay != nullptr);
+  // 绝对定位：左上角 = 父内容盒左上角 + (left, top)，**不受兄弟影响**。
+  ST_CHECK_NEAR(overlay->bounds().x, 10.0f, 0.5f);
+  ST_CHECK_NEAR(overlay->bounds().y, 20.0f, 0.5f);
+  // 若不落 absolute，它会被排在第一个块的下面（y ≈ 100）——这两个断言就区分得开。
+  ST_CHECK(overlay->bounds().y < base->bounds().height - 1.0f);
+}
+
+// ── 动画（`animate` / `animate_delay` / `transition`）─────────────────
+
+ST_TEST(xml_ui_animate_starts_animation) {
+  // 起播走**动作**而不是属性面（重置起点/标脏/请求续帧），所以在 `apply_one`
+  // 里单独处理。这里验两件事：名字被接受（不进 unknown_attributes）、
+  // 以及元素真的进入了“在播”状态。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(
+      R"(<Column animate="fadeInUp" animate_delay="0.2"/>)", &report);
+  ST_REQUIRE(tree != nullptr);
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
+  ST_CHECK(report.unknown_attributes.empty());
+  const auto name = tree->get_property("animation");
+  ST_CHECK(name.has_value());
+  if (name.has_value()) ST_CHECK_EQ(*name, std::string("fadeInUp"));
+}
+
+ST_TEST(xml_ui_animate_unknown_preset_is_reported) {
+  // 拼错预设名必须报（不能静默当“没设”）——否则现象是“动画写了但不动”。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(R"(<Column animate="fadeInUpTypo"/>)", &report);
+  ST_REQUIRE(tree != nullptr);
+  ST_CHECK(!report.unknown_attributes.empty());
+  ST_CHECK(!tree->get_property("animation").has_value());
+}
+
+ST_TEST(xml_ui_transition_is_configured) {
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(R"(<Column transition="0.35"/>)", &report);
+  ST_REQUIRE(tree != nullptr);
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
+  ST_CHECK(report.clean());
+  ST_CHECK(tree->transition_configured());
+  const auto prop = tree->get_property("transition");
+  ST_CHECK(prop.has_value());
+}

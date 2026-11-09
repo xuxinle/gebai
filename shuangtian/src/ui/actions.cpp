@@ -55,7 +55,14 @@ namespace {
       std::string_view{"font_size"},    std::string_view{"font_weight"},
       std::string_view{"monospace"},    std::string_view{"border_width"},
       std::string_view{"border_color"}, std::string_view{"opacity"},
-      std::string_view{"clip_children"}};
+      std::string_view{"clip_children"},
+      // 叠放（绝对定位）：五个量一起在这张表里——它是“名字认得”的唯一真源
+      // （`apply_properties` 用它区分“未知名”与“值不合法”，而落点在上面的
+      // `apply_layout_property`）。两处必须同步增删，否则又回到
+      // “白名单说支持、实现没做”或反之。
+      std::string_view{"absolute"},        std::string_view{"left"},
+      std::string_view{"top"},             std::string_view{"right"},
+      std::string_view{"bottom"}};
   return std::ranges::find(kLayoutNames, name) != kLayoutNames.end();
 }
 
@@ -286,6 +293,26 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
       style.opacity = as_float();
     } else if (name == "clip_children") {
       style.clip_children = st::json_as_bool(value, style.clip_children);
+    } else if (name == "absolute") {
+      // 叠放（绝对定位）。
+      //
+      // 为何四个偏移量要**一并**处理：`Style::absolute` 为真后子元素就改按
+      // 「父内容盒左上角 + left/top」定位（`right/bottom` 非负时改按右/底缘锤定）。
+      // 只落 `absolute` 不落偏移的后果是它叠在左上角——看着像“属性没生效”。
+      //
+      // 这个缺口当年已经踩过一次：`xml_ui.cpp` 的白名单收录了它（还带着一段
+      // “上次漏了它导致图谱覆盖层消失”的注释），但**这张实现表里没有分支**——
+      // 于是 XML 写 `absolute="true"` 得到的是“的值没被接受”，把人往“值写错了”
+      // 的方向引。白名单收录 ≠ 实现，两者必须同一批改。
+      style.absolute = st::json_as_bool(value, style.absolute);
+    } else if (name == "left") {
+      style.left = as_float();
+    } else if (name == "top") {
+      style.top = as_float();
+    } else if (name == "right") {
+      style.right = as_float();
+    } else if (name == "bottom") {
+      style.bottom = as_float();
     } else {
       return false;
     }
