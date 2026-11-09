@@ -272,6 +272,36 @@ ST_TEST(animation_presets_exist_and_have_duration) {
   ST_CHECK(!st::ui::anim::preset_animation("no-such-preset").has_value());
 }
 
+/// 入场类预设必须是 `fill: both`（**不是 `forwards`**）。
+///
+/// 差的正好是「延迟期」那一段：`forwards` 只在**结束后**保留终态，延迟期内不施加
+/// 任何覆盖，于是元素以自身样式**原位、完全不透明**地待着，延迟一到才突然跳成
+/// 「透明 + 偏移」再淡入。
+///
+/// 实测（不透明黑块、`delay=0.5s`、延迟期内采样中心墨量）：
+/// `forwards` = **255**（完全可见）、`both` = **11**（首帧态）。
+/// 单条动画看不太出来（延迟为 0），而 `set_animation_delay` 做 stagger 时每一块
+/// 都会先“闪一下”再消失重播——肉眼立刻能看见。
+ST_TEST(animation_entrance_presets_use_fill_both) {
+  for (const std::string_view name :
+       {"fadeIn", "fadeOut", "fadeInUp", "modalIn", "slideInLeft", "slideInRight", "pulse"}) {
+    const auto animation = st::ui::anim::preset_animation(name);
+    ST_REQUIRE(animation.has_value());
+    ST_CHECK(animation->fill == st::ui::anim::Animation::Fill::Both);
+  }
+  // 带延迟时，延迟期内必须已经是**首帧态**（这里用“有属性覆盖”当判据：
+  // `fill: forwards` 在延迟期内返回空 `Props`，两行代码就分得开）。
+  const auto frames = st::ui::anim::preset_keyframes("fadeInUp");
+  auto animation = st::ui::anim::preset_animation("fadeInUp");
+  ST_REQUIRE(frames.has_value());
+  ST_REQUIRE(animation.has_value());
+  animation->delay = 0.5;
+  const auto waiting = st::ui::anim::sample_animation(*frames, *animation, 0.2);
+  ST_CHECK(waiting.running);
+  ST_CHECK(waiting.props.translate_y.has_value());
+  ST_CHECK(std::abs(*waiting.props.translate_y - 24.0F) <= 0.01F);
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // 元素级落点
 // ────────────────────────────────────────────────────────────────────────────

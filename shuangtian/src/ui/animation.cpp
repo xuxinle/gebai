@@ -622,27 +622,35 @@ auto preset_names() -> const std::vector<std::string_view>& {
 namespace {
 
 [[nodiscard]] auto build_preset(std::string_view name) -> std::optional<PresetEntry> {
+  // **入场类一律 `fill: both`**（不是 `forwards`）。
+  //
+  // 差的正好是「延迟期」那一段：`forwards` 只在结束后保留终态，延迟期内**不施加
+  // 任何覆盖** → 元素以自身样式**原位、完全不透明**地待在那儿，延迟一到才突然跳成
+  // 「透明 + 偏移 24px」再淡入。实测（不透明黑块、delay 0.5s、延迟期内采样）：
+  // `forwards` 墨量 **255**（完全可见）、`both` 墨量 **11**（首帧态）。
+  // 单条动画看不太出来（延迟 0），而 `set_animation_delay` 做 stagger 时
+  // 每一块都会先“闪一下”再消失重播——那是肉眼立刻能看见的错。
   if (name == "fadeIn") {
-    return PresetEntry{"fadeIn", nullptr, 0.30, 1, Easing::ease_out(), Animation::Fill::Forwards};
+    return PresetEntry{"fadeIn", nullptr, 0.30, 1, Easing::ease_out(), Animation::Fill::Both};
   }
   if (name == "fadeOut") {
-    return PresetEntry{"fadeOut", nullptr, 0.25, 1, Easing::ease_in(), Animation::Fill::Forwards};
+    return PresetEntry{"fadeOut", nullptr, 0.25, 1, Easing::ease_in(), Animation::Fill::Both};
   }
   if (name == "fadeInUp") {
     return PresetEntry{"fadeInUp", fade_in_up, 0.45, 1, Easing::ease_out(),
-                       Animation::Fill::Forwards};
+                       Animation::Fill::Both};
   }
   if (name == "modalIn") {
     return PresetEntry{"modalIn", modal_in, 0.25, 1, Easing::ease_out(),
-                       Animation::Fill::Forwards};
+                       Animation::Fill::Both};
   }
   if (name == "slideInLeft") {
     return PresetEntry{"slideInLeft", [] { return slide_in(-32.0f); }, 0.32, 1,
-                       Easing::ease_out(), Animation::Fill::Forwards};
+                       Easing::ease_out(), Animation::Fill::Both};
   }
   if (name == "slideInRight") {
     return PresetEntry{"slideInRight", [] { return slide_in(32.0f); }, 0.32, 1,
-                       Easing::ease_out(), Animation::Fill::Forwards};
+                       Easing::ease_out(), Animation::Fill::Both};
   }
   if (name == "pulse") {
     // 循环动画**必须用 `fill: both`**：否则循环间隙（`local` 归零）会把值抖回元素原值。
