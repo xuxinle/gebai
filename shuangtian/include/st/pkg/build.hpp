@@ -10,6 +10,7 @@
 
 #include "st/core/error.hpp"
 #include "st/core/fs.hpp"
+#include "st/pkg/compiler.hpp"
 #include "st/pkg/manifest.hpp"
 
 namespace st::pkg {
@@ -207,6 +208,32 @@ auto clear_content_hash_cache() -> void;
 /// 命中时 `st build` 的报错会直接给出「结束实例再重编」的下一步）。
 /// 纯函数，供 `pkg_build_lock_test` 断言三套文案各命中/不误报。
 [[nodiscard]] bool artifact_locked(std::string_view diagnostics);
+
+/// 链接命令**头部旗标**（`-static`/`--gc-sections`/`-fuse-ld=…` 这类由平台与工具链
+/// 决定、与源文件无关的参数）。纯函数，只做平台/编译器族/交叉判定。
+///
+/// ## 为什么要导出（而不是留在 `build.cpp` 内部）
+///
+/// 它们是**链接指纹**的组成部分：不纳入指纹时，只改链接旗标（如 Windows 静态链
+/// 运行库 `-static-libgcc -static-libstdc++` → `-static`）会出现——单元一个没变
+/// ⇒ 指纹不变 ⇒ “链接已跳过” ⇒ 产物仍是旧链接方式的（实测：`libwinpthread-1.dll`
+/// 一直留在导入表里），而构建输出说“完成”。这已经是**第二次**踩同一类缺陷
+/// （前一次是 `system`/`icon`）。根治口径：命令行看到什么、指纹就算什么，所以
+/// 两侧共用本函数，回归 `pkg_link_flag_fingerprint_test` 直接断言。
+[[nodiscard]] auto link_only_flags_for(std::string_view platform, st::pkg::CompilerKind kind,
+                                       bool cross,
+                                       const std::vector<std::string>& extra_flags)
+    -> std::vector<std::string>;
+
+/// 链接命令**尾部**（对象之后）由平台/清单决定的参数：系统库与工具链 `extra_flags`。
+///
+/// 为何与头部旗标分两支：命令行位置有语义（单趟链接器必须先看到对象里的未定义符号，
+/// 再扫到库才知道拉什么）；但**两支都进链接指纹**——只改清单里 `system_libs`
+/// 或 `extra_flags` 一行也该重链。
+[[nodiscard]] auto link_tail_flags_for(std::string_view platform,
+                                       const std::vector<std::string>& system_libs,
+                                       const std::vector<std::string>& extra_flags)
+    -> std::vector<std::string>;
 
 /// 错误分类：`run_tests` 链路上哪些失败是「链接/构建失败」而非「用例断言红」。
 /// 返回 true = 链接失败类（产物没出来或子进程起不来，用例根本没跑）。

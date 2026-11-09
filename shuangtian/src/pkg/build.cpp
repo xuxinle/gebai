@@ -1807,13 +1807,102 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   return ok();
 }
 
-[[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
-                        const std::vector<CompileUnit>& units, const std::string& output,
-                        const std::vector<std::string>& profile_flags_list,
-                        const ResolvedToolchain& toolchain,
-                        const std::vector<std::string>& extra_sources,
-                        const std::vector<CompileUnit>* target_units = nullptr)
-    -> Result<std::string> {
+ /// 链接命令**头部旗标**：声明在 `build.hpp`（导出供 `pkg_link_flag_fingerprint_test`
+ /// 直接断言），这里只写实现要点。
+ ///
+ /// 与指纹共用同一份产出：两侧任何一侧自己另算一份，就会出现“命令行里有、指纹里没”
+ /// 的静默缺陷——那正是本函数存在的原因（详见 `build.hpp` 的注释与实测记录）。
+ [[nodiscard]] auto detail_link_only_flags_for(std::string_view platform, CompilerKind kind,
+ bool cross,
+ const std::vector<std::string>& extra_flags)
+ -> std::vector<std::string> {
+   std::vector<std::string> flags;
+   const auto add = [&](const std::string& flag) {
+     if (std::ranges::find(flags, flag) == flags.end()) flags.push_back(flag);
+   };
+   // 链接器：存在 mold/lld 时优先（链接是纯 I/O + 符号解析，lld 通常快 2~4 倍）。
+   //
+   // **交叉编译时跳过**：宿主装的 lld/mold 未必支持目标格式，交给交叉工具链自带的链接器最稳。
+   // **Clang 也跳过**：它默认就用 LLVM 链接器，显式 `-fuse-ld=lld` 会让它去 PATH 里找
+   // GNU 味的 `ld.lld`，与它自己选定的链接器不是一回事。
+   if (!cross && kind == CompilerKind::Gcc) {
+     if (process::which("ld.lld").has_value()) {
+       add("-fuse-ld=lld");
+     } else if (process::which("mold").has_value()) {
+       add("-fuse-ld=mold");
+     }
+   }
+   // `-rdynamic`：把可执行文件的符号表导出到动态符号表——**崩溃栈能否显示函数名
+   // 全靠它**（`backtrace_symbols` 只认动态符号表里的名字，否则只有裸地址）。
+   // 交叉编译/Windows 跳过（GNU 扩展，且 Windows 栈走 CaptureStackBackTrace+PDB）。
+   if (!cross && platform != "windows") {
+     add("-rdynamic");
+   }
+   // **死代码裁剪**（配合编译侧的 `-ffunction-sections -fdata-sections`；理由与
+   // 实测见 build.cpp 的按需链接节）。GNU 链接器用 `--gc-sections`，macOS ld64 用
+   // `-dead_strip`。
+   if (platform == "darwin") {
+     add("-Wl,-dead_strip");
+   } else {
+     add("-Wl,--gc-sections");
+   }
+   // Windows 目标的**全静态链接**（2026-11-09 由 `-static-libgcc -static-libstdc++` 升级）。
+   // 升级动机：只静态 libgcc/libstdc++ 时，`std::thread` 走 winpthreads，链接器在
+   // `libwinpthread.dll.a`（动态导入库）与 `libwinpthread.a`（静态库）之间默认选动态——
+   // 产物导入表留下 `libwinpthread-1.dll`，目标机没装 MinGW 就起不来（实测三个 exe 全中）。
+   // `-static` 一并静态 winpthread 等所有 GNU 运行库；系统库（KERNEL32/USER32 等）
+   // 本就是系统 DLL、导入方式不变，UCRT（api-ms-win-crt-*）同样不受影响。
+   // Windows 目标的**MinGW 运行库静态、系统库动态**（2026-11-09 确认）。
+   //
+   // 只静态 `-static-libgcc -static-libstdc++` 时，`std::thread` 走 winpthreads，
+   // 链接器在 `libwinpthread.dll.a`（动态导入库）与 `libwinpthread.a`（静态库）之间
+   // 默认选动态——产物导入表留下 `libwinpthread-1.dll`，目标机没装 MinGW 就起不来
+   // （实测三个 exe 全中）。所以 winpthread 也要显式静态：`-Wl,-Bstatic -lwinpthread
+   // -Wl,-Bdynamic` 把它锁死为静态，同时**不影响其它库**（之后的系统库照旧动态）。
+   //
+   // 为什么不是全 `-static`：产物会大很多（全部静态链接 + 无 GC 时实测 gallery
+   // 从 6.5MB 涨到 9.3MB），而系统库（KERNEL32/USER32/GDI32 等）本来就是操作系统
+   // 自带的，绝不需要搬进来。
+   //
+   // `libstdc++` 动态版导入名是 `libstdc++-6.dll`——也在这里被 `-static-libstdc++` 锁死。
+   if (platform == "windows") {
+     add("-static-libgcc");
+     add("-static-libstdc++");
+     if (std::ranges::find(extra_flags, std::string{"-static"}) == extra_flags.end() &&
+         std::ranges::find(extra_flags, std::string{"-Wl,-Bstatic"}) == extra_flags.end()) {
+       add("-Wl,-Bstatic");
+       add("-lwinpthread");
+       add("-Wl,-Bdynamic");
+     }
+   }
+   return flags;
+ }
+
+ /// 链接命令**尾部**（对象之后）由工具链/清单决定的参数：系统库与 `extra_flags`。
+ ///
+ /// 为何与头部旗标分两支：命令行位置有语义（单趟链接器必须先看到对象里的未定义符号，
+ /// 再扫到库才知道拉什么）；但**两支都进链接指纹**（见指纹处的注释）。
+ /// 声明在 `build.hpp`，供测试直觉断言。
+ [[nodiscard]] auto detail_link_tail_flags_for(std::string_view platform,
+ const std::vector<std::string>& system_libs,
+ const std::vector<std::string>& extra_flags)
+ -> std::vector<std::string> {
+   std::vector<std::string> out;
+   const auto add = [&](const std::string& flag) {
+     if (std::ranges::find(out, flag) == out.end()) out.push_back(flag);
+   };
+   for (const auto& item : link_library_arguments(platform, system_libs)) add(item);
+   for (const auto& flag : extra_flags) add(flag);
+   return out;
+ }
+
+ [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
+ const std::vector<CompileUnit>& units, const std::string& output,
+ const std::vector<std::string>& profile_flags_list,
+ const ResolvedToolchain& toolchain,
+ const std::vector<std::string>& extra_sources,
+ const std::vector<CompileUnit>* target_units = nullptr)
+ -> Result<std::string> {
   if (toolchain.compiler_path.empty()) {
     return unexpected(ErrorCode::Unsupported, "未解析出链接器（见 resolve_toolchain）");
   }
@@ -1893,50 +1982,16 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   std::vector<std::string> long_args;
   std::vector<std::string> tail;
   for (const auto& flag : profile_flags_list) args.push_back(flag);
-  // 链接器：存在 mold/lld 时优先（链接是纯 I/O + 符号解析，lld 通常快 2~4 倍）。
-  //
-  // **交叉编译时跳过**：宿主装的 lld/mold 未必支持目标格式，交给交叉工具链自带的链接器最稳。
-  // **Clang 也跳过**：它默认就用 LLVM 链接器，显式 `-fuse-ld=lld` 会让它去 PATH 里找
-  // GNU 味的 `ld.lld`，与它自己选定的链接器不是一回事。
-  if (!toolchain.cross() && toolchain.kind == CompilerKind::Gcc) {
-    if (const auto lld = process::which("ld.lld"); lld.has_value()) {
-      args.push_back("-fuse-ld=lld");
-    } else if (const auto mold = process::which("mold"); mold.has_value()) {
-      args.push_back("-fuse-ld=mold");
-    }
-  }
-  // `-rdynamic`：把可执行文件的符号表导出到动态符号表——**崩溃栈能否显示函数名
-  // 全靠它**（`backtrace_symbols` 只认动态符号表里的名字，否则只有裸地址）。
-  //
-  // 为什么值得付这个代价（产物略大、链接略慢）：无头应用崩溃时"能看见栈"与
-  // "只有地址"是"能自己定位"与"得手工包 gdb 再来一遍"的区别——AI 开发闭环里
-  // 后者意味着多一轮往返。实测代价：gbcode 产物 2.99MB → 3.1MB（+3.7%）。
-  // 交叉编译/Windows 跳过（GNU 扩展，且 Windows 栈走 CaptureStackBackTrace+PDB）。
-  if (!toolchain.cross() && toolchain.platform != "windows") {
-    args.emplace_back("-rdynamic");
+  // 链接期专属旗标（位于对象**之前**的那批）：`link_only_flags_for()` 是单一事实源
+  // （与 `build()` 侧的链接指纹共用同一堆），改旗标必须重链——
+  // 理由与实测代价见该函数的注释。
+  for (const auto& flag :
+      detail_link_only_flags_for(toolchain.platform, toolchain.kind, toolchain.cross(),
+                                 toolchain.extra_flags)) {
+    args.push_back(flag);
   }
   // 目标三元组：链接侧必须与编译侧**同一个**（否则拿 A 目标的运行库链 B 目标的对象）
   for (const auto& item : toolchain.target_args()) args.push_back(item);
-
-  // **死代码裁剪**（配合编译侧的 `-ffunction-sections -fdata-sections`）。
-  //
-  // 为何要成对出现：编译期把每个函数/数据分到独立 section，链接期才有粒度去丢。
-  // 不开时链接器只能以 **.o 文件**为单位保留——一个 .o 里有一处被引用，
-  // 整个文件的函数全部进二进制。
-  //
-  // 实测代价与收益（gbcode，2026-11-04）：
-  //   源码对三维/裁云/镂月引用 0 次，二进制里却有 69 个三维符号（286KB）；
-  //   QuickJS（只在 `--enable-script` 时用）完整占 1.07MB。
-  //
-  // 为何对所有档位都开：它只是给链接器删代码的**许可**，不会删掉被引用的东西；
-  // dev/debug 档开着也能让加载/调试对象更小。
-  // 交叉编译时同样适用（GNU ld / lld / mold 都认这个旗标）。
-  // 平台差异：GNU ld / lld / mold 用 `--gc-sections`；macOS 的 ld64 用 `-dead_strip`。
-  if (toolchain.platform == "darwin") {
-    args.emplace_back("-Wl,-dead_strip");
-  } else {
-    args.emplace_back("-Wl,--gc-sections");
-  }
 
   // ⚠ **以下所有 `args` 追加必须发生在 `full_args` 拼接之前**。
   //
@@ -1945,18 +2000,6 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   // 链接器收到的是一个不含它的命令行，既不报错也不警告。
   // 这也是 Windows 静态链运行库长期没生效的原因（它在快照之后）。
   // 判据：命令行走 `full_args`，响应文件路径走 `args`——两路必须看到同一堆旗标。
-
-  // Windows 目标的**静态链接 C++ 运行库**（`-static-libgcc -static-libstdc++`）。
-  // 不静态时产物要求 `libgcc_s_seh-1.dll`/`libstdc++-6.dll` 在 PATH 上——用户双击 exe
-  // 或从别的目录启动时就报“找不到 dll”（与 mingw 交叉档同口径，见 st.pkg 的 extra_flags）。
-  if (toolchain.platform == "windows") {
-    for (const auto* flag : {"-static-libgcc", "-static-libstdc++"}) {
-      if (std::ranges::find(args, flag) == args.end() &&
-          std::ranges::find(toolchain.extra_flags, flag) == toolchain.extra_flags.end()) {
-        args.emplace_back(flag);
-      }
-    }
-  }
 
   // —— Windows 图形子系统 + exe 图标（2026-10-18）——
   //
@@ -2087,9 +2130,14 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
       (void)dep;
     }
   }
-  const auto link_arguments = link_library_arguments(toolchain.platform, libraries);
-  for (const auto& item : link_arguments) tail.push_back(item);
-  for (const auto& flag : toolchain.extra_flags) tail.push_back(flag);
+  // 系统库（含交叉工具链接管的 `system_libs`）与清单 `extra_flags`：**必须留在
+  // `tail`**（链接顺序：库在对象之后，单趟链接器才能解析未定义符号）。
+  // 它们同样入指纹——理由见 `link_only_flags_for()`；这里用**同一个纯函数**
+  // 算出来（`link_tail_flags_for`），不另写一份口径。
+  for (const auto& item : detail_link_tail_flags_for(
+      toolchain.platform, resolve_system_libraries(manifest, toolchain), toolchain.extra_flags)) {
+    tail.push_back(item);
+  }
 
   // 完整命令行（未启用响应文件时用它；长度估算也基于它）。
   // **必须在上面所有 `args` 追加完成之后才拼**（见上面的踩坑注释）。
@@ -2154,7 +2202,23 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   return output;
 }
 
-}  // namespace
+ }  // namespace
+
+/// 链接头部旗标：单一事实源（声明与理由见 `build.hpp`）。
+/// 匿名空间里的同名实现不动——它是命令行的内部拼装口径；导出这层只做同名转发，
+/// 保证“测试断言的就是链接实际用的”。
+[[nodiscard]] auto link_only_flags_for(std::string_view platform, CompilerKind kind, bool cross,
+                                       const std::vector<std::string>& extra_flags)
+    -> std::vector<std::string> {
+  return detail_link_only_flags_for(platform, kind, cross, extra_flags);
+}
+
+[[nodiscard]] auto link_tail_flags_for(std::string_view platform,
+                                       const std::vector<std::string>& system_libs,
+                                       const std::vector<std::string>& extra_flags)
+    -> std::vector<std::string> {
+  return detail_link_tail_flags_for(platform, system_libs, extra_flags);
+}
 
 /// 文件内容的 fnv1a64。读不到 → `nullopt`。
 ///
@@ -3279,10 +3343,22 @@ if (target->kind == "group") {
   std::vector<CompileUnit> link_units = units;
   link_units.insert(link_units.end(), target_units.begin(), target_units.end());
 
+  // 链接期专属旗标（`-static`/`--gc-sections`/`-fuse-ld=…` 等）：与 `link()` 命令行
+  // 同源（`link_only_flags_for()`，纯函数）——指纹纳入它，只改链接旗标也必须重链。
+  // 不纳入的代价见该函数注释（实测：`-static` 改了不重链，libwinpthread-1.dll
+  // 一直在产物导入表里）。
+  const std::vector<std::string> applied_link_flags =
+      detail_link_only_flags_for(toolchain->platform, toolchain->kind, toolchain->cross(),
+                                 toolchain->extra_flags);
+  // 命令尾部的链接参数（系统库、extra_flags）同样入指纹：只改清单这一行也应该重链。
+  const std::vector<std::string> applied_tail_flags = detail_link_tail_flags_for(
+      toolchain->platform, resolve_system_libraries(manifest, *toolchain),
+      toolchain->extra_flags);
+
   // 链接跳过：参与链接的东西**一个都没变**就不重链。
   //
-  // 指纹的内容：编译器族 + 链接集合（对象路径按序）+ 编译标志 + 每个对象的出生快照
-  // （`.meta` 里的内容哈希）——不含时间戳，也不靠“产物比对象新”。
+  // 指纹的内容：编译器族 + 链接集合（对象路径按序）+ 编译标志 + 链接期旗标
+  // + 每个对象的出生快照（`.meta` 里的内容哈希）——不含时间戳，也不靠“产物比对象新”。
   //
   // 为何不看时间：`git checkout` 会整批刷时间戳（白重链），而\.o 从共享缓存 restore 时
   // 时间戳又可能停在旧条目那一刻（内容换了时间却没动，旧实现会静默拿旧产物）。
@@ -3295,6 +3371,10 @@ if (target->kind == "group") {
       material.append("\t").append(meta.value_or("missing"));
     }
     for (const auto& flag : *flags) material.append("\n@").append(flag);
+    // 链接期专属旗标：同属“只改链接参数”的静默风险面（见下方 system/icon 注释），
+    // 2026-11-09 补入（实测：`-static` 改了不重链，libwinpthread-1.dll 一直在产物里）。
+    for (const auto& flag : applied_link_flags) material.append("\n&").append(flag);
+    for (const auto& flag : applied_tail_flags) material.append("\n+").append(flag);
     material.append("\n<").append(target->name).append(">");
     // 链接期**非源文件**的输入：子系统与图标资源。
     //
