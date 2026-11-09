@@ -78,6 +78,20 @@ struct TargetSpec {
   /// 白名单相反：**漏写会链接报错**（可发现），不会静默变胖。
   /// 语义：非空时只编这些 glob，`exclude_sources` 不再参与。
   std::vector<std::string> include_sources{};
+  /// **第三方源白名单**：本目标只编这些 glob 命中的第三方源（`third_party_sources` 的目标级裁剪）。
+  ///
+  /// ## 为什么需要它（工程级全量的两个实测代价）
+  ///
+  /// `third_party_sources` 是工程级的：一家进清单，**所有**目标都编它。对走按需链接
+  /// （归档 + gc-sections）的目标，多余的第三方只是白编几个单元；但对**直铺 .o** 的
+  /// 链接路径（自举脚本 `bootstrap.ps1`/`bootstrap.sh`），没人引用的第三方成员会被
+  /// 强制全链——而它们引用的移植层符号在（被 `include_sources` 正确滤掉的）框架源里，
+  /// 链接期报一串 `undefined reference`。实测：引入 `third_party/micropython/py/*.c`
+  /// 后自举立即可复现（`gc_collect`/`mp_hal_stdout_tx_strn_cooked`/`nlr_jump_fail`）。
+  ///
+  /// 语义与 `include_sources` 同哲学：白名单漏写 → 链接报错（可发现），不会静默变胖；
+  /// 缺省/空 → 维持工程级全量（既有目标零改动）。
+  std::vector<std::string> include_third_party_sources{};
   /// 编译期嵌入的资源文件 glob（`battery/embed.hpp`，见 `third_party/battery/UPSTREAM.md`）。
   ///
   /// 写在**目标**上而不是工程级：嵌入集合决定生成的声明头内容，而声明头是按目标隔离的

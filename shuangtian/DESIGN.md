@@ -5912,6 +5912,15 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 - **`c_flags`**：C 源专用标志（默认 `-std=gnu11`）。**C 标志与 C++ 标志彻底分开**：
   `flags` 里的 `-Wnon-virtual-dtor`/`-Woverloaded-virtual` 是 C++ 专属，喂给 C 会直接报错。
   两者都得不到 `-std` 串味，`-x c` 保证同一个编译器二进制即可编 C，无需第二套工具链。
+- **`targets.<名>.include_third_party_sources`**（目标级第三方源白名单）：非空时本目标只编这些
+  glob 命中的第三方源，工程级 `third_party_sources` 里其余一概不进；缺省/空 → 维持工程级全量
+  （既有目标零改动）。为什么需要：`third_party_sources` 是工程级的，一家进清单所有目标都编它；
+  按需链接（归档 + gc-sections）的目标只是白编几个单元，而**自举脚本（bootstrap.ps1/sh）
+  直铺 .o 链接**——没人引用的第三方成员被强制全链，它们引用的移植层符号又在被
+  `include_sources` 正确滤掉的框架源里，于是链接期报 `undefined reference`、且报错指向
+  源码（方向被带偏）。实测（2026-11-09）：micropython 进清单后自举立即可复现
+  （`gc_collect`/`mp_hal_stdout_tx_strn_cooked`/`nlr_jump_fail`）；语义与 `include_sources`
+  同哲学：漏写 → 链接报错（可发现），不静默变胖。自举脚本读同一字段，两边过滤结果必须一致。
 - `source` 依赖项：`{ "name": "...", "version": "^1.2", "source": {"kind":"path|http|git-tarball","url":"..."}, "sha256": "...", "build": {...} }`
 - `system` 仅声明链接/加载项（`dl`/`pthread`/`m`），**不是第三方源码依赖**。
 

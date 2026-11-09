@@ -63,6 +63,8 @@ inline constexpr std::array<std::string_view, 22> known_keys{
   target.flags = json_get_string_array(json, "flags");
   target.exclude_sources = json_get_string_array(json, "exclude_sources");
   target.include_sources = json_get_string_array(json, "include_sources");
+  target.include_third_party_sources =
+      json_get_string_array(json, "include_third_party_sources");
   target.embed = json_get_string_array(json, "embed");
   target.libraries = json_get_string_array(json, "libraries");
   if (const st::Json* flag = st::json_find(json, "inherit_project_embed");
@@ -468,6 +470,9 @@ auto Manifest::to_json() const -> st::Json {
     if (!target.flags.empty()) entry["flags"] = to_array(target.flags);
     if (!target.exclude_sources.empty()) entry["exclude_sources"] = to_array(target.exclude_sources);
     if (!target.include_sources.empty()) entry["include_sources"] = to_array(target.include_sources);
+    if (!target.include_third_party_sources.empty()) {
+      entry["include_third_party_sources"] = to_array(target.include_third_party_sources);
+    }
     if (!target.embed.empty()) entry["embed"] = to_array(target.embed);
     if (!target.libraries.empty()) entry["libraries"] = to_array(target.libraries);
     if (target.inherit_project_embed.has_value()) {

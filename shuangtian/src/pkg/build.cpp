@@ -2816,6 +2816,29 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
           ST_LOG_INFO("白名单：目标 {} 库源 {} → {} 个（include_sources {} 条）", options.target, before,
                       library_sources.size(), spec->include_sources.size());
         }
+        // ## 第三方源的目标级白名单（include_third_party_sources）
+        //
+        // 上面那条库源白名单不作用于第三方（见下方黑名单段的注释：第三方是原子依赖）；
+        // 但目标也可能真的不需要某家第三方（如 `st` 不用 micropython）——
+        // 这里的白名单按**包级 glob** 裁，不切碎到文件（与原子依赖的语义自洽）。
+        // 看得见的理由：自举脚本（bootstrap.ps1/sh）直铺 .o 链接，没有归档的按需拉取，
+        // 多余的第三方成员会强制全链——它们的移植层符号在被库源白名单滤掉的框架源里，
+        // 链接期报 undefined reference（实测：引入 micropython 后自举立即可复现）。
+        // 本字段与自举脚本同口径读取，两边过滤结果必须一致（见 bootstrap 的注释）。
+        if (!spec->include_third_party_sources.empty()) {
+          const std::size_t before_third = third_party_paths.size();
+          std::erase_if(third_party_paths, [&spec, &manifest](const std::string& path) {
+            const std::string relative = fs::relative_to(path, manifest.directory);
+            return std::none_of(spec->include_third_party_sources.begin(),
+                                spec->include_third_party_sources.end(),
+                                [&](const std::string& pattern) {
+                                  return fs::match_glob(pattern, relative);
+                                });
+          });
+          ST_LOG_INFO("第三方白名单：目标 {} 第三方单元 {} → {} 个（include_third_party_sources {} 条）",
+                      options.target, before_third, third_party_paths.size(),
+                      spec->include_third_party_sources.size());
+        }
       } else {
         // ## 黑名单同时作用于库源与第三方源（按需编译）
         //

@@ -149,11 +149,35 @@ foreach ($pattern in @($pkg.third_party_sources)) {
   $thirdPartySources += @(Get-ChildItem -Path (Join-Path $Root $pattern) -File -ErrorAction SilentlyContinue |
                           Select-Object -ExpandProperty FullName)
 }
-
 $targetSpec = if ($pkg.targets) { $pkg.targets.st } else { $null }
 if ($null -eq $targetSpec) {
   Write-Error "st.pkg 里没有 targets.st（自举无法推导单元集）"
 }
+# ## 第三方源的目标级白名单（include_third_party_sources）：与 `st build st` / build.cpp 同口径
+#
+# 为什么自举必须跟着裁：自举直铺 .o 链接（无归档、无 gc-sections 的按需拉取），
+# 没人引用的第三方成员会强制全链——而它们引用的移植层符号（如 micropython 的
+# `gc_collect`，实现在 src/python/ 里）已被库源白名单正确滤掉 → 链接报
+# undefined reference（2026-11-09 实测：micropython 进清单后自举立即可复现）。
+# `st build st` 靠归档按需拉取把多余成员排除在链接之外，但白编的 127 个单元
+# 也是纯浪费——两边都按同一份白名单裁，口径一致、结果一致。
+$thirdPartyWhitelist = if ($targetSpec.include_third_party_sources) {
+  @($targetSpec.include_third_party_sources)
+} else { @() }
+if ($thirdPartyWhitelist.Count -gt 0) {
+  $before = $thirdPartySources.Count
+  $thirdPartySources = @($thirdPartySources | Where-Object {
+    $abs = $_
+    $rel = $abs.Substring($Root.Length).TrimStart('\', '/') -replace '\\', '/'
+    @($thirdPartyWhitelist | Where-Object { Test-GlobMatch $_ $rel }).Count -gt 0
+  })
+  if ($thirdPartySources.Count -eq 0) {
+    Write-Host "[bootstrap] 白名单未命中任何第三方源（include_third_party_sources $($thirdPartyWhitelist.Count) 条）——检查 glob 是否写错" -ForegroundColor Yellow
+  } else {
+    Write-Host "[bootstrap] 第三方白名单: $before → $($thirdPartySources.Count) 个（include_third_party_sources $($thirdPartyWhitelist.Count) 条）"
+  }
+}
+
 $excludePatterns = if ($targetSpec.exclude_sources) { @($targetSpec.exclude_sources) } else { @() }
 $includePatterns = if ($targetSpec.include_sources) { @($targetSpec.include_sources) } else { @() }
 $extraPatterns = if ($targetSpec.sources) { @($targetSpec.sources) } else { @() }

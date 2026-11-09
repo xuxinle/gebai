@@ -163,6 +163,66 @@ else
   mapfile -t C_SOURCES < <(find third_party -name '*.c' 2>/dev/null | sort)
 fi
 
+# ## 第三方源的目标级白名单（include_third_party_sources）：与 `st build st` / build.cpp 同口径
+#
+# 为什么自举必须跟着裁：自举直铺 .o 链接（无归档、无 gc-sections 的按需拉取），
+# 没人引用的第三方成员会强制全链——而它们引用的移植层符号（如 micropython 的
+# gc_collect，实现在 src/python/ 里）已被库源白名单正确滤掉 → 链接报
+# undefined reference（2026-11-09 实测：micropython 进清单后自举立即可复现）。
+# 两个自举入口读同一字段，两边过滤结果必须一致。
+mapfile -t THIRD_PARTY_WHITELIST < <(python3 - "$PKG" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+target = (data.get("targets") or {}).get("st") or {}
+for pattern in target.get("include_third_party_sources", []) or []:
+    print(pattern)
+PY
+)
+if [ "${#THIRD_PARTY_WHITELIST[@]}" -gt 0 ]; then
+  # 复用上面同一段匹配器：`**` 跨段、`*`/`?` 不跨 `/`（与 fs::match_glob 同口径）。
+  before=${#C_SOURCES[@]}
+  filtered=()
+  for file in "${C_SOURCES[@]}"; do
+    rel="${file#./}"
+    for pattern in "${THIRD_PARTY_WHITELIST[@]}"; do
+      if python3 -c '
+import sys, re
+def seg_match(p, s):
+    if p == "*": return True
+    out, i = "", 0
+    while i < len(p):
+        c = p[i]
+        if c == "*":
+            out += "[^/]*"
+            while i + 1 < len(p) and p[i + 1] == "*": i += 1
+        elif c == "?": out += "[^/]"
+        else: out += "\\" + c if c in ".^$+{}()|[]\\\\" else c
+        i += 1
+    return re.fullmatch(out, s) is not None
+def walk(pat, seg, pi, si):
+    if pi == len(pat): return si == len(seg)
+    if pat[pi] == "**": return any(walk(pat, seg, pi + 1, k) for k in range(si, len(seg) + 1))
+    if si == len(seg): return False
+    return seg_match(pat[pi], seg[si]) and walk(pat, seg, pi + 1, si + 1)
+pattern, path = sys.argv[1], sys.argv[2]
+pat = [s for s in pattern.split("/") if s]
+seg = [s for s in path.split("/") if s and s != "."]
+sys.exit(0 if walk(pat, seg, 0, 0) else 1)
+' "$pattern" "$rel"; then
+        filtered+=("$file")
+        break
+      fi
+    done
+  done
+  C_SOURCES=("${filtered[@]}")
+  if [ "${#C_SOURCES[@]}" -eq 0 ]; then
+    echo "[bootstrap] 白名单未命中任何第三方源（include_third_party_sources ${#THIRD_PARTY_WHITELIST[@]} 条）——检查 glob 是否写错" >&2
+  else
+    echo "[bootstrap] 第三方白名单: $before → ${#C_SOURCES[@]} 个（include_third_party_sources ${#THIRD_PARTY_WHITELIST[@]} 条）" >&2
+  fi
+fi
+
 echo "[bootstrap] 编译器: $CXX · 并行 $JOBS · 源文件 ${#UNITS[@]} 个（另 C 源 ${#C_SOURCES[@]} 个）"
 START=$(date +%s%N)
 
