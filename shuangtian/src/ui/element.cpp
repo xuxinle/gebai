@@ -5,6 +5,7 @@
 #include <format>
 
 #include "st/core/log.hpp"
+#include "st/core/fs.hpp"
 #include "st/perf/clock.hpp"
 #include "st/perf/frame.hpp"
 #include "st/raster/paint.hpp"

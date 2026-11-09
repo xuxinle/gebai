@@ -320,6 +320,44 @@ ST_TEST(md_view_layout_width_follows_real_control_geometry) {
 }
 
 // ③ 渲染到 600×400 画布：内容包围盒非空、内容高度 > 视口（可滚动）
+ST_TEST(md_view_empty_clip_branch_pops_clip) {
+  // `MarkdownView::paint_content` 开头压了一层裁剪，随后有一条“空裁剪早退”分支。
+  // 早退时若忘 `pop_clip`，`Canvas::pop_clip` 在栈底是 no-op、不会报错，
+  // 留存的裁剪会静默约束后续全部绘制（症状是“某块界面凭空不见”，而属性面全正常）。
+  //
+  // 这条缺陷**不产生任何像素差异**（空裁剪本来就不画），只有栈深能抓住它；
+  // 且必须**直接调 `paint_content`**：`Element::paint` 会先做视口剔除
+  //（零高裁剪与任何矩形相交都为空）→ 整块跳过 → 根本到不了那条分支。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+  st::ui::MarkdownView view{std::string(kSample)};
+  view.apply_theme(theme);
+  view.measure(context, constraints_for(kCanvasWidth, kCanvasHeight));
+  view.arrange(context,
+               st::math::Rect{0.0f, 0.0f, view.measured_size().width, view.measured_size().height});
+
+  st::raster::Canvas canvas(kCanvasWidth, kCanvasHeight);
+  const std::size_t before = canvas.clip_depth();
+  // 把裁剪区压成**零高**：直接让 `clip_rect().height == 0`，
+  // 于是 `clip_bottom <= clip_top` 必成立（这就是滚动到视口外的等价条件）。
+  canvas.push_clip_rect(st::math::Rect{0.0f, 0.0f, static_cast<float>(kCanvasWidth), 0.0f});
+  const std::size_t inside = canvas.clip_depth();
+  // **直接调 `paint_content`，不走 `paint`**：`Element::paint` 会先做视口剔除
+  //（零高裁剪与任何矩形相交都为空）→ 整块跳过 → 根本到不了那条早退分支，
+  // 测试就成了恒绿的空壳（本轮实测踩过：回退修复后仍 PASS）。
+  view.paint_content(context, canvas);
+  const std::size_t after = canvas.clip_depth();
+  canvas.pop_clip();
+
+  std::cout << std::format("  [md] clip_depth before={} inside={} after={}\n", before, inside, after)
+            << std::flush;
+  // 空裁剪确实生效（否则本用例根本没碰到那条分支）。
+  ST_CHECK(inside > before);
+  // 关键断言：绘制完必须回到**进入前**的深度。
+  // 漏 pop 时 `paint_content` 内部那一层会留在栈上 ⇒ after = inside + 1。
+  ST_CHECK_EQ(after, inside);
+}
+
 ST_TEST(md_view_render_pixels_and_content_bounds) {
   const st::ui::Theme theme = st::ui::Theme::light();
   st::ui::MarkdownView view{std::string(kSample)};

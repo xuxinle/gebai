@@ -412,6 +412,15 @@ class MarkdownView : public Element {
   [[nodiscard]] auto content_point_of(math::Point control_point) const -> math::Point;
   /// 行下标 ↔ 内容 y 的互查（选择/滚动用；越界/空白区返回最近行）。
   [[nodiscard]] auto row_at_y(float content_y) const -> int;
+  /// 第 `row` 行在**控件坐标**里的横向整条带（含滚动位移）。
+  ///
+  /// 供**细粒度脏上报**用：选中/悬停/光标这类“只影响几行”的变化按行报，
+  /// 不报整个 bounds——大文档的 bounds 远大于合并阀值，一报就退化成整帧重绘。
+  /// 越界行返回空矩形（调用方无需自己判界）。
+  [[nodiscard]] auto row_band(int row) const -> math::Rect;
+  /// 把 `[first, last]` 行区间（闭区间，越界自动夹取）合并成一个损坏矩形上报。
+  /// 区间为空时什么都不做。
+  void report_rows_damage(int first, int last) const;
   /// 高亮选区（paint 里画在文本层之下，**逐行分段**：每行的选中区间独立算）。
   ///
   /// 需要 `port`（算字形**墨迹区**——高亮的垂直范围取墨迹不取行盒，见定义处的说明）。

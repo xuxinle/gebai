@@ -275,12 +275,20 @@ void TagInput::paint_content(const RenderContext& context, raster::Surface& canv
     (void)text_width;
 
     if (focused_ && enabled_) {
-      if (std::fmod(context.time_seconds, 1.0) < 0.5) {
+      // 协议见 `blink.hpp`：定时唤醒，不用连续续帧。
+      const BlinkState blink = caret_blink_.tick(context.time_seconds, *this);
+      if (blink.needs_damage()) {
+        const float caret = draft_box_.x + port.measure_width(draft_, font_size_);
+        record_damage_rect(
+            math::Rect{caret, draft_box_.y + 4.0f, 1.0f, draft_box_.height - 8.0f});
+      }
+      if (blink.visible) {
         const float caret = draft_box_.x + port.measure_width(draft_, font_size_);
         canvas.fill_rect(math::Rect{caret, draft_box_.y + 4.0f, 1.0f, draft_box_.height - 8.0f},
                          raster::Paint::solid(colors.text));
       }
-      request_animation();
+    } else {
+      caret_blink_.reset();
     }
   }
 }

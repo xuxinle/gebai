@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /// @file tag_input.hpp
 /// @brief `TagInput`：标签输入（已输入的标签做成 Chip + 末尾一个可输入的空位）。
@@ -41,6 +41,7 @@
 #include "st/math/geometry.hpp"
 #include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/blink.hpp"
 
 namespace st::ui {
 
@@ -135,7 +136,8 @@ class TagInput : public Element {
   mutable math::Rect draft_box_{};
   mutable int hover_tag_{-1};
   mutable int hover_close_{-1};
-  mutable int last_blink_visible_{-1};
+  /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
+  mutable BlinkCursor caret_blink_{};
 };
 
 }  // namespace st::ui

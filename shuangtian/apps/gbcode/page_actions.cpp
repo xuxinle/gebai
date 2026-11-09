@@ -213,21 +213,15 @@ namespace gbcode_ui {
     // 特殊标签（差异/合并/空白对比）当前正在看时优先关它（与内容区互斥顺序一致：
     // 看的是什么就关什么）——不先判会让 Ctrl+W 在差异视图下静默关掉背后的文件标签。
     if (!compare_key_.value().empty()) {
-      compare_key_.set({});
-      status_.set("已关闭文本对比");
+      close_compare_view();
       return;
     }
     if (!merge_key_.value().empty()) {
-      merge_key_.set({});
-      merge_view_ptr = nullptr;
-      status_.set("已关闭合并标签");
+      close_merge_view();
       return;
     }
     if (!diff_key_.value().empty()) {
-      diff_key_.set({});
-      diff_title_.set({});
-      diff_file_.set(st::text::FileDiff{});
-      status_.set("已关闭差异视图");
+      close_diff_view();
       return;
     }
     const auto list = buffers_.value();
@@ -517,16 +511,33 @@ namespace gbcode_ui {
   /// 切到某个标签（先存回旧文本，再灌新文本）。
   void CodeEditorPage::activate(std::vector<OpenBuffer>& list, std::size_t index) {
     stash_active_text(list);
-    // 切到文件标签 = 当前要看的是编辑器：清掉差异/合并标签（与 `open_path` 同理由）。
-    if (!diff_key_.value().empty() || !merge_key_.value().empty()) {
+    // 切到文件标签 = 当前要看的是编辑器：三个特殊标签（差异/合并/对比）全部让位。
+    //
+    // 三个都不能漏：内容区是**按 key 互斥选分支**的（见 `build_editor_area`），
+    // 漏一个就会“标签栏已指向文件、内容区还停在那张特殊视图”。
+    const bool had_special = !diff_key_.value().empty() || !merge_key_.value().empty() ||
+                             !compare_key_.value().empty();
+    if (!diff_key_.value().empty()) {
       diff_key_.set({});
       diff_title_.set({});
       diff_file_.set(st::text::FileDiff{});
+    }
+    if (!merge_key_.value().empty()) {
       merge_key_.set({});
       merge_view_ptr = nullptr;
     }
+    if (!compare_key_.value().empty()) compare_key_.set({});
     buffers_.set(std::move(list));
     active_.set(index);
+    if (had_special) {
+      // 从特殊标签回到文件标签：“编辑器”这一个实例是**刚被重建**的（内容区之前
+      // 根本不是它）。此时 `editor` 还可能指向**上一帧已销毁**的那个实例——
+      // 不能 `set_text`（旧实现就靠 `load_active_text` 直写，而它只能靠
+      // “编辑器指针非空”这一个条件作判，挡不住悬垂）。
+      // 只标“需要重灌”，实际灌入交给本帧 `build()` 末尾（那里拿到的一定是新实例）。
+      loaded_key_.clear();
+      return;
+    }
     load_active_text();
   }
 
@@ -587,27 +598,60 @@ void CodeEditorPage::load_active_text() {
   // —— 标签关闭策略：脏标签先确认（VSCode 的保存/不保存/取消三选）——
 
 
+  /// 关闭差异/合并/对比这类**特殊标签**的公共收尾。
+  ///
+  /// ## 为何不能只 `xxx_key_.set({})`（用户报「关掉对比标签后编辑器一片空白」）
+  ///
+  /// 特殊标签的内容区是**另一棵子树**（`DiffView`/`MergeView`），关掉它就等于
+  /// 把背后的 `CodeEditor` 整棵重建。新实例的 `text_` 是空的，而 `build()` 末尾的
+  /// 灌入逻辑靠 `loaded_key_` 判「要不要灌」——**它此时还等于当前文件 key**
+  /// （装载那个文件时写下的），于是灌入被跳过了：标签栏回到了 `DESIGN.md`，
+  /// 内容区却是一片空白，只有再点一下别的标签回来才有内容。
+  ///
+  /// 所以：凡是「让编辑器重新上树」的路径，都必须把 `loaded_key_` 清掉。
+  void CodeEditorPage::reset_editor_after_special_tab() {
+    // 拿不到旧指针也没关系：它的作用只是“下一帧提示重新灌”，而真正灌入
+    // 由 `build()` 末尾统一做（那时 editor 是本帧刚取得的，一定有效）。
+    loaded_key_.clear();
+  }
+
+  void CodeEditorPage::close_compare_view() {
+    compare_key_.set({});
+    reset_editor_after_special_tab();
+    status_.set("已关闭文本对比");
+  }
+
+  void CodeEditorPage::close_merge_view() {
+    merge_key_.set({});
+    merge_view_ptr = nullptr;
+    reset_editor_after_special_tab();
+    status_.set("已关闭合并标签");
+  }
+
+  void CodeEditorPage::close_diff_view() {
+    diff_key_.set({});
+    diff_title_.set({});
+    diff_file_.set(st::text::FileDiff{});
+    reset_editor_after_special_tab();
+    status_.set("已关闭差异视图");
+  }
+
+
   /// 关闭入口（快捷键/×/菜单都走这里）：脏标签弹确认，干净标签直接关。
   void CodeEditorPage::request_close(std::string_view key) {
     // 差异/合并标签（key 是 `diff:…` / `merge:…`，与文件 key 天然不撞）：直接关，
     // 它们没有未保存状态。关掉后若还有文件标签，留在原地（active_ 不变）；
     // 没有文件标签则显示空提示。
     if (!merge_key_.value().empty() && key == merge_key_.value()) {
-      merge_key_.set({});
-      merge_view_ptr = nullptr;
-      status_.set("已关闭合并标签");
+      close_merge_view();
       return;
     }
     if (!compare_key_.value().empty() && key == compare_key_.value()) {
-      compare_key_.set({});
-      status_.set("已关闭文本对比");
+      close_compare_view();
       return;
     }
     if (!diff_key_.value().empty() && key == diff_key_.value()) {
-      diff_key_.set({});
-      diff_title_.set({});
-      diff_file_.set(st::text::FileDiff{});
-      status_.set("已关闭差异视图");
+      close_diff_view();
       return;
     }
     const auto list = buffers_.value();

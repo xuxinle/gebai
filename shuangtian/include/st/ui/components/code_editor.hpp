@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "st/text/highlight.hpp"
+#include "st/ui/blink.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/line_layout.hpp"
 
@@ -755,6 +756,11 @@ class CodeEditor : public Element {
   /// 而现算需要 `RenderContext`（绘制期才有）。一帧滞后在这里不可见。
   mutable std::size_t last_visible_first_{1};
   mutable std::size_t last_visible_last_{0};
+  /// 光标闪烁状态机（协议见 `include/st/ui/blink.hpp`）。
+  ///
+  /// 只在**相位真翻转**的那一帧上报损坏区，否则每帧上报会与「帧间损坏判据」
+  /// 互相拉成每帧续帧循环。`mutable`：`paint_content` 是 const。
+  mutable BlinkCursor caret_blink_{};
   /// 行装饰（整体替换语义，见 `set_line_decorations`）。
   std::vector<LineDecoration> line_marks_{};
   /// 按行号索引的装饰表（绘制热路径用；`set_*` 时重建）。

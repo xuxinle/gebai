@@ -1856,6 +1856,27 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   const std::size_t current = line_of_index(cursor_);
   const auto [sel_begin, sel_end] = selection();
   const auto brackets = focused_ ? matching_bracket() : std::nullopt;
+  // —— 光标闪烁（协议见 `include/st/ui/blink.hpp`）——
+  //
+  // 光标画在 `paint_content` 里，而绘制只在「有损坏区 / 有动画 / 唤醒点到期」时才跑。
+  // `BlinkCursor::tick` **内部已登记下一翻转点的唤醒**，不登记的话静止的编辑器永远
+  // 拿不到下一帧，画面会停在光标恰好可见的那一相位（用户看到的就是「光标不闪烁」）。
+  const bool caret_blinking = focused_ && !read_only_;
+  bool caret_visible_now = true;
+  if (caret_blinking) {
+    const BlinkState blink = caret_blink_.tick(context.time_seconds, *this);
+    caret_visible_now = blink.visible;
+    // 只在相位真翻转的那帧上报损坏区，且**只报光标那一小条**（宽 8px）：
+    // 整个 bounds 占视口 80%+，一报就超过合并阈值退化成整帧重绘。
+    if (blink.needs_damage()) {
+      const float caret_x = x_for_index(context, cursor_);
+      const float row_top = origin_y + static_cast<float>(current) * height;
+      record_damage_rect(math::Rect{caret_x - 2.0f, row_top + band_top,
+                                     kCursorWidth + 4.0f, band_height});
+    }
+  } else {
+    caret_blink_.reset();
+  }
 
   for (std::size_t line = first_line; line < last_line && line < line_spans_.size(); ++line) {
     const float row_top = origin_y + static_cast<float>(line) * height;
@@ -2223,7 +2244,7 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   }
 
   // 光标（聚焦且可见时）
-  if (focused_ && !read_only_) {
+  if (caret_blinking && caret_visible_now) {
     const std::size_t line = line_of_index(cursor_);
     if (line >= first_line && line < last_line) {
       const float row_top = origin_y + static_cast<float>(line) * height;
@@ -2903,6 +2924,12 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
   if (name == "line_height") return std::format("{:.2f}", line_height_cache_);
   if (name == "text_offset") return std::format("{:.2f}", line_geometry_cache_.origin_y);
   if (name == "caret_top") return std::format("{:.2f}", line_geometry_cache_.ink_top);
+  // 光标闪烁相位（0=隐 1=显 -1=没在闪）。
+  //
+  // 为何要把它抬到属性面：光标是**每秒只翻两次**的像素变化，截图/像素哈希
+  // 很容易恰好跨过翻转点而“看不到动”（实测：连拍 10 张全一样）。而“它在不在闪”
+  // 是行为契约，不该只能靠肉眼盯屏确认。
+  if (name == "caret_blink") return std::to_string(caret_blink_.last_visible());
   if (name == "ink_height") return std::format("{:.2f}", line_geometry_cache_.ink_height);
   if (name == "baseline") return std::format("{:.2f}", line_geometry_cache_.baseline);
   if (name == "find_needle") return find_needle_;
@@ -3059,9 +3086,9 @@ auto CodeEditor::property_names() const -> std::vector<std::string_view> {
           "tab_width", "indent_guides", "auto_pairs", "scroll_beyond_last_line", "font_size",
           "font_scale", "scroll",
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
-          "find_active", "find_case", "find_word", "line_height", "text_offset", "caret_top",
-          "ink_height", "baseline", "diagnostics", "diagnostic_errors", "hover_diagnostic",
-          "end_annotations"};
+              "find_active", "find_case",  "find_word", "line_height", "text_offset", "caret_top",
+    "ink_height", "baseline", "caret_blink", "diagnostics", "diagnostic_errors",
+    "hover_diagnostic", "end_annotations"};
 }
 
 // —— 查找与替换 ——

@@ -30,8 +30,6 @@ constexpr float k_icon_slot_width = 18.0f;
 constexpr float k_icon_size = 16.0f;
 constexpr float k_input_min_width = 160.0f;
 constexpr float k_textarea_default_lines = 4.0f;
-constexpr double k_blink_period = 1.0;
-constexpr double k_blink_duty = 0.55;
 
 [[nodiscard]] constexpr auto is_continuation(char value) noexcept -> bool {
   return (static_cast<std::uint8_t>(value) & 0xC0) == 0x80;
@@ -115,6 +113,15 @@ Input::Input() {
 void Input::set_text(std::string text) {
   text_ = std::move(text);
   cursor_ = text_.size();
+  mark_dirty();
+}
+
+void Input::update_text(std::string text) {
+  if (text == text_) return;  // 内容没变：不标脏（否则每帧回写会持续重绘）
+  const std::size_t keep = std::min(cursor_, text.size());
+  text_ = std::move(text);
+  // 偏移夹到新长度（超出则到末尾），**不重置到 0/末尾**——这是与 `set_text` 的差别。
+  set_cursor_index(keep);
   mark_dirty();
 }
 
@@ -457,22 +464,12 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
               text_color);
   }
   if (usable && focused()) {
-    // **闪烁走定时唤醒**（与 Terminal 光标同一套协议）：一秒只翻转两次的
-    // 光标若每帧续帧，静止的聚焦输入框就会把帧循环拉满（60fps 空转重绘静止
-    // 画面，纯 CPU 环境实测烧多核）。登记下一翻转点到点才拉一帧。
-    const double blink = std::fmod(context.time_seconds, k_blink_period);
-    const bool visible_now = blink < k_blink_period * k_blink_duty;
-    const double next_flip = context.time_seconds +
-        (visible_now ? k_blink_period * k_blink_duty - blink
-                     : k_blink_period - blink);
-    request_wake_at(next_flip);
-    // 只在相位真翻转的那帧上报损坏区（每帧报会与帧间损坏判据互相触发成
-    // 每帧续帧循环，见 Terminal 光标处的说明）。
-    if (last_blink_visible_ != (visible_now ? 1 : 0)) {
-      record_damage();
-      last_blink_visible_ = visible_now ? 1 : 0;
-    }
-    if (visible_now) {
+    // 闪烁协议见 `blink.hpp`：`tick` 内部已登记下一翻转点的唤醒（一秒只翻两次的
+    // 东西若每帧续帧，静止的聚焦输入框就会把帧循环拉满）。
+    const BlinkState blink = caret_blink_.tick(context.time_seconds, *this);
+    // 只在相位真翻转的那帧上报损坏区（每帧报会与帧间损坏判据互相触发成续帧循环）。
+    if (blink.needs_damage()) record_damage();
+    if (blink.visible) {
     const float height = std::min(line, box.height);
     const math::Rect caret{cursor_x(context), box.y + (box.height - height) * 0.5f, k_cursor_width,
                           height};
@@ -486,7 +483,7 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
       port.draw(canvas, preedit_, math::Point{caret.x, box.y + (box.height - line) * 0.5f}, size,
                 colors.primary);
     }
-    if (visible_now) {
+    if (blink.visible) {
       canvas.fill_rect(caret, raster::Paint::solid(colors.primary), k_cursor_radius);
     }
     }
@@ -778,6 +775,15 @@ void TextArea::set_text(std::string text) {
   mark_dirty();
 }
 
+void TextArea::update_text(std::string text) {
+  if (text == text_) return;  // 内容没变：不标脏
+  const std::size_t keep = std::min(cursor_, text.size());
+  text_ = std::move(text);
+  // 保住光标偏移与滚动位置（**不**重置到 0）——这是与 `set_text` 的差别。
+  set_cursor_index(keep);
+  mark_dirty();
+}
+
 void TextArea::set_placeholder(std::string text) {
   placeholder_ = std::move(text);
   mark_dirty();
@@ -1062,18 +1068,10 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
   }
 
   if (usable && focused()) {
-    // **闪烁走定时唤醒**（与 Input 光标同一套协议，见那儿的说明）。
-    const double blink = std::fmod(context.time_seconds, k_blink_period);
-    const bool visible_now = blink < k_blink_period * k_blink_duty;
-    const double next_flip = context.time_seconds +
-        (visible_now ? k_blink_period * k_blink_duty - blink
-                     : k_blink_period - blink);
-    request_wake_at(next_flip);
-    // 只在相位真翻转的那帧上报损坏区（同 Input 光标处）。
-    if (last_blink_visible_ != (visible_now ? 1 : 0)) {
-      record_damage();
-      last_blink_visible_ = visible_now ? 1 : 0;
-    }
+    // 闪烁协议见 `blink.hpp`（与 `Input` 光标同一套）。
+    const BlinkState blink = caret_blink_.tick(context.time_seconds, *this);
+    if (blink.needs_damage()) record_damage();
+    const bool visible_now = blink.visible;
     const std::size_t row = row_of(lines, cursor_);
     const Line& entry = lines[row];
     const float caret_x = box.x + port.measure_width(

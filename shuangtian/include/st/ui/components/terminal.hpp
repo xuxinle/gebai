@@ -1,4 +1,4 @@
-/// 终端（Terminal）：**真终端**面板——伪终端 + ANSI 屏幕模型 + 字节级输入。
+﻿/// 终端（Terminal）：**真终端**面板——伪终端 + ANSI 屏幕模型 + 字节级输入。
 ///
 /// ## 什么叫"真终端"
 ///
@@ -47,6 +47,7 @@
 #include "st/core/pty.hpp"
 #include "st/math/geometry.hpp"
 #include "st/text/ansi_screen.hpp"
+#include "st/ui/blink.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
 
@@ -100,6 +101,12 @@ struct TerminalSession {
   std::int64_t last_output_ms{0};
   /// 运行中的命令名（PTY 模式下是 shell 名；行模式下是命令）。
   std::string running_name{};
+  /// 自上次绘制以来**变过的屏幕行**（0 起的网格行号，可重复）。
+  ///
+  /// 为何按会话存而不是组件级：每个会话的屏幕各有一套脏行标记
+  ///（`AnsiScreen::set_dirty`），而后台会话的行不归本元素可见区——必须先按
+  /// 会话收下、到 `pump` 末尾再决定报不报。
+  std::vector<int> damage_rows{};
   /// PTY **会话层**真值：收到的字节里是否出现过提示符状的行尾（见 `Terminal::command_running`）。
   ///
   /// 为何不用它单独作答：提示符识别是启发式（不同 shell/主题写法各异），
@@ -534,6 +541,12 @@ class Terminal : public Element {
   [[nodiscard]] auto scroll_to_end_rect() const -> math::Rect;
   /// 标签同步：会话表 → `Tabs`（稳定 key = 会话序号字符串；只在真变了时写）。
   void sync_tabs();
+  /// 屏幕第 `row` 行（0 起）的像素矩形（**整宽**：背景/选区/光标都可能跨行改）。
+  ///
+  /// 格宽/行高与 `paint_content` **同源**（`measured_cell_width_` /
+  /// `measured_line_height_`）——用别的系数算出来的带会错位，重绘时就会把
+  /// 邻行的墨迹抹掉（表现为“光标闪烁时上一行闪一下空白”）。
+  [[nodiscard]] auto output_row_band(int row) const -> math::Rect;
 
   math::Rect tabs_rect_{};
   math::Rect output_rect_{};
@@ -545,12 +558,8 @@ class Terminal : public Element {
   mutable std::string last_active_key_{};
   /// 「回到底部」按钮的悬停态（高亮反馈）。
   mutable bool hover_to_end_{false};
-  /// 上一次绘制时光标的**闪烁可见相位**（`fmod(time,1) < 0.5`）。
-  ///
-  /// 只在相位真翻转的那帧才上报损坏区：若每帧都报，配合帧间损坏判据
-  /// （`tree_damage_pending`）就成了又一个"每帧续帧"循环（2026-10-29 修 CPU
-  /// 空转时引入，实测 headless 下 35fps 空转，当天即修）。`-1` = 从未画过。
-  mutable int last_blink_visible_{-1};
+  /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
+  mutable BlinkCursor caret_blink_{};
   /// 屏幕文本的渲染缓存（逐行，避免每帧重建整屏字符串）。
   mutable std::vector<std::string> screen_lines_{};
   /// 刷新实测格宽缓存（字体端口/字号/缩放变化时调用；`arrange` 里先于列数计算）。

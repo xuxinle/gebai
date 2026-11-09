@@ -1,4 +1,4 @@
-/// 终端组件实现（见 `terminal.hpp` 的设计说明）。
+﻿/// 终端组件实现（见 `terminal.hpp` 的设计说明）。
 ///
 /// 结构（真终端）：
 ///
@@ -15,8 +15,8 @@
 /// 光标是**屏幕状态**（`AnsiScreen::cursor_*`），渲染时画出来。
 
 #include "st/ui/components/terminal.hpp"
-
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <mutex>
@@ -26,6 +26,7 @@
 
 #include "st/core/channel.hpp"
 #include "st/core/fs.hpp"
+#include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
@@ -492,7 +493,17 @@ void Terminal::set_terminal_size(st::process::PtySize size) {
   for (auto& session : sessions_) {
     if (session == nullptr || session->pty == nullptr) continue;
     session->pty->resize(size);
-    if (session->screen != nullptr) session->screen->resize(size.cols, size.rows);
+    if (session->screen != nullptr) {
+      session->screen->resize(size.cols, size.rows);
+      // ⚠ **把 resize 产生的整屏脏标记当场消费掉**（只留一次整块上报）。
+      //
+      // `AnsiScreen::resize` 会 `mark_all_dirty()`；而 `pump` 只在**有新字节到达**时
+      // 才 `take_dirty_rows()`。不在这里清掉的话，那批行会一直积在屏幕里，
+      // 等到用户下一次敲键时才连同那一个字符一起报上来——
+      // 于是“一次按键”变成了整屏重绘（正是本文件要修的那个现象）。
+      (void)session->screen->take_dirty_rows();
+      session->damage_rows.clear();
+    }
   }
   mark_dirty();
 }
@@ -989,6 +1000,9 @@ void Terminal::pump() {
 
   // ① PTY 字节 → 屏幕（**逐会话各自喂**——缓冲按会话分，多标签不串台）。
   bool any_pty_data = false;
+  // **本帧是否真的看过脏行**：没看过（没有字节）而下面又整块上报，是正确的。
+  // 看过就按行报——哪怕行集为空（那说明屏幕真没变）。
+  bool dirty_rows_scanned = false;
   {
     std::vector<std::pair<TerminalSession*, std::vector<std::string>>> ready;
     {
@@ -1024,9 +1038,41 @@ void Terminal::pump() {
       any_pty_data = true;
       // 最近一次输出时间（`idle_ms` 的输入）——每喂一次字节就刷新。
       target->last_output_ms = st::time::now_ms();
+      // **按行取走变动行**：屏幕模型自己就维护了「哪些行变过」
+      //（`AnsiScreen::set_dirty`），这里把它转成像素矩形。
+      //
+      // ❗ 不取走就会累积：下次输出会把上一次的行一起报进来（损坏区只大不小）。
+      // 后台会话的行不在本元素可见区，取走后直接丢。
+      const auto rows = target->screen->take_dirty_rows();
+      dirty_rows_scanned = true;
+      if (target == &current()) {
+        target->damage_rows.insert(target->damage_rows.end(), rows.begin(), rows.end());
+      }
     }
   }
-  if (any_pty_data) mark_dirty();
+  if (any_pty_data) {
+    // **按行上报，不整块报**：终端占视口 30%（gbcode 底部面板），一次按键回显
+    // 只改一行。整块 `bounds` 上报会与其它元素的损坏区合并后恒超 55% 阀值，
+    // 退化成每敲一个字整帧重绘（实测 paint 28.7ms / painted_elements 51，
+    // 而按行上报时 15ms / 41）。
+    TerminalSession& front = current();
+    if (!dirty_rows_scanned || front.screen == nullptr) {
+      // 这一帧没走到「取脏行」（无新字节/屏幕刚建好）→ 整块兼底，正确性优先。
+      // ❗ 不能因为 `damage_rows` 为空就整块报：那会把「屏幕真的没变」也变成整屏重绘。
+      mark_dirty();
+    } else if (!front.damage_rows.empty()) {
+      // 行号可能超出屏幕（刚 resize 过的旧行）：夹到屏内，否则会报出一条
+      // 画在输出区外面的带子（高度仍然对不上屏）。
+      const int rows = front.screen->rows();
+      for (const int row : front.damage_rows) {
+        if (row >= 0 && row < rows) record_damage_rect(output_row_band(row));
+      }
+      front.damage_rows.clear();
+      // 光标可能刚跳行：把光标所在行也带上（旧行的光标块没人报就抹不掉）。
+      if (const int caret_row = front.screen->cursor_row(); caret_row >= 0 && caret_row < rows) {
+        record_damage_rect(output_row_band(caret_row));
+      }
+    }  }
   // ② PTY 退出收尾（逐会话；只收**已退出**的那些）。
   std::vector<std::pair<TerminalSession*, int>> finished;
   {
@@ -1442,6 +1488,23 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
+auto Terminal::output_row_band(int row) const -> math::Rect {
+  if (output_rect_.is_empty()) return {};
+  // 与 `paint_content` 同源：行高取实测值，没有则回退到构造参数。
+  // （格宽不进这个矩形：带子是**整宽**的，命中不需要横向精度。）
+  const float cell_h = measured_line_height_ > 0.0f ? measured_line_height_
+                                                    : line_height_ * font_scale_;
+  if (cell_h <= 0.0f) return {};
+  // 文本起点与 `paint_content` 一致（`origin_x/origin_y = output_rect + 4`）。
+  const float y = output_rect_.y + 4.0f + static_cast<float>(row) * cell_h;
+  // 行高向上/下各取整一像素：字形可能轻微溢出格高（下伸部/行距），
+  // 少一像素就会残留半截墨迹。宽度取**整个输出区**（含行右缘空白与滚动条带），
+  // 因为同一行里可能同时有背景色块、选区和光标。
+  const float top = std::floor(y) - 1.0f;
+  const float height = std::ceil(cell_h) + 2.0f;
+  return math::Rect{output_rect_.x, top, output_rect_.width, height};
+}
+
 void Terminal::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   // 终端有**自己的**色板（挂主题）：底色/前景/光标 + 16 个 ANSI 色。
@@ -1609,19 +1672,14 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   // 用户报"gbcode CPU 70%"的根因）。现在只在下一个相位翻转点拉一帧。
   const bool blinking = screen.cursor_visible() && sb_offset == 0 && focused();
   if (blinking) {
-    const double blink = std::fmod(context.time_seconds, 1.0);
-    const bool visible_now = blink < 0.5;
-    const double next_flip =
-        context.time_seconds + (visible_now ? 0.5 - blink : 1.0 - blink);
-    request_wake_at(next_flip);
-    // **只在相位真翻转的那帧上报损坏区**：光标那一格的重画由翻转驱动，
+    // 闪烁协议见 `blink.hpp`。
+    const BlinkState blink = caret_blink_.tick(context.time_seconds, *this);
+    const bool visible_now = blink.visible;
+    // 只在相位真翻转的那帧上报损坏区：光标那一格的重画由翻转驱动，
     // 平时（同相位内的帧）上报只会与帧间损坏判据（`tree_damage_pending`）
     // 互相触发成又一个每帧续帧循环（实测 headless 35fps 空转）。
     // 屏幕内容/光标位置的其它变化走 PTY 泉的标脏路径，不在这几。
-    if (last_blink_visible_ != (visible_now ? 1 : 0)) {
-      record_damage();
-      last_blink_visible_ = visible_now ? 1 : 0;
-    }
+    if (blink.needs_damage()) record_damage();
     // 挂起态（写满一行还没换行）：光标停在**最后一个字符上**，不是下一列——
     // 多画一格会出现"光标永远多跳一列"的错位感。
     const int cursor_col = screen.pending_wrap() && screen.cursor_col() > 0

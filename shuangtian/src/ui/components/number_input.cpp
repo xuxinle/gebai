@@ -242,15 +242,23 @@ void NumberInput::paint_content(const RenderContext& context, raster::Surface& c
   port.draw(canvas, shown, math::Point{text_x, top}, style_.font_size,
             enabled_ ? colors.text : colors.text_faint);
 
-  // 光标（聚焦时按 1s 周期闪烁；相位由 `time_seconds` 决定 → 可截图回归）。
+  // 光标（聚焦时周期闪烁）。协议见 `blink.hpp`：**定时唤醒**而非连续续帧——
+  // 一秒只翻两次的东西若每帧 `request_animation()`，静止的聚焦控件会把帧循环
+  // 拉满 60fps 空转重绘同一张静止画面。
   if (focused_ && enabled_) {
-    const bool visible = std::fmod(context.time_seconds, 1.0) < 0.5;
-    if (visible) {
+    const BlinkState blink = caret_blink_.tick(context.time_seconds, *this);
+    if (blink.needs_damage()) {
+      // 只报光标那一小条，不报整个控件（大控件整块上报会退化成整帧重绘）。
+      const float caret = caret_x(context);
+      record_damage_rect(math::Rect{caret, bounds_.y + 6.0f, 1.0f, bounds_.height - 12.0f});
+    }
+    if (blink.visible) {
       const float caret = caret_x(context);
       canvas.fill_rect(math::Rect{caret, bounds_.y + 6.0f, 1.0f, bounds_.height - 12.0f},
                        raster::Paint::solid(colors.text));
     }
-    request_animation();
+  } else {
+    caret_blink_.reset();
   }
 
   // 步进三角（上/下）。悬停时加深，禁用时变淡。

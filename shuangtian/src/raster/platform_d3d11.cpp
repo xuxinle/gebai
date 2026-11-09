@@ -2123,6 +2123,9 @@ class GpuCanvas final : public Surface {
   [[nodiscard]] auto clip_rect() const noexcept -> math::IntRect override {
     return current_clip().rect;
   }
+  [[nodiscard]] auto clip_depth() const noexcept -> std::size_t override {
+    return clip_stack_.size();
+  }
   [[nodiscard]] auto has_mask_clip() const noexcept -> bool override {
     return current_clip().mode > 1;
   }

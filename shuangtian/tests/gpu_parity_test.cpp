@@ -585,6 +585,60 @@ ST_TEST(gpu_clip_rounded_rect_leaves_corners_clear) {
   ST_CHECK_EQ(static_cast<int>(target.pixel_at(32, 10).a), 0xFF);
 }
 
+ST_TEST(gpu_clip_rounded_rect_works_away_from_origin) {
+  // 回归（2026-11-09，用户报「相期连续点击审批后标题栏和窗口按钮没了，缩放下才又出现」）：
+  //
+  // ## 根因
+  //
+  // 着色器的圆角裁剪分支把**绝对像素坐标**减了裁剪矩形的**左上角**：
+  //
+  //     clip_factor = saturate(0.5 - rounded_sdf(pixel - g_clip.xy, clip_half, ...));
+  //
+  // 而 `rounded_sdf` 的入参约定是**相对矩形中心**（同一函数在实心/渐变模式里
+  // 收的是 `local_px`，那可是从左上角起算、再靠 `abs(local - half_size)` 转中心的）。
+  // 于是 `pixel - g_clip.xy` 落在 [0, w]×[0, h] 而比的是 `half = (w/2, h/2)`：
+  // **只有矩形右下 1/4 被判为“在内”**，其余全 `discard`。
+  //
+  // ## 为何表现为“标题栏消失、缩放一下又回来”
+  //
+  // 滚动区（`ScrollView`）的裁剪矩形是内容区（y≈34..576，中心 y≈305）。
+  // 标题栏在 y<34，整个落在“上半部”⇒ 被 discard。缩放窗口后裁剪矩形变大、
+  // 中心移动，标题栏又落回“有覆盖”的区间，于是又出现了。
+  //
+  // ## 为何现有用例没拦住
+  //
+  // `gpu_clip_rounded_rect_leaves_corners_clear` 的裁剪矩形是 (8,8,48,48)——
+  // 原点离 0 很近，中心 (32,32) 附近的采样点恰好都落在“右下 1/4”里，
+  // 缺陷实现也是绿的。**本用例的矩心故意远离原点**（x 从 40 起），
+  // 让“左上坐标当中心用”这个错误直接把左侧与上侧整条裁掉。
+  if (!gpu_ready()) return;
+  auto gpu = st::raster::gpu::create_canvas(200, 120, 1.0f, {});
+  ST_CHECK(gpu.has_value());
+  if (!gpu.has_value()) return;
+  Surface& target = **gpu;
+  target.clear(Color{0, 0, 0, 0});
+  // 远离原点的矩形：左上 (40,20)、尺寸 120×80 ⇒ 中心 (100,60)。
+  target.push_clip_rounded_rect(Rect{40.0f, 20.0f, 120.0f, 80.0f}, 12.0f);
+  target.fill_rect(Rect{0.0f, 0.0f, 200.0f, 120.0f},
+                   st::raster::Paint::solid(Color{0x00, 0xFF, 0x00, 0xFF}));
+  target.pop_clip();
+
+  // ① 矩形**左上那一片**必须着色（缺陷实现会把它整块裁掉：那是“上半/左半”区）。
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(50, 30).a), 0xFF);
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(46, 60).a), 0xFF);
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(100, 26).a), 0xFF);
+  // ② 中心当然要着色。
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(100, 60).a), 0xFF);
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(152, 92).a), 0xFF);
+  // ③ 矩形外必须干净（反向断言：不能为了“看得见”而放弃裁剪）。
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(30, 60).a), 0);
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(100, 10).a), 0);
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(170, 60).a), 0);
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(100, 110).a), 0);
+  // ④ 圆角处仍被削掉（不能把圆角裁剪降级成直角）。
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(41, 21).a), 0);
+}
+
 ST_TEST(gpu_huge_path_mask_is_bounded_by_canvas) {
   // 回归（2026-09-30 定位的真实崩溃）：把无界约束哨兵（kUnbounded≈1e9）当作
   // 高度的元素，其描边路径包围盒高度 ≈1e9 → GPU 遮罩曾按包围盒全量分配

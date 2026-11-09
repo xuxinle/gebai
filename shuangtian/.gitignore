@@ -51,8 +51,17 @@ apps/caiyun/styles/**/*.mp4
 apps/caiyun/styles/**/*.wav
 apps/caiyun/styles/**/frames/
 
-# 示例应用自己落盘的本地数据（示例内置库的可重建产物，不是源码）
-apps/cefu/cefu.db
+# 应用运行时落盘的 SQLite 库：全部是**可重建的本地数据**，不是源码。
+#
+# 用通配而不是逐条列举：库文件名会随应用改（`cefu.db` 曾因工作目录不同
+# 分别落在仓库根与 `apps/cefu/`），而且新应用会新增自己的库——逐条列必然漏。
+#
+# 安全性已核：仓库里**没有任何已跟踪的 `.db`**（`git ls-files "*.db"` 为空），
+# 所以这条不会让既有文件从版本库里消失。
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 apps/caiyun/mtfilm/qa/*.mp4
 apps/caiyun/mtfilm/qa/*.png

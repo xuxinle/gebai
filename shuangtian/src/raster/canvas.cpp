@@ -681,6 +681,8 @@ auto Canvas::current_clip() const noexcept -> const ClipFrame& { return clip_sta
 
 auto Canvas::clip_rect() const noexcept -> math::IntRect { return current_clip().rect; }
 
+auto Canvas::clip_depth() const noexcept -> std::size_t { return clip_stack_.size(); }
+
 auto Canvas::has_mask_clip() const noexcept -> bool {
   for (const auto& frame : clip_stack_) {
     if (frame.mask != nullptr) return true;

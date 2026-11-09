@@ -1,4 +1,5 @@
-#include "st/ui/components/merge_view.hpp"
+﻿#include "st/ui/components/merge_view.hpp"
+#include "st/ui/wheel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -409,10 +410,12 @@ auto MergeView::on_event(const RenderContext& /*context*/, Event& event) -> bool
     }
     case EventKind::Wheel: {
       if (event.wheel_delta == 0.0f) return false;
-      // 向上滚（正 delta）= 看上面的内容 ⇒ 减 scroll。
-      scroll_ = std::max(0.0f, scroll_ - event.wheel_delta * line_height() * 2.0f);
-      const float max_scroll = std::max(0.0f, content_height() - bounds_.height);
-      scroll_ = std::min(scroll_, max_scroll);
+      // 方向约定见 `st/ui/wheel.hpp`；本视图一格滚两行（`line_height() * 2`）。
+      const float max = std::max(0.0f, content_height() - bounds_.height);
+      if (max <= 0.0f) return false;
+      const float step = line_height() * 2.0f;
+      const float next = std::clamp(scroll_ - event.wheel_delta * step, 0.0f, max);
+      scroll_ = next;
       mark_dirty();
       event.handled = true;
       return true;

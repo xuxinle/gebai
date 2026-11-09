@@ -1,4 +1,5 @@
-#include "st/ui/components/markdown_view.hpp"
+﻿#include "st/ui/components/markdown_view.hpp"
+#include "st/ui/wheel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1288,6 +1289,30 @@ auto MarkdownView::row_box_at(float content_y) const -> math::Rect {
   return row.box;
 }
 
+auto MarkdownView::row_band(int row) const -> math::Rect {
+  if (row < 0 || row >= static_cast<int>(rows_.size())) return {};
+  // 行盒的 `y` 是**内容坐标**，平移到控件坐标要加滚动位移（与 `paint_content`
+  // 里 `origin_y + row.box.y` 同一变换）。
+  const Row& entry = rows_[static_cast<std::size_t>(row)];
+  const float top = content_box().y - scroll_offset_ + entry.box.y;
+  return math::Rect{bounds_.x, top, bounds_.width, entry.box.height};
+}
+
+void MarkdownView::report_rows_damage(int first, int last) const {
+  if (rows_.empty()) return;
+  const int max_row = static_cast<int>(rows_.size()) - 1;
+  first = std::max(0, first);
+  last = std::min(last, max_row);
+  if (first > last) return;
+  // 用行高累加得到整段区间的竖直包络（行盒高度不一：标题行比正文行高），
+  // 而不是简单地把“首行高 × 行数”相乘。
+  const math::Rect head = row_band(first);
+  const math::Rect tail = row_band(last);
+  if (head.is_empty() || tail.is_empty()) return;
+  record_damage_rect(math::Rect{std::min(head.x, tail.x), head.y, std::max(head.width, tail.width),
+                                tail.bottom() - head.y});
+}
+
 auto MarkdownView::link_at(math::Point content_point) const -> std::string {
   // 先定位行（用同一套命中），再看 x 落在哪个 Span 的区间里。
   const int index = row_at_y(content_point.y);
@@ -1971,7 +1996,15 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
     const float inv_scale = canvas.device_scale() > 0.0f ? 1.0f / canvas.device_scale() : 1.0f;
     const float clip_top = static_cast<float>(raw_clip.y) * inv_scale;
     const float clip_bottom = static_cast<float>(raw_clip.y + raw_clip.height) * inv_scale;
-    if (clip_bottom <= clip_top) return;  // 空裁剪：什么都不画
+    if (clip_bottom <= clip_top) {
+      // 空裁剪（自身已完全排在裁剪区外）：什么都不画。
+      //
+      // ⚠ 早退前**必须 pop**：本函数开头已经 `push_clip_rect(bounds_)`。
+      // `pop_clip` 在栈底是 no-op（不能弹掉画布那一层），所以漏弹**不会报错**，
+      // 只会让留存的那层裁剪静默地约束后面的**全部**绘制，且逐帧累积。
+      canvas.pop_clip();
+      return;
+    }
     // 二分找首个 `box.bottom > clip_top` 的行（与 `row_at_y` 同判据：用 bottom，
     // 因为行间隙归上一行）。
     std::size_t low = 0;
@@ -2079,13 +2112,13 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
     case EventKind::Wheel: {
       if (event.wheel_delta == 0.0f) return false;
       const float max = max_scroll();
-      // **自身不可滚时把滚轮让给外层容器**（return false → 事件冒泡）：
-      // 嵌套滚动（卡片列表里的 MarkdownView）里，内容没超高时滚轮应滚动外层列表，
-      // 而不是被本视图吞掉——旧实现无条件消费 + 内部 no-op 滚动，
-      // 外层 ScrollView 永远收不到 wheel（实测：相期卡片列表滚不动）。
-      // 已在边界且继续滚向边界外同样放行（薄边触到外层继续滚，主流滚动语义）。
-      if (max <= 0.0f) return false;
-      const float next = scroll_offset_ - event.wheel_delta * step;
+      // 方向/步长约定见 `st/ui/wheel.hpp`；`< 0` 表示“没内容可滚”。
+      //
+      // **边界的滚轮必须让给外层**（返回 false → 冒泡）：嵌套滚动（卡片列表里的
+      // MarkdownView）里，内容没超高或已到边时该滚外层列表，而不是被本视图吞掉
+      //（旧实现无条件消费 + 内部 no-op，实测：相期卡片列表滚不动）。
+      const float next = wheel_target(scroll_offset_, event, max, context.theme);
+      if (next < 0.0f) return false;
       if ((next < 0.0f && scroll_offset_ <= 0.0f) || (next > max && scroll_offset_ >= max)) {
         return false;
       }
@@ -2110,7 +2143,8 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
         select_anchor_ = caret_at(content);
         select_focus_ = select_anchor_;
         has_selection_ = false;   // 点一下还没选中任何字（拖了才有）
-        mark_dirty();
+        // 只影响两行：旧选区所在行（去高亮）与新 caret 行。
+        report_rows_damage(select_anchor_.line - 1, select_anchor_.line + 1);
       }
       event.handled = true;
       return true;
@@ -2123,7 +2157,9 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
           if (!hovered_link_.empty()) {
             hovered_link_.clear();
             if (on_link_hover) on_link_hover({});
-            mark_dirty();
+            // 悬停高亮只影响指针所在那一行。
+            report_rows_damage(row_at_y(content_point_of(event.position).y),
+                               row_at_y(content_point_of(event.position).y));
           }
           return false;
         }
@@ -2141,10 +2177,13 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
     const math::Point drag_content = content_point_of(event.position);
     const Caret next = caret_at(drag_content);
       if (next.line != select_focus_.line || next.offset != select_focus_.offset) {
+        const int previous_line = select_focus_.line;
         select_focus_ = next;
         has_selection_ = select_anchor_.line != select_focus_.line ||
                          select_anchor_.offset != select_focus_.offset;
-        mark_dirty();
+        // 拖动改的是**终点行**：旧终点行到新终点行之间是高亮变化的范围。
+        report_rows_damage(std::min(previous_line, select_focus_.line),
+                           std::max(previous_line, select_focus_.line));
       }
       return true;
     }
@@ -2155,10 +2194,13 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
       const bool empty = select_anchor_.line == select_focus_.line &&
                          select_anchor_.offset == select_focus_.offset;
       if (empty) {
+        const int was_first = std::min(select_anchor_.line, select_focus_.line);
+        const int was_last = std::max(select_anchor_.line, select_focus_.line);
         select_anchor_ = Caret{};
         select_focus_ = Caret{};
         has_selection_ = false;
-        mark_dirty();
+        // 清高亮只影响原来那段选区所在的行。
+        report_rows_damage(was_first, was_last);
       }
       return true;
     }

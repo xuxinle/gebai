@@ -1,4 +1,5 @@
-#include "st/ui/components/table.hpp"
+﻿#include "st/ui/components/table.hpp"
+#include "st/ui/wheel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -104,7 +105,8 @@ void Table::set_cell_tone(std::size_t row, std::size_t column, CellTone tone) {
     cell_tones_[row].resize(std::max(column + 1, rows_[row].size()), CellTone::Inherit);
   }
   cell_tones_[row][column] = tone;
-  mark_dirty();
+  // 单个单元格的色调变化只影响那一格（按单元格上报，不报整块）。
+  record_damage_rect(cell_rect(row, column));
 }
 
 auto Table::cell_tone(std::size_t row, std::size_t column) const -> CellTone {
@@ -232,8 +234,11 @@ void Table::set_selected_row(std::optional<std::size_t> row) {
     if (*row >= rows_.size()) return;
   }
   if (row == selected_row_) return;
+  // 选中变化只影响**两行**：旧行（去高亮）与新行（加高亮）——按行上报，
+  // 不报整块（大表格整块上报会越过合并阀值退化成整帧重绘）。
+  if (selected_row_.has_value()) record_damage_rect(row_rect(*selected_row_));
   selected_row_ = row;
-  mark_dirty();
+  if (selected_row_.has_value()) record_damage_rect(row_rect(*selected_row_));
 }
 
 void Table::apply_theme(const Theme& theme) {
@@ -581,8 +586,10 @@ auto Table::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseMove: {
       const std::size_t row = row_at(event.position);
       if (row != hovered_row_) {
+        // 悬停只是两行高亮变化：按行上报（旧行去高亮 + 新行加高亮）。
+        if (hovered_row_ != kNoRow) record_damage_rect(row_rect(hovered_row_));
         hovered_row_ = row;
-        mark_dirty();
+        if (hovered_row_ != kNoRow) record_damage_rect(row_rect(hovered_row_));
       }
       return bounds_.contains(event.position);
     }
@@ -591,8 +598,8 @@ auto Table::on_event(const RenderContext& context, Event& event) -> bool {
       // 清行高亮。旧实现只靠 MouseMove——但 move 只在本表被命中时才到达，
       // 指针移走后最后 hover 的行高亮永久残留。
       if (hovered_row_ != kNoRow) {
+        record_damage_rect(row_rect(hovered_row_));
         hovered_row_ = kNoRow;
-        mark_dirty();
       }
       return false;
     case EventKind::MouseDown:
@@ -607,10 +614,11 @@ auto Table::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::Wheel: {
-      if (!event.shift || max_scroll() <= 0.0f) return false;
-      // 方向：`-`（`wheel_delta` 向上为正；`offset` 变大 = 看到更靠右的列）。
-      // 旧写法的 `+` 把方向反了——与 `scroll.cpp` 的明文约定相反（2026-10-14 修）。
-      set_scroll_offset(scroll_offset_ - event.wheel_delta * kScrollStep);
+      if (!event.shift) return false;  // 横向滚动要 Shift（纵向由外层容器管）
+      // 方向/步长约定见 `st/ui/wheel.hpp`（`< 0` = 没内容可滚，冒泡给外层）。
+      const float next = wheel_target(scroll_offset_, event, max_scroll(), context.theme);
+      if (next < 0.0f) return false;
+      set_scroll_offset(next);
       event.handled = true;
       return true;
     }

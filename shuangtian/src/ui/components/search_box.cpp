@@ -151,13 +151,18 @@ void SearchBox::paint_content(const RenderContext& context, raster::Surface& can
   const float top = centered_line_top(port, visible, style_.font_size, bounds_.y, bounds_.height);
   port.draw(canvas, visible, math::Point{field_.x, top}, style_.font_size, color);
 
-  // 光标
+  // 光标（协议见 `blink.hpp`：定时唤醒，不用连续续帧）
   if (focused_ && enabled_) {
-    if (std::fmod(context.time_seconds, 1.0) < 0.5) {
+    const BlinkState blink = caret_blink_.tick(context.time_seconds, *this);
+    if (blink.needs_damage()) {
+      record_damage_rect(math::Rect{caret_x(context), bounds_.y + 7.0f, 1.0f, bounds_.height - 14.0f});
+    }
+    if (blink.visible) {
       canvas.fill_rect(math::Rect{caret_x(context), bounds_.y + 7.0f, 1.0f, bounds_.height - 14.0f},
                        raster::Paint::solid(colors.text));
     }
-    request_animation();
+  } else {
+    caret_blink_.reset();
   }
 
   // 清除 ×

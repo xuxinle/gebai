@@ -1293,6 +1293,17 @@ auto open_recent(const std::string& path) -> void;
    void request_close(std::string_view key);
 
 
+  /// 关掉差异/合并/对比这三个**特殊标签**（它们各自占据内容区，关掉后要回到编辑器）。
+  ///
+  /// 三者共用一套收尾：清对应 key + **清 `loaded_key_` 让编辑器重新灌入**。
+  /// 不然后者会被当成“已装载”而跳过——用户看到的就是「关掉对比标签，内容区一片空白」。
+  void close_compare_view();
+  void close_merge_view();
+  void close_diff_view();
+  /// 特殊标签关掉后把编辑器标成“需要重灌”（见三个 `close_*_view` 的注释）。
+  void reset_editor_after_special_tab();
+
+
   /// 确认对话框的第一个按钮：保存并关闭。
    void confirm_close_save();
 

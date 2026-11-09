@@ -163,6 +163,7 @@ class Canvas final : public Surface {
   void push_clip_path(const Path& path) override;
   void pop_clip() override;
   [[nodiscard]] auto clip_rect() const noexcept -> math::IntRect override;
+  [[nodiscard]] auto clip_depth() const noexcept -> std::size_t override;
   [[nodiscard]] auto has_mask_clip() const noexcept -> bool override;
 
   // —— 像素访问（物理像素；逻辑坐标访问用 pixel_at_point）——

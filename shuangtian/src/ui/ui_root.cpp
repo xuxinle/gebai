@@ -1743,6 +1743,8 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
   }
   // 1) 收集元素上报的损坏区（上一帧之后到现在的所有变更）。
   collect_tree_damage();
+  // 帧首的裁剪栈基准（画布自带的一层）。帧末要与它对上（见那里的说明）。
+  const std::size_t base_depth = canvas.clip_depth();
   // 2) 必要时重排；真跑了重排 → 保守整帧（见 `layout` 尾部说明）。
   layout();
   // 2.5) 指针态重算（浮层增删/内容替换置位）：布局已出新几何，此刻按最后指针
@@ -1855,6 +1857,14 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
   // `dirty()` 恒真，5 个过渡测试变红）。帧首的 `collect_tree_damage` 已把
   // 帧间登记搬进 `pending_damage_`，这里清的是它搬完后的余量。
   (void)take_root_damage();
+  // **裁剪栈必须归位**：某处漏了 `pop_clip` 时，留存的那层裁剪会静默地约束
+  // **后续所有绘制**（包括别的组件）——而 `pop_clip` 在栈底是 no-op，漏弹不会
+  // 当场报错，只会逐帧累积。这里在帧末把它变成一条显式错误。
+  if (canvas.clip_depth() != base_depth) {
+    ST_LOG_ERROR("[clip-leak] 本帧结束时裁剪栈深 {}（期望 {}）· 残留 clip=({},{},{},{})",
+                 canvas.clip_depth(), base_depth, canvas.clip_rect().x, canvas.clip_rect().y,
+                 canvas.clip_rect().width, canvas.clip_rect().height);
+  }
   return last_frame_partial_;
 }
 

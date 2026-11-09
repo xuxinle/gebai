@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /// @file search_box.hpp
 /// @brief `SearchBox`：搜索框（放大镜 + 输入 + 清除 × + 结果计数徽标）。
@@ -40,6 +40,7 @@
 #include "st/math/geometry.hpp"
 #include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/blink.hpp"
 
 namespace st::ui {
 
@@ -118,7 +119,8 @@ class SearchBox : public Element {
   mutable math::Rect icon_{};
   mutable math::Rect count_box_{};
   mutable bool hover_clear_{false};
-  mutable int last_blink_visible_{-1};
+  /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
+  mutable BlinkCursor caret_blink_{};
 };
 
 }  // namespace st::ui

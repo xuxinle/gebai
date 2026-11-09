@@ -379,6 +379,14 @@ class Surface {
   /// 持有逻辑坐标路径时先 `path.scaled(surface.device_scale())`）。
   virtual void push_clip_path(const Path& path) = 0;
   virtual void pop_clip() = 0;
+  /// 当前裁剪栈**深度**（1 = 只剩画布本身那一层，即“已归位”）。
+  ///
+  /// 为何要它：`pop_clip` 在栈底是 **no-op**（不能把画布那一层弹掉），因此任何一处
+  /// **漏了 pop** 都不会当场报错，只会让**后续所有绘制**被困在那个旧裁剪区里
+  /// ——表现为“某块界面凭空不见了”，而属性面（bounds）一切正常，极难定位
+  ///（实测 2026-11-09：相期在内容溢出、滚动条出现后标题栏整条消失）。
+  /// 有了这个量，帧末一句断言就能把“漏 pop”变成直接变红的回归用例。
+  [[nodiscard]] virtual auto clip_depth() const noexcept -> std::size_t = 0;
   [[nodiscard]] virtual auto clip_rect() const noexcept -> math::IntRect = 0;
   [[nodiscard]] virtual auto has_mask_clip() const noexcept -> bool = 0;
 

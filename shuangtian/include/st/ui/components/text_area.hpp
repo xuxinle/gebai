@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /// @file text_area.hpp
 /// @brief `TextArea`：多行文本域：自动换行（经 `TextPort::wrap`）+ 内部竖向滚动（光标始终可见）。。
@@ -12,6 +12,7 @@
 #include <string_view>
 #include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/blink.hpp"
 
 namespace st::ui {
 
@@ -26,7 +27,15 @@ class TextArea : public Element {
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "TextArea"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::TextArea; }
 
+  /// 换一份文档（**光标回到文首、滚动归位**）。
+  ///
+  /// 语义约定与 `Input::set_text` 一致：`set_text` = 换文档；`update_text` = 保位置。
   void set_text(std::string text);
+  /// 更新文本但**保住光标与滚动**（见 `set_text`）。
+  ///
+  /// 光标按字符偏移保持（超出新文本长度时夹到末尾）；滚动位置不重置。
+  /// 文本未变时什么都不做。
+  void update_text(std::string text);
   void set_placeholder(std::string text);
   /// 设置光标字节位置（自动夹取到合法 UTF-8 码点边界）。
   void set_cursor_index(std::size_t index);
@@ -126,9 +135,8 @@ class TextArea : public Element {
   std::string preedit_{};
   /// 上一帧绘制的插入点矩形（`caret_rect()` 用）。
   mutable math::Rect last_caret_rect_{};
-  /// 上一次绘制时光标的**闪烁可见相位**；只在真翻转的那帧才上报损坏区
-  ///（见 Input 同名成员的说明）。
-  mutable int last_blink_visible_{-1};
+  /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
+  mutable BlinkCursor caret_blink_{};
   /// 只读（编辑禁入，但可聚焦/定位光标/滚动）。与 `enabled_` **无关**：
   /// 后者是“控件不可用”（变灰、不响应），两者语义不同，不要用一个代替另一个。
   bool read_only_{false};

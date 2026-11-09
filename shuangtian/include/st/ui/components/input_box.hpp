@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /// @file input_box.hpp
 /// @brief `Input`：单行文本输入框。。
@@ -12,6 +12,7 @@
 #include <string_view>
 #include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/blink.hpp"
 
 namespace st::ui {
 
@@ -27,8 +28,20 @@ class Input : public Element {
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Input"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::TextInput; }
 
-  /// 设置文本（光标移到末尾）。
+  /// 换一份文档（**光标移到末尾**）。
+  ///
+  /// 语义约定（全仓统一）：
+  /// - `set_text` = **换了一份文档**：光标/滚动重置；适合“打开文件、程序化载入”。
+  /// - `update_text` = **内容变了但位置要保住**：光标按**字符偏移**保持；
+  ///   适合“重新计算后回写同一份内容”。
+  ///
+  /// 混用代价实测过（`CodeEditor` 曾用 `set_text` 做重排回写）：每敲一个字光标就
+  /// 跳回行首、滚动回顶、撤销栈被清空。
   void set_text(std::string text);
+  /// 更新文本但**保住光标位置**（见 `set_text` 的语义约定）。
+  ///
+  /// 偏移超出新文本长度时夹到末尾；文本未变时什么都不做（不标脏）。
+  void update_text(std::string text);
   /// 占位文本（内容为空时以 `text_faint` 绘制）。
   void set_placeholder(std::string text);
   /// 密码模式：显示掩码 `•`（`value()` 仍返回明文）。
@@ -115,10 +128,8 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   /// 上一帧绘制的插入点矩形（`caret_rect()` 用；它拿不到 `RenderContext`）。
   mutable math::Rect last_caret_rect_{};
   bool password_{false};
-  /// 上一次绘制时光标的**闪烁可见相位**；只在真翻转的那帧才上报损坏区
-  ///（每帧报会与帧间损坏判据互相触发成每帧续帧循环，见 Terminal 同名成员）。
-  /// `-1` = 从未画过。mutable：paint 是 const 路径。
-  mutable int last_blink_visible_{-1};
+  /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
+  mutable BlinkCursor caret_blink_{};
 
   // —— 选区（2026-10-14）——
   //

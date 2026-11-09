@@ -1,4 +1,5 @@
 ﻿#include "st/ui/components/html_view.hpp"
+#include "st/ui/wheel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -859,11 +860,11 @@ auto HtmlView::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::Wheel: {
-      const float step = context.theme.metrics().wheel_step;
+      // 方向/步长约定见 `st/ui/wheel.hpp`（`< 0` = 没内容可滚，冒泡给外层）。
       const float limit = std::max(content_height_ + padding_ * 2.0f - bounds_.height, 0.0f);
-      if (limit <= 0.0f) return false;
-      const float delta = event.wheel_delta < 0.0f ? step : -step;
-      set_scroll(scroll_ + delta);
+      const float next = wheel_target(scroll_, event, limit, context.theme);
+      if (next < 0.0f) return false;
+      set_scroll(next);
       return true;
     }
     case EventKind::KeyDown: {

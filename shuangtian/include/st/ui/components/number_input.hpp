@@ -45,6 +45,7 @@
 #include "st/math/geometry.hpp"
 #include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/blink.hpp"
 
 namespace st::ui {
 
@@ -150,7 +151,8 @@ class NumberInput : public Element {
   mutable math::Rect down_{};
   mutable bool hover_up_{false};
   mutable bool hover_down_{false};
-  mutable int last_blink_visible_{-1};
+  /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
+  mutable BlinkCursor caret_blink_{};
 };
 
 }  // namespace st::ui
