@@ -2435,10 +2435,16 @@ void Application::pace_loop(std::int64_t tick_start_ms) {
   // 绝对时刻——不刷新的话剩余时长永远按旧基准算，不是睡过头就是频繁早醒。
   root_.set_time(static_cast<double>(time::now_ns() - impl_->started_ns) / 1'000'000'000.0);
   const double wake_in_ms = root_.next_wake_in_ms();
-  int idle_ms = 4;
+  // **输入响应上限**：`interruptible_wait` 只等控制通道 socket，**不包括窗口消息**——
+  // 键盘/鼠标事件由后端队列 `events_` 承载，只能靠主循环主动 `poll_event()` 取。
+  // 所以即使有定时唤醒点，也不能睡过这个上限，否则真实键盘输入要等下一次
+  // 闪烁翻转才上屏（实测：光标在闪时回显延迟 350~900ms，而绘制只用 3.8ms）。
+  constexpr int kInputPollMs = 4;
+  int idle_ms = kInputPollMs;
   if (wake_in_ms >= 0.0) {
-    // 到点或已过：立即醒（下一轮 tick 会看到 needs_frame 为真）。
-    idle_ms = static_cast<int>(wake_in_ms);
+    // 唤醒点只是“**额外的最早时限**”：取两者之小。到点或已过→立即醒。
+    const int wake_ms = static_cast<int>(wake_in_ms);
+    if (wake_ms < idle_ms) idle_ms = wake_ms;
   }
   if (idle_ms <= 0) return;  // 唤醒点已到：不睡，直接下一轮
   if (idle_ms > 4000) idle_ms = 4000;  // 防御：时钟异常时不至于睡死

@@ -285,6 +285,17 @@ namespace gbcode_ui {
       // 非二进制一律回 false：否则从二进制标签切到普通文件会“继承”只读态。
       editor->set_read_only(buffers[active].binary);
       loaded_key_ = buffers[active].key;
+      // **装载新文件后把键盘焦点交给编辑器**。
+      //
+      // 为何必须有：`open_path` 不能碰 `editor`（帧首调用时那个指针可能是上一次
+      // `build()` 留下的悬垂指针，见那里的说明），聚焦只能等到这里——此刻的
+      // `editor` 是本帧刚取得的。漏了它的后果是**键盘输入全部丢失**：用户打开
+      // 文件后直接打字，字去不了任何控件（必须先用鼠标点一下编辑区）。
+      // 实测（2026-11-09 用户报“所有键盘输入回显都很慢”）：未聚焦时 8/8 次输入
+      // 全部 `handled=false`、帧号零增长；手动聚焦后回显 16~23ms。
+      if (auto* host = editor->host(); host != nullptr) {
+        (void)host->set_keyboard_focus(editor);
+      }
       // 切到新文件：把语言服务指向它（懒启动 server）——只对**磁盘上的真文件**做，
       // 内存缓冲（untitled-N）没有 URI 可同步。
       sync_language_document(buffers[active]);

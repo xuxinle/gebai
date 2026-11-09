@@ -1685,6 +1685,11 @@ result["frame_p50_ms"] = metrics.frame_p50_ms;
   // “帧内小、墙钟大”是被限帧，“两个都大”才是真的重。
   result["wall_p50_ms"] = metrics.wall_p50_ms;
   result["wall_p95_ms"] = metrics.wall_p95_ms;
+  // 下一个定时唤醒点距现在多久（ms；无登记 = -1）。
+  //
+  // 为何要它：帧循环"有唤醒点就睡到唤醒点"，而`tick` 每帧重登唤醒点。
+  // 若这个值长期停在几百毫秒，输入就得等它醒才上屏——**回显延迟的直接量**。
+  result["next_wake_in_ms"] = host.root().next_wake_in_ms();
 result["frame_p95_ms"] = metrics.frame_p95_ms;
 result["nodes"] = static_cast<std::uint64_t>(metrics.nodes);
   // 上一帧实际绘制的元素数：视口剔除的效果**只能**这样观测——
