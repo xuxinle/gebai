@@ -196,6 +196,93 @@ ST_TEST(html_css_unknown_properties_do_not_kill_the_rule) {
 }
 
 /// 伪类/属性选择器**明确不支持**：写了就丢掉那条选择器（不静默当通配）。
+ST_TEST(html_css_animation_and_keyframes_are_parsed) {
+  const auto sheet = st::html::StyleSheet::parse(R"(
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.panel { animation: fadeInUp .45s ease-out 0.1s both; }
+)");
+  // 关键帧真的被收下了（而不是“整个 at-rule 被跳过后什么都没剩”）。
+  ST_CHECK_EQ(sheet.keyframes.size(), static_cast<std::size_t>(1));
+  const auto* frames = st::html::find_keyframes(sheet, "fadeInUp");
+  ST_REQUIRE(frames != nullptr);
+  ST_CHECK_EQ(frames->frames.size(), static_cast<std::size_t>(2));
+  ST_CHECK(std::abs(frames->frames.front().opacity.value_or(-1.0F)) <= 1e-4F);
+  ST_CHECK(std::abs(frames->frames.front().translate_y.value_or(-1.0F) - 24.0F) <= 1e-4F);
+  ST_CHECK(std::abs(frames->frames.back().translate_y.value_or(-1.0F)) <= 1e-4F);
+
+  const auto doc = st::html::parse("<div class='panel'>x</div>");
+  st::html::StyleResolver resolver(sheet, st::html::StyleResolver::initial_style());
+  resolver.resolve_tree(doc.root);
+  const st::html::Node* div = find_child(doc.root, "div");
+  ST_REQUIRE(div != nullptr);
+  const st::html::Style& style = resolver.style_of(div);
+  ST_REQUIRE(style.animation.has_value());
+  ST_CHECK(style.animation->name == "fadeInUp");
+  // **时间值要按单位换算**：`0.45s` = 0.45、`450ms` = 0.45——按原文字符串存就会
+  // 在 `parse_seconds` 两侧各解一次，而 `0.45s` 很容易被当成 45。
+  ST_CHECK(std::abs(style.animation->duration - 0.45) <= 1e-6);
+  ST_CHECK(std::abs(style.animation->delay - 0.1) <= 1e-6);
+  ST_CHECK(style.animation->timing == "ease-out");
+  ST_CHECK(style.animation->fill == st::html::AnimationSpec::Fill::Both);
+}
+
+/// `animation` 简写的分量**可以任意顺序**（按位置解会把名字解成时长）。
+ST_TEST(html_css_animation_shorthand_is_order_insensitive) {
+  const auto sheet = st::html::StyleSheet::parse(
+      ".a { animation: 0.4s ease-in-out 2 alternate pulse; }");
+  const auto doc = st::html::parse("<p class='a'>x</p>");
+  st::html::StyleResolver resolver(sheet, st::html::StyleResolver::initial_style());
+  resolver.resolve_tree(doc.root);
+  const st::html::Node* p = find_child(doc.root, "p");
+  ST_REQUIRE(p != nullptr);
+  const st::html::Style& style = resolver.style_of(p);
+  ST_REQUIRE(style.animation.has_value());
+  ST_CHECK(style.animation->name == "pulse");
+  ST_CHECK(std::abs(style.animation->duration - 0.4) <= 1e-6);
+  ST_CHECK(style.animation->iterations == 2);
+  ST_CHECK(style.animation->direction == st::html::AnimationSpec::Direction::Alternate);
+}
+
+/// 一帧可以列多个停点：`0%, 100% { … }` 必须展开成两个帧。
+/// 不展开就只有最后一个停点生效——`shake` 那种写法会完全变样。
+ST_TEST(html_css_keyframe_multiple_stops_expand) {
+  const auto sheet = st::html::StyleSheet::parse(R"(
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-6px); }
+  75%      { transform: translateX(6px); }
+}
+)");
+  const auto* frames = st::html::find_keyframes(sheet, "shake");
+  ST_REQUIRE(frames != nullptr);
+  ST_CHECK_EQ(frames->frames.size(), static_cast<std::size_t>(4));
+  // **按集合判、不按下标**：解析层保持作者写的顺序（`0%,100%` 在一起），
+  // 排序是引擎 `normalized()` 的事（它才是每帧采样要用到有序帧的那一层）。
+  std::vector<float> offsets;
+  offsets.reserve(frames->frames.size());
+  for (const st::html::KeyframeSpec& frame : frames->frames) offsets.push_back(frame.offset);
+  std::ranges::sort(offsets);
+  ST_CHECK(std::abs(offsets[0]) <= 1e-4F);
+  ST_CHECK(std::abs(offsets[1] - 0.25F) <= 1e-4F);
+  ST_CHECK(std::abs(offsets[2] - 0.75F) <= 1e-4F);
+  ST_CHECK(std::abs(offsets[3] - 1.0F) <= 1e-4F);
+}
+
+/// `transition` 的时长被解析出来（旧实现是“写了就丢”）。
+ST_TEST(html_css_transition_duration_is_parsed) {
+  const auto sheet = st::html::StyleSheet::parse(".b { transition: all 250ms ease-out; }");
+  const auto doc = st::html::parse("<p class='b'>x</p>");
+  st::html::StyleResolver resolver(sheet, st::html::StyleResolver::initial_style());
+  resolver.resolve_tree(doc.root);
+  const st::html::Node* p = find_child(doc.root, "p");
+  ST_REQUIRE(p != nullptr);
+  ST_CHECK(std::abs(resolver.style_of(p).transition_duration - 0.25) <= 1e-6);
+}
+
+/// 伪类/属性选择器**明确不支持**：写了就丢掉那条选择器（不静默当通配）。
 ST_TEST(html_css_pseudo_class_is_dropped_not_wildcarded) {
   const auto sheet = st::html::StyleSheet::parse("a:hover { color: #ff0000; } p { color: #00ff00; }");
   const auto doc = st::html::parse("<a href='#'>x</a>");

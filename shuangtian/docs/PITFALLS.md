@@ -260,6 +260,9 @@
 | **`bounds().x` 不是正文原点** | 自绘文本类组件的 `bounds_.x` 是**控件左缘**，行号槽就在右边；拿它当“列 0”取样会落在行号槽里（那里永远是底色）。正文原点走 `caret_offset_x(context)`（绘制/命中同源）。 | `tests/ui_code_editor_test.cpp` 的 `..._does_not_stack_with_indent_depth`（写这条时先踩了一次：两行都读到 733 = 行号槽底色） |
 | **“编辑 → 重算”不要只靠下一次重组**〔数据回流〕 | 回调只通知宿主、靠 `State` 触发重组才落地，中间会有一帧“派生量没跟着变”（差异/高亮/统计都会）。正确做法是回调里**先就地闭环**（组件自己的 `commit_side_edit`），再通知宿主。因为两者顺序不能反：先通知的话宿主可能在同一帧又读一次旧值 | `diff_view.cpp` 的 `apply_editor_config`；DESIGN §4.2.11.5.1 |
 | **`arrange` 里不要无条件推内容**〔布局期副作用〕 | `arrange` 每帧都跑（只要布局脏/重排），在里面 `push`/`set_text` 等于把布局帧当成内容帧——同第 252 行的回滚效果。只在**刚造出子元素时**推一次（`left_created \|\| right_created`） | `diff_view.cpp` 的 `arrange` |
+| **给 `RenderContext` 加字段只能追加在末尾**〔结构体初始化〕 | 它是**聚合体**：全仓大量调用点写 `RenderContext{theme, port, time, &count}`。把新字段插在中间会**静默**改变既有初始化的字段对应关系——实测把 `bool reduced_motion` 插在 `painted_elements` 前，`nullptr` 被解作 `bool`，报 `converting to bool from nullptr_t`（且只在三个测试单元里露出来，主库照常编过） | `element.hpp` 的 `RenderContext`；本轮实测 |
+| **动画值不要写回 `style_`**〔动画〕 | 写入真样式后，主题切换/控制通道读回/`apply_appearance` 全看到假值，而“结束复位”漏一处就永久错位。正解：`paint_style()` 无动画时返回 `style_`（零开销）、有时返回快照。另：**动画/过渡触发的样式变化必须 `mark_dirty()`**——否则 `paint_frame` 的“空帧闸门”（损坏区空+无续帧）会让这一帧根本不进 `paint`，过渡永远开不了头（测试里直接摸 `style()` 时踩到） | `src/ui/element.cpp` 的 `paint_style` / `advance_animation` |
+| **`draw_canvas` 的 `opacity` 只能乘一次**〔两条腿一致性〕 | 软体侧曾“先 `scale_premul(blended, opacity)`、再把缩放后的 α 当 coverage 传”（后者内部再乘一次），于是 `0.5` 实际得 `0.25`：实测不透明黑贴白底 **191** 而非 127，而 GPU 腿只乘一次——**两条腿本来就不一致**。三维特性矩阵拦不住它（那是图像合成路径） | `src/raster/canvas.cpp` 的 `draw_canvas`；本轮实测 |
 
 ## 场景 8：画自绘组件 / 写光栅管线
 

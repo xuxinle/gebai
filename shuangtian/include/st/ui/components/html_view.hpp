@@ -45,6 +45,7 @@
 
 #include "st/html/style.hpp"
 #include "st/math/geometry.hpp"
+#include "st/ui/animation.hpp"
 #include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
 
@@ -158,6 +159,14 @@ class HtmlView : public Element {
     float radius{0.0f};
     /// 链接 URL（非空 = 该行可点）。
     std::string link{};
+    /// 该行所属块元素声明的 CSS `animation`（`nullptr` = 无）。
+    ///
+    /// 为何挂在**行**上：本组件是扁平行列表（`rows_`）而不是元素树，
+    /// 而动画的生效范围是“那个块元素”（可能占多行）。只持指针，不持数据——
+    /// `AnimationSpec` 的生命周期随 `style_sheet_`（与 `resolver_` 同生共死）。
+    const html::AnimationSpec* animation{nullptr};
+    /// 该行所属块元素的 `transition-duration`（秒；`0` = 无）。
+    double transition_duration{0.0};
   };
 
   /// 排版中间状态：当前块（一个块可以占多行）。
@@ -177,6 +186,9 @@ class HtmlView : public Element {
     float radius{0.0f};
     /// 块首行的行索引（画背景用）。
     std::size_t first_row{0};
+    /// 块声明的动画/过渡（排版时从 `html::Style` 抄下来，落到它产生的每一行上）。
+    const html::AnimationSpec* animation{nullptr};
+    double transition_duration{0.0};
     bool has_rows{false};
   };
 
@@ -236,6 +248,22 @@ class HtmlView : public Element {
   static void collect_text(const html::Node& node, std::string& out);
   /// 计算可点行的 URL（命中用）。
   [[nodiscard]] auto link_at(math::Point point) const -> std::string;
+  /// `html::KeyframesSpec` → 引擎关键帧（属性名不同、值已解析）。
+  ///
+  /// 为何要做这一层转换而不是让 `html` 层直接产 `anim::Keyframes`：
+  /// 两个模块是**独立层**（`html` 是解析，`ui` 是绘制）。让解析器 include
+  /// UI 引擎的头，会让“只想预览一段静态 HTML”的宿主也拖进整套动画。
+  [[nodiscard]] static auto to_engine_keyframes(const html::KeyframesSpec& spec)
+      -> anim::Keyframes;
+  /// `html::AnimationSpec` → 引擎播放参数（含 `timing` 字符串解析）。
+  [[nodiscard]] static auto to_engine_animation(const html::AnimationSpec& spec)
+      -> anim::Animation;
+  /// 本份文档的动画起点（单调秒；首次绘制时定）。
+  ///
+  /// 为何不是“每个块各自一个起点”：CSS 里同一份文档的多个 `animation`
+  /// 都在**页面就绪那一刻**同时起算（错开靠 `delay`，不靠错开起点）。
+  /// 各自计时会让“重新排版一次”就重置一部分动画（重排会重建 `rows_`）。
+  mutable double html_animation_start_{-1.0};
 
   /// 文档底色（从 `<body>`/`<html>` 的 `background` 取；没有则白）。
   ///

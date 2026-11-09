@@ -389,6 +389,14 @@ auto UiRoot::hit_test_pointer_move(math::Point point) -> Element* {
 
 auto UiRoot::hit_test_subtree(Element& element, math::Point point) -> Element* {
   if (!element.visible() || !element.intercepts_input()) return nullptr;
+  // **动画平移要反算进命中坐标**（与绘制同源）：元素在画面上被偏移了
+  // `animation_translate()`，它的可点区域也跟着走——不补偿就是“看着在那里、点不到”。
+  // 坐标只在**本元素这一层**反算，下钻时传的是已补偿的坐标，
+  // 于是每一层各管自己那一段平移（与绘制时嵌套 `TranslatedSurface` 同构）。
+  if (element.animation_translate().x != 0.0f || element.animation_translate().y != 0.0f) {
+    point = math::Point{point.x - element.animation_translate().x,
+                        point.y - element.animation_translate().y};
+  }
   // **裁剪器件的命中也要裁**：`clip_children` 为真的元素（`ScrollView` 的内层、
   // `CodeEditor` 等）把子元素画到自己的矩形外——那些像素根本不存在，自然不可点。
   //

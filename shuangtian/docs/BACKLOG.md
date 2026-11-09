@@ -7130,7 +7130,17 @@ token/include 目录——**不含源内容与 mtime**；版本判定全在 `obj
     Windows 分支（`Write-Output …; Start-Sleep`）**保持未改**：两者都是 PowerShell 进程内 cmdlet，
     不发生前台作业交接，只能靠 Windows 实测判定（见用例内注释）。
 - [ ] 多窗口抽象（Window/WindowManager 进 shell，control::Host 带窗口维度）。
-- [ ] 统一动画系统（现每组件手工状态机：advance_hover/last_hover_time_）。
+- [x] **统一动画系统**（2026-11-09 已落地：`st/ui/animation.hpp` + `Element::set_animation` /
+      `set_transition`；CSS 式缓动/关键帧/过渡，几何变换走 `TranslatedSurface` + 离屏合成。
+      设计见 `DESIGN.md` §4.2.9.2）。**剩下的**：
+  - [ ] 既有组件的私有状态机**尚未逐个迁移**到新引擎（`Toggle`/`Tabs`/`ProgressRing`/
+        `Skeleton`/`StatusDot` 仍是各自的 `paint_content` 里算相位）。它们工作正常，
+        且各自带着“组件专属的中间量”（开关的滑块圆角渐变、`ProgressRing` 的弧段扫掠）——
+        搬进通用引擎需要先回答“这些中间量要不要也做成可动画属性”。**不提前搬**：
+        搬错一次就是把已经正常的观感改坏。
+  - [ ] 逐关键帧 `timing-function`（目前段间统一）。
+  - [ ] CSS `@media (prefers-reduced-motion)` 解析（`RenderContext::reduced_motion`
+        已就位、宿主可手工开；解析层还没读这条查询）。
 - [ ] DisplayList（立即模式→保留模式）：解锁多线程分帧、录制回放测试、GPU 图层缓存。
 - [ ] 协议命令注册表机制（server.cpp 分发链较长，新命令多处同步）。
 - [ ] `st add/fetch/vendor/audit/outdated` CLI 入口（内核已就绪）+ TLS + 归档解包。

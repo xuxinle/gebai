@@ -14,6 +14,7 @@
 
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/ui/animation.hpp"
 #include "st/ui/property_schema.hpp"
 #include "st/ui/style.hpp"
 #include "st/ui/styling.hpp"
@@ -348,6 +349,19 @@ struct RenderContext {
   /// 计数是可复现的结构性证据：既能证明"屏幕外确实没画"，
   /// 也能配合"每个元素自己声明是否在视口内"来证明"该画的都画了"。
   std::uint64_t* painted_elements{nullptr};
+
+  /// **减少动效**（无障碍：`prefers-reduced-motion` 同语义）。
+  ///
+  /// 为真时所有动画/过渡**直接落终态**（不播中间帧），且 `paint` 不会为动画续帧。
+  /// 为何要把它放进 `RenderContext` 而不是一个全局开关：全局状态会跨线程/
+  /// 跨实例泄漏（同时跑两个窗口时一个开了就全开了），而它天然是“这一次渲染的
+  /// 环境”。宿主（多窗口/移动端/系统设置）在构造 context 时决定它。
+  ///
+  /// 必须放在**字段末尾**：本结构是聚合体（大量调用点写
+  /// `RenderContext{theme, port, time, &count}`），插在中间会静默改变既有
+  /// 初始化的字段对应关系（实际踩到：`nullptr` 被解作 `bool`，报
+  /// “converting to bool from nullptr_t”）。新增字段一律追加。
+  bool reduced_motion{false};
 };
 
 class Element {
@@ -702,6 +716,57 @@ class Element {
     const RenderExtras* state = extras_if_any();
     return state != nullptr ? state->hover_t : 0.0f;
   }
+
+  // —— 动画（CSS 式；引擎见 `st/ui/animation.hpp`）——
+  //
+  // ## 为什么运行态长在 `Element` 而引擎是纯函数
+  //
+  // 引擎只会算“某一刻该是什么值”，而“从哪一刻开始算”“要不要续帧”“什么时候
+  // 算播完”是元素自己的生命周期——它已经在 `paint()` 里拿到 `RenderContext`
+  // （`time_seconds` 在那里）。把这三件事放到元素上，与 `advance_hover` 完全同构，
+  // 于是：
+  //
+  // - **不需要新的 tick 钩子**（应用不必驱动任何东西，也就没有“忘了 tick
+  //   所以动画不动”这类缺陷）；
+  // - **续帧走既有的 `request_animation()` 汇总链**（`UiRoot::collect_animation_requests`），
+  //   播完就不再请求——不会重踩 2026-10-29 那个“静止画面每帧空转”的坑。
+  //
+  // 与 CSS 的差别：**不支持逐关键帧的 timing-function**（段间统一，见头文件的能力表）。
+
+  /// 设一个关键帧动画（从**下一次绘制**起播）。
+  ///
+  /// 语义对齐 CSS：`delay` 负值为“从动画中途开始”；`iterations <= 0` 为无限循环；
+  /// `fill: forwards/both` 才会在结束后保留终态（否则回落到元素自身样式）。
+  /// `frames` 传 `anim::preset_keyframes("fadeInUp")` 或自己构造的关键帧。
+  void set_animation(anim::Animation animation, anim::Keyframes frames);
+  /// 用内置预设设一个动画（包含了时长/循环/缓动；名字见 `anim::preset_names()`）。
+  /// 名字不存在时返回 `false`（**不静默装个空的**：那会让“写错了动画名”看起来像
+  /// “动画生效了但看不出效果”）。
+  [[nodiscard]] auto set_preset_animation(std::string_view preset) -> bool;
+  void clear_animation();
+  /// 改动画的**延迟**（秒）。只能在 `set_animation` 之后调（动画未设时无操作）。
+  ///
+  /// 为何要单独的入口：声明式里“预设名 + 错开延迟”是最常见的入场写法
+  ///（一屏卡片依次出现），而把延迟塞进预设名会让名字组合爆炸
+  ///（`fadeInUp-delay-2` 之类）。
+  void set_animation_delay(double seconds);
+  /// 是否设过过渡（声明式用来避开“每帧重设 → 每帧重置过渡状态”）。
+  [[nodiscard]] auto transition_configured() const noexcept -> bool;
+  /// 是否还在播（结束后为 `false`；诊断/测试用）。
+  [[nodiscard]] auto animation_running() const noexcept -> bool;
+  /// 本帧生效的动画属性（未设动画时全为空）。
+  [[nodiscard]] auto animation_props() const noexcept -> const anim::Props&;
+  /// 动画正在作用在几何上吗（位移/缩放非恒等）——绘制与命中需要特殊处理。
+  [[nodiscard]] auto animation_transforms() const noexcept -> bool;
+
+  /// 设一条属性过渡（`transition`）：此后**样式值变化时**补间过去而不是瞬变。
+  /// 与动画的分工：过渡由“值变了”触发（交互态、主题切换、数据刷新），
+  /// 动画由“想播”触发——与 CSS 里 `transition` / `animation` 的分工一致。
+  void set_transition(anim::Transition transition);
+  void clear_transition();
+  /// 当前过渡是否在进行。
+  [[nodiscard]] auto transition_active() const noexcept -> bool;
+
   [[nodiscard]] auto pressed() const noexcept -> bool { return pressed_; }
   [[nodiscard]] auto focused() const noexcept -> bool { return focused_; }
   /// 焦点环策略（组件级声明，不是运行时状态）。
@@ -1154,6 +1219,16 @@ class Element {
   /// 子类绘制文本（自动按 `text_align` 定位）。
   auto paint_text(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                   math::Rect box) const -> void;
+  /// **本帧真正用于绘制的样式**：无动画时就是 `style_`（零开销、同一个对象），
+  /// 有动画时是「`style_` + 动画覆盖值」的快照。
+  ///
+  /// 为何不把动画值直接写回 `style_`：那是**真实样式**——主题切换、
+  /// 控制通道读回、`apply_appearance` 都会看到被动画污染的假值，
+  /// 而且“动画结束复位”一旦有一处漏了，界面就永久错位。
+  [[nodiscard]] auto paint_style() const noexcept -> const Style&;
+  /// 推进动画/过渡状态并算好本帧的 `paint_style()`。必须在**绘制与读取几何之前**调。
+  /// 返回是否仍在动（调用方据此续帧）。
+  [[nodiscard]] auto advance_animation(const RenderContext& context) const -> bool;
   /// 布局子节点（Flex 子集：方向/间距/增长/对齐）。
   void layout_children(const RenderContext& context, math::Rect content);
   /// 摆放一个**绝对定位**的子元素（不参与 flex 流；见 `Style::absolute`）。
@@ -1226,20 +1301,69 @@ class Element {
     /// 主题切换后所有联动自动跟随，这是「CSS 控制元素样式」的落点）。
     /// `has_value()` 为假 = 未声明外观（组件自己的 apply_theme 说了算）。
     std::optional<Appearance> appearance{};
+
+    // —— 动画（CSS 式；引擎见 `st/ui/animation.hpp`）——
+    //
+    // 惰性：没设过动画/过渡的元素不付任何代价（本结构本身也是惰性分配的，
+    // 见上方 `extras()` 的说明）。
+    anim::Animation animation{};
+    /// 已归一化的关键帧（构造时排序并补齐端点；每帧不再重算）。
+    anim::Keyframes keyframes{};
+    /// 动画起点（单调秒；`-1` = 尚未起播——首帧绘制时才定，这样“设了但还没上屏”
+    /// 的元素不会因为构造与首帧之间的时间差而生从半程开始播）。
+    double anim_start{-1.0};
+    /// 是否设过动画（与 `anim_running` 不同：后者是“本帧还在播”）。
+    bool anim_active{false};
+    bool anim_running{false};
+    /// 本帧生效的动画属性（已合成到 `paint_style()` 里）。
+    anim::Props anim_props{};
+    /// 本帧的动画样式的“快照”（`paint_style()` 返回它；只在 `anim_props`
+    /// 非空时使用）——存成字段而不是每次现造，避免每帧复制一份 `Style`。
+    Style animated_style{};
+
+    anim::Transition transition{};
+    double transition_start{-1.0};
+    bool transition_running{false};
+    /// 过渡的起点/终点属性快照（`from` 在值变化那一帧捕获，`to` 每帧跟随当前样式）。
+    anim::Props transition_from{};
+    anim::Props transition_to{};
+    /// 捕获“当前样式对应的属性快照”（判断值变没变、做起止点）。
+    anim::Props style_snapshot{};
+    /// 是否已记下初始快照。**没有它就会“启动即过渡”**：首帧 `style_snapshot` 为空，
+    /// 与真实样式逐项不等，会被当成“值变了”而开一段无意义的过渡（多拉十几帧）。
+    bool style_snapshot_valid{false};
   };
 
   /// 取（必要时创建）渲染附属状态。**非 const** 的入口（`advance_hover` 用 `mutable` 成员调）。
   [[nodiscard]] auto extras() const noexcept -> RenderExtras& {
     if (extras_ == nullptr) extras_ = std::make_unique<RenderExtras>();
     return *extras_;
-  }
-  /// 只读访问（**不存在则为 `nullptr`**）：查询路径用，不分配。
+  }  /// 只读访问（**不存在则为 `nullptr`**）：查询路径用，不分配。
   [[nodiscard]] auto extras_if_any() const noexcept -> const RenderExtras* {
     return extras_.get();
   }
 
   /// 组件主动请求的续帧（与悬浮过渡共用汇总链路）。
   mutable bool animation_requested_{false};
+  /// 本元素这一帧的**动画平移量**（逻辑像素）与缩放。
+  /// `mutable`：在 `paint()`（const）里推进；命中测试与子元素坐标都读它。
+  mutable math::Point animation_translate_{};
+  mutable float animation_scale_{1.0f};
+
+ public:
+  /// 本帧的动画平移量（命中测试反算坐标用；未设动画时为原点）。
+  [[nodiscard]] auto animation_translate() const noexcept -> math::Point {
+    return animation_translate_;
+  }
+  /// 本帧的动画缩放（诊断用；命中暂不按缩放反算，见 `animation_scale` 的说明）。
+  [[nodiscard]] auto animation_scale() const noexcept -> float { return animation_scale_; }
+
+ protected:
+  /// 离屏合成期间临时改走“去掉了动画透明度”的样式（防止乘两次）。
+  mutable const Style* style_override_{nullptr};
+
+  /// 带几何变换的绘制入口（`paint()` 在剥除、计时后调它）。
+  virtual void paint_animated(const RenderContext& context, raster::Surface& canvas) const;
   /// 登记的唤醒时刻（单调秒；< 0 = 无）。mutable：paint 是 const 路径。
   mutable double wake_at_{-1.0};
   bool pressed_{false};

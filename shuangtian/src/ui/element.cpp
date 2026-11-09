@@ -3,12 +3,12 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
-
 #include "st/core/log.hpp"
 #include "st/core/fs.hpp"
 #include "st/perf/clock.hpp"
 #include "st/perf/frame.hpp"
 #include "st/raster/paint.hpp"
+#include "st/raster/translated_surface.hpp"
 #include "st/math/path.hpp"
 #include "st/ui/component_registry.hpp"   // Panel / Spacer 的登记（文件末尾）
 #include "st/ui/components/panel.hpp"      // `component_meta<Panel/Spacer>` 的声明
@@ -370,6 +370,33 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   // 兼容期：仍接受 `size`，但走告警路径（见 set_property）。
   if (name == "font_size") return std::format("{:.2f}", static_cast<double>(style_.font_size));
   if (name == "weight") return std::string(ui::to_string(style_.font_weight));
+  // —— 动画诊断口 ——
+  //
+  // `animation` 返回**空串** = 未设动画（而不是 `"none"`：后者在 CSS 里是隔写，
+  // 两者的语义一样但读者容易把它们当成“设了但没效果”）。
+  if (name == "animation") {
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr && state->anim_active ? std::optional<std::string>(state->animation.name)
+                                                  : std::nullopt;
+  }
+  if (name == "animation_running") return animation_running() ? "true" : "false";
+  // 本帧的动画透明度（`get` 能读到“现在到底多淡”，比截图量像素可靠）。
+  if (name == "animation_opacity") {
+    const anim::Props& props = animation_props();
+    return props.opacity.has_value()
+               ? std::optional<std::string>(std::format("{:.3f}", static_cast<double>(*props.opacity)))
+               : std::nullopt;
+  }
+  if (name == "animation_translate") {
+    return std::format("{:.2f},{:.2f}", static_cast<double>(animation_translate_.x),
+                       static_cast<double>(animation_translate_.y));
+  }
+  if (name == "transition") {
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr && state->transition.active()
+               ? std::optional<std::string>(std::format("{:.3f}s", state->transition.duration))
+               : std::nullopt;
+  }
   return std::nullopt;
 }
 
@@ -386,7 +413,13 @@ auto Element::property_names() const -> std::vector<std::string_view> {
 
 auto Element::readonly_property_names() const -> std::vector<std::string_view> {
   // 默认空：哪些属性只读由组件自己声明。
-  return {};
+  //
+  // 动画诊断五项**只能读**：它们反映的是“这一帧播到哪了”（由时间轴推出），
+  // 写入它们没有意义；而入 `property_names()` 会让通用护欄
+  // （“声明为可写的名字必须能 `set` 生效”）必然失败。
+  // 要触发动画走 `invoke_action("animate", 预设名)`——那是**动作**不是属性。
+  return {"animation", "animation_running", "animation_opacity", "animation_translate",
+          "transition"};
 }
 
 auto Element::property_schema() const -> std::span<const PropertyDesc> {
@@ -399,7 +432,6 @@ auto Element::property_schema() const -> std::span<const PropertyDesc> {
 }
 
 auto Element::invoke_action(std::string_view action, std::string_view argument) -> bool {
-  (void)argument;
   if (action == "click" || action == "activate") {
     activate();
     return true;
@@ -410,6 +442,19 @@ auto Element::invoke_action(std::string_view action, std::string_view argument) 
   }
   if (action == "blur") {
     set_focused(false);
+    return true;
+  }
+  // 动画的**动作**入口（属性面只暴露只读诊断，原因见 `readonly_property_names`）：
+  //   invoke animate <预设名>   —— 用内置预设起播（名字见 `anim::preset_names()`）
+  //   invoke stop-animation     —— 清除动画
+  // 为何走动作而不走 `set animation=…`：起播是**带副作用的动作**（重置起点、标脏、
+  // 请求续帧），而 `set` 的契约是“改一个值”——把它做成属性会让
+  // “重复 `set` 同一个名字”反复重播（声明式每帧下发属性时会变成死循环动画）。
+  if (action == "animate") {
+    return set_preset_animation(argument);
+  }
+  if (action == "stop-animation") {
+    clear_animation();
     return true;
   }
   return false;
@@ -496,6 +541,260 @@ void Element::mark_layout_dirty() {
 void Element::clear_dirty() noexcept {
   dirty_ = false;
   layout_dirty_ = false;
+}
+
+// —— 动画（CSS 式；引擎在 `st/ui/animation.cpp`）——
+
+void Element::set_animation(anim::Animation animation, anim::Keyframes frames) {
+  if (animation.empty() || frames.empty()) {
+    clear_animation();
+    return;
+  }
+  RenderExtras& state = extras();
+  state.animation = std::move(animation);
+  // **归一化在设值时做一次**（排序/去重/补端点）：采样是每帧都跑的，
+  // 把排序放在采样里等于每帧排一次序（动画越复杂越贵，且排序结果毫无变化）。
+  state.keyframes = std::move(frames).normalized();
+  state.anim_active = true;
+  state.anim_running = true;
+  // 起点由**首帧绘制**定（`-1`）：这样“设好动画、下帧才上屏”的元素不会因为
+  // 构造与首帧之间的时间差而生从半程开始播。
+  state.anim_start = -1.0;
+  state.anim_props = anim::Props{};
+  mark_dirty();
+}
+
+auto Element::set_preset_animation(std::string_view preset) -> bool {
+  std::optional<anim::Keyframes> frames = anim::preset_keyframes(preset);
+  std::optional<anim::Animation> animation = anim::preset_animation(preset);
+  if (!frames.has_value() || !animation.has_value()) {
+    // 名字不存在：**不静默装个空的**——那会让“写错动画名”看起来像“动画生效了但看不出”。
+    ST_LOG_WARN("未知的动画预设：{}（可用：fadeIn/fadeInUp/fadeOut/modalIn/slideInLeft/"
+                "slideInRight/pulse/shake）", preset);
+    return false;
+  }
+  set_animation(std::move(*animation), std::move(*frames));
+  return true;
+}
+
+void Element::clear_animation() {
+  const RenderExtras* state = extras_if_any();
+  if (state == nullptr || !state->anim_active) return;
+  RenderExtras& mutable_state = extras();
+  mutable_state.anim_active = false;
+  mutable_state.anim_running = false;
+  mutable_state.anim_start = -1.0;
+  mutable_state.anim_props = anim::Props{};
+  animation_translate_ = math::Point{};
+  animation_scale_ = 1.0f;
+  mark_dirty();
+}
+
+void Element::set_animation_delay(double seconds) {
+  const RenderExtras* state = extras_if_any();
+  if (state == nullptr || !state->anim_active) return;
+  RenderExtras& mutable_state = extras();
+  mutable_state.animation.delay = seconds;
+  // 改延迟等于“重新计时”：起点抬到下帧（否则已播的时长会跟新延迟叠在一起）。
+  mutable_state.anim_start = -1.0;
+  mark_dirty();
+}
+
+auto Element::transition_configured() const noexcept -> bool {
+  const RenderExtras* state = extras_if_any();
+  return state != nullptr && state->transition.active();
+}
+
+auto Element::animation_running() const noexcept -> bool {  const RenderExtras* state = extras_if_any();
+  return state != nullptr && state->anim_running;
+}
+
+auto Element::animation_props() const noexcept -> const anim::Props& {
+  static const anim::Props kEmpty{};
+  const RenderExtras* state = extras_if_any();
+  return state != nullptr ? state->anim_props : kEmpty;
+}
+
+auto Element::animation_transforms() const noexcept -> bool {
+  return animation_translate_.x != 0.0f || animation_translate_.y != 0.0f ||
+         animation_scale_ != 1.0f;
+}
+
+void Element::set_transition(anim::Transition transition) {
+  RenderExtras& state = extras();
+  state.transition = std::move(transition);
+  state.transition_start = -1.0;
+  state.transition_running = false;
+  state.transition_from = anim::Props{};
+  state.transition_to = anim::Props{};
+  state.style_snapshot = anim::Props{};
+  mark_dirty();
+}
+
+void Element::clear_transition() {
+  const RenderExtras* state = extras_if_any();
+  if (state == nullptr || !state->transition.active()) return;
+  RenderExtras& mutable_state = extras();
+  mutable_state.transition = anim::Transition{};
+  mutable_state.transition_start = -1.0;
+  mutable_state.transition_running = false;
+  mutable_state.transition_from = anim::Props{};
+  mutable_state.transition_to = anim::Props{};
+  mutable_state.style_snapshot = anim::Props{};
+  mark_dirty();
+}
+
+auto Element::transition_active() const noexcept -> bool {
+  const RenderExtras* state = extras_if_any();
+  return state != nullptr && state->transition_running;
+}
+
+namespace {
+
+/// 把一份 `Style` 里**可动画的项**取成 `Props`（过渡的起止点与“值变没变”判据）。
+[[nodiscard]] auto snapshot_style(const Style& style) -> anim::Props {
+  anim::Props out{};
+  out.opacity = style.opacity;
+  out.background = style.background;
+  out.border_color = style.border_color;
+  out.color = style.color;
+  out.radius = style.radius;
+  out.border_width = style.border_width;
+  out.font_size = style.font_size;
+  return out;
+}
+
+/// 把动画/过渡算出的属性**写进一份 `Style` 副本**（返回 `paint_style()` 要用的快照）。
+void apply_props(Style& style, const anim::Props& props) {
+  // 逐项只在声明了才写——**未声明的项必须保持样式原值**（关键帧 `from{opacity:0}`
+  // 只该动 opacity，若把其余字段写成默认值，背景色也会被一起冲掉）。
+  if (props.opacity.has_value()) style.opacity = *props.opacity;
+  if (props.background.has_value()) style.background = *props.background;
+  if (props.border_color.has_value()) style.border_color = *props.border_color;
+  if (props.color.has_value()) style.color = *props.color;
+  if (props.radius.has_value()) style.radius = *props.radius;
+  if (props.border_width.has_value()) style.border_width = *props.border_width;
+  if (props.font_size.has_value()) style.font_size = *props.font_size;
+}
+
+}  // namespace
+
+auto Element::advance_animation(const RenderContext& context) const -> bool {
+  const RenderExtras* existing = extras_if_any();
+  const bool has_animation = existing != nullptr && existing->anim_active;
+  const bool has_transition = existing != nullptr && existing->transition.active();
+  if (!has_animation && !has_transition) {
+    animation_translate_ = math::Point{};
+    animation_scale_ = 1.0f;
+    return false;
+  }
+  RenderExtras& state = extras();
+  anim::Props combined{};
+  bool running = false;
+
+  if (state.anim_active) {
+    if (state.anim_start < 0.0) state.anim_start = context.time_seconds;
+    if (context.reduced_motion) {
+      // 无障碍：不播中间帧，直接落终态。用“一个足够大的 elapsed”让采样器
+      // 走**它自己的结束分支**（而不是让这里再造一套“终态是什么”的逻辑）——
+      // 两份实现必然漂移（`fill`/`direction`/`iterations` 全都参与终态判定）。
+      const double span = state.animation.delay +
+                          state.animation.duration *
+                              static_cast<double>(state.animation.iterations > 0
+                                                      ? state.animation.iterations
+                                                      : 1) +
+                          1.0;
+      const anim::Sample sample =
+          anim::sample_animation(state.keyframes, state.animation, span);
+      state.anim_props = sample.props;
+      state.anim_running = false;
+    } else {
+      const anim::Sample sample = anim::sample_animation(
+          state.keyframes, state.animation, context.time_seconds - state.anim_start);
+      state.anim_props = sample.props;
+      state.anim_running = sample.running;
+      running = running || sample.running;
+    }
+    combined = anim::overlay_props(combined, state.anim_props);
+  }
+
+  if (state.transition.active()) {
+    const anim::Props target = snapshot_style(style_);
+    if (!state.style_snapshot_valid) {
+      // 第一次推进：只记基准，**不开过渡**（否则首帧会无端播一段）。
+      state.style_snapshot = target;
+      state.style_snapshot_valid = true;
+    } else if (!anim::props_equal(target, state.style_snapshot)) {
+      // 值变了：从“当前视觉值”起步（不是从上一份声明的目标值——那会让
+      // 连续多次变化（如快速划过一排按钮）出现跳变）。
+      anim::Props from = state.style_snapshot;
+      anim::Props current = anim::lerp_props(
+          state.transition_from, state.transition_to,
+          anim::transition_progress(state.transition,
+                                    state.transition_start < 0.0
+                                        ? 0.0
+                                        : context.time_seconds - state.transition_start));
+      // 只把**参与过渡的属性**换成当前视觉值，其余用新目标（新目标里没动的项不追）。
+      from = anim::overlay_props(from, current);
+      state.transition_from = from;
+      state.transition_to = target;
+      state.transition_start = context.time_seconds;
+      state.transition_running = true;
+      state.style_snapshot = target;
+    }
+    if (state.transition_running) {
+      // 无障碍：直接落位（不播中间帧）。
+      const float progress =
+          context.reduced_motion
+              ? 1.0f
+              : anim::transition_progress(state.transition,
+                                          context.time_seconds - state.transition_start);
+      if (progress >= 1.0f) {
+        state.transition_running = false;
+      } else {
+        running = true;
+      }
+      const anim::Props interpolated =
+          anim::lerp_props(state.transition_from, state.transition_to, progress);
+      combined = anim::overlay_props(combined, interpolated);
+    }
+  }
+
+  // 几何变换取**动画**的属性（过渡不参与位移：过渡的触发是“值变了”，
+  // 而位移/缩放没有“样式值”可比较——它们是动画专有的表达）。
+  animation_translate_ = math::Point{state.anim_props.translate_x.value_or(0.0f),
+                                     state.anim_props.translate_y.value_or(0.0f)};
+  animation_scale_ = state.anim_props.scale.value_or(1.0f);
+
+  if (combined.empty()) {
+    return running;
+  }
+  state.animated_style = style_;
+  apply_props(state.animated_style, combined);
+  // 位置变了 → 本帧必须重画（损坏区由续帧协议带着上报）。
+  if (running) {
+    record_damage();
+    // **几何变化时的损坏区要盖住“旧位置 + 新位置”**：只报原地那一块，
+    // 元素滑出之后的残影就没人清（局部重绘路径会把画布上的旧像素留着）。
+    if (animation_transforms()) {
+      const float margin = state.paint_margin_hint > 0.0f ? state.paint_margin_hint : 0.0f;
+      const math::Rect here = bounds_.inflate(margin);
+      const math::Rect there = bounds_.offset(animation_translate_.x, animation_translate_.y)
+                                   .inflate(margin);
+      record_damage_rect(here.union_with(there));
+    }
+  }
+  return running;
+}
+
+auto Element::paint_style() const noexcept -> const Style& {
+  if (style_override_ != nullptr) return *style_override_;
+  const RenderExtras* state = extras_if_any();
+  if (state == nullptr) return style_;
+  // 判据是“本帧动画/过渡真的算出了覆盖”而不是“设过动画”：后者在播完之后
+  // 仍为真（`fill: none` 时终态就是原样式），那时应当回到零成本的 `style_`。
+  if (state->anim_props.empty() && !state->transition_running) return style_;
+  return state->animated_style;
 }
 
 auto Element::content_box() const noexcept -> math::Rect { return bounds_.inset(style_.padding); }
@@ -826,6 +1125,10 @@ void Element::arrange(const RenderContext& context, math::Rect rect) {
 /// 组件只需声明"要哪些效果"（`HoverEffect`），参数由主题令牌统一给。
 void Element::paint_box(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
+  // 动画值在这里生效：`paint_style()` 无动画时就是 `style_` 本身（零开销），
+  // 有动画时是「样式 + 动画覆盖」的快照。**不能把动画值写回 `style_`**——那是
+  // 真实样式，主题切换/控制通道读回会看到被污染的假值（详见 `paint_style` 的说明）。
+  const Style& style = paint_style();
   const auto& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
   // 悬浮进度（0..1）：未开特效的组件恒为 0，走的是原有路径，零额外开销
@@ -838,8 +1141,8 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   const math::Rect box = hovering && hover_effect_.lift
                              ? bounds_.offset(0.0f, -metrics.hover_lift * hover_t)
                              : bounds_;
-  math::Color background = style_.background;
-  math::Color border = style_.border_color;
+  math::Color background = style.background;
+  math::Color border = style.border_color;
   if (hovering && hover_effect_.background) {
     // **不透明底要"同向提亮/压暗"，不能换成中性灰**。
     //
@@ -886,7 +1189,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
       if (pressed_ && background.a != 0U) background.a = 255U;
     }
   } else if (pressed_ && hover_effect_.enabled && hover_effect_.background &&
-             style_.background.a != 0U) {
+             style.background.a != 0U) {
     // 极窄的一条缝：按下了但 hover_t 尚未起来（如程序化 `set_pressed`）。
     // 给一个固定压暗，保证"按下"本身在任何情况下都可见。
     //
@@ -905,11 +1208,11 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     const math::Color glow{colors.glow.r, colors.glow.g, colors.glow.b,
                            static_cast<std::uint8_t>(colors.glow.a * hover_t)};
     canvas.fill_rect(box.inflate(spread), raster::Paint::solid(glow),
-                     style_.radius + spread, raster::DrawOptions{.opacity = style_.opacity});
+                     style.radius + spread, raster::DrawOptions{.opacity = style.opacity});
   }
-  if (style_.shadow.visible() && !style_.shadow.inset) {
+  if (style.shadow.visible() && !style.shadow.inset) {
     // 上浮时阴影跟着走（否则“抬起”会被阴影钉在原地，看着像两层错位）
-    const math::Rect shadow_box = box.inset(style_.margin);
+    const math::Rect shadow_box = box.inset(style.margin);
     // **告诉后端“哪块随后会被不透明底盖掉”**（`covered_region`）。
     //
     // 语义：下文（第 820 行附近）会用 `background` 以同半径铺满 `box`。若它
@@ -922,11 +1225,11 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     //
     // 为何要显式判 `opacity >= 0.999`：半透明合成后底色仍半透明，不能跳
     //（契约第 1 条要求“完全覆盖”，而 `opacity < 1` 的底不满足）。
-    const bool can_skip_covered = background.a == 255U && style_.opacity >= 0.999f;
+    const bool can_skip_covered = background.a == 255U && style.opacity >= 0.999f;
     const auto options = raster::DrawOptions{
-        .opacity = style_.opacity,
+        .opacity = style.opacity,
         .covered_region = can_skip_covered ? box : math::Rect{},
-        .covered_radius = can_skip_covered ? style_.radius : 0.0f,
+        .covered_radius = can_skip_covered ? style.radius : 0.0f,
     };
     // **走 `draw_shadow_layered`，不是调两次 `draw_shadow`**：
     // 两层的遮罩都只取决于几何，后端可以把它们预合成成**一张**缓存贴图、只做一次
@@ -936,13 +1239,13 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     //
     // 单层阴影（`second_visible()` 为假）时 `ambient_blur` 传 0——后端据此退回
     // 单层路径，行为与以前逐像素相同。
-    const bool has_ambient = style_.shadow.second_visible();
+    const bool has_ambient = style.shadow.second_visible();
     canvas.draw_shadow_layered(
-        shadow_box, style_.radius, style_.shadow.color, style_.shadow.blur,
-        math::Point{style_.shadow.offset_x, style_.shadow.offset_y},
-        has_ambient ? style_.shadow.color2 : math::Color{0, 0, 0, 0},
-        has_ambient ? style_.shadow.blur2 : 0.0f,
-        math::Point{style_.shadow.offset2_x, style_.shadow.offset2_y}, options);
+        shadow_box, style.radius, style.shadow.color, style.shadow.blur,
+        math::Point{style.shadow.offset_x, style.shadow.offset_y},
+        has_ambient ? style.shadow.color2 : math::Color{0, 0, 0, 0},
+        has_ambient ? style.shadow.blur2 : 0.0f,
+        math::Point{style.shadow.offset2_x, style.shadow.offset2_y}, options);
   }
   // **渐变底优先**：设了 `background_gradient` 就用它（`background` 退为回退色）。
   //
@@ -957,9 +1260,9 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   // 目前只有线性渐变在用（主按钮的双色），非线性的语义需要“非等比缩放”决策，
   // 与其拍一个再重做，不如等真有需求时按那时候的场景定。
   bool painted_gradient = false;
-  if (style_.background_gradient.has_value() &&
-      !style_.background_gradient->stops().empty() && style_.gradient_opacity > 0.0f) {
-    const raster::Gradient& source = *style_.background_gradient;
+  if (style.background_gradient.has_value() &&
+      !style.background_gradient->stops().empty() && style.gradient_opacity > 0.0f) {
+    const raster::Gradient& source = *style.background_gradient;
 
     // ① 色标：悬停/按下的明度偏移必须也作用到渐变，否则主按钮悬浮时“没反应”——
     //    渐变分支不看 `background`，而上面那整段提亮/压暗改的正是 `background`。
@@ -1011,13 +1314,13 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
         mapped = raster::Gradient::sweep(map_point(source.start()), std::move(stops));
         break;
     }
-    canvas.fill_rect(box, raster::Paint::with_gradient(std::move(*mapped)), style_.radius,
-                     raster::DrawOptions{.opacity = style_.opacity * style_.gradient_opacity});
+    canvas.fill_rect(box, raster::Paint::with_gradient(std::move(*mapped)), style.radius,
+                     raster::DrawOptions{.opacity = style.opacity * style.gradient_opacity});
     painted_gradient = true;
   }
   if (!painted_gradient && background.a != 0U) {
-    canvas.fill_rect(box, raster::Paint::solid(background), style_.radius,
-                     raster::DrawOptions{.opacity = style_.opacity});
+    canvas.fill_rect(box, raster::Paint::solid(background), style.radius,
+                     raster::DrawOptions{.opacity = style.opacity});
   }
   // **内阴影（`inset`）在底色之后画**——它要压在底色之上才看得见。
   //
@@ -1036,20 +1339,20 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   // 四条叠在一起就是“四周内缘压暗”。用圆角裁剪把四角收齐。
   // 偏移（`offset_x/offset_y`）通过**偏置四条带的过渡长度**表达方向：
   // 偏移为正的那一侧带更窄（光从那侧来），负的那侧更宽。
-  if (style_.shadow.visible() && style_.shadow.inset) {
-    const float spread = std::max(style_.shadow.blur * 2.0f, 2.0f);
-    const math::Color edge = style_.shadow.color;
+  if (style.shadow.visible() && style.shadow.inset) {
+    const float spread = std::max(style.shadow.blur * 2.0f, 2.0f);
+    const math::Color edge = style.shadow.color;
     const math::Color clear = edge.with_alpha(0);
     // 偏移归一化到 [-1, 1]，用来把两侧过渡长度调成不对称。
-    const float ox = std::clamp(style_.shadow.offset_x / spread, -1.0f, 1.0f);
-    const float oy = std::clamp(style_.shadow.offset_y / spread, -1.0f, 1.0f);
+    const float ox = std::clamp(style.shadow.offset_x / spread, -1.0f, 1.0f);
+    const float oy = std::clamp(style.shadow.offset_y / spread, -1.0f, 1.0f);
     // 偏移为正 ⇒ 该侧变窄（受光），为负 ⇒ 变宽（背光）。
     const float top_len = spread * (1.0f - oy * 0.5f);
     const float bottom_len = spread * (1.0f + oy * 0.5f);
     const float left_len = spread * (1.0f - ox * 0.5f);
     const float right_len = spread * (1.0f + ox * 0.5f);
 
-    canvas.push_clip_rounded_rect(box, style_.radius);
+    canvas.push_clip_rounded_rect(box, style.radius);
     const auto band = [&](math::Point from, math::Point to, math::Rect rect) {
       if (rect.width <= 0.0f || rect.height <= 0.0f) return;
       canvas.fill_rect(
@@ -1058,10 +1361,10 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
               from, to,
               std::vector<raster::GradientStop>{raster::GradientStop{0.0f, edge},
                                                 raster::GradientStop{1.0f, clear}})),
-          0.0f, raster::DrawOptions{.opacity = style_.opacity});
+          0.0f, raster::DrawOptions{.opacity = style.opacity});
     };
-    const float ix = box.x + std::min(style_.margin.left, 0.0f);
-    const float iy = box.y + std::min(style_.margin.top, 0.0f);
+    const float ix = box.x + std::min(style.margin.left, 0.0f);
+    const float iy = box.y + std::min(style.margin.top, 0.0f);
     const float iw = box.width;
     const float ih = box.height;
     // 上带：从顶边往下渐变
@@ -1088,12 +1391,12 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   // 因为真实的受光不在“顶边中点”，而在**光源方向**（约定左上）。
   // 改成以左上角为圆心的径向后，亮度沿对角线向向衰减，与 `Shadow` 的“光从上来”
   // （内阴影压在上内缘）方向一致——两者方向一致才像一个物体，否则会自相矛盾。
-  if (style_.top_highlight.a != 0U && style_.highlight_width > 0.0f && box.width > 0.0f) {
-    const math::Color edge = style_.top_highlight;
+  if (style.top_highlight.a != 0U && style.highlight_width > 0.0f && box.width > 0.0f) {
+    const math::Color edge = style.top_highlight;
     const math::Color fading = edge.with_alpha(0);
     // 只占顶边**内沿**那一条（高度 = highlight_width）：径向渐变的垂直影响
     // 天然衰减得很快，但把它限制在一条带里才能保证“不下泼到内容区”。
-    const math::Rect band{box.x, box.y, box.width, style_.highlight_width};
+    const math::Rect band{box.x, box.y, box.width, style.highlight_width};
     // 径向半径：取宽度的 55%。太小 → 只有左上一小段亮（像块污渍）；
     // 太大 → 整条顶边均匀发亮，又退化回“亮胶带”。宽高都参与，使窄卡也不会局部过亮。
     const float reach = std::max(box.width, box.height * 3.0f) * 0.55f;
@@ -1105,12 +1408,12 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
                                                                                 edge.a / 3))},
                                           raster::GradientStop{1.0f, fading}});
     // 裁剪到圆角内：半径大于 0 时顶边那段会被圆角削掉，不裁就会在角上多出一小块。
-    if (style_.radius > 0.0f) canvas.push_clip_rounded_rect(box, style_.radius);
+    if (style.radius > 0.0f) canvas.push_clip_rounded_rect(box, style.radius);
     canvas.fill_rect(band, raster::Paint::with_gradient(gradient), 0.0f,
-                     raster::DrawOptions{.opacity = style_.opacity});
-    if (style_.radius > 0.0f) canvas.pop_clip();
+                     raster::DrawOptions{.opacity = style.opacity});
+    if (style.radius > 0.0f) canvas.pop_clip();
   }
-  if (style_.border_width > 0.0f && border.a != 0U) {
+  if (style.border_width > 0.0f && border.a != 0U) {
     // **环形填充**而不是描边：卡片边框是界面里出现次数最多的描边，而 `stroke_path`
     // 把圆角矩形展开成 ~152 条边（每段一个四边形 + 顶点补圆），环形只有 76 条边。
     // 实测 96 张卡片：6.9 ms/帧 → 3.9 ms/帧（`docs/PAINT_DIAGNOSIS.md` §2.2）。
@@ -1128,24 +1431,26 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
         std::max(0.0f, std::round(box.right()) - std::round(box.x)),
         std::max(0.0f, std::round(box.bottom()) - std::round(box.y))};
     canvas.fill_path(
-        math::make_rounded_border_ring(snapped, style_.radius, style_.border_width),
+        math::make_rounded_border_ring(snapped, style.radius, style.border_width),
         raster::Paint::solid(border),
-        raster::DrawOptions{.opacity = style_.opacity});
+        raster::DrawOptions{.opacity = style.opacity});
   }
 }
 
 auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                          math::Rect box) const -> void {
   if (text.empty()) return;
+  // 字号/字色/对齐都取**本帧生效样式**（动画可以动 `font-size` 与 `color`）。
+  const Style& style = paint_style();
   const TextPort& port = text_port_or_null(context);
-  const float size = style_.font_size;
+  const float size = style.font_size;
   const std::string clipped = port.ellipsize(text, size, box.width);
   if (clipped.empty()) return;
   const float width = port.measure_width(clipped, size);
   float x = box.x;
-  if (style_.text_align == TextAlign::Center) {
+  if (style.text_align == TextAlign::Center) {
     x = box.x + (box.width - width) * 0.5f;
-  } else if (style_.text_align == TextAlign::End) {
+  } else if (style.text_align == TextAlign::End) {
     x = box.right() - width;
   }
   // **按墨迹区居中**（全仓统一口径，见 `st::ui::centered_line_top`）。
@@ -1155,7 +1460,7 @@ auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, 
   // `centered_line_top` 在端口报不出墨迹时自动退回行盒居中。
   const float y = centered_line_top(port, clipped, size, box.y, box.height);
   // **字重落像素**：框架没有独立字重的字体面，非 Regular 档用合成加粗（沿水平外扩）。
-  // 不读 `style_.font_weight` 时，界面里所有 SemiBold/Bold 都与 Regular 逐像素相同——
+  // 不读 `style.font_weight` 时，界面里所有 SemiBold/Bold 都与 Regular 逐像素相同——
   // 「字重」就只是个落不到画面上的属性。
   //
   // 端口只持有物理口径的语义量（半径），采样格步数由渲染器按自己的模式换算。
@@ -1163,9 +1468,9 @@ auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, 
   // **Bold 档优先走真粗体字体面**（实测比合成加粗锐 36~37%、英文字间离散 14.1%→0%，
   // 见 `prefers_real_bold`）：此时**不再叠加合成加粗**——叠了会把真粗体的字再撑开、
   // 字腔粘住。探不到真粗体面时自动回退常规面，此时仍用合成加粗补足（Medium/SemiBold 同理）。
-  const bool real_bold = prefers_real_bold(style_.font_weight) && port.has_real_bold();
-  const float embolden = real_bold ? 0.0f : embolden_radius(physical, style_.font_weight);
-  port.draw(canvas, clipped, math::Point{x, y}, size, style_.color, text::FontRole::Proportional,
+  const bool real_bold = prefers_real_bold(style.font_weight) && port.has_real_bold();
+  const float embolden = real_bold ? 0.0f : embolden_radius(physical, style.font_weight);
+  port.draw(canvas, clipped, math::Point{x, y}, size, style.color, text::FontRole::Proportional,
             embolden, real_bold);
 }
 
@@ -1180,6 +1485,10 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
   // 放在这里对可见元素零额外开销。
   extras().paint_margin_hint = paint_margin(context);
   if (!visible_) return;
+  // **动画推进必须早于一切几何与样式读取**：`paint_style()` / 位移量都在这一行之后
+  // 才是本帧的值。与 `advance_hover` 同一个位置理由（绘制是元素的唯一时间源）。
+  const bool animating = advance_animation(context);
+  if (animating) request_animation();   // 走既有汇总链：播完自然不再续帧
   // **视口剔除**：与当前裁剪区无交集就整块不画。
   //
   // 为什么必须有：绘制是自顶向下的，一个排到屏幕外很远的元素（例如滚动到视野外的
@@ -1208,11 +1517,11 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
   perf::FrameProfiler* profiler =
       ::st::perf::enabled() ? ::st::perf::active_frame_profiler() : nullptr;
   if (profiler == nullptr) {
-    paint_impl(context, canvas);
+    paint_animated(context, canvas);
     return;
   }
   const std::int64_t element_start = ::st::perf::now_ticks();
-  paint_impl(context, canvas);
+  paint_animated(context, canvas);
   const std::int64_t subtree_ns = ::st::perf::ticks_to_ns(::st::perf::now_ticks() - element_start);
   // 只减**本帧真的画过**的子孙：被视口剔除的子元素不会重新计时，
   // 它手里的是旧帧的值——减它会把别人的账算进来（或得出负值）。
@@ -1225,6 +1534,65 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
   paint_cost_ns_ = subtree_ns;  // 供父元素相减（**必须记含子孙的量**）
   paint_cost_serial_ = serial;
   profiler->record_element(type(), id_, self_ns, subtree_ns);
+}
+
+void Element::paint_animated(const RenderContext& context, raster::Surface& canvas) const {
+  const RenderExtras* state = extras_if_any();
+  const anim::Props& props = state != nullptr ? state->anim_props : anim::Props{};
+  const float opacity = props.opacity.has_value() ? std::clamp(*props.opacity, 0.0f, 1.0f) : 1.0f;
+  const bool scaled = animation_scale_ != 1.0f;
+  // 三条路：
+  // ① 纯平移（最常见：滑入/抖动/上浮）——包一层 `TranslatedSurface`，零像素代价；
+  // ② 缩放或子树透明度——只能离屏合成（缩放要重采样，透明度要乘到整个子树）；
+  // ③ 无几何变化——直接画（零开销，与没有动画时完全同一条路径）。
+  const bool need_offscreen = scaled || opacity < 0.999f;
+  if (!need_offscreen) {
+    if (animation_translate_.x != 0.0f || animation_translate_.y != 0.0f) {
+      raster::TranslatedSurface shifted(canvas, animation_translate_);
+      paint_impl(context, shifted);
+      return;
+    }
+    paint_impl(context, canvas);
+    return;
+  }
+
+  // —— 离屏合成 ——
+  //
+  // 区域取 `bounds + paint_margin`：阴影/发光/内高光都画到盒子外，
+  // 按 bounds 截会把它们削掉（“缩放动画期间卡片边缘发硬”）。
+  const float margin = paint_margin(context);
+  const math::Rect region = bounds_.offset(animation_translate_.x, animation_translate_.y)
+                                .inflate(margin);
+  if (region.is_empty()) return;
+  const int width = std::max(1, static_cast<int>(region.width));
+  const int height = std::max(1, static_cast<int>(region.height));
+  raster::Canvas scratch = raster::Canvas::for_logical_size(width, height, canvas.device_scale());
+  // 画进 scratch 时把坐标平移到 scratch 原点，并**临时改走未含透明度的样式**：
+  // 透明度由最后那次合成统一乘上（否则会叠两次：里面乘一次、外面再乘一次）。
+  Style& original_style = extras().animated_style;
+  const Style saved = original_style;
+  if (opacity < 0.999f) {
+    original_style = paint_style();
+    original_style.opacity = style_.opacity;   // 去掉动画透明度（合成时统一乘）
+  }
+  const Style* saved_override = style_override_;
+  style_override_ = &original_style;
+  {
+    raster::TranslatedSurface shifted(scratch, math::Point{-region.x, -region.y});
+    paint_impl(context, shifted);
+  }
+  style_override_ = saved_override;
+  original_style = saved;
+  // 目标矩形：以 `bounds_` 中心为基准缩放（CSS `transform-origin: center` 默认）。
+  const math::Point center = bounds_.offset(animation_translate_.x, animation_translate_.y).center();
+  const float factor = animation_scale_;
+  const math::Rect destination{
+      center.x + (region.x - center.x) * factor,
+      center.y + (region.y - center.y) * factor,
+      region.width * factor,
+      region.height * factor,
+  };
+  canvas.draw_canvas(scratch, destination, raster::DrawOptions{.opacity = opacity});
 }
 
 void Element::paint_impl(const RenderContext& context, raster::Surface& canvas) const {

@@ -737,6 +737,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "启动卡品牌标记候选：6 个方案 × 1x/1.5x/2x 三档对照图（图标是纯观感物，必须小尺寸也认得出）"
     },
+    "ui_animation_probe": {
+      "kind": "executable",
+      "sources": ["tools/ui_animation_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "组件动画（CSS 式）的分镜图 + 像素量断言：淡入墨量单调、滑入墨迹真的在左移、抖动位移变号、无限循环不提前停、缩放墨量变化。为何必须出图：属性面读回对而绘制层没读它，是这条线真实存在的失败形态"
+    },
     "splash_anim_probe": {
       "kind": "executable",
       "sources": ["tools/splash_anim_probe.cpp"],

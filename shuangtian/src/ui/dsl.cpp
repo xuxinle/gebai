@@ -1572,6 +1572,26 @@ void apply_box(Element& element, const BoxProps& props) {
                                              .size = props.control_size,
                                              .density = props.density});
   }
+  // —— 动画 ——
+  //
+  // **只在名字变了时重设**：声明式每帧重建元素（同 key 复用同一个），
+  // 而 `set_animation` 会把起点重置为“下一帧”——每帧重设就永远播不完
+  //（画面会死在第一帧）。这与 `Tabs::add_trailing_button` 那个
+  // “configure 里每帧追加一个”的堆和缺陷同一类，只是表现形式是“动画卡死”。
+  if (!props.animate.empty()) {
+    const std::optional<std::string> current = element.get_property("animation");
+    const bool same = current.has_value() && *current == props.animate;
+    if (!same) {
+      (void)element.set_preset_animation(props.animate);
+      if (props.animate_delay >= 0.0) element.set_animation_delay(props.animate_delay);
+    }
+  }
+  if (props.transition_duration > 0.0 && !element.transition_configured()) {
+    anim::Transition transition{};
+    transition.duration = props.transition_duration;
+    transition.easing = anim::Easing::ease_out();
+    element.set_transition(transition);
+  }
 }
 
 // ── 组件包装 ──────────────────────────────────────────────────────────────

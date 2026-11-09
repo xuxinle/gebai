@@ -61,7 +61,7 @@ struct PageSpec {
   std::string_view subtitle{};  ///< 页副标题
 };
 
-inline constexpr std::size_t kPageCount = 6;
+inline constexpr std::size_t kPageCount = 7;
 
 [[nodiscard]] auto page_specs() -> const std::array<PageSpec, kPageCount>&;
 

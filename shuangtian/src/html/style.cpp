@@ -379,6 +379,131 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+/// 一帧的停点：`from` / `to` / `50%`（返回值夹到 `[0,1]`）。
+[[nodiscard]] auto parse_keyframe_offset(std::string_view text) -> std::optional<float> {
+  const std::string_view value = trim_view(text);
+  if (value.empty()) return std::nullopt;
+  if (value == "from") return 0.0f;
+  if (value == "to") return 1.0f;
+  // ⚠ **不能借 `parse_length` 解百分比**：它对 `percent_base == 0` 直接返回 `nullopt`
+  //（那条分支的存在理由是“百分比宽高要容器尺寸”）。而关键帧停点 `50%` 的百分比
+  // 基数是**1**（它本身就是比例），所以这里自己读数。
+  if (value.back() != '%') return std::nullopt;
+  const auto number = parse_length(value.substr(0, value.size() - 1), 0.0f, 0.0f);
+  if (!number.has_value()) return std::nullopt;
+  return std::clamp(*number / 100.0f, 0.0f, 1.0f);
+}
+
+/// 把一条声明写进关键帧（**只认可动画的几项**，其余忽略）。
+void apply_keyframe_declaration(KeyframeSpec& frame, std::string_view property,
+                               std::string_view value) {
+  const std::string_view raw = trim_view(value);
+  if (raw.empty()) return;
+  if (property == "opacity") {
+    if (const auto number = parse_length(raw, 0.0f, 0.0f); number.has_value()) {
+      frame.opacity = std::clamp(*number, 0.0f, 1.0f);
+    }
+    return;
+  }
+  if (property == "background" || property == "background-color") {
+    for (const std::string& word : split_ws_into_words(raw)) {
+      if (const auto color = parse_color(word); color.has_value()) {
+        frame.background = *color;
+        return;
+      }
+    }
+    return;
+  }
+  if (property == "color") {
+    if (const auto color = parse_color(raw); color.has_value()) frame.color = *color;
+    return;
+  }
+  if (property == "border-radius") {
+    if (const auto number = parse_length(raw, 0.0f, 0.0f); number.has_value()) {
+      frame.radius = *number;
+    }
+    return;
+  }
+  // `transform`：只接这四种最常见写法（`translateX/Y`、`translate`、`scale`）。
+  // 完整 transform 语法（矩阵/旋转/斜切）不接：本层没有变换引擎，
+  // 而那些写法在展示型网页里占比极低。
+  if (property != "transform") return;
+  const auto words = split_ws_into_words(raw);
+  for (const std::string& word : words) {
+    const std::string lower = lower_ascii(word);
+    const auto number_in = [&lower](std::string_view prefix) -> std::optional<float> {
+      if (lower.rfind(prefix, 0) != 0) return std::nullopt;
+      // ⚠ `prefix` 本身已含 `(`（如 `"translatex("`）：从这里往后找 `(` 永远找不到，
+      // 于是所有 transform 函数静默失败——实测症状是“关键帧解析出来了，但位移是 0”。
+      const std::size_t open = prefix.size() - 1U;
+      const std::size_t close = lower.rfind(')');
+      if (open == std::string::npos || close == std::string::npos || close <= open) {
+        return std::nullopt;
+      }
+      const std::string_view body =
+          std::string_view(lower).substr(open + 1, close - open - 1);
+      std::size_t cursor = 0;
+      while (cursor < body.size() && is_space(body[cursor])) ++cursor;
+      std::size_t end = cursor;
+      while (end < body.size() && !is_space(body[end]) && body[end] != ',') ++end;
+      return parse_length(body.substr(cursor, end - cursor), 0.0f, 0.0f);
+    };
+    if (const auto value_x = number_in("translatex("); value_x.has_value()) {
+      frame.translate_x = *value_x;
+      continue;
+    }
+    if (const auto value_y = number_in("translatey("); value_y.has_value()) {
+      frame.translate_y = *value_y;
+      continue;
+    }
+    if (const auto value_scale = number_in("scale("); value_scale.has_value()) {
+      frame.scale = *value_scale;
+      continue;
+    }
+    if (const auto value_scale = number_in("scalex("); value_scale.has_value()) {
+      frame.scale = *value_scale;   // 等比近似：本层不做非等比缩放
+      continue;
+    }
+    if (const auto value_scale = number_in("scaley("); value_scale.has_value()) {
+      frame.scale = *value_scale;
+      continue;
+    }
+    if (const auto value_translate = number_in("translate("); value_translate.has_value()) {
+      // `translate(x, y)`：第一个分量当 X；Y 只在 x 为 0 时单独取（与 CSS 简写同义）。
+      frame.translate_x = *value_translate;
+      if (std::abs(*value_translate) < 1e-6F) {
+        frame.translate_x = std::nullopt;
+      }
+    }
+  }
+}
+
+/// 时间值：`0.3s` / `300ms` / `0`。
+[[nodiscard]] auto parse_seconds(std::string_view text) -> std::optional<double> {
+  const std::string_view value = trim_view(text);
+  if (value.empty()) return std::nullopt;
+  if (value.ends_with("ms")) {
+    const auto number = parse_length(value.substr(0, value.size() - 2), 0.0f, 0.0f);
+    if (!number.has_value()) return std::nullopt;
+    return static_cast<double>(*number) / 1000.0;
+  }
+  if (value.ends_with("s")) {
+    const auto number = parse_length(value.substr(0, value.size() - 1), 0.0f, 0.0f);
+    if (!number.has_value()) return std::nullopt;
+    return static_cast<double>(*number);
+  }
+  const auto number = parse_length(value, 0.0f, 0.0f);
+  if (!number.has_value()) return std::nullopt;
+  // **无单位只认 `0`**：CSS 里 `animation: 2 fadeIn` 的 `2` 是循环次数，
+  // 不是“2 秒”——无条件接受无单位时间会把次数吃成时长（实测踩到）。
+  if (*number != 0.0F) return std::nullopt;
+  return 0.0;
+}
+
+}  // namespace
+
 auto StyleSheet::parse(std::string_view css) -> StyleSheet {
   StyleSheet sheet{};
   std::size_t index = 0;
@@ -387,7 +512,7 @@ auto StyleSheet::parse(std::string_view css) -> StyleSheet {
     // 跳过空白与注释（注释已在 `clean_style_text` 去过，这里兜底 `//` 行注释）。
     while (index < css.size() && is_space(css[index])) ++index;
     if (index >= css.size()) break;
-    // `@media` / `@import` / `@font-face`：整段跳过（不猜语义）。
+    // `@keyframes` → 收集成 `KeyframesSpec`；其余 at-rule 整段跳过（不猜语义）。
     if (css[index] == '@') {
       const std::size_t open = css.find('{', index);
       const std::size_t semi = css.find(';', index);
@@ -405,6 +530,53 @@ auto StyleSheet::parse(std::string_view css) -> StyleSheet {
         if (css[at] == '}') {
           --depth;
           if (depth == 0) break;
+        }
+      }
+      const std::string_view head = trim_view(css.substr(index, open - index));
+      const std::string_view body = at < css.size() ? css.substr(open + 1, at - open - 1)
+                                                    : std::string_view{};
+      // 前缀写法（`-webkit-keyframes`）不认：只接标准 `@keyframes`。
+      if (head.rfind("@keyframes", 0) == 0) {
+        KeyframesSpec spec{};
+        spec.name = std::string(trim_view(head.substr(10)));
+        if (!spec.name.empty()) {
+          std::size_t cursor = 0;
+          while (cursor < body.size()) {
+            const std::size_t frame_open = body.find('{', cursor);
+            if (frame_open == std::string_view::npos) break;
+            const std::size_t frame_close = body.find('}', frame_open);
+            if (frame_close == std::string_view::npos) break;
+            const std::string_view stops = body.substr(cursor, frame_open - cursor);
+            const std::string_view declarations =
+                body.substr(frame_open + 1, frame_close - frame_open - 1);
+            cursor = frame_close + 1;
+            // 一帧可以列多个停点：`0%, 100% { … }` —— 展开成多个同值帧
+            //（否则 `shake` 那种写法只有最后一个停点生效，动效完全不一样）。
+            std::size_t stop_at = 0;
+            while (stop_at <= stops.size()) {
+              const std::size_t comma = stops.find(',', stop_at);
+              const std::string_view piece = comma == std::string_view::npos
+                                                 ? stops.substr(stop_at)
+                                                 : stops.substr(stop_at, comma - stop_at);
+              const auto offset = parse_keyframe_offset(piece);
+              if (offset.has_value()) {
+                KeyframeSpec frame{};
+                frame.offset = *offset;
+                for (const Declaration& declaration : parse_inline_style(declarations)) {
+                  apply_keyframe_declaration(frame, declaration.property, declaration.value);
+                }
+                spec.frames.push_back(std::move(frame));
+              }
+              if (comma == std::string_view::npos) break;
+              stop_at = comma + 1;
+            }
+          }
+        }
+        if (!spec.name.empty() && !spec.frames.empty()) {
+          // 同名后者覆盖：CSS 里后定义的关键帧赢。
+          std::erase_if(sheet.keyframes,
+                        [&spec](const KeyframesSpec& existing) { return existing.name == spec.name; });
+          sheet.keyframes.push_back(std::move(spec));
         }
       }
       index = at < css.size() ? at + 1 : css.size();
@@ -653,6 +825,14 @@ auto StyleResolver::style_of(const Node* node) const -> const Style& {
   return found == styles_.end() ? initial_ : found->second;
 }
 
+auto find_keyframes(const StyleSheet& sheet, std::string_view name) -> const KeyframesSpec* {
+  if (name.empty()) return nullptr;
+  for (const KeyframesSpec& spec : sheet.keyframes) {
+    if (spec.name == name) return &spec;
+  }
+  return nullptr;
+}
+
 auto StyleResolver::matches_compound(const Node& node, const CompoundSelector& part) -> bool {
   if (node.kind != NodeKind::Element) return false;
   if (!part.tag.empty() && part.tag != "*" && node.tag != part.tag) return false;
@@ -789,6 +969,128 @@ void StyleResolver::apply_declaration(Style& style, std::string_view property,
   const std::string_view raw = trim_view(value);
   if (raw.empty()) return;
   const float percent_base = 0.0f;   // 百分比宽度/高度需要容器宽高：排版层给，这里不支持
+
+  if (property == "animation" || property == "animation-name") {
+    // `animation` 简写：`name duration timing delay iteration-count direction fill-mode`。
+    // 逐词**分类**（不按位置）——CSS 允许这些分量任意顺序，按位置解会把
+    // `animation: 0.4s ease-out fadeInUp` 解错（名字取成 `0.4s`）。
+    AnimationSpec spec{};
+    for (const std::string& word : split_ws_into_words(raw)) {
+      const std::string lower = lower_ascii(word);
+      if (lower == "none") {
+        style.animation.reset();
+        return;
+      }
+      if (lower == "infinite") {
+        spec.iterations = 0;
+        continue;
+      }
+      if (lower == "normal" || lower == "reverse" || lower == "alternate" ||
+          lower == "alternate-reverse") {
+        spec.direction = lower == "reverse"          ? AnimationSpec::Direction::Reverse
+                         : lower == "alternate"        ? AnimationSpec::Direction::Alternate
+                         : lower == "alternate-reverse" ? AnimationSpec::Direction::AlternateReverse
+                                                        : AnimationSpec::Direction::Normal;
+        continue;
+      }
+      if (lower == "forwards" || lower == "backwards" || lower == "both") {
+        spec.fill = lower == "forwards" ? AnimationSpec::Fill::Forwards
+                    : lower == "backwards" ? AnimationSpec::Fill::Backwards
+                                            : AnimationSpec::Fill::Both;
+        continue;
+      }
+      if (lower == "linear" || lower == "ease" || lower == "ease-in" ||
+          lower == "ease-out" || lower == "ease-in-out" ||
+          lower.rfind("cubic-bezier(", 0) == 0 || lower.rfind("steps(", 0) == 0) {
+        spec.timing = lower;
+        continue;
+      }
+      if (const auto seconds = parse_seconds(word); seconds.has_value()) {
+        // 第一个时间是 duration，第二个是 delay（CSS 同规则）。
+        if (spec.duration <= 0.0) {
+          spec.duration = *seconds;
+        } else {
+          spec.delay = *seconds;
+        }
+        continue;
+      }
+      const auto count = parse_length(word, 0.0f, 0.0f);
+      if (count.has_value()) {
+        spec.iterations = static_cast<int>(*count);
+        continue;
+      }
+      // 其余按名字（最后一个未被认领的标识符就是动画名）。
+      if (!word.empty() &&
+          (word[0] == '_' || std::isalpha(static_cast<unsigned char>(word[0])) != 0)) {
+        spec.name = word;
+      }
+    }
+    if (property == "animation-name" && spec.name.empty()) spec.name = std::string(raw);
+    if (spec.name.empty()) return;
+    style.animation = std::move(spec);
+    return;
+  }
+  if (property == "animation-duration") {
+    if (const auto seconds = parse_seconds(raw); seconds.has_value()) {
+      if (!style.animation.has_value()) style.animation.emplace();
+      style.animation->duration = *seconds;
+    }
+    return;
+  }
+  if (property == "animation-delay") {
+    if (const auto seconds = parse_seconds(raw); seconds.has_value()) {
+      if (!style.animation.has_value()) style.animation.emplace();
+      style.animation->delay = *seconds;
+    }
+    return;
+  }
+  if (property == "animation-iteration-count") {
+    if (!style.animation.has_value()) style.animation.emplace();
+    if (lower_ascii(raw) == "infinite") {
+      style.animation->iterations = 0;
+      return;
+    }
+    if (const auto count = parse_length(raw, 0.0f, 0.0f); count.has_value()) {
+      style.animation->iterations = static_cast<int>(*count);
+    }
+    return;
+  }
+  if (property == "animation-timing-function") {
+    if (!style.animation.has_value()) style.animation.emplace();
+    style.animation->timing = std::string(raw);
+    return;
+  }
+  if (property == "animation-fill-mode") {
+    if (!style.animation.has_value()) style.animation.emplace();
+    const std::string lower = lower_ascii(raw);
+    style.animation->fill = lower == "forwards"  ? AnimationSpec::Fill::Forwards
+                            : lower == "backwards" ? AnimationSpec::Fill::Backwards
+                            : lower == "both"      ? AnimationSpec::Fill::Both
+                                                   : AnimationSpec::Fill::None;
+    return;
+  }
+  if (property == "animation-direction") {
+    if (!style.animation.has_value()) style.animation.emplace();
+    const std::string lower = lower_ascii(raw);
+    style.animation->direction = lower == "reverse" ? AnimationSpec::Direction::Reverse
+                                 : lower == "alternate"
+                                     ? AnimationSpec::Direction::Alternate
+                                 : lower == "alternate-reverse"
+                                     ? AnimationSpec::Direction::AlternateReverse
+                                     : AnimationSpec::Direction::Normal;
+    return;
+  }
+  if (property == "transition" || property == "transition-duration") {
+    // 过渡只接**时长**（其余分量取缺省：`all` + `ease-out`）。逐属性曲线、
+    // 逐属性延迟在展示型内容里几乎不用，而接全它们要再一张解析表。
+    for (const std::string& word : split_ws_into_words(raw)) {
+      const auto seconds = parse_seconds(word);
+      if (!seconds.has_value()) continue;
+      if (*seconds > 0.0) style.transition_duration = *seconds;
+      break;   // 第一个时间就是 duration（第二个是 delay，不接）
+    }
+    return;
+  }
 
   if (property == "color") {
     if (const auto color = parse_color(raw); color.has_value()) style.color = *color;

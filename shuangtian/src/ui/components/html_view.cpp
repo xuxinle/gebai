@@ -671,6 +671,20 @@ void HtmlView::layout_node(const RenderContext& context, const html::Node& node,
     }
   }
 
+  // 动画与过渡：**属于块**（`<div class="fade">` 里的多行一起动），
+  // 所以要在块收尾时下发给它产生的每一行，而不是逐行自己查样式。
+  //
+  // 为何不在 `finish_inline_flow` 里做：那个函数只看得见“行内流”，
+  // 拿不到块级的 `html::Style`；而这里 `style` 就是本块的样式。
+  const html::AnimationSpec* block_animation =
+      style.animation.has_value() ? &*style.animation : nullptr;
+  if (inner.has_rows && (block_animation != nullptr || style.transition_duration > 0.0)) {
+    for (std::size_t row = inner.first_row; row < rows_.size(); ++row) {
+      if (block_animation != nullptr) rows_[row].animation = block_animation;
+      if (style.transition_duration > 0.0) rows_[row].transition_duration = style.transition_duration;
+    }
+  }
+
   cursor_y += style.padding_bottom;
   cursor_y += style.margin_bottom;
   (void)block;
@@ -713,6 +727,53 @@ void HtmlView::paint_content(const RenderContext& context, raster::Surface& canv
   const TextPort& port = text_port_of(context);
   const Palette& theme_colors = context.theme.colors();
 
+  // **CSS 动画的实际落点**：逐行算“这一刻的属性值”。
+  //
+  // 为何把动画算在**行**上而不是元素上：本组件自绘一个行列表（不是元素树），
+  // 而 `<div style="animation:fadeInUp .4s">` 的作用范围是那个块（可能多行）。
+  // 排版时已把块级 `animation` 下发到它产生的每一行（见 `layout_node` 收尾），
+  // 这里只需把“已过去多久”换成属性值。
+  //
+  // 时间基准：元素自己的 `animation()` 状态机用首帧起点；这里同口径——
+  // 用 `anim_start`（首次见到该动画名时记录）。
+  struct RowAnimation {
+    float opacity{1.0f};
+    float translate_x{0.0f};
+    float translate_y{0.0f};
+    float scale{1.0f};
+    bool running{false};
+  };
+  const auto row_animation = [&context, this](const Row& row) -> RowAnimation {
+    RowAnimation out{};
+    if (row.animation == nullptr || !row.animation->active()) return out;
+    if (html_animation_start_ < 0.0) html_animation_start_ = context.time_seconds;
+    const html::KeyframesSpec* frames =
+        html::find_keyframes(style_sheet_, row.animation->name);
+    if (frames == nullptr) return out;
+    const anim::Keyframes engine_frames = to_engine_keyframes(*frames);
+    const anim::Animation engine = to_engine_animation(*row.animation);
+    double elapsed = context.time_seconds - html_animation_start_;
+    if (context.reduced_motion) {
+      // 无障碍：直接落终态（同一条理由：用采样器自己的结束分支判“终态是什么”）。
+      elapsed = engine.delay + engine.duration * 2.0 + 1.0;
+    }
+    const anim::Sample sample = anim::sample_animation(engine_frames, engine, elapsed);
+    out.running = sample.running;
+    if (sample.props.opacity.has_value()) out.opacity = std::clamp(*sample.props.opacity, 0.0F, 1.0F);
+    if (sample.props.translate_x.has_value()) out.translate_x = *sample.props.translate_x;
+    if (sample.props.translate_y.has_value()) out.translate_y = *sample.props.translate_y;
+    if (sample.props.scale.has_value()) out.scale = *sample.props.scale;
+    return out;
+  };
+  bool animation_running = false;
+  // 逐行算一次（两遍绘制都要用，不重复算）。
+  std::vector<RowAnimation> row_anim(rows_.size());
+  for (std::size_t index = 0; index < rows_.size(); ++index) {
+    row_anim[index] = row_animation(rows_[index]);
+    if (row_anim[index].running) animation_running = true;
+  }
+  if (animation_running) request_animation();
+
   // ⚠ **必须自己裁剪**：`style_.clip_children` 只包裹**子元素**的绘制
   //（`Element::paint_impl` 里 `paint_content` 在裁剪之前），而滚动内容会画到
   // 组件之外——实测：往上滚时正文直接压在卡片标题上。组件自绘滚动内容时必须
@@ -738,47 +799,71 @@ void HtmlView::paint_content(const RenderContext& context, raster::Surface& canv
     if (box.bottom() < bounds_.y - 4.0f || box.y > bounds_.bottom() + 4.0f) continue;
     const math::Rect ink{offset_x + row.ink.x, offset_y + row.ink.y, row.ink.width,
                          row.ink.height};
+    // 动画位移/缩放：只作用于**存在动画的行**（其余行走原路径、零额外开销）。
+    const RowAnimation& row_fx = row_anim[index];
+    const bool row_animated = !(row_fx.opacity >= 0.999F) || row_fx.translate_x != 0.0F ||
+                              row_fx.translate_y != 0.0F || row_fx.scale != 1.0F;
+    const math::Point shift{row_fx.translate_x, row_fx.translate_y};
+    const auto place = [&row_fx, &shift](math::Rect rect, math::Point center) -> math::Rect {
+      math::Rect moved = rect.offset(shift.x, shift.y);
+      if (row_fx.scale != 1.0F) {
+        // 以**行中心**为基准缩放（CSS 缺省 `transform-origin: center`）。
+        const float factor = row_fx.scale;
+        moved = math::Rect{center.x + (moved.x - center.x) * factor,
+                           center.y + (moved.y - center.y) * factor, moved.width * factor,
+                           moved.height * factor};
+      }
+      return moved;
+    };
+    const math::Point center{box.x + box.width * 0.5F + shift.x,
+                             box.y + box.height * 0.5F + shift.y};
+    const math::Rect draw_box = place(box, center);
+    const math::Rect draw_ink = place(row.ink.width > 0.0F ? ink : box, center);
+    const math::Color row_color = row.color.with_alpha_f(
+        static_cast<float>(row.color.a) / 255.0F * row_fx.opacity);
+    if (row_animated && row_fx.opacity <= 0.004F) continue;   // 完全透明：不画（也不脏）
     if (row.has_background && row.background.a != 0U) {
-      fill_round_rect(canvas, row.ink.width > 0.0f ? ink : box, row.radius, row.background);
+      fill_round_rect(canvas, draw_ink, row.radius,
+                      row.background.with_alpha_f(static_cast<float>(row.background.a) / 255.0F *
+                                                 row_fx.opacity));
     }
     if (row.border_width > 0.0f && row.border_color.a != 0U) {
-      const math::Rect surface_rect = row.ink.width > 0.0f ? ink : box;
+      const math::Color border = row.border_color.with_alpha_f(
+          static_cast<float>(row.border_color.a) / 255.0F * row_fx.opacity);
       if (row.border_left_only) {
         // 只画左缘一道竖线（引用块/提示条）。
-        canvas.fill_rect(math::Rect{surface_rect.x, surface_rect.y, row.border_width,
-                                    surface_rect.height},
-                         raster::Paint::solid(row.border_color));
+        canvas.fill_rect(math::Rect{draw_ink.x, draw_ink.y, row.border_width, draw_ink.height},
+                         raster::Paint::solid(border));
       } else {
-        paint_outline(canvas, surface_rect, row.radius, row.border_color, row.border_width);
+        paint_outline(canvas, draw_ink, row.radius, border, row.border_width);
       }
     }
     if (!row.bullet.empty()) {
-      const float bullet_x = box.x + row.text_x - 16.0f;
-      port.draw(canvas, row.bullet, math::Point{bullet_x, box.y}, row.font_size, row.color);
+      const float bullet_x = draw_box.x + row.text_x - 16.0f;
+      port.draw(canvas, row.bullet, math::Point{bullet_x, draw_box.y}, row.font_size, row_color);
     }
     // 装饰线（下划线/删除线）也属于“非文字层”，放第 1 趟：同行的背景不会盖它们。
     if ((row.underline || row.strikethrough) && !row.text.empty()) {
-      const float text_x = box.x + row.text_x;
-      const auto geometry = layout_line(port, kInkReferenceSample, row.font_size, box.height);
+      const float text_x = draw_box.x + row.text_x;
+      const auto geometry = layout_line(port, kInkReferenceSample, row.font_size, draw_box.height);
       const float line_width = port.measure_width(row.text, row.font_size);
       if (row.underline) {
-        canvas.fill_rect(math::Rect{text_x,
-                                    box.y + geometry.glyph_top + geometry.glyph_height,
+        canvas.fill_rect(math::Rect{text_x, draw_box.y + geometry.glyph_top + geometry.glyph_height,
                                     line_width, 1.0f},
-                         raster::Paint::solid(row.color));
+                         raster::Paint::solid(row_color));
       }
       if (row.strikethrough) {
         canvas.fill_rect(math::Rect{text_x,
-                                    box.y + geometry.glyph_top + geometry.glyph_height * 0.58f,
+                                    draw_box.y + geometry.glyph_top + geometry.glyph_height * 0.58f,
                                     line_width, 1.0f},
-                         raster::Paint::solid(row.color));
+                         raster::Paint::solid(row_color));
       }
     }
     // 链接悬停：底部一道主色提示线。
     if (!row.link.empty() && static_cast<int>(index) == hover_row_ && !row.text.empty()) {
-      const float text_x = box.x + row.text_x;
+      const float text_x = draw_box.x + row.text_x;
       const float line_width = port.measure_width(row.text, row.font_size);
-      canvas.fill_rect(math::Rect{text_x, box.y + box.height - 1.0f, line_width, 1.0f},
+      canvas.fill_rect(math::Rect{text_x, draw_box.y + draw_box.height - 1.0f, line_width, 1.0f},
                        raster::Paint::solid(theme_colors.primary));
     }
   }
@@ -792,12 +877,32 @@ void HtmlView::paint_content(const RenderContext& context, raster::Surface& canv
   for (std::size_t index = 0; index < rows_.size(); ++index) {
     const Row& row = rows_[index];
     if (row.text.empty()) continue;
+    const RowAnimation& row_fx = row_anim[index];
+    if (row_fx.opacity <= 0.004F) continue;
     const math::Rect box{offset_x + row.box.x, offset_y + row.box.y, row.box.width, row.box.height};
     if (box.bottom() < bounds_.y - 4.0f || box.y > bounds_.bottom() + 4.0f) continue;
-    const float draw_x = box.x + row.text_x;
-    const float line_top = centered_line_top(port, row.text, row.font_size, box.y, box.height);
+    // 与第 1 趟同一个变换（位移 + 以行中心缩放）。
+    const math::Point center{box.x + box.width * 0.5F + row_fx.translate_x,
+                             box.y + box.height * 0.5F + row_fx.translate_y};
+    const auto transform_rect = [&row_fx, &center](math::Rect rect) -> math::Rect {
+      math::Rect moved = rect.offset(row_fx.translate_x, row_fx.translate_y);
+      if (row_fx.scale != 1.0F) {
+        const float factor = row_fx.scale;
+        moved = math::Rect{center.x + (moved.x - center.x) * factor,
+                           center.y + (moved.y - center.y) * factor, moved.width * factor,
+                           moved.height * factor};
+      }
+      return moved;
+    };
+    const math::Rect draw_box = transform_rect(box);
+    const float draw_x = draw_box.x + row.text_x * row_fx.scale;
+    const float draw_size = row.font_size * row_fx.scale;
+    const float line_top =
+        centered_line_top(port, row.text, draw_size, draw_box.y, draw_box.height);
     const bool bold = static_cast<float>(row.font_weight) >= kBoldThreshold;
-    port.draw(canvas, row.text, math::Point{draw_x, line_top}, row.font_size, row.color,
+    const math::Color draw_color =
+        row.color.with_alpha_f(static_cast<float>(row.color.a) / 255.0F * row_fx.opacity);
+    port.draw(canvas, row.text, math::Point{draw_x, line_top}, draw_size, draw_color,
               row.monospace ? text::FontRole::Monospace : text::FontRole::Proportional, 0.0f,
               bold);
   }
@@ -808,8 +913,54 @@ void HtmlView::paint_content(const RenderContext& context, raster::Surface& canv
 // 交互
 // ————————————————————————————————————————————————————————————————————————————
 
-auto HtmlView::link_at(math::Point point) const -> std::string {
-  const float offset_x =
+auto HtmlView::to_engine_keyframes(const html::KeyframesSpec& spec) -> anim::Keyframes {
+  anim::Keyframes out{};
+  out.name = spec.name;
+  out.frames.reserve(spec.frames.size());
+  for (const html::KeyframeSpec& frame : spec.frames) {
+    anim::Props props{};
+    props.opacity = frame.opacity;
+    props.background = frame.background;
+    props.color = frame.color;
+    props.radius = frame.radius;
+    props.translate_x = frame.translate_x;
+    props.translate_y = frame.translate_y;
+    props.scale = frame.scale;
+    out.frames.push_back(anim::Keyframe{frame.offset, props});
+  }
+  // **归一化在这里做一次**（排序/去重/补端点）：采样是每帧都跑的。
+  return out.normalized();
+}
+
+auto HtmlView::to_engine_animation(const html::AnimationSpec& spec) -> anim::Animation {
+  anim::Animation out{};
+  out.name = spec.name;
+  out.duration = spec.duration;
+  out.delay = spec.delay;
+  out.iterations = spec.iterations;
+  // 认不出的 timing 名字回退 `ease`（CSS 缺省）——**但只在真认不出时**：
+  // 静默当线性会让“抄来的 `cubic-bezier` 曲线”永远不生效。
+  out.easing = anim::parse_easing(spec.timing).value_or(anim::Easing::ease());
+  switch (spec.direction) {
+    case html::AnimationSpec::Direction::Normal: out.direction = anim::Animation::Direction::Normal; break;
+    case html::AnimationSpec::Direction::Reverse: out.direction = anim::Animation::Direction::Reverse; break;
+    case html::AnimationSpec::Direction::Alternate:
+      out.direction = anim::Animation::Direction::Alternate;
+      break;
+    case html::AnimationSpec::Direction::AlternateReverse:
+      out.direction = anim::Animation::Direction::AlternateReverse;
+      break;
+  }
+  switch (spec.fill) {
+    case html::AnimationSpec::Fill::None: out.fill = anim::Animation::Fill::None; break;
+    case html::AnimationSpec::Fill::Forwards: out.fill = anim::Animation::Fill::Forwards; break;
+    case html::AnimationSpec::Fill::Backwards: out.fill = anim::Animation::Fill::Backwards; break;
+    case html::AnimationSpec::Fill::Both: out.fill = anim::Animation::Fill::Both; break;
+  }
+  return out;
+}
+
+auto HtmlView::link_at(math::Point point) const -> std::string {  const float offset_x =
       bounds_.x + padding_ +
       std::max((bounds_.width - padding_ * 2.0f - content_width_) * 0.5f, 0.0f);
   const float offset_y = bounds_.y + padding_ - scroll_;

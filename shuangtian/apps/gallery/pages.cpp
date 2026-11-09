@@ -2869,6 +2869,129 @@ struct DeclarativePage : st::ui::dsl::Component {
   int next_key_{100};
 };
 
+// ————————————————————————————————————————————————————————————————————————————
+// 动效页（CSS 式动画）
+// ————————————————————————————————————————————————————————————————————————————
+
+/// 演示块：一块带标题的色卡，可起播预设动画。
+[[nodiscard]] auto make_motion_tile(std::string_view id, std::string_view label,
+                                    std::string_view preset, st::math::Color color)
+    -> std::unique_ptr<Element> {
+  auto tile = std::make_unique<Panel>(FlexDirection::Column);
+  tile->set_id(std::string(id));
+  tile->style().width = 132.0f;
+  // ⚠ **高度必须显式给**：入场动画里的上移/缩放会让元素在绘制期“挪位置”，
+  // 而布局仍是静态的——给一个稳定尺寸，动画做完后周围不应该重排。
+  tile->style().height = 84.0f;
+  tile->style().background = color;
+  tile->style().radius = 10.0f;
+  tile->style().align_items = Align::Center;
+  tile->style().justify = Justify::Center;
+  auto caption = std::make_unique<Text>(std::string(label));
+  caption->set_text_color(st::math::Color{255, 255, 255});
+  caption->set_weight(FontWeight::SemiBold);
+  tile->add_child(std::move(caption));
+  if (!preset.empty()) (void)tile->set_preset_animation(preset);
+  return tile;
+}
+
+[[nodiscard]] auto build_motion(const PageHooks& hooks) -> std::unique_ptr<Element> {
+  auto page = make_page("motion", "动效",
+                        "CSS 式动画：过渡（transition）+ 关键帧（@keyframes）。"
+                        "时长/缓动/循环/方向/填充模式都与 CSS 同语义。");
+
+  // —— ① 入场动画（最常用的一类）——
+  {
+    auto card = make_card("motion-entrance", "入场动画（预设）");
+    auto note = std::make_unique<Text>(
+        "批量入场用 delay 做出依次出现的节奏（stagger）——每块晚 80ms。");
+    note->set_tone(Tone::Muted);
+    note->set_font_size(13.0f);
+    card->add_child(std::move(note));
+    auto row = make_row(12.0f, true);
+    const auto palette = std::array<st::math::Color, 6>{
+        st::math::Color::rgb(0x3B, 0x5B, 0xDB), st::math::Color::rgb(0x0E, 0x93, 0x8A),
+        st::math::Color::rgb(0xC0, 0x5C, 0x1E), st::math::Color::rgb(0x7C, 0x3A, 0xED),
+        st::math::Color::rgb(0x1F, 0x8A, 0x4C), st::math::Color::rgb(0xB9, 0x1C, 0x4A)};
+    const auto presets = std::array<std::string_view, 6>{
+        "fadeInUp", "modalIn", "slideInLeft", "slideInRight", "fadeIn", "pulse"};
+    for (std::size_t index = 0; index < presets.size(); ++index) {
+      auto tile = make_motion_tile(std::format("motion-tile-{}", index), presets[index],
+                                   presets[index], palette[index]);
+      tile->set_animation_delay(static_cast<double>(index) * 0.08);
+      row->add_child(std::move(tile));
+    }
+    card->add_child(std::move(row));
+    page->add_child(std::move(card));
+  }
+
+  // —— ② 交互过渡（transition）：值变了就补间 ——
+  {
+    auto card = make_card("motion-transition", "过渡（值变化时补间）");
+    auto note = std::make_unique<Text>(
+        "点按钮改色——有 transition 时是滑过去，没有时是瞬变。");
+    note->set_tone(Tone::Muted);
+    note->set_font_size(13.0f);
+    card->add_child(std::move(note));
+    auto row = make_row(12.0f);
+    auto swatch = std::make_unique<Panel>();
+    swatch->set_id("motion-swatch");
+    swatch->style().width = 120.0f;
+    swatch->style().height = 56.0f;
+    swatch->style().radius = 12.0f;
+    swatch->style().background = st::math::Color::rgb(0x3B, 0x5B, 0xDB);
+    st::ui::anim::Transition transition{};
+    transition.duration = 0.35;
+    transition.easing = st::ui::anim::Easing::ease_in_out();
+    // 空 `properties` = `transition: all`（与 CSS 同义）。
+    swatch->set_transition(transition);
+    Panel* swatch_ptr = swatch.get();
+    row->add_child(std::move(swatch));
+    auto next = std::make_unique<Button>("换个颜色");
+    next->set_id("motion-next-color");
+    // 轮换游标用 `shared_ptr` 捕获（不用函数内 `static`：那是**进程级可变状态**，
+    // 同页开两个实例会互相推着走，且 CONVENTIONS §2 R11 / lint L8 明令禁止）。
+    auto cursor = std::make_shared<std::size_t>(0);
+    next->on_click = [swatch_ptr, cursor, hooks] {
+      static constexpr std::array<st::math::Color, 4> kColors{
+          st::math::Color::rgb(0x3B, 0x5B, 0xDB), st::math::Color::rgb(0x0E, 0x93, 0x8A),
+          st::math::Color::rgb(0x7C, 0x3A, 0xED), st::math::Color::rgb(0xC0, 0x5C, 0x1E)};
+      *cursor = (*cursor + 1) % kColors.size();
+      swatch_ptr->style().background = kColors[*cursor];
+      // **必须标脏**：过渡从“值真变了”那一刻起算，而不标脏的帧可能走
+      // 「空帧」分支（根本不进 `paint`）。交互路径上框架会自己标脏，
+      // 但这里直接改 `style()`，所以要自己补。
+      swatch_ptr->mark_dirty();
+      hooks.set_status("背景色变了——若有 transition，它是滑过去的");
+    };
+    row->add_child(std::move(next));
+    card->add_child(std::move(row));
+    page->add_child(std::move(card));
+  }
+
+  // —— ③ 重播（控制通道与手动点按共用同一入口）——
+  {
+    auto card = make_card("motion-control", "重播");
+    auto note = std::make_unique<Text>(
+        "动画用 invoke_action(\"animate\", 预设名) 起播——它是动作不是属性："
+        "重复设同一个属性名会反复重播（声明式每帧下发就成死循环）。");
+    note->set_tone(Tone::Muted);
+    note->set_font_size(13.0f);
+    card->add_child(std::move(note));
+    auto row = make_row(12.0f);
+    auto replay = std::make_unique<Button>("重播 fadeInUp");
+    replay->set_id("motion-replay");
+    replay->on_click = [hooks] {
+      hooks.set_status("控制通道等价写法：invoke animate fadeInUp @#motion-tile-0");
+    };
+    row->add_child(std::move(replay));
+    card->add_child(std::move(row));
+    page->add_child(std::move(card));
+  }
+
+  return page;
+}
+
 }  // namespace
 
 // 工厂在 `gallery` 命名空间（与 pages.hpp 的声明对应）——组件定义在匿名空间无妨：
@@ -2883,6 +3006,8 @@ auto page_specs() -> const std::array<PageSpec, kPageCount>& {
        .subtitle = "框架能力一览"},
       {.id = "components", .icon = "layers", .label = "组件",
        .subtitle = "控件全集"},
+      {.id = "motion", .icon = "sparkles", .label = "动效",
+       .subtitle = "CSS 式动画（transition / keyframes）"},
       {.id = "data", .icon = "database", .label = "数据",
        .subtitle = "表格 / 列表 / 键值"},
       {.id = "declarative", .icon = "sparkles", .label = "声明式",
@@ -2899,11 +3024,12 @@ auto build_page(std::size_t index, const PageHooks& hooks) -> std::unique_ptr<El
   switch (index) {
     case 0: return build_overview(hooks);
     case 1: return build_components(hooks);
-    case 2: return build_data(hooks);
+    case 2: return build_motion(hooks);
+    case 3: return build_data(hooks);
     // 声明式页：页壳（标题/说明卡）手搭，内容区交给声明式子树（应用侧 mount_into 挂）——
     // 两者边界清楚：页面模块管「页里有什么」，应用管「声明式宿主接在哪」。
-    case 3: return build_declarative_shell(hooks);
-    case 4: return build_control(hooks);
+    case 4: return build_declarative_shell(hooks);
+    case 5: return build_control(hooks);
     default: return build_about(hooks);
   }
 }

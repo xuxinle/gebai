@@ -606,6 +606,20 @@ struct BoxProps {
   std::optional<Align> align_items{};          ///< 交叉轴对齐
   std::optional<Align> align_self{};           ///< 单项覆盖父容器的交叉轴对齐
   std::optional<TextAlign> text_align{};       ///< 文本内部对齐（对 text 生效）
+  // —— 动画（CSS 式；引擎见 `st/ui/animation.hpp`）——
+  //
+  // 一行声明就能起播一个入场动效：`column(c, {.animate = "fadeInUp"}, …)`。
+  // 名字走 `anim::preset_names()`（fadeIn/fadeInUp/fadeOut/modalIn/slideInLeft/
+  // slideInRight/pulse/shake）。
+  //
+  // 为何不是 `std::optional<Animation>`：声明式每帧重建元素，
+  // 而把一个带“起点时间”的对象每帧重传会让动画**每帧重新起播**（永远播不完）。
+  // 传**名字**，落点函数只在“名字变了”时真正重设（见 `apply_box`）。
+  std::string animate{};
+  /// 动画延迟（秒；与 `animate` 配合。`-1` = 不设置）。批量入场时用来做 stagger。
+  double animate_delay{-1.0};
+  /// 属性过渡（`transition`）：值变化时补间。`<= 0` = 不设（每个元素最多一条）。
+  double transition_duration{-1.0};
   std::string id{};                       ///< 显式 id（空 = 自动）
   std::string key{};                      ///< 业务身份（自动 id 用 Type@key）
 };

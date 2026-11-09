@@ -2229,12 +2229,17 @@ void Canvas::draw_canvas(const Surface& source, math::Rect destination, DrawOpti
       std::uint32_t blended =
           pack(interpolate(p00, p10, p01, p11, 24), interpolate(p00, p10, p01, p11, 16),
                interpolate(p00, p10, p01, p11, 8), interpolate(p00, p10, p01, p11, 0));
-      if (options.opacity < 0.999f) {
-        const auto alpha =
-            static_cast<std::uint32_t>(math::clamp01(options.opacity) * 255.0f + 0.5f);
-        blended = scale_premul(blended, alpha);
-      }
-      const float coverage = static_cast<float>(channel(blended, 0)) / 255.0f;
+      // **`opacity` 只能乘一次**：它是“图层不透明度”，语义与源自身的 α 相乘后
+      // 作为合成覆盖率交给下面的 `blend_pixel_premul`（那里内部会按 coverage
+      // 再 `scale_premul` 一次——那是**覆盖率**不是不透明度）。
+      //
+      // 旧写法是“先 `scale_premul(blended, opacity)`、再把缩放后的 α 当 coverage
+      // 传下去”，于是 `0.5` 实际得到 `0.25`：实测不透明黑贴到白底上是 **191**
+      // 而不是 127。而 GPU 腿（`platform_d3d11.cpp` 的 `draw_canvas`）只乘一次
+      // （`base_params(…, options.opacity)`）——**两条腿本来就不一致**。
+      // 现在两者同一个算式。
+      const float source_alpha = static_cast<float>(channel(blended, 0)) / 255.0f;
+      const float coverage = source_alpha * math::clamp01(options.opacity);
       if (coverage <= kCoverageEpsilon) continue;
       // ⚠ **必须传 `options.blend`**（不能硬编码 `over_premul`）：这是图层合成的
       // 唯一入口，而“每个图层带自己的混合模式”正是图像编辑器的核心能力。

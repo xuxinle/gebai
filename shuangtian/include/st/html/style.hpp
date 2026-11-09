@@ -25,8 +25,14 @@
 /// 宽度 / 高度 / 最大宽度 / 外边距 / 内边距 / 边框（宽度·颜色·圆角）/
 /// 背景色 / 显示模式 / 列表样式类型 / 空白保留模式。
 ///
+/// **支持到什么程度（2026-11-09 更新）**：`transition` 与 `animation`/`@keyframes`
+/// **已支持解析**（见 `AnimationSpec` / `KeyframesSpec`）：宿主（`HtmlView`）把它们
+/// 接到 `st::ui::anim` 引擎上真实播放。以下仍**不支持**（写了忽略）：
+/// `transform` 静态值（排版层无变换能力）、`animation-play-state`、
+/// 逐关键帧 `timing-function`（段间统一）、兼容写法 `-webkit-animation`。
+///
 /// **不支持**（出现即忽略该声明）：`float` / `position` / `flex` / `grid` /
-/// `transform` / `animation` / `transition` / 百分比高度 / `calc()` / 变量 `var(--x)`。
+/// `transform` / 百分比高度 / `calc()` / 变量 `var(--x)`。
 /// 忽略而不是报错：网页里这些属性满天飞，一份样式表里有一条不认识的不该让整页不可读。
 ///
 /// ### 层叠（简化但**顺序正确**）
@@ -67,6 +73,51 @@ enum class Display : std::uint8_t {
 
 /// 空白处理（沿 CSS `white-space`）。
 enum class WhiteSpace : std::uint8_t { Normal, Pre, PreWrap, NoWrap };
+
+/// 一条 CSS `animation`（已解析成数值；**不依赖 `st::ui::anim`**）。
+///
+/// 为何不直接用 `st::ui::anim::Animation`：`st::html` 是**独立层**（解析器与排版语义
+/// 不该依赖 UI 引擎；`docs/` 里的分层图就是按这个切的）。两边的边界就在这一层：
+/// `html` 只交出“作者写了什么”，`HtmlView` 负责把它翻成引擎能跑的形式。
+struct AnimationSpec {
+  std::string name{};
+  /// 秒；`<= 0` = 未指定（按 CSS 缺省 0s，即瞬变）。
+  double duration{0.0};
+  double delay{0.0};
+  /// 循环次数；`<= 0` = `infinite`。
+  int iterations{1};
+  /// `normal` / `reverse` / `alternate` / `alternate-reverse`。
+  enum class Direction : std::uint8_t { Normal, Reverse, Alternate, AlternateReverse };
+  Direction direction{Direction::Normal};
+  /// `none` / `forwards` / `backwards` / `both`。
+  enum class Fill : std::uint8_t { None, Forwards, Backwards, Both };
+  Fill fill{Fill::None};
+  /// `animation-timing-function` 原文（如 `"ease-out"` / `"cubic-bezier(...)"`）。
+  /// 保留字符串而不是枚举：解析器在 `anim` 层（一份实现），HTML 层不抄第二份。
+  std::string timing{"ease"};
+
+  [[nodiscard]] auto active() const noexcept -> bool { return !name.empty() && name != "none"; }
+};
+
+/// 一组关键帧（`@keyframes`）。每个帧的**属性值**已按该帧自己的声明表解析成 `Style`
+/// 差异——于是 `from { opacity: 0 }` 只需写一条声明，不必重写整个样式。
+struct KeyframeSpec {
+  float offset{0.0f};
+  /// 该帧**声明过**的属性（`std::optional` 逐项表达“没写”：没写就沿用元素原值）。
+  std::optional<float> opacity{};
+  std::optional<math::Color> background{};
+  std::optional<math::Color> color{};
+  std::optional<float> translate_x{};
+  std::optional<float> translate_y{};
+  std::optional<float> scale{};
+  std::optional<float> radius{};
+};
+
+/// 一个命名关键帧集合。
+struct KeyframesSpec {
+  std::string name{};
+  std::vector<KeyframeSpec> frames{};
+};
 
 /// 列表标记类型。
 enum class ListStyle : std::uint8_t { Disc, Circle, Square, Decimal, None };
@@ -119,6 +170,20 @@ struct Style {
   /// 标题级别（1..6；非标题为 0）——排版层据此给默认字号/间距/字重。
   std::uint8_t heading_level{0};
 
+  // —— 动画（：`@keyframes` + `animation` + `transition`）——
+  ///
+  /// 为何现在支持了（旧注释写的是“不支持，出现即忽略”）：
+  /// 展示型内容（报告页/落地页/文档预览）里入场动效是标配，
+  /// 而“写了静默丢掉”让人只能靠截图猜到底是没解析还是没播。
+  /// 现在把声明**解析出来**，能不能真的动取决于宿主（`HtmlView` 接到
+  /// `st::ui::anim` 引擎；其他宿主只调用静态排版时可以不用）。
+  std::optional<AnimationSpec> animation{};
+  /// `transition-duration`（秒；`0` = 不补间）。其余字段简化：统一 `ease-out`、
+  /// 作用在**所有**可动画属性上（`transition: all`）。
+  double transition_duration{0.0};
+  /// 动态值（`:hover` 等）未实现——样式上的**静态** `transform` 也不支持：
+  /// 排版层没有变换能力（见 `docs/`），硬塞会在排版与命中两侧各漏一处。
+
   [[nodiscard]] auto bold() const noexcept -> bool { return font_weight >= 600U; }
 };
 
@@ -156,10 +221,16 @@ struct Rule {
 /// 解析后的样式表。
 struct StyleSheet {
   std::vector<Rule> rules{};
+  /// `@keyframes` 集合（按名查；后定义的覆盖前面的——CSS 同语义）。
+  std::vector<KeyframesSpec> keyframes{};
 
   /// 解析 CSS 文本（容错：认不出选择器/声明的部分被跳过）。
   static auto parse(std::string_view css) -> StyleSheet;
 };
+
+/// 按名取 `@keyframes`（没有返回 `nullptr`）。
+[[nodiscard]] auto find_keyframes(const StyleSheet& sheet, std::string_view name)
+    -> const KeyframesSpec*;
 
 /// 解析一份内联 `style="…"`（返回声明表）。
 [[nodiscard]] auto parse_inline_style(std::string_view text) -> std::vector<Declaration>;
