@@ -75,7 +75,7 @@ exe 按以下顺序查找（命中即止，**不需要任何自定义环境变�
 ③ run(action=build, project="/path/to/app", target="app")  # 构建（首次编框架源，之后走共享对象缓存）
 ④ run(action=start, project=..., target="app")             # 启动（无头；返回端口与控制文件）
 ⑤ find/tree/get/set/invoke/capture/wait                    # 观察与验证（截图是硬要求）
-⑥ run(action=build, project=..., target="app", toolchain="mingw")   # 交叉编译出 Windows .exe
+⑥ run(action=build, project=..., target="app", toolchain="mingw")   # **仅当宿主非 Windows 时**才出 .exe（Windows 宿主上普通构建就是 .exe，这跑空转）
 ⑦ run(action=stop,  project=..., target="app")             # 收尾
 ```
 
@@ -179,8 +179,18 @@ exe 按以下顺序查找（命中即止，**不需要任何自定义环境变�
      `ifstream(std::string)`——Windows 上按 ANSI 解释，中文路径必坏）；
    - 示例/工具的入口用 `ST_MAIN(fn)`（Windows 的 `argv` 是 ANSI，中文参数会乱）；
    - 不用 `long` 表示字节数/偏移（Windows 上是 32 位），打印一律 `std::format`。
-   **改了平台分支就要交叉编译一次验证**：`shuangtian_run(action=build, toolchain="mingw")`
-   （本机编不到 Windows 分支，这是唯一能发现问题的途径）。
+   **改了平台分支要不要交叉编译，先看宿主**：
+   判据是「本机原生编译器的目标三元组是不是那个平台」（`g++ -dumpmachine`）。
+   - **Windows 宿主（本仓库开发机）**：原生工具链**本就是** mingw64
+     （`x86_64-w64-mingw32`），普通 `st build` 已经在编 Windows 分支——
+     再跑 `--toolchain=mingw` 只是**同一件事做第二遍**（白花几分钟构建时间），
+     `x86_64-w64-mingw32-g++` 与 `g++.exe` 在同一个 `mingw64\bin` 目录下、
+     产物是同一个 Windows x64 目标。
+   - **Linux 宿主**：本机编不到 Windows 分支，`--toolchain=mingw` 是必做项。
+
+   真正该问的是：**除了宿主，还有哪个平台的分支我改过却没编过？**
+   （Windows 宿主上真正需要交叉的其实是 Linux/macOS 目标，而本仓目前没配。）
+   权威条款见 `CONVENTIONS.md` §10 第 6 条（那里完整记着“机械套用 mingw 三次全是空转”的教训）。
 9. **改界面前先搞清你用的是哪套写法**（声明式 vs 手搭）——两者的生命周期契约完全不同：
    - **声明式**（`st::ui::dsl`）：整个界面是一份 `build()` 描述。开始写之前先读
      `docs/declarative.md` §5.5「调用方必须知道的三件事」：
@@ -533,7 +543,8 @@ env 回退路径。判据：**改任一条腿，必须让 `scene3d_two_legs_test
 
 - **`CONVENTIONS.md` 是硬红线**，`action=lint` 会挡（禁用清单、头文件纪律、跨平台约束…）。
 - **设计层面变更（行为/接口/协议/存储布局/常量）必须同步 `DESIGN.md` 对应章节**。
-- **改了平台分支就要交叉编译验证**（`action=build, toolchain="mingw"`）。
+- **改了平台分支的验证看宿主**（Windows 宿主：普通构建已经是 mingw64 目标，
+  `--toolchain=mingw` 空转；Linux 宿主：必做）。详见 §3 第 8 条。
 - 改完照常跑 `action=test`；本机是 Linux 时，`--san` 档要在 Linux 上跑（Windows 上无 ASan）。
 - **产物纯净**：注释/文档只述当前能力与限制，不写“何时发现问题/为什么改成这样”——
   缘由归 git 提交说明与 journal。
