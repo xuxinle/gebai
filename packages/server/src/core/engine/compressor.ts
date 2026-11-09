@@ -54,11 +54,9 @@ export function outputReserveTokens(cap: number, maxOutputTokens?: number): numb
 /** 摘要请求的单块输入预算与块数上限（总覆盖 = 两者之积 ≈ 12 万字符历史可完整进摘要）。 */
 const SUMMARY_INPUT_LIMIT = 20000
 const SUMMARY_MAX_CHUNKS = 6
-/** 摘要输出上限（合并后摘要的硬上限）。 */
-const SUMMARY_OUTPUT_LIMIT = 2000
 /** 摘要输入中单条消息骨架的内容上限（工具参数只取开头，避免单条超长消息挤占块预算）。 */
 const SUMMARY_ITEM_LIMIT = 600
-/** 摘要失败时降级骨架的行数与单行字符上限（降级文本同样受 SUMMARY_OUTPUT_LIMIT 约束）。 */
+/** 摘要失败时降级骨架的行数与单行字符上限（降级骨架体积远小于其覆盖的历史，见 summarizeFallback）。 */
 const SUMMARY_FALLBACK_LINES = 15
 const SUMMARY_FALLBACK_ITEM_LIMIT = 120
 
@@ -139,6 +137,17 @@ export function estimateSchemasTokens(schemas?: Array<{ name?: string; descripti
 function clipText(s: string, n: number): string {
   if (s.length <= n) return s
   return `${s.slice(0, n)}…（余 ${s.length - n} 字符）`
+}
+
+/**
+ * 子会话报告摘要的输入取样：预算内原文直取；超预算取**头尾**（报告结论与建议在尾部）+ 中部省略说明
+ * ——不做「只留开头」的硬切（报告越长，越可能把结论切掉，摘要就只剩过程叙述）。
+ */
+function pickSubSessionReportInput(content: string, budget = SUMMARY_INPUT_LIMIT): string {
+  if (content.length <= budget) return content
+  const head = Math.floor(budget * 0.4)
+  const tail = budget - head
+  return `${content.slice(0, head)}\n[省略] 其中约 ${content.length - budget} 字符因超出摘要输入预算未纳入（头尾已保留）\n${content.slice(content.length - tail)}`
 }
 
 /**
@@ -306,15 +315,16 @@ export function buildSummaryChunks(lines: string[], budget = SUMMARY_INPUT_LIMIT
 }
 
 /**
- * 摘要失败（接口异常/读超时/取消）时的降级文本：保留**被裁剪内容的骨架行**而非一句空占位——
- * 模型仍能知道被裁剪的历史大致是什么、涉及哪些文件与工具，
- * 比「历史已丢弃」式占位信息量大得多。
+ * 摘要不可用（接口异常/读超时/取消；或模型产出的摘要长于其摘要输入、进上下文不腾空间）时的降级文本：
+ * 保留**被裁剪内容的骨架行**而非一句空占位——模型仍能知道被裁剪的历史大致是什么、涉及哪些文件与工具。
+ * priorSummaries 为既有摘要原文：它们随区间一起被替换，新摘要没接上时必须在这里续上（否则那段历史彻底丢失）。
  */
-export function summarizeFallback(slice: Message[]): string {
+export function summarizeFallback(slice: Message[], priorSummaries: string[] = []): string {
   const lines = slice.slice(0, SUMMARY_FALLBACK_LINES).map((m) => summarizeMessageLine(m, SUMMARY_FALLBACK_ITEM_LIMIT))
-  const head = `[上下文已裁剪：摘要生成失败，已丢弃最早 ${slice.length} 条历史消息（原文不再保留）。以下为被裁剪内容的骨架记录]`
+  const head = `[上下文已裁剪：原 ${slice.length} 条历史消息已丢弃（原文不再保留）。以下为被裁剪内容的骨架记录]`
   const more = slice.length > SUMMARY_FALLBACK_LINES ? `\n…（另有 ${slice.length - SUMMARY_FALLBACK_LINES} 条更晚的消息同样已被裁剪）` : ""
-  return `${head}\n${lines.join("\n")}${more}`.slice(0, SUMMARY_OUTPUT_LIMIT)
+  const prior = priorSummaries.length ? `\n[此前摘要]\n${priorSummaries.map((s) => s.trim()).join("\n")}` : ""
+  return `${head}\n${lines.join("\n")}${more}${prior}`
 }
 
 /** 模型单轮调用的 schema 形态（engine.callModel 同构）。 */
@@ -358,9 +368,6 @@ export interface SummarizeCachePrefix {
 }
 
 export class ContextCompressor {
-  /** 前缀缓存命中记忆（provider+model → 上次摘要调用是否命中）：未命中时改写骨架行路径（体积小得多）。 */
-  private cacheHit = new Map<string, boolean>()
-
   constructor(private deps: CompressorDeps) {}
 
   async compactSession(
@@ -440,10 +447,8 @@ export class ContextCompressor {
     return { compacted: removed, summary }
   }
 
-  /** 构造（并判断是否可用）缓存友好摘要请求的前缀：engine 提供 system 提示词与工具 schema，
-   *  历史前缀经 deps.loadHistory(upToIndex) 渲染（与主循环同渲染路径）。
-   *  会话工作目录段由 loadHistory 产出（紧随主提示词之后），与本处拼接顺序一致——前缀逐字节相同因此自动成立。
-   *  不可用时返回 undefined，summarize 退回骨架行 + 分块路径。 */
+  /** 构造函数注入的缓存前缀请求（与主循环逐字节同前缀）：仅在既有摘要消息全部位于区间之前时可用——
+   *  否则旧摘要内容不在前缀里，吸收后会丢信息。不可用时返回 undefined，summarize 退回骨架行 + 分块路径。 */
   private async cachedPrefix(
     llm: LLMProvider,
     sessionId: string,
@@ -453,7 +458,7 @@ export class ContextCompressor {
     priorSummaryBefore: boolean,
   ): Promise<{ messages: MessageLike[]; tools?: CallModelSchemas } | undefined> {
     if (!cachePrefix?.systemPrompt || !priorSummaryBefore) return undefined
-    if (!this.cachePreferred(llm)) return undefined // 上次同模型调用未命中缓存（服务商无前缀缓存）：不再白付全价
+    if (!this.cachePreferred(llm)) return undefined // GEBAI_COMPACT_CACHE_PREFIX=0：强制改走骨架路径
     const caps = typeof llm?.capabilities === "function" ? llm.capabilities() : undefined
     try {
       const history = await this.deps.loadHistory(sessionId, user, caps?.multimodal ?? false, upTo)
@@ -466,19 +471,15 @@ export class ContextCompressor {
     }
   }
 
-  /** 前缀缓存可用性（按 provider+模型记忆）：上次同模型摘要调用命中过缓存 → 继续用原文前缀；
-   *  未命中（服务商无前缀缓存/前缀失配）→ 改写骨架行路径（体积小得多，全价也划算）。
-   *  环境变量 GEBAI_COMPACT_CACHE_PREFIX=0/off 强制关闭，=1/on 强制开启（不做自适应）。 */
-  private cachePreferred(llm: LLMProvider): boolean {
+  /** 前缀请求可用性：**默认可用**（原文前缀是摘要的首选输入形态——信息量最高，且服务端前缀缓存
+   *  命中时按缓存价计）。不再按上次是否命中缓存做自适应退化：多数 OpenAI 兼容网关不返回
+   *  `prompt_tokens_details.cached_tokens`（字段缺失 ≠ 未命中），据此判「无缓存」会让摘要永久退化到
+   *  骨架行路径（每条消息压到 600 字符，摘要信息量更低）——默认走前缀，失败最多付一次全价。
+   *  `GEBAI_COMPACT_CACHE_PREFIX=0/off` 强制改走骨架路径（服务商无前缀缓存且要省 token 时用）。
+   *  仍按 IP 保持开关读取（不只是 process.env）：任务级 env 覆盖对压缩同样生效。 */
+  private cachePreferred(_llm: LLMProvider): boolean {
     const flag = (this.deps.readEnv?.("GEBAI_COMPACT_CACHE_PREFIX") ?? process.env.GEBAI_COMPACT_CACHE_PREFIX ?? "").toLowerCase()
-    if (flag === "0" || flag === "off" || flag === "false") return false
-    if (flag === "1" || flag === "on" || flag === "true") return true
-    return this.cacheHit.get(this.providerKey(llm)) !== false
-  }
-
-  private providerKey(llm: LLMProvider): string {
-    const caps = typeof llm?.capabilities === "function" ? llm.capabilities() : undefined
-    return `${llm?.id ?? "unknown"}:${caps?.model ?? ""}`
+    return !(flag === "0" || flag === "off" || flag === "false")
   }
 
   /** 近消息滑动窗口条数（GEBAI_COMPACT_WINDOW 可调，非法值忽略取缺省）。 */
@@ -614,22 +615,20 @@ export class ContextCompressor {
           fits = est <= budget
         }
         if (fits) {
-          const { text, usage } = await this.completeTextWithUsage(req, provider, signal, { tools: cached.tools })
-          // 缓存命中记忆：服务商无前缀缓存/前缀失配时不白付全价，下次改走骨架路径
-          if (usage) this.cacheHit.set(this.providerKey(provider), (usage.cachedTokens ?? 0) > 0)
-          if (text) return text.slice(0, SUMMARY_OUTPUT_LIMIT)
+          const { text } = await this.completeTextWithUsage(req, provider, signal, { tools: cached.tools })
+          if (text) return text
           // 空文本（如模型改成调用工具）→ 退回骨架路径
         }
       }
       const lines = [...priorSummaries.map((s) => `[此前摘要] ${clipText(s.trim(), SUMMARY_ITEM_LIMIT)}`), ...slice.map((m) => summarizeMessageLine(m))]
       const chunks = buildSummaryChunks(lines)
       if (!chunks.length) throw new Error("摘要输入为空")
-      let summary: string
+      const partials: string[] = []
       if (chunks.length === 1) {
-        summary = await this.completeText([{ role: "system", content: SUMMARIZE_PROMPT }, { role: "user", content: chunks[0] }], provider, signal)
+        const one = await this.completeText([{ role: "system", content: SUMMARIZE_PROMPT }, { role: "user", content: chunks[0] }], provider, signal)
+        if (one) partials.push(one)
       } else {
         // 逐块摘要（单块失败跳过——其余块仍能产出摘要，不因一块异常整体降级为空占位）
-        const partials: string[] = []
         for (let i = 0; i < chunks.length; i++) {
           try {
             const part = await this.completeText(
@@ -642,14 +641,19 @@ export class ContextCompressor {
             if (signal?.aborted) throw err
           }
         }
-        if (!partials.length) throw new Error("分块摘要均为空")
-        summary = partials.length === 1 ? partials[0] : await this.mergeSummaries(partials, provider, signal)
       }
-      if (!summary) throw new Error("摘要为空")
-      return summary.slice(0, SUMMARY_OUTPUT_LIMIT)
+      // 摘要不裁剪：模型写多长就是多长（不按字符数切片，长摘要里的文件路径与未完成事项不会被切掉尾巴）。
+      // **但**要为「摘要压不住窗口」保留收敛路径：摘要是其覆盖区间的唯一留存形态，若模型产出的摘要
+      // 比摘要输入（区间骨架行 + 既有摘要）还长，它进上下文必然净不腾出空间——带着它每次压缩都白做，
+      // 同一个水位反复压缩、每次都调一次模型。此时退回不裁切的 summarizeFallback（被裁内容的全量骨架行，
+      // 体积恒小于其覆盖的历史），压缩因此每轮净腾出空间、区间持续后移。
+      const assembled = partials.length > 1 ? [...partials, await this.mergeSummaries(partials, provider, signal)] : partials
+      const best = assembled.reduce<string | null>((a, s) => (s && (a === null || s.length > a.length) ? s : a), null)
+      if (!best) throw new Error("摘要为空")
+      return best.length < lines.join("\n").length ? best : summarizeFallback(slice, priorSummaries)
     } catch {
       // 摘要失败（含读超时/取消）降级为滚动裁剪：被裁剪内容保留骨架行，占位文本向模型说明历史已被裁剪
-      return summarizeFallback(slice)
+      return summarizeFallback(slice, priorSummaries)
     }
   }
 
@@ -713,11 +717,11 @@ export class ContextCompressor {
       const out = await this.completeText(
         [
           { role: "system", content: "你是子会话报告压缩器。把子会话执行报告压缩为给父会话决策用的要点：保留结论、关键发现、产物文件路径、给父会话的建议与未尽事项；舍弃过程叙述与客套话。直接输出要点正文（可分条），不超过 400 字。" },
-          { role: "user", content: content.slice(0, SUMMARY_INPUT_LIMIT) },
+          { role: "user", content: pickSubSessionReportInput(content) },
         ],
         provider,
       )
-      return out ? out.slice(0, SUMMARY_OUTPUT_LIMIT) : undefined
+      return out || undefined
     } catch {
       return undefined
     }

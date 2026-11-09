@@ -110,7 +110,6 @@ describe("摘要输入构造", () => {
     expect(text).toContain("上下文已裁剪")
     expect(text).toContain("read(")
     expect(text).toContain("b.ts")
-    expect(text.length).toBeLessThanOrEqual(2000)
   })
 })
 
@@ -171,6 +170,53 @@ describe("compactSession 摘要生成", () => {
     expect(r.compacted).toBeGreaterThan(0)
     expect(r.summary).toContain("上下文已裁剪")
     expect(r.summary).toContain("sh(") // 骨架里有工具调用
+    s.cleanup()
+  })
+
+  test("摘要输出不裁剪：模型写多长就多长（超过旧 2000 字符上限也一字不切）", async () => {
+    const long = `摘要：${"要".repeat(2500)}`
+    const { provider } = mockProvider(() => long)
+    // 历史骨架行总量（约 1.8 万字符）远大于摘要长度——摘要进上下文净腾出空间
+    const s = await setup({ provider, messages: dialogue(30, 3000) })
+    const r = await s.compressor.compactSession(s.session.id, "default")
+    expect(r.compacted).toBeGreaterThan(0)
+    expect(r.summary).toBe(long)
+    const loaded = await s.store.load(s.session.id)
+    expect(String(loaded!.messages.find((m) => m.compacted)?.content)).toBe(long)
+    s.cleanup()
+  })
+
+  test("摘要长于其摘要输入（压不住窗口）时降级为骨架——不裁摘要，但压缩必须每轮净腾出空间", async () => {
+    const long = "长".repeat(20000) // 远超小历史骨架行总量
+    const { provider } = mockProvider(() => long)
+    const s = await setup({ provider, messages: dialogue(6, 10) })
+    const r = await s.compressor.compactSession(s.session.id, "default")
+    expect(r.compacted).toBeGreaterThan(0)
+    expect(r.summary).toContain("上下文已裁剪")
+    expect(r.summary.length).toBeLessThan(2000) // 骨架行体积远小于其覆盖历史
+    s.cleanup()
+  })
+
+  test("降级骨架续接既有摘要：旧摘要随区间被替换时其内容不丢", async () => {
+    const slice = [msg("assistant", "被裁剪的回答")]
+    const text = summarizeFallback(slice, ["旧摘要：任务目标与两条未完成事项"])
+    expect(text).toContain("被裁剪的回答")
+    expect(text).toContain("此前摘要")
+    expect(text).toContain("旧摘要：任务目标与两条未完成事项")
+  })
+
+  test("子会话报告摘要：超长报告取头尾（结论与建议都不被切掉），输出同样不裁剪", async () => {
+    const report = `开头结论\n${"x".repeat(50000)}\n末尾建议`
+    const long = "要".repeat(3000)
+    const { provider, inputs } = mockProvider(() => long)
+    const s = await setup({ provider })
+    const out = await s.compressor.summarizeSubSessionReport(report, {})
+    const sent = String(inputs[0]![1]!.content)
+    expect(sent).toContain("开头结论")
+    expect(sent).toContain("末尾建议")
+    expect(sent).toContain("[省略]")
+    expect(sent.length).toBeLessThan(report.length)
+    expect(out).toBe(long)
     s.cleanup()
   })
 
@@ -421,16 +467,34 @@ describe("缓存友好摘要（直接重发主循环同前缀，命中提示词�
     s.cleanup()
   })
 
-  test("未命中缓存（usage.cachedTokens=0）：下次自动改走骨架行路径（不白付全价）", async () => {
+  test("默认走原样上下文：缓存未命中（cachedTokens=0）也不退化到骨架路径", async () => {
     const { provider, inputs } = mockProvider(undefined, { inputTokens: 90000, cachedTokens: 0 })
     const s = await setup({ provider })
     const cached = { messages: PREFIX }
-    // 第一次：走前缀路径（命中记忆未知，先试）
     await s.compressor.summarize([msg("assistant", "abc")], provider, undefined, [], cached)
-    expect(String(inputs[0]![inputs[0]!.length - 1]!.content)).toContain("压缩指令")
-    // 第二次：记录到未命中 → 骨架路径（system 为骨架提示词）
     await s.compressor.summarize([msg("assistant", "abc")], provider, undefined, [], cached)
-    expect(String(inputs[1]![0]!.content)).toContain("压缩器")
+    // 两次都发原样前缀（不因未命中记录而改写骨架行）
+    for (const sent of inputs) {
+      expect(sent.slice(0, PREFIX.length)).toEqual(PREFIX)
+      expect(String(sent[sent.length - 1]!.content)).toContain("压缩指令")
+    }
+    s.cleanup()
+  })
+
+  test("字段缺失（接口不返回 cached_tokens）同样保持原样上下文，不判未命中", async () => {
+    const { provider, inputs } = mockProvider(undefined, { inputTokens: 90000 }) // cachedTokens undefined
+    const s = await setup({ provider })
+    const cached = { messages: PREFIX }
+    for (let i = 0; i < 3; i++) await s.compressor.summarize([msg("assistant", "abc")], provider, undefined, [], cached)
+    for (const sent of inputs) expect(sent.slice(0, PREFIX.length)).toEqual(PREFIX)
+    s.cleanup()
+  })
+
+  test("GEBAI_COMPACT_CACHE_PREFIX=0：强制改走骨架行路径（省 token 的开关口）", async () => {
+    const { provider, inputs } = mockProvider()
+    const s = await setup({ provider, readEnv: (n) => (n === "GEBAI_COMPACT_CACHE_PREFIX" ? "0" : undefined) })
+    await s.compressor.summarize([msg("assistant", "abc")], provider, undefined, [], { messages: PREFIX })
+    expect(String(inputs[0]![0]!.content)).toContain("压缩器") // 骨架提示词
     s.cleanup()
   })
 

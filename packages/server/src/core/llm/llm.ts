@@ -1196,11 +1196,13 @@ export function salvageWriteArgs(raw: string): { path: string; content: string }
 function pickUsage(u: Record<string, unknown> | undefined): LLMUsage | undefined {
   if (!u) return undefined
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
-  // 提示词缓存命中：OpenAI chat（prompt_tokens_details）与 Responses（input_tokens_details）的 cached_tokens
-  // 已含在 prompt/input_tokens 内；Anthropic 的 cache_read_input_tokens 在 input_tokens 之外，折算并入统一「cached ⊆ input」
+  // 提示词缓存命中（统一口径：cached ⊆ input）——三个来源：
+  // ① OpenAI chat / Responses：prompt_tokens_details.cached_tokens / input_tokens_details.cached_tokens（已含在 input 内）；
+  // ② DeepSeek：顶层 prompt_cache_hit_tokens（同样已含在 prompt_tokens 内，不重复累加）；
+  // ③ Anthropic：cache_read_input_tokens（在 input_tokens 之外，折算并入 input 统一口径）。
   const details = (u.prompt_tokens_details ?? u.input_tokens_details) as Record<string, unknown> | undefined
   const cacheRead = num(u.cache_read_input_tokens)
-  const cachedTokens = num(details?.cached_tokens) ?? cacheRead
+  const cachedTokens = num(details?.cached_tokens) ?? num(u.prompt_cache_hit_tokens) ?? cacheRead
   let inputTokens = num(u.input_tokens) ?? num(u.prompt_tokens)
   if (cacheRead !== undefined && inputTokens !== undefined) inputTokens += cacheRead
   const outputTokens = num(u.output_tokens) ?? num(u.completion_tokens)

@@ -260,6 +260,21 @@ describe("provider robustness", () => {
     expect(chunks.find((c) => c.type === "done")?.usage).toEqual({ inputTokens: 120, outputTokens: 3, totalTokens: 123, cachedTokens: 100 })
   })
 
+  test("OpenAI 兼容流（DeepSeek 口径）：顶层 prompt_cache_hit_tokens 提取缓存命中（已含在 prompt_tokens 内，不重复累加）", async () => {
+    const chunks: LLMChunk[] = []
+    await withFetch(
+      async () =>
+        new Response(
+          'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":3,"total_tokens":123,"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":56}}\n\ndata: [DONE]\n\n',
+          { status: 200 },
+        ),
+      async () => {
+        for await (const c of provider().chat([{ role: "user", content: "x" }])) chunks.push(c)
+      },
+    )
+    expect(chunks.find((c) => c.type === "done")?.usage).toEqual({ inputTokens: 120, outputTokens: 3, totalTokens: 123, cachedTokens: 64 })
+  })
+
   test("OpenAI 兼容流：服务端不返回 usage 时 done 不带 usage（估算兜底）", async () => {
     const chunks: LLMChunk[] = []
     await withFetch(
