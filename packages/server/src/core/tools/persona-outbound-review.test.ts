@@ -5,7 +5,7 @@
  * 审核关（env）放行 → 相期卡缺失拒绝 → 卡未送达拒绝 → 超时拒绝 → 驳回拒绝 → 批准放行。
  */
 import { describe, expect, test, beforeEach } from "bun:test"
-import { outboundReviewEnabled, personaOutboundGate, isAuthFailure, notifyAuthNeeded, ensureXiangqiReady, _resetXiangqiRecoveryForTest } from "./persona-outbound-review"
+import { outboundReviewEnabled, personaOutboundGate, isAuthFailure, notifyAuthNeeded, ensureXiangqiReady, _resetXiangqiRecoveryForTest, asPlainCodeBlock } from "./persona-outbound-review"
 
 function ctxWithPersona(personaId: string | null, sessionId = "s1") {
   return {
@@ -160,6 +160,59 @@ describe("personaOutboundGate 判定链", () => {
     )
     const sent = ask.calls[0] as { body: string }
     expect(sent.body).toContain("已截断")
+  })
+
+  /**
+   * 纯文本 vs markdown 的观感一致性。
+   *
+   * 审核卡用 MarkdownView 渲染，而被审内容发到飞书是**纯文本**。
+   * 直接拼会让 `##`、`*`、`-` 在卡片上被当标题/列表解释，预览与实际发出不一致——
+   * 而审核卡的全部意义就是让人看到「将会发出什么」。
+   */
+  test("纯文本正文包进围栏代码块（markdown 不解析它）", async () => {
+    const ask = askCardOf("deliver-approve")
+    const plain = "## 一、判定与处置\n* 训练频次检查\n1. 第一条\n不要 **随便** 改"
+    await personaOutboundGate(
+      ctxWithPersona("xiaoshuang") as never,
+      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: plain } },
+      { askCard: ask },
+    )
+    const sent = ask.calls[0] as { body: string }
+    // 原文逐字在内（断言内容不丢）
+    expect(sent.body).toContain("## 一、判定与处置")
+    expect(sent.body).toContain("不要 **随便** 改")
+    // 且被围栏包住：原文紧跟在 ```text 之后、``` 之前
+    expect(sent.body).toContain(`\`\`\`text\n${plain}\n\`\`\``)
+  })
+
+  test("正文自带反引号围栏时升级围栏长度（防提前关闭）", () => {
+    const withFence = "示例：\n```js\nconst a = 1\n```"
+    const wrapped = asPlainCodeBlock(withFence)
+    // 内容里最长连续反引号是 3 个 → 外层用 4 个
+    expect(wrapped.startsWith("````text\n")).toBe(true)
+    expect(wrapped.endsWith("\n````")).toBe(true)
+    // 原文整段逐字在内（不被自己在内部的 ``` 截断）
+    expect(wrapped).toContain(withFence)
+  })
+})
+
+/**
+ * 卡片渲染契约：审核卡的头尾说明是 markdown（需要渲染），只有**消息正文**是代码块。
+ * 反向锚住：不要把“目标”也包进代码块——那会让卡片看起来像一坨终端输出。
+ */
+describe("审核卡正文形态", () => {
+  test("目标与缘由保持 markdown 强调，正文才是代码块", async () => {
+    const ask = askCardOf("deliver-approve")
+    await personaOutboundGate(
+      ctxWithPersona("xiaoshuang") as never,
+      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi", why: "回复他" } },
+      { askCard: ask },
+    )
+    const body = (ask.calls[0] as { body: string }).body
+    expect(body).toContain("**目标**：")
+    expect(body).toContain("**缘由**：")
+    // 正文在代码块里，不在 markdown 强词里
+    expect(body).toContain("```text\nhi\n```")
   })
 })
 

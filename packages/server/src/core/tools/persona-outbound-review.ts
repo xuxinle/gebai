@@ -172,6 +172,35 @@ const REVIEW_WAIT_MS = 5 * 60_000
 const REVIEW_BODY_MAX = 800
 
 /**
+ * 把飞书**纯文本**安全地嵌进相期卡的 **markdown** 正文。
+ *
+ * ## 为什么必须包而不是直接拼
+ *
+ * 审核卡是 markdown 渲染的（相期用 MarkdownView），而被审核的内容是飞书**纯文本**
+ * （飞书消息不渲染 markdown，人格写 `**粗体**` 过去会原样显示成星号）。
+ * 两者直接拼起来的后果：正文里正常出现的 `#`、`*`、`-`、`1.` 会被 MarkdownView
+ * 当成标题/列表/加粗来解释——
+ *
+ * ```
+ * 原文：    ## 一、判定与处置        →  卡片上变成大标题
+ * 原文：    * 训练频次检查            →  卡片上变成项目符号
+ * 原文：    不要 **随便** 改           →  卡片上“随便”加粗（星号消失）
+ * ```
+ *
+ * 审批人看到的样子与实际发出后的样子不一致——而这张卡的存在意义正是「让他看到将会
+ * 发出什么」。预览失真就不是小毛病，是审核环节失效。
+ *
+ * 包进围栏代码块后 markdown 不解析其中内容，逐字呈现；内容里自带的 ``` 要降级成长围栏
+ * 防提前关闭。
+ */
+export function asPlainCodeBlock(text: string): string {
+  // 内容里含有 ``` 时，用更长的围栏（CommonMark：围栏长度需大于内容中最长的连续反引号）
+  const longest = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0)
+  const fence = "`".repeat(Math.max(3, longest + 1))
+  return `${fence}text\n${text}\n${fence}`
+}
+
+/**
  * 人格出站闸：act 发 feishu 消息（send/reply）前的三重检查。
  *
  * @param ctx 工具上下文
@@ -265,10 +294,11 @@ export async function personaOutboundGate(
       title: `人格「${personaId}」请求向飞书群发送消息`,
       from: "出站审核",
       body:
-        `**目标**：${input.target}${input.verb === "reply" ? `（引用回复 ${String(input.args.reply_to ?? "?")}）` : ""}\n\n` +
-        `**正文**：\n\n${bodyText}\n\n` +
+        `**目标**：${input.target}${input.verb === "reply" ? `（引用回复 ${String(input.args.reply_to ?? "?")}）` : ""}` +
+        `\n\n将以你的名义发送下面这段内容（飞书**纯文本**，此处逐字呈现）：\n\n` +
+        `${asPlainCodeBlock(bodyText)}\n\n` +
         (input.args.why ? `**缘由**：${String(input.args.why)}\n\n` : "") +
-        `批准将以**你的名义**发出；驳回则不发送。`,
+        `批准后即发出；驳回则不发送。`,
       options: [
         { label: "批准发送", value: "approve" },
         { label: "驳回", value: "reject" },
