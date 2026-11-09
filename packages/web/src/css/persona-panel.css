@@ -201,6 +201,22 @@
   line-height: 1.6;
 }
 .persona-pop .settings-row { align-items: flex-start; }
+
+/* ── 定时任务行：状态点 + 文案 + 两个小按钮 ──
+   为何单独一行而不是塞进上面的 bits：定时是有「当前开没开」的状态的，
+   混在一串纯文本里读者看不出哪个圆点是控制项。 */
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.schedule-dot { font-size: 10px; line-height: 1; }
+.schedule-dot.on { color: var(--ok, #27ae60); }
+/* 停用不用红色：它不是错误，是用户自己关掉的（红色会让人以为坏了） */
+.schedule-dot.off { color: var(--text-muted, #999); }
+.schedule-meta { color: var(--text-muted); opacity: 0.85; }
+.schedule-row button { margin-left: 2px; }
 .persona-pop-error {
   margin: 6px 0;
   padding: 8px 10px;

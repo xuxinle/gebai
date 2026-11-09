@@ -61,6 +61,23 @@ function makeApp(deps: {
   credentials?: unknown
   state?: () => Promise<PersonaStateSnapshot>
   sourceControl?: { start(name: string): Promise<boolean>; stop(name: string): Promise<boolean> }
+  scheduleControl?: {
+    list(): Promise<
+      Array<{
+        key: string
+        personaId: string
+        driverId: string
+        scheduleId: string
+        enabled: boolean
+        cron: string
+        description?: string
+        timezone?: string
+        lastRunAt?: number
+      }>
+    >
+    setEnabled(key: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>
+    run(key: string): Promise<{ ok: boolean; error?: string; eventId?: string }>
+  }
   pushAuthCard?: () => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>
   requireAdmin?: (c: Context) => Response | null
 }): Hono<AppEnv> {
@@ -71,6 +88,7 @@ function makeApp(deps: {
     publicBase: () => "http://localhost:3000",
     ...(deps.state ? { state: deps.state } : {}),
     ...(deps.sourceControl ? { sourceControl: deps.sourceControl } : {}),
+    ...(deps.scheduleControl ? { scheduleControl: deps.scheduleControl } : {}),
     ...(deps.pushAuthCard ? { pushAuthCard: deps.pushAuthCard } : {}),
     ...(deps.requireAdmin ? { requireAdmin: deps.requireAdmin } : {}),
   } as never)
@@ -296,5 +314,155 @@ describe("POST /api/v1/persona/authorize（令牌请求走相期）", () => {
     const res = await app.request("/api/v1/persona/authorize", { method: "POST" })
     expect(res.status).toBe(404)
     expect(pushed).toBe(0)
+  })
+})
+
+/**
+ * 定时任务控制面：启停与手动运行。
+ *
+ * 这几条都是「界面点了应该有反应」的底层保证。要特别钉住两个边界：
+ * 1. **key 不存在** → 404 而不是默默接收（写错 key 静默成功 = 以为设好了其实没有）
+ * 2. **停用状态下能 run** → 不是意外，是刻意（先验证再决定要不要一直跑）
+ */
+describe("定时任务控制面 /api/v1/persona/schedules", () => {
+  /** 与 app.ts 同款的门槛桩（本 describe 不带入上层作用域的 adminOnly）。 */
+  const adminOnly = (isAdmin: boolean) =>
+    ((_c: Context) => (isAdmin ? null : new Response(JSON.stringify({ error: "admin only" }), { status: 403 }))) as (
+      c: Context,
+    ) => Response | null
+
+  const row = (over: Record<string, unknown> = {}) => ({
+    key: "xiaoshuang/report/morning",
+    personaId: "xiaoshuang",
+    driverId: "report",
+    scheduleId: "morning",
+    enabled: true,
+    cron: "0 9 * * *",
+    description: "早报",
+    ...over,
+  })
+
+  const control = (opts: { rows?: unknown[]; ok?: boolean; error?: string; eventId?: string } = {}) => {
+    const log: string[] = []
+    return {
+      log,
+      api: {
+        list: async () => (opts.rows ?? [row()]) as never,
+        setEnabled: async (key: string, enabled: boolean) => {
+          log.push(`set:${key}:${enabled}`)
+          return opts.ok === false ? { ok: false, error: opts.error ?? "写盘失败" } : { ok: true }
+        },
+        run: async (key: string) => {
+          log.push(`run:${key}`)
+          return opts.ok === false
+            ? { ok: false, error: opts.error ?? "没接管" }
+            : { ok: true, eventId: opts.eventId ?? "task:x@manual:1" }
+        },
+      },
+    }
+  }
+
+  test("未注入控制面 → 404（与未启用拟人同面对待）", async () => {
+    const app = makeApp({ credentials: {} })
+    expect((await app.request("/api/v1/persona/schedules")).status).toBe(404)
+    expect(
+      (await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/enable", { method: "POST" })).status,
+    ).toBe(404)
+  })
+
+  test("列表返回全部声明（含已停用）", async () => {
+    const c = control({ rows: [row(), row({ key: "b/y/m", enabled: false })] })
+    const res = await makeApp({ credentials: {}, scheduleControl: c.api }).request("/api/v1/persona/schedules")
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { schedules: Array<{ key: string; enabled: boolean }> }
+    // 停用的必须也在：否则界面没地方把它重新打开
+    expect(body.schedules).toHaveLength(2)
+    expect(body.schedules[1]).toMatchObject({ enabled: false })
+  })
+
+  test("enable / disable 转发到控制面", async () => {
+    const c = control()
+    const app = makeApp({ credentials: {}, scheduleControl: c.api })
+    expect((await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/enable", { method: "POST" })).status).toBe(200)
+    expect((await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/disable", { method: "POST" })).status).toBe(200)
+    expect(c.log).toEqual([
+      "set:xiaoshuang/report/morning:true",
+      "set:xiaoshuang/report/morning:false",
+    ])
+  })
+
+  test("run 转发并回 eventId", async () => {
+    const c = control({ eventId: "task:abc@manual:9" })
+    const res = await makeApp({ credentials: {}, scheduleControl: c.api }).request(
+      "/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/run",
+      { method: "POST" },
+    )
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { eventId: string }).eventId).toBe("task:abc@manual:9")
+  })
+
+  test("停用状态下也能 run（刻意支持：先验证再决定要不要一直跑）", async () => {
+    const c = control({ rows: [row({ enabled: false })] })
+    const res = await makeApp({ credentials: {}, scheduleControl: c.api }).request(
+      "/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/run",
+      { method: "POST" },
+    )
+    expect(res.status).toBe(200)
+    expect(c.log).toEqual(["run:xiaoshuang/report/morning"])
+  })
+
+  test("未知 key → 404 且列出可用的（写错不能静默成功）", async () => {
+    const c = control()
+    const res = await makeApp({ credentials: {}, scheduleControl: c.api }).request(
+      "/api/v1/persona/schedules/xiaoshuang%2Freport%2Ftypo/run",
+      { method: "POST" },
+    )
+    expect(res.status).toBe(404)
+    const body = (await res.json()) as { error: string; available: string[] }
+    expect(body.error).toContain("未找到")
+    expect(body.available).toContain("xiaoshuang/report/morning")
+    // 一次都没转发
+    expect(c.log).toEqual([])
+  })
+
+  test("非法动作 → 400（不做猜测性路由）", async () => {
+    const c = control()
+    const res = await makeApp({ credentials: {}, scheduleControl: c.api }).request(
+      "/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/restart",
+      { method: "POST" },
+    )
+    expect(res.status).toBe(400)
+    expect(c.log).toEqual([])
+  })
+
+  test("控制面说失败（写盘报错 / 事件未被接管）→ 4xx 并透出原因", async () => {
+    const app = makeApp({ credentials: {}, scheduleControl: control({ ok: false, error: "磁盘只读" }).api })
+    const dis = await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/disable", {
+      method: "POST",
+    })
+    expect(dis.status).toBe(400)
+    expect(((await dis.json()) as { error: string }).error).toContain("磁盘只读")
+    const run = await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/run", {
+      method: "POST",
+    })
+    expect(run.status).toBe(400)
+  })
+
+  test("服务模式：非 admin 不能启停/触发（部署级资源）", async () => {
+    const c = control()
+    const app = makeApp({ credentials: {}, scheduleControl: c.api, requireAdmin: adminOnly(false) })
+    expect(
+      (await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/disable", { method: "POST" })).status,
+    ).toBe(403)
+    expect((await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/run", { method: "POST" })).status).toBe(403)
+    expect(c.log).toEqual([])
+  })
+
+  test("服务模式：admin 可以启停", async () => {
+    const c = control()
+    const app = makeApp({ credentials: {}, scheduleControl: c.api, requireAdmin: adminOnly(true) })
+    expect(
+      (await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/disable", { method: "POST" })).status,
+    ).toBe(200)
   })
 })

@@ -50,6 +50,21 @@ export {
   validateDriverSchedule,
 } from "./schedules"
 
+// ── 定时任务启停控制面（界面开关 + 手动运行）──
+export type {
+  ScheduleAction,
+  ScheduleControlEntry,
+  ScheduleControlPersistence,
+  ScheduleControlResult,
+  ScheduleControlState,
+} from "./schedule-control"
+export {
+  MemoryScheduleControlPersistence,
+  ScheduleControl,
+  manualRunEventId,
+  parseScheduleAction,
+} from "./schedule-control"
+
 // ── 幂等与调度 ──
 export { EventDedupe } from "./dedupe"
 export type { PersonaSchedulerOptions, PersonaSchedulerState, RoundInput, SessionQueueState, InsertStrategy } from "./scheduler"
@@ -136,7 +151,7 @@ export { ACTOR_FIELDS_JSON_KEY, actorFieldsFromEnv, renderTemplate, resolveActor
 
 // ── 发送者判定（防回灌 + 是否回复用户本人；两条入站路径共用同一口径）──
 export type { SpeakerInput, SpeakerKind, SpeakerVerdict } from "./speaker-filter"
-export { classifySpeaker, replyToOwnerFromEnv } from "./speaker-filter"
+export { classifySpeaker, replyToOwnerFromEnv, speakerNote } from "./speaker-filter"
 
 // ── 自动学习（从人话里识别值得进知识库的东西；纯函数，可穷举单测）──
 export type { LearnedCandidate } from "./memory-learn"

@@ -30,6 +30,9 @@ export interface PersonaSessionStore {
   listSessions(userId: string): Promise<SessionData[]>
   createSession(userId: string, name?: string): Promise<SessionData>
   save(session: SessionData, opts?: { touch?: boolean }): Promise<void>
+  /** 只记上下文用（appendOnly）：读一个会话与追加一条消息。 */
+  load?(sessionId: string, userId?: string): Promise<SessionData | null>
+  appendMessage?(sessionId: string, msg: import("@gebai/sdk").Message, userId?: string): Promise<void>
 }
 
 export interface PersonaSessionResolverOptions {
@@ -173,6 +176,78 @@ export class PersonaSessionResolver implements SessionResolver {
         (agents.length ? `，装载工具包 ${agents.join(",")}` : ""),
     )
     return { sessionId: session.id, created: true, name }
+  }
+
+  /**
+   * 只把一条消息写进会话上下文，**不启动任何执行**。
+   *
+   * 用途：人格自己以用户名义发出的消息回灌进群时，必须记下（它得知道群里
+   * 此刻有自己这段话），却绝不能拿它再跑一轮（会把自己刚说的话当新指令重答）。
+   *
+   * 为何不用 resolveDriver + runner：runner 的语义就是「跑一轮」，而引擎有
+   * `tasks.has(sessionId)` 互斥——会话正在跑时塞进去只会排队等下一轮，
+   * 还是会被执行。写入必须绕开调度器与引擎，直接落会话记录。
+   *
+   * 写成 `role: "user"` 而不是自造一个角色：它就是「群里进来了这句话」这个事实，
+   * 与用户发言同形。是谁说的由正文里的身份注记说清楚（见 `speakerNote`），
+   * 不靠角色字段——引擎对 user/assistant 的理解固定，加新角色会改动所有下游。
+   */
+  async appendOnly(input: {
+    personaId: string
+    driverId: string
+    user: string
+    event: import("@gebai/persona").PersonaEvent
+    sessionKey?: string
+    note?: string
+    /** 发送者类别（落盘标记用：面板能区分“它看过没答”与“它没收到”）。 */
+    kind?: "self" | "owner" | "other"
+    reason?: string
+  }): Promise<{ sessionId: string; created: boolean }> {
+    const kind = input.kind ?? "other"
+    // store 可能是精简实现（单测注入只实现了列表/建/存）：没有写入能力就如实报错——
+    // 静默成功会让“上下文里少了一条”无处可查。
+    if (typeof this.store.load !== "function" || typeof this.store.appendMessage !== "function") {
+      throw new Error("会话存储未实现 load/appendMessage（只记上下文能力不可用）")
+    }
+    const resolved = await this.resolveDriver({
+      personaId: input.personaId,
+      driverId: input.driverId,
+      user: input.user,
+      event: input.event,
+      ...(input.sessionKey !== undefined ? { sessionKey: input.sessionKey } : {}),
+    })
+    const session = await this.store.load(resolved.sessionId, input.user)
+    if (!session) {
+      // 刚 resolve 出来的会话随即不见了（被删/被 GC）：不抛错——这条消息不够重要到
+      // 值得中断投递；但必须留痕，否则“上下文里怎么少了一条”无从查起。
+      this.log?.warn(`[persona:sessions] 只记模式：会话 ${resolved.sessionId} 已不可读，本条不落盘`)
+      return { sessionId: resolved.sessionId, created: resolved.created }
+    }
+    // 正文 = 事件摘要头 + 原正文 + 身份注记。注记放在**末尾**（与 renderEventBlock 一致：
+    // 先事实后说明），且用括号包住以免被误读为消息内容。
+    const body = input.event.body ?? ""
+    const content = [
+      `【${input.event.context?.source ?? input.event.channel}】${input.event.context?.summary ?? ""}`.trim(),
+      body,
+      ...(input.note ? [`（${input.note}）`] : []),
+    ]
+      .filter((s) => s && s.trim())
+      .join("\n")
+    await this.store.appendMessage(
+      resolved.sessionId,
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content,
+        createdAt: Date.now(),
+        // 标记「这条只进了上下文、没有触发执行」：面板/诊断能区分
+        // “它看过但没答”与“它压根没收到”——这两种故障的现象完全不同。
+        // 用独立字段而不是 engineNote：后者是系统合成提醒的标记，会被 UI 弱化。
+        contextOnly: { kind, ...(input.reason ? { reason: input.reason } : {}) },
+      },
+      input.user,
+    )
+    return { sessionId: resolved.sessionId, created: resolved.created }
   }
 
   /** 会话是否仍存在（且归属正确）。 */

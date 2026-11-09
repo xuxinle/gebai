@@ -27,9 +27,11 @@ function ev(id: string, over: Partial<PersonaEvent> = {}): PersonaEvent {
 
 const IDENT: PersonaIdentity = { id: "xiaoshuang", name: "小霜", identity: "你是小霜", role: "应答支持群" }
 
-function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimit?: number; sessionRouting?: "driver" | "chat"; sessionKeyOf?: (e: PersonaEvent) => string; sessionMap?: import("./session-map").SessionMapRule[] } = {}) {
+function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimit?: number; sessionRouting?: "driver" | "chat"; sessionKeyOf?: (e: PersonaEvent) => string; sessionMap?: import("./session-map").SessionMapRule[]; appendOnly?: boolean } = {}) {
   const runs: PersonaRunInput[] = []
   const resolvers: Array<{ personaId: string; driverId: string; sessionKey?: string }> = []
+  /** 只记上下文的调用记录（appendOnly 路径）。 */
+  const appended: Array<{ personaId: string; driverId: string; note?: string; kind?: string; sessionKey?: string }> = []
   const sessionByThread = new Map<string, string>()
   let seq = 0
   /** 挂起中的 run（逐个放行，不共享一个 release——共享会让并发观察失真）。 */
@@ -70,6 +72,15 @@ function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimi
       sessionByThread.set(key, id)
       return { sessionId: id, created: true, name: `${personaId}·${driverId}` }
     },
+    // appendOnly 默认提供（模拟宿主实现），可用 appendOnly:false 测“宿主未实现”分支
+    ...(opts.appendOnly === false
+      ? {}
+      : {
+          appendOnly: async (i: { personaId: string; driverId: string; note?: string; kind?: string; sessionKey?: string }) => {
+            appended.push({ personaId: i.personaId, driverId: i.driverId, ...(i.note ? { note: i.note } : {}), ...(i.kind ? { kind: i.kind } : {}), ...(i.sessionKey ? { sessionKey: i.sessionKey } : {}) })
+            return { sessionId: "0".repeat(32), created: false }
+          },
+        }),
   }
   const runtime = new PersonaRuntime({
     lookup,
@@ -84,6 +95,7 @@ function makeHarness(opts: { maxConcurrent?: number; routes?: boolean; queueLimi
   return {
     runtime,
     runs,
+    appended,
     resolvers,
     sessionByThread,
     settle,
@@ -752,5 +764,89 @@ describe("PersonaRuntime.bindings：运行态快照的会话来源", () => {
     runtime.syncDriver("xiaoshuang", "main", "offline")
     expect(runtime.bindings()).toEqual([])
     runtime.stop()
+  })
+})
+
+
+/**
+ * 只记上下文（`refs.extra.contextOnly=1`）：进会话、不起轮次。
+ *
+ * 这是「飞书群消息全量录入」的核心通路。每条断言都对应一个真会发生的失效形态：
+ * 记了却跑了（自问自答无限循环）、该记却没记（上下文缺口）、
+ * 宿主没实现还静默成功（以为记了其实没写）。
+ */
+describe("PersonaRuntime：只记上下文不触发执行", () => {
+  /** 造一条带只记标记的事件。 */
+  function ctxOnly(id: string, extra: Record<string, string> = {}): PersonaEvent {
+    return ev(id, {
+      context: {
+        source: "飞书群「支持群」",
+        summary: "我自己说的",
+        refs: { chatId: "oc_1", messageId: id, extra: { contextOnly: "1", speakerKind: "self", ...extra } },
+      },
+      body: "【张三】今天是星期三",
+    })
+  }
+
+  test("带标记 → 只写上下文，不跑引擎", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    const r = await h.runtime.dispatch(ctxOnly("e1"))
+    expect(r.status).toBe("accepted")
+    // 关键：一次 run 都没起
+    expect(h.runs).toHaveLength(0)
+    expect(h.appended).toHaveLength(1)
+    expect(h.appended[0]).toMatchObject({ personaId: "xiaoshuang", driverId: "main", kind: "self" })
+  })
+
+  test("身份注记与原因一并传给会话层（模型据此分辨来历）", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    await h.runtime.dispatch(ctxOnly("e1", { speakerNote: "这是你自己刚发的", contextOnlyReason: "防回灌" }))
+    expect(h.appended[0]!.note).toBe("这是你自己刚发的")
+  })
+
+  test("不带标记 → 照常跑（这条不能误伤正常消息）", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    await h.runtime.dispatch(ev("e1"))
+    expect(h.runs).toHaveLength(1)
+    expect(h.appended).toHaveLength(0)
+  })
+
+  test("宿主未实现 appendOnly → unavailable（不静默丢）", async () => {
+    const h = makeHarness({ appendOnly: false })
+    h.runtime.start()
+    const r = await h.runtime.dispatch(ctxOnly("e1"))
+    // 报 unavailable 而非 accepted：源会重投，不会以为“记下了”
+    expect(r.status).toBe("unavailable")
+    expect(r.reason).toContain("appendOnly")
+    expect(h.runs).toHaveLength(0)
+  })
+
+  test("幂等：同一 id 重投只记一次", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    const a = await h.runtime.dispatch(ctxOnly("e1"))
+    const b = await h.runtime.dispatch(ctxOnly("e1"))
+    expect(a.status).toBe("accepted")
+    expect(b.status).toBe("duplicate")
+    expect(h.appended).toHaveLength(1)
+  })
+
+  test("无人关注 → unrouted（与普通事件同口径，不改写）", async () => {
+    const h = makeHarness({ routes: false })
+    h.runtime.start()
+    const r = await h.runtime.dispatch(ctxOnly("e1"))
+    expect(r.status).toBe("unrouted")
+    expect(h.appended).toHaveLength(0)
+  })
+
+  test("只记事件也走会话路由（写入目标与会话键一致）", async () => {
+    const h = makeHarness({ sessionRouting: "chat" })
+    h.runtime.start()
+    await h.runtime.dispatch(ctxOnly("e1"))
+    // 会话键应按群推导出来（写到“它想事的那本账”上，不另起一个）
+    expect(h.appended[0]!.sessionKey).toBe("oc_1")
   })
 })

@@ -246,7 +246,9 @@ describe("source：启动与投递", () => {
     await source.stop?.()
   })
 
-  test("机器人自己发的消息被忽略（否则无限自我对话）", async () => {
+  test("机器人应用身份发的消息：进上下文但不触发执行（否则无限自我对话）", async () => {
+    // 旧行为是直接丢弃——结果是上下文缺一条（人格讨论“刚才那条告警”时不知道它存在）。
+    // 新口径：**照样投递**，但打上 contextOnly 标，runtime 只记不起轮。
     const { state, factory } = fakeConn()
     const { ctx: c, emitted } = ctx({ FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" }, { feishuLongConn: factory })
     await source.start(c)
@@ -254,11 +256,18 @@ describe("source：启动与投递", () => {
       ev({ event: { sender: { sender_type: "app" }, message: { message_id: "om_9", chat_id: "oc_1", message_type: "text", content: '{"text":"我自己说的"}' } } }),
     )
     await new Promise((r) => setTimeout(r, 10))
-    expect(emitted.length).toBe(0)
+    // 投了（上下文完整）
+    expect(emitted.length).toBe(1)
+    // 但不触发执行
+    expect(emitted[0]!.refs?.extra?.contextOnly).toBe("1")
+    // 且不标成 human（它不是人打的，不该启动让位窗口）
+    expect(emitted[0]!.refs?.extra?.by).toBeUndefined()
+    // 正文带身份注记（模型据此不把它当新指令）
+    expect(emitted[0]!.refs?.extra?.speakerNote).toContain("机器人应用身份")
     await source.stop?.()
   })
 
-  test("自己发出去的消息（as_user 名义）→ 按记账命中即丢弃（防回灌）", async () => {
+  test("自己发出去的消息（as_user 名义）→ 记入上下文但不触发执行（防回灌）", async () => {
     const { state, factory } = fakeConn()
     const marker = { ids: new Set<string>() }
     const { ctx: c, emitted, logs } = ctx(
@@ -273,21 +282,30 @@ describe("source：启动与投递", () => {
     )
     await source.start(c)
 
-    // 自己以用户名义发的消息（sender_type=user，字段上无法与用户本人区分）→ 记账命中即丢
+    // 自己以用户名义发的消息（sender_type=user，字段上无法与用户本人区分）→ 记账命中
     marker.ids.add("om_self_user")
     state.handler!(
       ev({ event: { sender: { sender_type: "user" }, message: { message_id: "om_self_user", chat_id: "oc_1", message_type: "text", content: '{"text":"今天是星期三"}' } } }),
     )
     await new Promise((r) => setTimeout(r, 10))
-    expect(emitted.length).toBe(0)
-    expect(logs.some((l) => l.msg.includes("防回灌"))).toBe(true)
+    // 关键改变：**不再整条丢弃**，而是记入上下文（打 contextOnly 标）+ 不触发执行。
+    // 丢弃会让它对“我刚刚在群里说过什么”一无所知。
+    expect(emitted.length).toBe(1)
+    expect(emitted[0]!.refs?.extra?.contextOnly).toBe("1")
+    expect(emitted[0]!.refs?.extra?.speakerKind).toBe("self")
+    // 不能标成 human：它不是人亲手打的，不能启动让位窗口
+    expect(emitted[0]!.refs?.extra?.by).toBeUndefined()
+    // 正文带身份注记，模型才知道这是自己的输出
+    expect(emitted[0]!.refs?.extra?.speakerNote).toContain("你自己")
+    expect(logs.some((l) => l.msg.includes("只记入上下文"))).toBe(true)
 
-    // 用户本人消息（未记账）→ 照常
+    // 用户本人消息（未记账）→ 正常触发执行
     state.handler!(
       ev({ event: { sender: { sender_type: "user" }, message: { message_id: "om_other", chat_id: "oc_1", message_type: "text", content: '{"text":"你好"}' } } }),
     )
     await new Promise((r) => setTimeout(r, 10))
-    expect(emitted.length).toBe(1)
+    expect(emitted.length).toBe(2)
+    expect(emitted[1]!.refs?.extra?.contextOnly).toBeUndefined()
     await source.stop?.()
   })
 

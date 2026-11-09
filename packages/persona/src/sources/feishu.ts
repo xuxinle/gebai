@@ -39,7 +39,7 @@
  */
 
 import type { EventSourceContext, EventSourceDef, IngressEvent } from "../source"
-import { classifySpeaker, replyToOwnerFromEnv } from "../speaker-filter"
+import { classifySpeaker, replyToOwnerFromEnv, speakerNote } from "../speaker-filter"
 
 /** 宿主注入的长连接工厂形状（与 channels 侧同口径，不 import 宿主包）。 */
 type LongConnFactory = (opts: {
@@ -209,14 +209,23 @@ export const source: EventSourceDef = {
         if (stopped) return
         const msg = extractMessage(ev)
         if (!msg) return
-        // 防自触发循环：机器人自己发的消息若被当输入，会无限自我对话
-        if (msg.senderType === "app") return
+        // 机器人身份发的消息（sender_type=app）：**也进上下文，永不触发执行**。
+        //
+        // 为何不能像旧实现那样 return：这类消息在群里是可见的事实（别的机器人/告警推送），
+        // 人格后续讨论它时（“刚才那条告警说的…）需要知道它存在。
+        // 而“永不触发执行”是硬要求：拿 app 身份的消息当输入会形成机器人对机器人的
+        // 无限自我对话（两个应用互相回话停不下来）。
+        const isAppSender = msg.senderType === "app"
         if (allowed.size && !allowed.has(msg.chatId)) return
         if (!msg.text) {
           ctx.log("info", `忽略空正文消息 ${msg.messageId}（撤回/系统消息）`)
           return
         }
-        // 发送者判定（防回灌 + 是否回用户本人）。
+        // 发送者判定：决定**触不触发执行**，但**不再决定要不要记录**。
+        //
+        // 旧实现对判定为“不该回”的消息直接 return——消息整条消失，于是上下文出现缺口
+        //（人格看不到用户本人说过什么，也看不到自己刚代发过什么）。现在改为：
+        // 每条消息都投递（带 `contextOnly` 标记），由 runtime 分流为“只记上下文”。
         //
         // 为何要异步：owner openId 要从凭据存里取（首次可能读盘）。
         // 为何不能只看 sender_type：人格以 `as_user` 发言时 sender_type=user，
@@ -225,15 +234,21 @@ export const source: EventSourceDef = {
         const isSelf = sentMessages?.hit(msg.messageId) === true
         void (async () => {
           const ownerOpenId = await ownerOpenIdOf?.().catch(() => undefined)
-          const verdict = classifySpeaker({
-            ...(msg.senderId ? { senderId: msg.senderId } : {}),
-            ...(ownerOpenId ? { ownerOpenId } : {}),
-            isSelf,
-            replyToOwner,
-          })
+          const verdict = isAppSender
+            ? {
+                kind: "self" as const,
+                record: true,
+                deliver: false,
+                reason: "机器人应用身份发出的消息（记入上下文，永不触发自有机器人回话）",
+              }
+            : classifySpeaker({
+                ...(msg.senderId ? { senderId: msg.senderId } : {}),
+                ...(ownerOpenId ? { ownerOpenId } : {}),
+                isSelf,
+                replyToOwner,
+              })
           if (!verdict.deliver) {
-            ctx.log("info", `忽略消息 ${msg.messageId}：${verdict.reason ?? verdict.kind}`)
-            return
+            ctx.log("info", `消息 ${msg.messageId} 只记入上下文、不触发执行：${verdict.reason ?? verdict.kind}`)
           }
           let history = ""
           if (historyLimit > 0 && typeof reader === "function") {
@@ -280,20 +295,27 @@ export const source: EventSourceDef = {
               ...(history ? { extra: { historyCount: String(historyLimit), readIdentity: history ? (useUser ? "user" : "app") : "none" } } : {}),
             },
           }
-          // 标“这条是不是用户亲手打的”。
+          // 标注两件事：**这条是谁说的**（给模型看）、**要不要触发执行**（给 runtime 看）。
           //
-          // 为何需要这个标注：人格以 `as_user` 发言后，那条消息回灌时
-          // sender_type=user、open_id 与用户本人**完全相同**——字段上无从区分。
-          // 而两者的处置应该完全不同：
-          // - 用户亲手打的 = 本人当场介入（最高优先级，可打断当前工作）
-          // - 人格自己刚发的 = 自己的话（绝不应当新指令重答）
+          // 为何必须标清：人格以 `as_user` 发言后，那条消息回灌时 sender_type=user、
+          // open_id 与用户本人**完全相同**——字段上无从区分。而两者的处置完全相反：
+          // - 用户亲手打的 = 本人当场发言（最高优先级，可打断当前工作）
+          // - 人格自己刚发的 = 自己的输出（绝不应当新指令重答）
           //
-          // `sentMessages.hit` 已在上面把它们挡掉了；能走到这里的
-          // **就是用户亲手发的**（或是其他成员）。所以这里写的是一个
-          // 正面事实而不是猜测：“能到此 = 不是我自己说的”。
+          // 两道口径：
+          // - `by=human`：给让位窗口用（用户说话 → 人格短暂不抢话）
+          // - `contextOnly`：给 runtime 用（只写上下文，不起轮次）
+          const note = isAppSender
+            ? `这是**机器人应用身份**发出的消息（不是你，也不是群成员本人）：它属于群内公开事实，已记入上下文供你参考，但**不要拿它触发回话**——机器人与机器人互相回话会无限循环。`
+            : speakerNote(verdict.kind, senderName ?? msg.senderId)
           ingress.refs!.extra = {
             ...(ingress.refs!.extra ?? {}),
-            by: "human",
+            // 用户亲手打的（或群内其他人）——自己代发的与机器人发的都不算 human
+            ...(verdict.kind === "self" ? {} : { by: "human" }),
+            speakerKind: verdict.kind,
+            ...(verdict.deliver ? {} : { contextOnly: "1", ...(verdict.reason ? { contextOnlyReason: verdict.reason } : {}) }),
+            // 身份说明直接写进正文（模型才能看到）——只靠 refs 它读不到
+            ...(note ? { speakerNote: note } : {}),
           }
           if (!senderName?.trim()) ingress.refs!.extra.senderUnresolved = "1"
           const r = await ctx.emit(ingress)

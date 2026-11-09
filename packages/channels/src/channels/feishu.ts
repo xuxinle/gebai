@@ -464,7 +464,10 @@ export const channel: ChannelDef = {
           ctx.log("info", `忽略非白名单群消息：${msg.chatId}`)
           return
         }
-        // 发送者判定（防回灌 + 是否回用户本人）。
+        // 发送者判定：决定**触不触发执行**，但**不再决定要不要记录**（与事件源同口径）。
+        //
+        // 旧实现对判定为“不该回”的消息直接 return——消息整条消失。现在两条入站路径
+        // 汇总到同一条纪律：每条消息都进上下文，只是有些不起轮次。
         //
         // 为何渠道也要判：渠道入站是**投给人格运行时**的（ChannelInputBridge），
         // 而人格事件源现在也在收同一批消息。两处口径不一致 → 「有时回有时不回」。
@@ -473,20 +476,26 @@ export const channel: ChannelDef = {
         const isSelf = sentMessages?.hit(msg.messageId) === true
         void (async () => {
           const decide = ctx.deps.speakerFilter as
-            | ((input: { senderId?: string; isSelf: boolean }) => { deliver: boolean; reason?: string })
+            | ((input: { senderId?: string; isSelf: boolean }) => {
+                deliver: boolean
+                record?: boolean
+                kind?: "self" | "owner" | "other"
+                reason?: string
+                note?: string
+              })
             | undefined
+          let verdict: { deliver: boolean; record?: boolean; kind?: "self" | "owner" | "other"; reason?: string; note?: string }
           if (decide) {
-            const v: { deliver: boolean; reason?: string } = await Promise.resolve(
-              decide({ ...(msg.senderId ? { senderId: msg.senderId } : {}), isSelf }),
-            ).catch(() => ({ deliver: true }))
-            if (!v.deliver) {
-              ctx.log("info", `忽略消息 ${msg.messageId}：${v.reason ?? "被 speakerFilter 拦下"}`)
-              return
-            }
-          } else if (isSelf) {
+            verdict = await Promise.resolve(decide({ ...(msg.senderId ? { senderId: msg.senderId } : {}), isSelf })).catch(
+              // 判定器抛错：当作“要处理”——宁可多回一条，也不能静默吞掉（旧代码同取向）
+              () => ({ deliver: true, record: true }) as { deliver: boolean; record?: boolean },
+            )
+          } else {
             // 未注入判定器（旧宿主）：至少保留防回灌
-            ctx.log("info", `忽略自发送消息 ${msg.messageId}（防回灌）`)
-            return
+            verdict = isSelf ? { deliver: false, record: true, kind: "self" as const, reason: "旧宿主未注入判定器（防回灌）" } : { deliver: true, record: true }
+          }
+          if (!verdict.deliver) {
+            ctx.log("info", `消息 ${msg.messageId} 只记入上下文、不触发执行：${verdict.reason ?? "被 speakerFilter 拦下"}`)
           }
         // 发送者姓名：优先群成员表（批量，一次覆盖全群），未命中再逐条查 contact API。
         // 查不到（权限不足/接口失败）时 body 兜底标「用户」——模型至少知道这条是别人发的，
@@ -518,6 +527,19 @@ export const channel: ChannelDef = {
                 ...(msg.senderId ? { senderId: msg.senderId } : {}),
                 ...(senderName ? { senderName } : {}),
                 ...(!senderName ? { senderName: "用户" } : {}),
+                // 身份/处置标记（与事件源同口径）：让 runtime 知道这条要不要触发执行、
+                // 让模型知道这段话是什么来历。渠道不自己造词，一律用判定器给的。
+                ...(verdict.kind ? { extra: { speakerKind: verdict.kind } } : {}),
+                ...(verdict.deliver
+                  ? {}
+                  : {
+                      extra: {
+                        ...(verdict.kind ? { speakerKind: verdict.kind } : {}),
+                        contextOnly: "1",
+                        ...(verdict.reason ? { contextOnlyReason: verdict.reason } : {}),
+                        ...(verdict.note ? { speakerNote: verdict.note } : {}),
+                      },
+                    }),
               },
               // 话题群内消息的来源标注带话题（模型可感知「这是某个话题内的一句话」）
               source: msg.rootId

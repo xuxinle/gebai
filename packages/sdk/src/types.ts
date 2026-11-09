@@ -87,6 +87,18 @@ export interface Message {
    * 标记之前落盘的存量提醒为 assistant 形态，按内容前缀「【待办提醒】/【验证提醒】」兜底识别
  *  （前缀兜底限定 assistant 角色）。 */
   engineNote?: "todo" | "verify" | "task" | "subsession" | "interrupted"
+  /**
+   * 「只进了上下文、没有触发执行」的消息标记（role=user）。
+   *
+   * 场景：飞书群里人格自己以用户名义发出的消息回灌——必须记下（它得知道群里
+   * 此刻有自己这段话），却不能拿它再跑一轮。这类消息**照常进模型上下文**
+   * （loadHistory 不跳过它），只是不触发执行。
+   *
+   * 为何不复用 `engineNote`：那个字段是**系统合成的软性提醒**（待办/验证/任务写回），
+   * UI 会弱化成通知条、压缩逻辑会特殊对待。而这类消息就是群里的真实发言，
+   * 应该按普通消息展示，只是它的来历需要标注。两者语义不同，不能合用一个字段。
+   */
+  contextOnly?: { kind: "self" | "owner" | "other"; reason?: string }
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean
   /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */

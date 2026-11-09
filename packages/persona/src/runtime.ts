@@ -32,6 +32,17 @@ import type { PersonaDispatchResult, PersonaEvent } from "./event"
 import type { DriverDef, PersonaDelivery, PersonaLogger, PersonaLookup, PersonaRunner, SessionResolver } from "./ports"
 import { PersonaScheduler, type PersonaSchedulerState } from "./scheduler"
 
+/**
+ * 该事件是否只进上下文、不触发执行。
+ *
+ * 判定依据是事件源打上的 `refs.extra.contextOnly`（字符串 `"1"`）——为什么不用
+ * 事件上的新字段：`refs.extra` 本来就是「渠道自定义引用，原样透传给模型」的口子，
+ * 这类标记正好是那个性质；加新字段会让所有源、所有序列化路径都得改一遍。
+ */
+function isContextOnly(event: PersonaEvent): boolean {
+  return event.context.refs?.extra?.contextOnly === "1"
+}
+
 export interface PersonaRuntimeOptions {
   lookup: PersonaLookup
   runner: PersonaRunner
@@ -179,7 +190,78 @@ export class PersonaRuntime {
     this.opts.onHumanSpeech?.(event)
     const targets = this.resolveTargets(event)
     if (targets.length === 0) return { status: "unrouted" }
+    // 只记上下文、不触发执行（`refs.extra.contextOnly`，由事件源按发送者判定后打标）。
+    //
+    // 为何在这分流而不在源里直接判：**路由仍要走完整**（哪个 driver 关注、归属哪个会话）——
+    // 写入目标与执行目标必须是同一个会话，否则“它看过这条”与“它在哪想事”成了两个地方。
+    if (isContextOnly(event)) {
+      return this.appendContextOnly(event, targets)
+    }
     const deliveries = await this.mapLimit(targets, this.fanoutConcurrency, (t) => this.deliverTo(event, t))
+    return this.summarize(event, deliveries)
+  }
+
+  /**
+   * 只写入上下文：给每个命中 driver 的会话落一条消息，**不起任何轮次**。
+   *
+   * 返回值里 status 仍用 `accepted`：从事件源视角看它确实被接管了（没有被丢弃），
+   * 源不应重投。区分“记了”与“跑了”靠 reason 与计数（见下）。
+   */
+  private async appendContextOnly(event: PersonaEvent, targets: Target[]): Promise<PersonaDispatchResult> {
+    const sessions = this.opts.sessions
+    if (typeof sessions.appendOnly !== "function") {
+      // 宿主未实现只记能力：**不能静默丢**（那就回到旧行为了）。如实报 unavailable，
+      // 源会重投——总比“上下文里凭空少一条”好查。
+      this.log?.warn(
+        `[persona] 事件 ${event.id} 标记为只记上下文，但会话解析器未实现 appendOnly——本条未落盘` +
+          `（宿主需实现该能力，或事件源不应打 contextOnly 标记）`,
+      )
+      return { status: "unavailable", reason: "会话解析器未实现 appendOnly（只记上下文能力缺失）" }
+    }
+    const deliveries: PersonaDelivery[] = []
+    for (const t of targets) {
+      const key = driverKey(t.personaId, t.driver.id)
+      const dedupeId = `${event.id}\u0000${key}`
+      if (!this.dedupe.admit(dedupeId)) {
+        this.bump(key, "deduped")
+        deliveries.push({
+          personaId: t.personaId,
+          driverId: t.driver.id,
+          status: "duplicate",
+          reason: `driver ${key} 已处理过事件 ${event.id}`,
+        })
+        continue
+      }
+      try {
+        const sessionKey = this.sessionKeyFor(key, t.driver, event)
+        const note = event.context.refs?.extra?.speakerNote
+        const kind = (event.context.refs?.extra?.speakerKind ?? "self") as "self" | "owner" | "other"
+        const r = await sessions.appendOnly({
+          personaId: t.personaId,
+          driverId: t.driver.id,
+          user: t.user,
+          event: { ...event, personaId: t.personaId },
+          sessionKey,
+          ...(note ? { note } : {}),
+          kind,
+          ...(event.context.refs?.extra?.contextOnlyReason ? { reason: event.context.refs.extra.contextOnlyReason } : {}),
+        })
+        deliveries.push({
+          personaId: t.personaId,
+          driverId: t.driver.id,
+          status: "accepted",
+          sessionId: r.sessionId,
+          reason: "已记入上下文（未触发执行）",
+        })
+      } catch (err) {
+        // 写失败必须撤回幂等位：否则源重投会被判 duplicate 而永久丢失这条上下文
+        this.dedupe.revoke(dedupeId)
+        this.bump(key, "failed")
+        const reason = String((err as Error)?.message || err)
+        this.log?.warn(`[persona:${key}] 只记上下文失败（已撤回幂等位，重投可被接住）: ${reason}`)
+        deliveries.push({ personaId: t.personaId, driverId: t.driver.id, status: "unavailable", reason })
+      }
+    }
     return this.summarize(event, deliveries)
   }
 

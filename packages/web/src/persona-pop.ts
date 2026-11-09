@@ -25,7 +25,13 @@
 import { clampPos } from "./todo-core"
 import { makeDraggable } from "./fw/draggable"
 import { el } from "./state"
-import { fetchPersonaState, renderPersonaPanel, type PersonaStateView } from "./persona-panel"
+import {
+  fetchPersonaSchedules,
+  fetchPersonaState,
+  renderPersonaPanel,
+  type PersonaStateView,
+  type ScheduleControlRow,
+} from "./persona-panel"
 
 const POS_KEY = "gebai.ui.persona.pos"
 const OPEN_KEY = "gebai.ui.persona.open"
@@ -172,10 +178,19 @@ async function refresh(force = false): Promise<void> {
     // 装配失败时其余段落都是空快照的占位，不再渲染面板骨架——失败原因就是全部信息
     return
   }
-  renderPersonaPanel(refs.body, snapshot, () => {
-    void refresh(true)
-    onPersonaStateChanged()
-  })
+  // 定时开关与声明是两份数据（快照只带声明、开关在 /schedules）：这里一并取全再画，
+  // 免得面板自己为了补开关而重画（那会变成一个自反馈的刷新环）。
+  // 取不到就给空数组：少几个开关按钮，换整块面板不等它。
+  const schedRes = await fetchPersonaSchedules().catch(() => ({ ok: false, rows: [] as ScheduleControlRow[] }))
+  renderPersonaPanel(
+    refs.body,
+    snapshot,
+    () => {
+      void refresh(true)
+      onPersonaStateChanged()
+    },
+    schedRes.rows,
+  )
 }
 
 /** 状态变化时需要同步的外部表现（轮盘按钮的提示态）。 */

@@ -161,6 +161,13 @@ function renderEventBlock(
   if (e.context.refs?.extra?.by === "human") {
     lines.push("（这条是**人亲手打的**，不是你自己发出去的话。它是用户的当场发言：按最高优先级处理；若与你正在做的事冲突，以它为准）")
   }
+  // 身份注记（事件源写的：自己代发的回灌 / 机器人身份发的）。
+  //
+  // 为何要单独一段：模型看到一段“以用户名义说的话”时，无法自行分辨那是用户本人
+  // 打的、还是自己上一轮代发的。两种情况的正确反应完全相反——前者是要处理的输入，
+  // 后者是自己的输出。一句话交代来历，比在提示词里写十条通用告诫都管用。
+  const speakerNote = e.context.refs?.extra?.speakerNote
+  if (speakerNote) lines.push(`（${speakerNote}）`)
   if (opts.includeHint) {
     const hint = replyHint(e)
     if (hint) lines.push(`（${hint}）`)
@@ -196,10 +203,15 @@ function metaLine(e: PersonaEvent): string {
   if (refs?.taskId) parts.push(`任务=${refs.taskId}`)
   if (refs?.extra) {
     for (const [k, v] of Object.entries(refs.extra)) {
-      // `by=human` 不当作普通键值渲染：它是**身份事实**，会在下面单独说清楚。
-      // 混在 `a=b` 一串里模型会漏看，而它恰好是“要不要把这句当新指令”的依据。
+      // 这几个不当作普通键值渲染：它们都是**身份/处置事实**，已在正文下方
+      // 用一句话说清楚（`by` / `speakerNote` / `contextOnly`）。
+      // 混在 `a=b` 一串里模型会漏看，而它们恰好是“要不要把这句当新指令”的依据。
       if (k === "by") continue
       if (k === "senderUnresolved") continue
+      if (k === "speakerKind") continue
+      if (k === "speakerNote") continue
+      if (k === "contextOnly") continue
+      if (k === "contextOnlyReason") continue
       if (v !== undefined && v !== "") parts.push(`${k}=${v}`)
     }
   }

@@ -71,6 +71,8 @@ export interface AppDeps {
   personaState?: (() => Promise<import("./core/session/persona-status").PersonaStateSnapshot>) | undefined
   /** 拟人事件源手动启停（诊断用；未启用时 undefined）。 */
   personaSourceControl?: { start(name: string): Promise<boolean>; stop(name: string): Promise<boolean> } | undefined
+  /** 人格定时任务的启停与手动运行（未启用拟人时 undefined → 端点 404）。 */
+  personaScheduleControl?: import("./routes/persona").ScheduleControlApi | undefined
   /**
    * 拟人装配失败的原因（undefined = 未失败）。
    *
@@ -219,8 +221,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       const base = (process.env.GEBAI_PUBLIC_URL ?? "").replace(/\/+$/, "")
       return base || `http://localhost:${d.config.port}`
     },
-    ...(d.personaState ? { state: d.personaState } : {}),
-    ...(d.personaSourceControl ? { sourceControl: d.personaSourceControl } : {}),
+      ...(d.personaState ? { state: d.personaState } : {}),
+  ...(d.personaSourceControl ? { sourceControl: d.personaSourceControl } : {}),
+  ...(d.personaScheduleControl ? { scheduleControl: d.personaScheduleControl } : {}),
     ...(d.personaSetupError ? { setupError: d.personaSetupError } : {}),
     ...(d.personaPushAuthCard ? { pushAuthCard: d.personaPushAuthCard } : {}),
     // 写面（授权发起/兑换/撤销、源启停）是部署级操作：服务模式下仅 admin

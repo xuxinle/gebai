@@ -25,6 +25,36 @@ import type { AppEnv } from "../app"
 import type { PersonaCredentials } from "@gebai/persona"
 import type { PersonaStateSnapshot } from "../core/session/persona-status"
 
+/**
+ * 人格定时任务控制面（路由依赖形状）。
+ *
+ * 为何走控制面而不是停整个 source：一个源管全部人格的全部定时（包括 `*`/`3` 这种高频档期），
+ * 停源等于把别人的定时一起停掉。以「声明」为粒度才是对的口径。
+ *
+ * `run` 不要求先启用：手动跑一次是「验证配置对不对」的手段，
+ * 如果必须先开，那“想看一眼效果又不想让它以后一直跑”就没有办法表达。
+ */
+export interface ScheduleControlApi {
+  /** 列当前全部声明（含已停用的——否则界面无法把它们列出来重新打开）。 */
+  list(): Promise<
+    Array<{
+      key: string
+      personaId: string
+      driverId: string
+      scheduleId: string
+      enabled: boolean
+      cron: string
+      description?: string
+      timezone?: string
+      lastRunAt?: number
+    }>
+  >
+  /** 改开关（持久）。 */
+  setEnabled(key: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>
+  /** 手动触发一次（不改变启用状态）。 */
+  run(key: string): Promise<{ ok: boolean; error?: string; eventId?: string }>
+}
+
 export interface PersonaRouteDeps {
   /** 凭据编排（拟人模式未启用时为 null → 全部端点返回「未启用」）。 */
   credentials: PersonaCredentials | null
@@ -44,6 +74,13 @@ export interface PersonaRouteDeps {
     start(name: string): Promise<boolean>
     stop(name: string): Promise<boolean>
   }
+  /**
+   * 人格定时任务的启停与手动运行。
+   *
+   * 与 `sourceControl` 是两个粒度：那个是「整个事件源通不通电」（诊断用），
+   * 这个是「某一条定时现在允不允许跑」（日常操作）。
+   */
+  scheduleControl?: ScheduleControlApi
   /**
    * 拟人装配失败原因（未失败时 undefined）。
    *
@@ -287,5 +324,85 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
       )
     }
     return c.json({ ok: true, name, action })
+  })
+
+  /**
+   * 定时开关不可用时的统一回包（与 `notEnabled` 同一取向：把真实原因说出来）。
+   *
+   * 单独一个函数而不是复用 notEnabled：两者的成因不同——
+   * notEnabled 是「拟人整个没开/装失败」，这里是「拟人开着但这个装配没接上」，
+   * 混在一起会让人往错方向查。
+   */
+  const notSchedulesEnabled = (c: Context) =>
+    c.json(
+      {
+        error: deps.setupError
+          ? `拟人模式装配失败：${deps.setupError}`
+          : "人格定时任务控制面未装配（拟人模式未启用，或该构建未接 scheduleControl）",
+        ...(deps.setupError ? { setupError: deps.setupError } : {}),
+      },
+      404,
+    )
+
+  /**
+   * 人格定时任务：列表（含已停用的）。
+   *
+   * 为何不能只返回启用的：界面要能把停用的列出来并提供「重新打开」；
+   * 用 `persona/state` 里的 schedules 拿不到已停用项（那里只列声明）。
+   */
+  app.get("/api/v1/persona/schedules", async (c) => {
+    if (!deps.scheduleControl) return notSchedulesEnabled(c)
+    try {
+      return c.json({ schedules: await deps.scheduleControl.list() })
+    } catch (err) {
+      return c.json({ error: `定时任务列表生成失败：${String((err as Error)?.message || err)}` }, 500)
+    }
+  })
+
+  /**
+   * 人格定时任务：启用 / 停用 / 立即运行一次。
+   *
+   * key 形态 `{personaId}/{driverId}/{scheduleId}`（与 `scheduleKey()` 逐字一致）。
+   * 含斜杠，终端里用时记得 URL 编码；前端 `encodeURIComponent` 即可。
+   * 这里用 `:key{.+}` 匹配整段（Hono 默认不跨斜杠），避免让使用者自己拼三段。
+   */
+  app.post("/api/v1/persona/schedules/:key{.+}/:action", async (c) => {
+    if (deps.requireAdmin) {
+      const denied = deps.requireAdmin(c)
+      if (denied) return denied
+    }
+    if (!deps.scheduleControl) return notSchedulesEnabled(c)
+    const key = decodeURIComponent(c.req.param("key") ?? "").trim()
+    const action = c.req.param("action")
+    if (!key) return c.json({ error: "缺少定时任务 key" }, 400)
+    if (action !== "enable" && action !== "disable" && action !== "run") {
+      return c.json({ error: `不支持的动作 ${action}（可用：enable / disable / run）` }, 400)
+    }
+    // 精确匹配已有声明：不存在的 key 直接 404。
+    // 为何不做「先存起来，以后出现了再生效」：key 写错（手抄、拼错分身名）时
+    // 静默接受会让人以为已经设好了——而实际那条定时根本没有——这类静默失败最难查。
+    const all = await deps.scheduleControl.list()
+    const found = all.find((s) => s.key === key)
+    if (!found) {
+      return c.json(
+        {
+          ok: false,
+          error: `未找到定时任务 ${key}`,
+          available: all.map((s) => s.key),
+        },
+        404,
+      )
+    }
+    if (action === "run") {
+      const r = await deps.scheduleControl.run(key)
+      if (!r.ok) return c.json({ ok: false, key, action, error: r.error }, 400)
+      deps.publish("event.persona.schedule", { key, action, eventId: r.eventId })
+      return c.json({ ok: true, key, action, eventId: r.eventId })
+    }
+    const wantEnabled = action === "enable"
+    const r = await deps.scheduleControl.setEnabled(key, wantEnabled)
+    if (!r.ok) return c.json({ ok: false, key, action, error: r.error }, 400)
+    deps.publish("event.persona.schedule", { key, action, enabled: wantEnabled })
+    return c.json({ ok: true, key, action, enabled: wantEnabled })
   })
 }

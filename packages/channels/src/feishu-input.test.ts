@@ -294,9 +294,9 @@ describe("入站：消息抽取与治理", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("自己发出去的消息（as_user 名义，senderType=user）→ 按记账精确过滤（防回灌）", async () => {
+  test("自己发出去的消息（as_user 名义，senderType=user）→ 记入上下文但不触发执行", async () => {
     const home = mkdtempSync(join(tmpdir(), "fs-reflux-"))
-    // 简化的记账替身：直接由用例控制
+    // 简化的记账替身：直接由用例控制；speakerFilter 用真实现（与事件源同口径）
     const marker = { ids: new Set<string>() }
     const { reg, conns, events } = makeRegistry(home, CREDS, {
       extraDeps: {
@@ -304,21 +304,29 @@ describe("入站：消息抽取与治理", () => {
           record: (id: string) => marker.ids.add(id),
           hit: (id: string) => marker.ids.has(id),
         },
+        speakerFilter: (i: { senderId?: string; isSelf: boolean }) => {
+          // deliver 的取舍就是本用例要验的东西：自己发的必须 deliver=false
+          return i.isSelf ? { deliver: false, record: true, kind: "self" as const, reason: "自己的回灌" } : { deliver: true, record: true, kind: "other" as const }
+        },
       },
     })
     await reg.init()
 
-    // 自己以用户名义发的消息（senderType=user，无法从事件字段区分）→ 记账命中即丢弃
+    // 自己以用户名义发的消息（senderType=user，无法从事件字段区分）→ **不再丢弃**，
+    // 而是带 contextOnly 标记投递（进上下文，不起轮次）。
     marker.ids.add("om_self_user")
     conns[0]!.fire(msgEvent({ messageId: "om_self_user", senderType: "user" }))
     await new Promise((r) => setTimeout(r, 100))
-    console.log(`    实测: 记账命中的事件数=${events.length}`)
-    expect(events.length).toBe(0)
+    console.log(`    实测: 记账命中的事件数=${events.length}，contextOnly=${events[0]?.refs?.extra?.contextOnly}`)
+    // 关键改变：事件数量从 0 变 1（上下文不能有缺口）
+    expect(events.length).toBe(1)
+    expect(events[0]!.refs?.extra?.contextOnly).toBe("1")
 
-    // 用户本人类似内容的消息（未记账）→ 照常投递
+    // 用户本人类似内容的消息（未记账）→ 正常投递且**不带** contextOnly
     conns[0]!.fire(msgEvent({ messageId: "om_other", senderType: "user", text: "今天是星期三（2026-10-28）。" }))
     await new Promise((r) => setTimeout(r, 100))
-    expect(events.length).toBe(1)
+    expect(events.length).toBe(2)
+    expect(events[1]!.refs?.extra?.contextOnly).toBeUndefined()
     await reg.stop()
     rmSync(home, { recursive: true, force: true })
   })

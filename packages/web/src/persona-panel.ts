@@ -114,6 +114,51 @@ export async function controlPersonaSource(name: string, action: "start" | "stop
   return { ok: res.ok && body.ok !== false, ...(body.error ? { error: body.error } : {}) }
 }
 
+/** 一条定时任务的控制面形状（含**已停用**的：界面要能把它们重新打开）。 */
+export interface ScheduleControlRow {
+  key: string
+  personaId: string
+  driverId: string
+  scheduleId: string
+  enabled: boolean
+  cron: string
+  description?: string
+  timezone?: string
+  lastRunAt?: number
+}
+
+/** 列全部定时任务（含已停用）。404（未启用/未装配）返回空数组而不是抛错。 */
+export async function fetchPersonaSchedules(): Promise<{ ok: boolean; rows: ScheduleControlRow[]; error?: string }> {
+  const res = await fetch("/api/v1/persona/schedules")
+  if (res.status === 404) return { ok: false, rows: [], error: "定时任务控制面未装配" }
+  const body = (await res.json().catch(() => ({}))) as { schedules?: ScheduleControlRow[]; error?: string }
+  if (!res.ok) return { ok: false, rows: [], ...(body.error ? { error: body.error } : {}) }
+  return { ok: true, rows: Array.isArray(body.schedules) ? body.schedules : [] }
+}
+
+/** 开/关一条定时任务（持久）。 */
+export async function setPersonaScheduleEnabled(
+  key: string,
+  enabled: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/v1/persona/schedules/${encodeURIComponent(key)}/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  })
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+  return { ok: res.ok && body.ok !== false, ...(body.error ? { error: body.error } : {}) }
+}
+
+/** 立即跑一次（不改变开关状态；停用状态下也可跑，用于验证配置）。 */
+export async function runPersonaSchedule(key: string): Promise<{ ok: boolean; error?: string; eventId?: string }> {
+  const res = await fetch(`/api/v1/persona/schedules/${encodeURIComponent(key)}/run`, { method: "POST" })
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; eventId?: string }
+  return {
+    ok: res.ok && body.ok !== false,
+    ...(body.error ? { error: body.error } : {}),
+    ...(body.eventId ? { eventId: body.eventId } : {}),
+  }
+}
+
 /**
  * 发起飞书授权。
  *
@@ -199,7 +244,20 @@ function counters(...pairs: Array<[string, number]>): HTMLElement {
  * `onChanged` 在手动启停源之后调用：让调用方决定重渲染方式（面板自己不做全量刷新，
  * 免得把用户正看着的滚动位置与展开状态抹掉）。
  */
-export function renderPersonaPanel(host: HTMLElement, snapshot: PersonaStateView, onChanged?: () => void): void {
+export function renderPersonaPanel(
+  host: HTMLElement,
+  snapshot: PersonaStateView,
+  onChanged?: () => void,
+  schedules?: ScheduleControlRow[],
+): void {
+  // 定时任务的启停状态（含**已停用项**）：不在 ssr 快照里（那里只列声明），
+  // 由调用方一并拉好传进来。
+  //
+  // 为何不在本函数里 fetch：渲染是同步的，异步补数据只能靠「回来后重画」，
+  // 而重画会再触发一次 fetch——一个自反馈的刷新环。取数交给调用方一次取全。
+  const scheduleState = new Map<string, ScheduleControlRow>()
+  for (const row of schedules ?? []) scheduleState.set(row.key, row)
+
   // ── 1. 凭据 ──
   const cred = section("出站凭据")
   if (!snapshot.credentials) {
@@ -364,10 +422,65 @@ export function renderPersonaPanel(host: HTMLElement, snapshot: PersonaStateView
           ["失败", d.failed],
         ),
       )
-      // 定时任务逐条列出：它们是静默的（不触发时不报错），面板是唯一的可见面
+      // 定时任务逐条列出 + 开关 + 「立即跑一次」。
+      //
+      // 为何放在面板里而不是只留着改代码：定时是**静默的**（不触发时不报错），
+      // 而「今天先别跑这条」「跑一次看看配置对不对」是两个每天都会出现的念头，
+      // 不该为了它们改代码重启。
+      //
+      // 启停状态与声明是两份数据：声明在 snapshot（只含启用的），开关在 /schedules
+      // （含停用的）。所以在这里对一次 key，单位对不上的就不渲染开关（宁可不给按钮，
+      // 也不给一个点了没用的按钮）。
       for (const s of d.schedules ?? []) {
         const tz = s.timezone ? `（${s.timezone}）` : ""
-        info.appendChild(el("div", "settings-row-desc", `⏰ ${s.description ?? s.id}：${s.cron}${tz}`))
+        const key = `${p.id}/${d.id}/${s.id}`
+        const state = scheduleState.get(key)
+        const line = el("div", "settings-row-desc schedule-row")
+        // 停用的也照样列（否则就没有地方把它重新打开了）
+        const on = state ? state.enabled : true
+        line.appendChild(el("span", on ? "schedule-dot on" : "schedule-dot off", on ? "●" : "○"))
+        line.appendChild(el("span", "", ` ${s.description ?? s.id}：${s.cron}${tz}`))
+        if (state?.lastRunAt) {
+          line.appendChild(el("span", "schedule-meta", ` · 上次 ${new Date(state.lastRunAt).toLocaleString()}`))
+        }
+        if (!on) line.appendChild(el("span", "schedule-meta", " · 已停用"))
+
+        // 开关：只在控制面确实认得这个 key 时给（见上）
+        if (state) {
+          const toggle = el("button", "mini-btn", on ? "停用" : "启用")
+          toggle.addEventListener("click", async () => {
+            toggle.disabled = true
+            const r = await setPersonaScheduleEnabled(key, !on)
+            if (!r.ok) {
+              toggle.disabled = false
+              // 失败得说出来：静默不动会让人以为已经改好了
+              alert(`定时任务${on ? "停用" : "启用"}失败：${r.error ?? "未知错误"}`)
+              return
+            }
+            onChanged?.()
+          })
+          line.appendChild(toggle)
+
+          // 立即跑一次：**停用状态下也给**——「先看看效果，再决定以后要不要一直跑」
+          // 是最自然的使用顺序，强制先启用会把这条路堵死。
+          const runBtn = el("button", "mini-btn", "立即跑一次")
+          runBtn.addEventListener("click", async () => {
+            runBtn.disabled = true
+            runBtn.textContent = "已投递…"
+            const r = await runPersonaSchedule(key)
+            if (!r.ok) {
+              runBtn.disabled = false
+              runBtn.textContent = "立即跑一次"
+              alert(`触发失败：${r.error ?? "未知错误"}`)
+              return
+            }
+            // 投递成功不等于跑完（引擎异步）：题面写「已投递」，刷新交给 onChanged
+            runBtn.textContent = "已投递"
+            setTimeout(() => onChanged?.(), 1200)
+          })
+          line.appendChild(runBtn)
+        }
+        info.appendChild(line)
       }
       if (d.reason) info.appendChild(el("div", "settings-row-desc", `创建原因：${d.reason}`))
       row.appendChild(info)

@@ -6,6 +6,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { spawn } from "node:child_process"
 import type { ServerWebSocket } from "bun"
+import type { ScheduleControlPersistence, ScheduleControlState } from "@gebai/persona"
 import { isolationConfigConflict, loadConfig } from "../core/base/config"
 import { SessionStore } from "../core/session/store"
 import { reportInterruptedRuns } from "../core/session/run-marker"
@@ -169,6 +170,42 @@ class PersonaDriverStore implements PersonaDriverPersistence {
       await mkdir(join(this.path, ".."), { recursive: true })
       await writeFile(this.path, JSON.stringify(all, null, 2), "utf8")
     })
+  }
+}
+
+/**
+ * 人格定时开关的落盘实现（`{GEBAI_HOME}/data/persona/schedule-control.json`）。
+ *
+ * 为何与 drivers.json 同级（`data/persona/`）：都是人格级、跨会话、属「迁移时一起带走」
+ * 的那类状态。放别处会在换机器后变成「开关全回来了」——那种错很难归因。
+ *
+ * 写失败不抛：开关只影响「下次重启能不能记住」，不该让点开关的接口报错
+ * （更不能因为磁盘只读就把运行中的定时全停掉）。
+ */
+class PersonaScheduleControlStore implements ScheduleControlPersistence {
+  private readonly path: string
+
+  constructor(home: string) {
+    this.path = join(dataSubdir(home, "persona"), "schedule-control.json")
+  }
+
+  async load(): Promise<ScheduleControlState> {
+    const text = await readFile(this.path, "utf8").catch(() => null)
+    if (!text) return {}
+    try {
+      const parsed = JSON.parse(text) as unknown
+      // 形态防御：坏文件当成「全部缺省」（= 全部启用）——不能因为手抖的 JSON
+      // 把整套定时任务静默停掉（缺省即启用，见 schedule-control.ts 语义 1）。
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+      return parsed as ScheduleControlState
+    } catch {
+      return {}
+    }
+  }
+
+  async save(state: ScheduleControlState): Promise<void> {
+    await mkdir(join(this.path, ".."), { recursive: true })
+    await writeFile(this.path, JSON.stringify(state, null, 2), "utf8")
   }
 }
 
@@ -741,16 +778,20 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       // 为何注入而不是在 channels 里重写：判定涉及「用户 openId」（要从凭据存取）
       // 与「发送记录」，channels 包不能依赖 persona；而两边口径必须完全一致
       //（不一致的现象是“有时回有时不回”）。
-      speakerFilter: async (i: { senderId?: string; isSelf: boolean }) => {
-        const { classifySpeaker, replyToOwnerFromEnv } = await import("@gebai/persona")
-        const ownerOpenId = await personaCredentials?.ownerOpenId().catch(() => undefined)
-        return classifySpeaker({
-          ...(i.senderId ? { senderId: i.senderId } : {}),
-          ...(ownerOpenId ? { ownerOpenId } : {}),
-          isSelf: i.isSelf,
-          replyToOwner: replyToOwnerFromEnv(process.env as Record<string, string | undefined>),
-        })
-      },
+          speakerFilter: async (i: { senderId?: string; isSelf: boolean }) => {
+      const { classifySpeaker, replyToOwnerFromEnv, speakerNote } = await import("@gebai/persona")
+      const ownerOpenId = await personaCredentials?.ownerOpenId().catch(() => undefined)
+      const v = classifySpeaker({
+        ...(i.senderId ? { senderId: i.senderId } : {}),
+        ...(ownerOpenId ? { ownerOpenId } : {}),
+        isSelf: i.isSelf,
+        replyToOwner: replyToOwnerFromEnv(process.env as Record<string, string | undefined>),
+      })
+      // 把身份注记一并给渠道：它是**正文的一部分**（模型看得到），不是日志。
+      // 在这里算而不让渠道自己拼：两种发送者的措辞差一个字都可能让模型误判。
+      const note = speakerNote(v.kind)
+      return { deliver: v.deliver, record: v.record, kind: v.kind, ...(v.reason ? { reason: v.reason } : {}), ...(note ? { note } : {}) }
+    },
       // 拟人凭据（feishu 渠道的 `as_user=true` 用它以用户本人名义发消息）；未启用时为 null
       ...(personaCredentials ? { personaCredentials } : {}),
     },
@@ -850,6 +891,16 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
    * 要重启才生效。未启用拟人时保持空数组（`personaRuntime` 为 null，源也不会启动）。
    */
   let collectPersonaSchedules: () => import("@gebai/persona").ScheduleDeclaration[] = () => []
+  /** 定时任务启停控制面（未启用拟人时 null）。 */
+  let personaScheduleControl: import("@gebai/persona").ScheduleControl | null = null
+  /**
+   * 定时任务控制面的 REST 形状（宿主在拟人装配块里填，路由装配处直接用）。
+   *
+   * 为何不直接在路由装配处拼：那里在拟人 try 域**之外**，拿不到块内的
+   * collectScheduleDeclarations / personaRuntime / buildEvent。
+   * 在块内把已能访问的一切包成这个对象存出来，两边只隔一个赋值。
+   */
+  let personaScheduleControlApi: import("../routes/persona").ScheduleControlApi | null = null
   if (config.personaEnabled) {
     // 整块故障隔离：拟人模式是**附加能力**，它装配期抛的任何错都不允许把整个服务拖下水。
     //
@@ -867,6 +918,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       createDriverListTool,
       applyPersonaEnv: applyPersonaEnvCore,
       collectScheduleDeclarations,
+      scheduleKey,
+      manualRunEventId,
+      buildEvent,
       personaApprovalMode: readApprovalMode,
       sessionRoutingMode: readSessionRouting,
     } = await import("@gebai/persona")
@@ -878,17 +932,30 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     const { SessionWorkerSpawner } = await import("../core/session/worker-spawner")
     const { createWorkerTools, createWorkerTaskBook } = await import("../core/session/worker-tools")
     const { ApprovalBridge } = await import("../core/session/persona-approval")
+    const { ScheduleControl } = await import("@gebai/persona")
+
+    // 定时任务启停控制面：先载入落盘状态，再装读取器（否则首次 tick 会用空状态把全部当启用）。
+    // 载入失败不阻断装配（ScheduleControl.load 内部已 catch）：退化形态是「开关暂时不生效」，
+    // 比人格整个装不起来轻得多。
+    const scheduleControl = new ScheduleControl(new PersonaScheduleControlStore(config.gebaiHome))
+    await scheduleControl.load()
+    personaScheduleControl = scheduleControl
 
     // 人格定时声明的统一读取面（内置 `schedule` 源靠它算档期）：**函数而非快照**——
     // 人格定义热加载是整体替换 catalog，快照会让新加的定时任务要重启才生效。
-    collectPersonaSchedules = () =>
-      collectScheduleDeclarations(
+    //
+    // 启停过滤就在这里做：`collectDue` 是纯函数，**声明不交给它就是停用**。
+    // 所以在出口剪掉被关掉的声明等于停用，且不碰 cron 解析、不碰源的游标、不碰调度器。
+    collectPersonaSchedules = () => {
+      const all = collectScheduleDeclarations(
         (personaCatalog?.all() ?? []).map((p) => ({
           id: p.id,
           ...(p.name ? { name: p.name } : {}),
           drivers: (p.drivers ?? []).map((d) => ({ id: d.id, ...(d.schedules ? { schedules: d.schedules } : {}) })),
         })),
       )
+      return personaScheduleControl ? personaScheduleControl.filterEnabled(all) : all
+    }
 
     const personaDirs = defaultPersonaScanDirs({ packageRoot: await resolvePersonaPackageRoot() })
     const found = await discoverPersonas(personaDirs)
@@ -1327,6 +1394,86 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           }
         },
       })
+
+    // 定时任务控制面的 REST 形状（界面开关 / 手动运行）。
+    //
+    // 为何在这里组装而不是在路由装配处：那里在拟人 try 域之外，拿不到
+    // collectScheduleDeclarations / personaRuntime / buildEvent。这里把能访问的一切包好存出去。
+    personaScheduleControlApi = {
+      list: async () => {
+        // 枚举**全部声明（含已停用）**：不能只返回启用的——
+        // 界面要能把停用的列出来并提供「重新打开」，而 collectPersonaSchedules()
+        // 已经在出口过滤过了，拿它会导致「关了就从界面上消失，再也打不开」。
+        const all = collectScheduleDeclarations(
+          (personaCatalog?.all() ?? []).map((p) => ({
+            id: p.id,
+            ...(p.name ? { name: p.name } : {}),
+            drivers: (p.drivers ?? []).map((d) => ({ id: d.id, ...(d.schedules ? { schedules: d.schedules } : {}) })),
+          })),
+        )
+        const snap = scheduleControl.snapshot()
+        return all.map((d) => {
+          const key = scheduleKey(d)
+          return {
+            key,
+            personaId: d.personaId,
+            driverId: d.driverId,
+            scheduleId: d.schedule.id,
+            enabled: scheduleControl.isEnabled(key),
+            cron: d.schedule.cron,
+            ...(d.schedule.description ? { description: d.schedule.description } : {}),
+            ...(d.schedule.timezone ? { timezone: d.schedule.timezone } : {}),
+            ...(snap[key]?.lastRunAt ? { lastRunAt: snap[key].lastRunAt } : {}),
+          }
+        })
+      },
+      setEnabled: async (key: string, enabled: boolean) => {
+        const r = await scheduleControl.setEnabled(key, enabled)
+        return r.ok ? { ok: true } : { ok: false, error: r.error }
+      },
+      run: async (key: string) => {
+        // 找声明（**含已停用**：停用状态下也允许手动跑一次验证配置）
+        const all = collectScheduleDeclarations(
+          (personaCatalog?.all() ?? []).map((p) => ({
+            id: p.id,
+            ...(p.name ? { name: p.name } : {}),
+            drivers: (p.drivers ?? []).map((d) => ({ id: d.id, ...(d.schedules ? { schedules: d.schedules } : {}) })),
+          })),
+        )
+        const decl = all.find((d) => scheduleKey(d) === key)
+        if (!decl) return { ok: false, error: `未找到定时任务 ${key}` }
+        if (!personaRuntime) return { ok: false, error: "人格运行时未启动" }
+        // 造一条与 cron 到点**同形**的事件：走同一条 runtime.dispatch，
+        // 所以身份注记、出站纪律、审批姿态、同会话串行全部自动生效（不另开旁路）。
+        const at = Date.now()
+        const label = decl.schedule.description?.trim() || decl.schedule.id
+        const eventId = manualRunEventId(decl.personaId, decl.driverId, decl.schedule.id, at)
+        const ev = buildEvent({
+          id: eventId,
+          kind: "schedule",
+          channel: "schedule",
+          personaId: decl.personaId,
+          driverId: decl.driverId,
+          source: `手动运行「${label}」· ${decl.personaName ? `${decl.personaName}（${decl.personaId}）` : decl.personaId}`,
+          summary: `手动运行「${label}」（${decl.schedule.cron}）`,
+          body: decl.schedule.prompt,
+          refs: {
+            taskId: decl.schedule.id,
+            extra: { scheduleId: decl.schedule.id, cron: decl.schedule.cron, manual: "1" },
+          },
+          at,
+        })
+        const res = await personaRuntime.dispatch(ev)
+        if (res.status !== "accepted") {
+          return {
+            ok: false,
+            error: `事件未被接管（${res.status}${res.reason ? `：${res.reason}` : ""}）——检查该分身的 subscriptions 是否含 schedule`,
+          }
+        }
+        await scheduleControl.markRun(key)
+        return { ok: true, eventId }
+      },
+    }
     } catch (err) {
       // 装配失败：回滚到「拟人未启用」的形态（运行时/目录/状态全置空），服务照常启动。
       // 回滚必须彻底：半装配的 personaRuntime 留在场上会让渠道把事件投给一个没有会话解析器的
@@ -1644,6 +1791,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           },
         }
       : {}),
+    // 人格定时任务的启停 + 手动运行（未启用拟人时 undefined → 端点 404）
+    ...(personaScheduleControlApi ? { personaScheduleControl: personaScheduleControlApi } : {}),
     // 文件工作台（DESIGN「文件工作台」）：Git 服务（宿主 git CLI，写/远程分别受开关约束）
     // 与写操作审计（用户直操文件系统的留痕；与工具审批的事前拦截互补）
     git: new GitService({

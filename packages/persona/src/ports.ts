@@ -305,6 +305,34 @@ export interface PersonaRunInput extends DriverTarget {
  */
 export interface SessionResolver {
   resolveDriver(input: { personaId: string; driverId: string; user: string; event: PersonaEvent; sessionKey?: string }): Promise<ResolvedSession>
+  /**
+   * 只把一条消息**写进会话上下文**，不启动任何执行。
+   *
+   * ## 为何需要这个能力
+   *
+   * 「进上下文」与「触发执行」原本是同一件事：事件投给 runner 就必然跑一轮。
+   * 但群消息里有一类——人格自己代发的回灌——必须记下（它得知道群里现在有自己
+   * 这段话），却绝不能拿它再跑一轮（会把自己刚说的话当成新指令重答）。
+   *
+   * 所以写入需要一条**绕过调度器与引擎**的路：直接落会话记录。
+   * 放在 SessionResolver 而不是 Runner，正是因为 Runner 的语义就是「跑一轮」，
+   * 而且引擎有 `tasks.has(sessionId)` 互斥——会话正在跑时塞进去只会排队等下一轮，
+   * 还是会被执行。
+   *
+   * 可选：未实现时调用方退化为「不记」（即旧行为）并记日志。
+   */
+  appendOnly?(input: {
+    personaId: string
+    driverId: string
+    user: string
+    event: PersonaEvent
+    sessionKey?: string
+    /** 写进消息正文的额外说明（身份注记；缺省用事件 body）。 */
+    note?: string
+    /** 发送者类别（落盘标记用：面板能区分“它看过没答”与“它没收到”）。 */
+    kind?: "self" | "owner" | "other"
+    reason?: string
+  }): Promise<{ sessionId: string; created: boolean }>
 }
 
 /** 单条投递结果（广播后每个命中的 driver 各一份）。 */
