@@ -140,21 +140,52 @@ struct LogEntry {
   /// 该提交的增删统计（`--numstat` 段；读详情时才填，列表不填）。
   std::vector<std::tuple<std::string, std::size_t, std::size_t>> files{};
 
+  /// **本行对应的图字格**（`|` `*` `/` `\` 空格），与 `git log --graph` 的左前缀同构。
+  ///
+  /// 一提交一格：`--graph` 把合并/分叉画在**它自己的那一行**（如 `|\`、`|/`），
+  /// 那些纯连线行在 `read_log_rows` 里是独立行；这里只存属于**本提交**那一行的字格。
+  std::string graph{};
+
   /// 相等比较：`State<std::vector<LogEntry>>` 需要它（`State` 用相等性做变更检测，
   /// 否则每次 `set` 都会当成“变了”而触发重组）。
   ///
-  /// 只比**身份与展示字段**（hash/subject/author/date）：`files` 是“读详情时才填”的
+  /// 只比**身份与展示字段**（hash/subject/author/date/graph）：`files` 是“读详情时才填”的
   /// 重量级字段，把它拉进来会让比较退化成逐条统计表对账。
   auto operator==(const LogEntry& other) const noexcept -> bool {
     return hash == other.hash && short_hash == other.short_hash && subject == other.subject &&
            author == other.author && date == other.date && lane == other.lane &&
-           refs == other.refs;
+           graph == other.graph && refs == other.refs;
   }
 };
 
+/// **一行日志**：要么是一条提交，要么是纯连线行（`--graph` 的 `|\`、`|/`）。
+///
+/// ## 为何连线行必须占一行
+///
+/// `git log --graph` 用**额外行**画斜边（合并 `|\`、分叉 `|/`）——一个提交可能带
+/// 1~3 行。若只保留提交行，斜边就没有安放处，图会变成“每个点都要挤在一格里”的直竖线，
+/// 分支关系彻底丢失（这正是旧实现的效果）。
+///
+/// 所以列表的数据模型是“行”而不是“提交”：连线行也占位，但**不可点、无内容**。
+struct LogRow {
+  /// 提交（`nullptr` = 纯连线行）。
+  std::optional<LogEntry> entry{};
+  /// 本行的图字格（`|` `*` `/` `\` 空格）。
+  std::string graph{};
+};
+
 /// 读日志（`limit` 条；从 `ref` 起，空 = HEAD）。
+///
+/// 只返回**提交**（过滤掉纯连线行）——供“按提交维度”做的逻辑（详情/选中）用。
 [[nodiscard]] auto read_log(const std::string& cwd, std::size_t limit,
                             const std::string& ref = {}) -> std::vector<LogEntry>;
+
+/// 读日志的**逐行**视图（含纯连线行）——供列表绘制用。
+///
+/// 与 `read_log` 同一份输出解析，差别是连线行**不丢**：
+/// 它保证“把每行的 `graph` 按顺序拼起来”与 `git log --graph` 的图区一致。
+[[nodiscard]] auto read_log_rows(const std::string& cwd, std::size_t limit,
+                                 const std::string& ref = {}) -> std::vector<LogRow>;
 
 /// 读一个提交的详情（变更文件 + numstat；写入 `entry.files` 并返回 diff 文本）。
 [[nodiscard]] auto read_commit_detail(const std::string& cwd, LogEntry& entry) -> std::string;
@@ -543,6 +574,9 @@ enum class Danger : std::uint8_t {
 /// 所以用这份纯数据整包过手。
 struct LogSnapshot {
   std::vector<LogEntry> log;
+  /// 逐行视图（含纯连线行的 `graph`）——与 `log` **按提交的 hash 对应**：
+  /// `log` 供业务用，`log_rows` 供列表绘制用（保留斜边行）。
+  std::vector<LogRow> log_rows;
   std::vector<BranchInfo> branches;
   std::vector<TagInfo> tags;
   std::vector<RemoteInfo> remotes;

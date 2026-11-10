@@ -369,6 +369,12 @@ struct CodeEditorPage : Component {
   /// 需要读日志（Git 标签可见或状态栏入口点过；泵里消费）。
   bool git_log_wanted_{false};
   std::vector<gbcode::LogEntry> git_log_{};
+  /// 逐行视图（含纯连线行的 `graph`）：日志表的**绘制数据源**。
+  ///
+  /// 为何与 `git_log_` 并存而不只用一个：`git_log_` 是“提交维度”（详情/选中/计数
+  /// 都以它为准），而列表要的是“行维度”（合并/分叉的斜边行也占一行）。两者由同一份
+  /// `read_log_rows` 产出（不跑两遍 git），不会不一致。
+  std::vector<gbcode::LogRow> git_log_rows_{};
   std::vector<gbcode::BranchInfo> git_branches_{};
   /// 选中的提交（详情摘要与高亮用）。
   std::string git_selected_hash_{};
@@ -1081,8 +1087,21 @@ auto open_recent(const std::string& path) -> void;
    auto log_line_label(const gbcode::LogEntry& entry) const -> std::string;
 
 
-  /// 过滤后的日志（提交信息/作者/路径三个条件都作用在同一条上）。
-   auto filtered_log() const -> std::vector<gbcode::LogEntry>;
+    /// 过滤后的日志（提交信息/作者/路径三个条件都作用在同一条上）。
+  auto filtered_log() const -> std::vector<gbcode::LogEntry>;
+
+
+  /// 日志列表的一行：要么是提交（`entry` 非空），要么是纯连线行。
+  ///
+  /// 为何不直接用 `gbcode::LogRow`：过滤后 `entry` 是**指向成员**的视图（不拷），
+  /// 而 `LogRow` 存的是值（它是解析层的产物，不该为绘制层的数据量付拷代价）。
+  struct LogRowView {
+    const gbcode::LogEntry* entry{nullptr};
+    std::string graph{};
+  };
+
+  /// 过滤后的**逐行**日志（含纯连线行；日志表的绘制源）。
+  auto filtered_log_rows() const -> std::vector<LogRowView>;
 
 
   /// 右栏：**选中提交的内容**（元信息 + 汇总 + 文件清单；点文件开并列差异）。

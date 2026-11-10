@@ -1402,6 +1402,7 @@ void CodeEditorPage::load_active_text() {
   /// 把一批 git 快照落到成员上（**主线程**；只有 `ensure_git_log` 与退路会调）。
   void CodeEditorPage::adopt_git_log(gbcode::LogSnapshot snapshot) {
     git_log_ = std::move(snapshot.log);
+    git_log_rows_ = std::move(snapshot.log_rows);
     git_branches_ = std::move(snapshot.branches);
     git_tags_ = std::move(snapshot.tags);
     git_remotes_ = std::move(snapshot.remotes);

@@ -553,17 +553,37 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     // 提交信息/作者/日期挤成一串，**列不对齐**（不同长度就错位）——而日志表
     // 恰恰是靠列对齐来扫的（“谁改的 / 什么时候” 是两列独立信息）。
     //
-    // 泳道列由图型圆点 + 竖线表示（`Table::set_row_lanes`），不走文本列：
+    // 泳道列由**连线图**（`Table::set_lane_links`）表示，不走文本列：
     // 用字符画分支线（`●`/`○`）在有向无环图上根本表达不出合并关系。
     (void)custom<Table>(c, [this](Table& table) {
       table.set_id("git-log-table");
-      const auto entries = filtered_log();
+      // **行维度**数据（含合并/分叉的连线行）——不是提交维度（否则斜边没处放）。
+      const auto rows = filtered_log_rows();
       table.clear_rows();   // 每次重组重建：日志量与过滤条件都会变
       // 泳道带宽：默认值（28）只够画一条线，而“圆点+线”与首字之间还需要一档空白。
       // 旧版**根本没给泳道留宽度**（`column_x` 从 `bounds_.x` 起算），圆点与竖线直接
       // 压在提交信息首字上（“提交线和信息贴太紧”的那个现象）。现在框架的 `Table`
       // 会把这块宽度真的让出来（见 `Table::lane_inset`），这里只调宽。
       table.set_lane_column_width(34.0f);
+      // —— 行首连线图（字格）——
+      //
+      // 直接把 `git log --graph` 的图区喂给 `Table`：它能画竖线、斜线、圆点，
+      // 于是**合并/分叉的斜边能真的画出来**（旧实现只存了列号，泳道一变就断线，
+      // 分支关系全丢——而那正是提交图存在的理由）。
+      std::vector<std::string> graphs;
+      graphs.reserve(rows.size());
+      for (const auto& row : rows) graphs.push_back(row.graph);
+      table.set_lane_links(std::move(graphs));
+      // —— 逐行高度：纯连线行压到 0.35 行高 ——
+      //
+      // 连线行只为了把斜边画出来，不承载文字。给它整行高会把两个相邻提交拉开数倍
+      // 距离（实测 1.0：合并处被 3 个连线行撑出 4 倍行距，整张表稀稀拉拉）。
+      // 0.35 是实测调出来的：再低（0.25 以下）斜线会因跨度太短而与上下行失去连接；
+      // 再高（0.5）依然看得出“多出几个空行”。
+      std::vector<float> scales;
+      scales.reserve(rows.size());
+      for (const auto& row : rows) scales.push_back(row.entry != nullptr ? 1.0f : 0.35f);
+      table.set_row_scales(std::move(scales));
       // 窄栏压缩优先级：先把哈希/日期让出去，再是作者；提交信息（主列）最后。
       //
       // 为何要显式声明：右栏把日志挤到 380px 宽时，110+130+76 = 316px 全被这三列
@@ -584,9 +604,13 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
                               Table::CellTone::Muted, Table::CellTone::Muted});
       table.set_row_height(24.0f);
-      std::vector<int> lanes;
-      lanes.reserve(entries.size());
-      for (const auto& entry : entries) {
+      for (const auto& row : rows) {
+        if (row.entry == nullptr) {
+          // 纯连线行：**空内容占位**（四列全空，但行高保留——斜边就画在它这一格里）。
+          table.add_row({});
+          continue;
+        }
+        const gbcode::LogEntry& entry = *row.entry;
         // refs（分支/标签胶囊）拼在提交信息尾部：它是**这条提交的身份装饰**，
         // 单独开一列会在窄视图里把真正的内容挤没。
         std::string subject = entry.subject;
@@ -596,21 +620,22 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
           subject += refs;
         }
         table.add_row({subject, entry.author, entry.date, entry.short_hash});
-        lanes.push_back(static_cast<int>(entry.lane));
       }
-      table.set_row_lanes(std::move(lanes));
       // 选中行与左栏的“当前提交”同源（同一条高亮，不是两个独立状态）。
       if (!git_selected_hash_.empty()) {
-        for (std::size_t index = 0; index < entries.size(); ++index) {
-          if (entries[index].short_hash == git_selected_hash_) {
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+          if (rows[index].entry != nullptr && rows[index].entry->short_hash == git_selected_hash_) {
             table.set_selected_row(index);
             break;
           }
         }
       }
       // 点行 = 看这条提交的详情（与旧版同一动线）。
-      table.set_on_row_click([this, entries](std::size_t row) {
-        if (row < entries.size()) show_commit(entries[row]);
+      //
+      // ⚠ 连线行不可点：下标是**行**下标，不是提交下标——必须经 `entry` 判空转一步，
+      // 否则“点了合并那一行 → 打开了另一笔提交”（差一行，极难归因）。
+      table.set_on_row_click([this, rows](std::size_t row) {
+        if (row < rows.size() && rows[row].entry != nullptr) show_commit(*rows[row].entry);
       });
     }, {.grow = true, .id = "git-log-host"});
     // 给 e2e 用的断言面：当前可见行区间（“表格真的在显示数据”而非空壳）。
@@ -646,18 +671,43 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
 
   /// 过滤后的日志（提交信息/作者/路径三个条件都作用在同一条上）。
   auto CodeEditorPage::filtered_log() const -> std::vector<gbcode::LogEntry> {
-    const std::string needle = std::string(st::trim(log_filter_text_.value()));
     std::vector<gbcode::LogEntry> out;
-    out.reserve(git_log_.size());
-    for (const auto& entry : git_log_) {
-      if (log_filter_current_branch_.value() && entry.lane != 0) continue;
+    for (const auto& row : filtered_log_rows()) {
+      if (row.entry != nullptr) out.push_back(*row.entry);
+    }
+    return out;
+  }
+
+  /// 过滤后的**逐行**日志（保留纯连线行）。
+  ///
+  /// 与 `filtered_log()` 的区别只在“连线行要不要”：列表绘制要（否则斜边没处放），
+  /// 而详情/选中/计数不要（那些是“提交”维度）。
+  auto CodeEditorPage::filtered_log_rows() const -> std::vector<CodeEditorPage::LogRowView> {
+    const std::string needle = std::string(st::trim(log_filter_text_.value()));
+    const bool current_only = log_filter_current_branch_.value();
+    std::vector<LogRowView> out;
+    out.reserve(git_log_rows_.size());
+    for (const auto& row : git_log_rows_) {
+      if (!row.entry.has_value()) {
+        // 纯连线行：跟着**上下文**决定留不留。
+        //
+        // 为何不一律丢掉：合并/分叉的斜边行就是纯连线行——丢了它们，
+        // “两个分支在这里汇合”这件事在画面上就是不存在的。
+        // 而在过滤时它们没有可匹配的内容（不是提交），所以：只要**不过滤**就留，
+        // 一旦有过滤条件就全部隐去（否则会出现“行留着、两边提交都没了”的悬空线）。
+        if (current_only || !needle.empty()) continue;
+        out.push_back(LogRowView{nullptr, row.graph});
+        continue;
+      }
+      const gbcode::LogEntry& entry = *row.entry;
+      if (current_only && entry.lane != 0) continue;
       if (!needle.empty()) {
         const bool hit = entry.subject.find(needle) != std::string::npos ||
                          entry.author.find(needle) != std::string::npos ||
                          entry.short_hash.find(needle) != std::string::npos;
         if (!hit) continue;
       }
-      out.push_back(entry);
+      out.push_back(LogRowView{&entry, row.graph});
     }
     return out;
   }

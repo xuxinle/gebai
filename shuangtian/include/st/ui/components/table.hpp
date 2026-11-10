@@ -52,7 +52,8 @@ class Table : public Element {
   static constexpr float kMinColumnWidth{72.0f};    ///< 自适应列的最小宽（px）
   static constexpr float kCellPadding{12.0f};       ///< 单元格左右内边距（px，= space_md）
   static constexpr float kScrollStep{48.0f};        ///< 横向滚轮每格距离（px）
-  static constexpr float kScrollBarHeight{3.0f};    ///< 横向滚动指示条高（px）
+  static constexpr float kScrollStepY{48.0f};       ///< 纵向滚轮每格距离（px）
+  static constexpr float kScrollBarHeight{3.0f};    ///< 滚动指示条宽（px）
   static constexpr float kSelectedAccentWidth{3.0f};///< 选中行左缘主色条宽（px）
 
   /// 单元格**色调**（主/次信息分层）。
@@ -81,6 +82,9 @@ class Table : public Element {
   /// 同一套几何算——应用自己画就得到表格外面去覆一层，而覆层拿不到
   /// “第 n 行现在在屏幕上第几个像素”（那是 `row_rect` 的内部知识）。
   /// 取值语义与 git 泳道图一致：0 = 主干，n = 第 n 条分支线。
+  ///
+  /// ⚠ 这是**简化接口**：它只能表达“本行在第 n 列有个点”，**表达不了跨道连线**
+  ///（合并/分叉的斜边）。真实的分支图请用 `set_row_lanes` 之上的 `set_lane_links`。
   void set_row_lanes(std::vector<int> lanes);
   /// 设在该列位置画泳道（负值保持默认 28px；0 会吃掉列宽，不要传）。
   ///
@@ -88,6 +92,42 @@ class Table : public Element {
   /// `x + lane_inset()` 起算（见 `column_x`），否则第一个字会与泳道圆点叠在一起——
   /// 实测症状就是“提交信息的首字被竖线和圆点盖住”。
   void set_lane_column_width(float width);
+
+  // —— 行首连线图（通用「行 × 列」连线模型）——
+  //
+  // ## 为何需要它（`set_row_lanes` 不够用）
+  //
+  // `set_row_lanes` 只给“本行一个列号”，于是绘制只能画出「圆点 + 只在相邻行同列时
+  // 才连一截竖线」——**泳道一变就断线**，合并/分叉（`|\`、`|/`）根本表达不了。
+  // 而真实的提交图（`git log --graph`）恰恰是“一个字符网格”：每行若干列，
+  // 每列可能有一条竖线、一条向左/右的斜线、或一个圆点。
+  //
+  // 本接口把这层网格**原样**收进 `Table`：应用只负责把语义翻译成字格，
+  // 几何（行高、纵向偏移、裁剪、列宽、缩进、主题色）全由 `Table` 算。
+  //
+  // ## 字格语义（与 `git log --graph` 一致，便于直接映射）
+  //
+  // | 字符 | 含义 |
+  // |---|---|
+  // | `"|"` | 本格一条竖线 |
+  // | `"*"` | 提交点（画实心圆） |
+  // | `"/"` | 左下→右上 的斜线 |
+  // | `"\\"` | 左上→右下 的斜线 |
+  // | `" "` | 空 |
+  //
+  // 字符格的宽在绘制时按 `lane_column_width / cell_columns` 等比算，
+  // 所以调用方**不必**关心像素（只管把图写成字符串）。
+  ///
+  /// ## 为何用字符串而不是坐标列表
+  ///
+  /// 坐标列表（“第 r 行第 c 列的格子画什么”）在人写/序列化/日志时会迅速不可读，
+  /// 而字符串网格**可以直接贴进测试、截图对账、肉眼对**——与要表达的东西同构。
+  void set_lane_links(std::vector<std::string> rows);
+  [[nodiscard]] auto lane_links() const noexcept -> const std::vector<std::string>& {
+    return row_links_;
+  }
+  /// 清掉行首连线图（回到 `set_row_lanes` 那套简化绘制）。
+  void clear_lane_links();
 
   // —— 数据 ——
   /// 设定列（会清空既有列宽缓存；行数据保留）。
@@ -106,6 +146,34 @@ class Table : public Element {
   [[nodiscard]] auto zebra() const noexcept -> bool { return zebra_; }
   void set_row_height(float height);
   [[nodiscard]] auto row_height() const noexcept -> float { return row_height_; }
+
+  /// **逐行高度倍率**（空 = 全部用 `row_height_`）。
+  ///
+  /// ## 为何需要它（不只是一个“美化开关”）
+  ///
+  /// 提交图里的**纯连线行**（`|\`、`|/`）只为画斜边而存在，不承载任何文字。
+  /// 给它一个完整行高，就会把两个相邻提交拉开 **数倍**距离（实测：合并处
+  /// `merge side` 到 `side 1` 之间被 3 个连线行撑出 4 倍行距），整张表看起来
+  /// “稀稀拉拉”。倍率 0.5 一压回去，行距立刻回到正常。
+  ///
+  /// 用**倍率**而不是绝对值：行高会被字号/主题改（`apply_theme` 里跟随字号），
+  /// 存绝对值会在换字号后与正常行不同步。
+  void set_row_scales(std::vector<float> scales);
+  [[nodiscard]] auto row_scales() const noexcept -> const std::vector<float>& {
+    return row_scales_;
+  }
+  /// 第 `row` 行的高度（px；越界回 `row_height_`）。
+  [[nodiscard]] auto row_height_at(std::size_t row) const noexcept -> float;
+  /// 行数据总高（含逐行高度；`row_offsets_` 的末值）。
+  [[nodiscard]] auto content_height() const noexcept -> float;
+  /// 行偏移前缀和（第 i 行的上边距；长度 = 行数 + 1；供只读几何用）。
+  ///
+  /// 为何暴露：`visible_row_range` 是自由函数（要遍历全量行的可见区间），
+  /// 而行高逐行不同时“除行高求下标”不成立——必须用前缀和二分。
+  [[nodiscard]] auto row_offsets() const noexcept -> const std::vector<float>& {
+    ensure_row_offsets();
+    return row_offsets_;
+  }
   // —— 选中行（v0.1.5：协议可读写、语义树可断言） ——
   /// 选中行序号（`nullopt` = 无选中）。点击行不自动改选中——选中是**数据语义**，
   /// 由应用决定（与 `List::selected` 同一口径），避免"点击即选中"在多选/命令面板里错。
@@ -125,10 +193,32 @@ class Table : public Element {
   void set_scroll_offset(float offset);
   void scroll_by(float delta) { set_scroll_offset(scroll_offset_ + delta); }
 
+  // —— 纵向滚动 ——
+  //
+  // ## 为何 Table 必须自己管纵向
+  //
+  // 旧实现在 `on_event` 的 Wheel 分支里写着「纵向由外层容器管」——但**这个约定
+  // 从来没被兑现过**：全仓零处把 Table 放进 `ScrollView`（`grep` 实测），
+  // 而 gbcode 的日志表就是直接挂在 `Panel` 下。后果：200 行提交只看得见 6 行，
+  // 而 `max_scroll`（当时只有横向）恒为 0——**完全滞不动**，且没有任何报错。
+  //
+  // 现在两种摆法都成立：
+  // - 直接放在容器里：`max_scroll_y() > 0`，滚轮纵向滚（**Shift 保持横向**，
+  //   与“Shift = 另一个轴”的通行约定一致）；
+  // - 放进 `ScrollView`：`bounds_.height` 是**内容全高**（> 行数据高），
+  //   `max_scroll_y()` 自然为 0、滚轮让给外层（`return false` 冒泡）——
+  //   这正是旧行为，不破坏既有用法。
+  [[nodiscard]] auto scroll_offset_y() const noexcept -> float { return scroll_offset_y_; }
+  [[nodiscard]] auto max_scroll_y() const noexcept -> float;
+  void set_scroll_offset_y(float offset);
+  void scroll_by_y(float delta) { set_scroll_offset_y(scroll_offset_y_ + delta); }
+  /// 表头之下、可见区域的行数（扣表头与横向滚动条；不受纵向偏移影响）。
+  [[nodiscard]] auto viewport_row_count() const noexcept -> std::size_t;
+
   // —— 布局几何（测试/控制通道用；arrange 后有效）——
   [[nodiscard]] auto header_rect() const noexcept -> math::Rect;
   [[nodiscard]] auto row_rect(std::size_t row) const noexcept -> math::Rect;
-  /// 实际绘制矩形（已含横向偏移）。
+  /// 实际绘制矩形（已含横向与**纵向**偏移）。
   [[nodiscard]] auto cell_rect(std::size_t row, std::size_t column) const noexcept -> math::Rect;
   [[nodiscard]] auto header_cell_rect(std::size_t column) const noexcept -> math::Rect;
   [[nodiscard]] auto column_width(std::size_t column) const noexcept -> float;
@@ -186,16 +276,34 @@ class Table : public Element {
   std::vector<std::vector<CellTone>> cell_tones_{};
   /// 每行的泳道列号（`-1` = 不画）。
   std::vector<int> row_lanes_{};
-  float lane_column_width_{28.0f};
   std::function<void(std::size_t)> on_row_click_{};
   float total_width_{0.0f};
   float row_height_{kDefaultRowHeight};
+
+  /// 行偏移前缀和（惰性重建；见 `row_offsets()`）。
+  void ensure_row_offsets() const;
   /// 调用方显式设过 `set_row_height`：字号覆盖不再改写行高（见 apply_theme）。
   bool explicit_row_height_{false};
+  /// 每行的**高度倍率**（空 = 全部 1.0）。见 `set_row_scales`。
+  std::vector<float> row_scales_{};
+  /// `row_scales_` 的**前缀和**前缀（第 i 行的上边距；长度 = 行数 + 1）。
+  ///
+  /// 为何缓存：行矩形/命中/可见区间/滚动量四处都要“第 n 行的 y”，每处各自累加
+  /// 就会在数据变化时错位（且是 O(n²)）。一次算好，四处共用。
+  mutable std::vector<float> row_offsets_{};
+  /// `row_offsets_` 是否与当前 `rows_`/`row_scales_`/`row_height_` 一致。
+  mutable bool row_offsets_valid_{false};
   float scroll_offset_{0.0f};
+  /// 纵向滚动偏移（px；`0` = 第一行贴着表头）。与 `row_rect` 同一坐标系。
+  float scroll_offset_y_{0.0f};
   std::size_t hovered_row_{kNoRow};
   std::optional<std::size_t> selected_row_{};
   bool zebra_{false};
+  /// 每行的行首连线图（字格；空 = 不用本通道，回退到 `row_lanes_`）。
+  std::vector<std::string> row_links_{};
+  /// `row_links_` 的最大列数（缓存：每行长度不等，按最宽的决定泳道带宽度）。
+  std::size_t lane_columns_{0};
+  float lane_column_width_{28.0f};
 
   /// 上一帧实际绘制的可见行区间（半开）——与 `Tree::last_visible_first_` 同一手法。
   /// `mutable`：`paint_content` 是 const（「绘制不改元素状态」是框架硬约束）。

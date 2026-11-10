@@ -171,11 +171,27 @@ ST_TEST(terminal_single_line_output_reports_row_band_not_whole_bounds) {
   }
 
   fixture.terminal->send_bytes("x");
-  st::platform::sleep_ms(200);
-  fixture.terminal->pump();
+  // ⚠ **轮询等回显**，不要固定 `sleep(200)` 后只 `pump()` 一次。
+  //
+  // 为何（实测）：并行跑全量时机器负载高，shell 从收键到把回显字节写回 PTY
+  // 可能超过 200ms——那一次 `pump()` 抽到空，`pending()` 自然无效，用例就
+  // 报“单行输出后没有任何损坏上报”。它**不是缺陷**，是夹具等得不够久；
+  // 而固定等待无论改多少都是碰运气（负载一变又红）。
+  //
+  // 轮询的边界仍严：**只等“有没有上报”**，一旦上报就立刻拿它去断言几何；
+  // 超时（3s）才判失败——真缺陷（上报整块/不上报）依然会被捉住。
+  Terminal::DamageReport report{};
+  for (int i = 0; i < 150; ++i) {   // 150 × 20ms = 3s 上限
+    st::platform::sleep_ms(20);
+    fixture.terminal->pump();
+    // ⚠ **先取损坏区、再 draw**：`draw()` 里的 `paint_frame` 帧首会消费掉它
+    // （本文件 `Fixture::pending` 的注释写着这一点），顺序反了就恒取到空。
+    report = fixture.pending();
+    if (report.valid) break;
+    fixture.draw();
+  }
 
-  const Terminal::DamageReport report = fixture.pending();
-  expect(report.valid, "单行输出后没有任何损坏上报 —— 画面会停在旧内容上");
+  expect(report.valid, "单行输出后 3s 内没有任何损坏上报 —— 画面会停在旧内容上");
   if (!report.valid) return;
   expect(!report.needs_full, "单行输出却要求整帧重绘（needs_full=true）");
   // 终端内部的单行变化永远是**一条行带**：高≈一行、宽=输出区宽，

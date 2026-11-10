@@ -89,6 +89,12 @@ void Table::add_row(std::vector<std::string> cells) {
   // 而“设了不生效”是最难查的一类缺陷（属性面也看不到）。
   cell_tones_.emplace_back(columns_.size(), CellTone::Inherit);
   row_lanes_.push_back(-1);
+  // 连线图：**只在不够长时**才补空格子（图可能先于行设置，那时它比行多）。
+  //
+  // ⚠ 不能无条件 `emplace_back()`：先 `set_lane_links` 给 2 格、再 `add_row` 加 2 行时，
+  // 无条件补会把图变 4 格——而前两行本来就有图，结果图与行整体错位（实测）。
+  if (!row_links_.empty() && row_links_.size() < rows_.size()) row_links_.emplace_back();
+  row_offsets_valid_ = false;   // 多了一行，前缀和必须重建
   mark_layout_dirty();
 }
 
@@ -126,13 +132,38 @@ void Table::set_row_lanes(std::vector<int> lanes) {
   mark_layout_dirty();
 }
 
+void Table::set_lane_links(std::vector<std::string> rows) {
+  // ⚠ **不要** `resize(rows_.size())`：本接口可能先于 `add_row` 调用（声明式重建里
+  // 常见“先配样式、再填数据”），而 resize 会把已给的图全截成空串——实测症状是
+  // `lane_inset = 0`（泳道带不占宽）且图上一条线都不画，**不报错**。
+  // 长度对齐改由 `add_row` 侧补齐（见那里的 `row_links_.resize`）。
+  row_links_ = std::move(rows);
+  lane_columns_ = 0;
+  for (const std::string& row : row_links_) lane_columns_ = std::max(lane_columns_, row.size());
+  mark_layout_dirty();
+}
+
+void Table::clear_lane_links() {
+  if (row_links_.empty()) return;
+  row_links_.clear();
+  lane_columns_ = 0;
+  mark_layout_dirty();
+}
+
 void Table::set_lane_column_width(float width) {
   // 夹到合理范围：太窄画不出线、太宽就是在抢内容区。
-  lane_column_width_ = std::clamp(width, 8.0f, 80.0f);
+  lane_column_width_ = std::clamp(width, 8.0f, 240.0f);
   mark_layout_dirty();
 }
 
 auto Table::lane_inset() const noexcept -> float {
+  // 优先：连线图模式（宽度由字符列数决定）。
+  if (!row_links_.empty() && lane_columns_ > 0U) {
+    // 每字符列占 `lane_column_width_ / 每列宽`——但这里把 `lane_column_width_` 当作
+    // **整条泳道带的宽度上限**，字符列宽 = 总宽 / 列数（上限 14px，免得 2 列就撑满）。
+    const float cell = std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_));
+    return cell * static_cast<float>(lane_columns_) + 8.0f;
+  }
   // **任何一行**有泳道就整表让位：同一张表里列必须对齐，不能按行变。
   for (const int lane : row_lanes_) {
     if (lane >= 0) return lane_column_width_;
@@ -147,8 +178,12 @@ void Table::clear_rows() {
   // 新行会拿到上一批的行位（颜色/泳道错位，而画面看着“有值只是不对”）。
   cell_tones_.clear();
   row_lanes_.clear();
+  row_links_.clear();
+  lane_columns_ = 0;
   hovered_row_ = kNoRow;
   selected_row_ = std::nullopt;  // 数据没了：选中索引必然悬空
+  scroll_offset_y_ = 0.0f;      // 行没了，纵向偏移跟着归零（否则下次填充会从中间开始）
+  row_offsets_valid_ = false;
   mark_layout_dirty();
 }
 
@@ -158,17 +193,86 @@ void Table::set_zebra(bool value) {
   mark_dirty();
 }
 
+void Table::set_row_scales(std::vector<float> scales) {
+  row_scales_ = std::move(scales);
+  // 夹取：0.2~3.0。低于 0.2 就连一行字都放不下了（行高会被字截切）；
+  // 高于 3.0 不是“紧凑/宽松”而是排版事故。
+  for (float& scale : row_scales_) {
+    scale = std::clamp(scale > 0.0f ? scale : 1.0f, 0.2f, 3.0f);
+  }
+  row_offsets_valid_ = false;   // 倍率变了，前缀和必须重建
+  mark_layout_dirty();
+}
+
+auto Table::row_height_at(std::size_t row) const noexcept -> float {
+  if (row < row_scales_.size()) return row_height_ * row_scales_[row];
+  return row_height_;
+}
+
+void Table::ensure_row_offsets() const {
+  if (row_offsets_valid_ && row_offsets_.size() == rows_.size() + 1U) return;
+  row_offsets_.assign(rows_.size() + 1U, 0.0f);
+  for (std::size_t index = 0; index < rows_.size(); ++index) {
+    row_offsets_[index + 1U] = row_offsets_[index] + row_height_at(index);
+  }
+  row_offsets_valid_ = true;
+}
+
+auto Table::content_height() const noexcept -> float {
+  ensure_row_offsets();
+  return row_offsets_.empty() ? 0.0f : row_offsets_.back();
+}
+
 void Table::set_row_height(float height) {
   explicit_row_height_ = true;   // 显式设置优先：字号覆盖不再改写行高
   const float clamped = height > 0.0f ? height : kDefaultRowHeight;
   if (row_height_ == clamped) return;
   row_height_ = clamped;
+  row_offsets_valid_ = false;   // 行高变了，前缀和失效
   mark_layout_dirty();
 }
 
 auto Table::max_scroll() const noexcept -> float {
   const float visible = std::max(bounds_.width, 0.0f);
   return std::max(0.0f, total_width_ - visible);
+}
+
+auto Table::max_scroll_y() const noexcept -> float {
+  // 可滚动量 = 行数据总高 − （視口高 − 表头高）。
+  // 表头**不滚**（它是列名，跟着滚就失去参考意义），所以它占的高度要从視口里扣掉。
+  //
+  // 放在 `ScrollView` 里时 `bounds_.height` 是**内容全高**，本式自然得 0——
+  // 于是纵向滚轮让给外层（见 `on_event`），保持旧行为。
+  if (bounds_.is_empty() || row_height_ <= 0.0f) return 0.0f;
+  const float content = content_height();
+  const float viewport = std::max(0.0f, bounds_.height - kHeaderHeight);
+  return std::max(0.0f, content - viewport);
+}
+
+auto Table::viewport_row_count() const noexcept -> std::size_t {
+  if (bounds_.is_empty() || row_height_ <= 0.0f) return 0U;
+  // 底部有横向滚动条时把它扣掉，否则最后一行的下半截会被指示条遮住。
+  const float bar = max_scroll() > 0.0f ? kScrollBarHeight + 2.0f : 0.0f;
+  const float body = std::max(0.0f, bounds_.height - kHeaderHeight - bar);
+  // 按**实际行高**逐行数（行高可能逐行不同，不能除）；只数到装不下为止。
+  float used = 0.0f;
+  std::size_t count = 0;
+  while (count < rows_.size()) {
+    const float next = used + row_height_at(count);
+    if (next > body + 0.01f) break;
+    used = next;
+    ++count;
+  }
+  return count;
+}
+
+void Table::set_scroll_offset_y(float offset) {
+  const float clamped = std::clamp(offset, 0.0f, max_scroll_y());
+  if (clamped == scroll_offset_y_) return;
+  scroll_offset_y_ = clamped;
+  // 纵向滚动是整个内容区在动（与横向的“列边界动”不同），按整块 bounds 上报。
+  record_damage();
+  mark_dirty();
 }
 
 /// 本帧**实际在裁剪区内的行区间** `[先, 后)`（半开）；无交集时 `[首, 首)`。
@@ -205,18 +309,27 @@ auto Table::max_scroll() const noexcept -> float {
   const float clip_bottom = static_cast<float>(physical.y + physical.height) * inv;
   if (clip_bottom <= clip_top) return {0U, 0U};
 
-  // 数据行从表头之下开始（与 `row_rect` 同一几何）。
-  const float rows_top = bounds.y + header_height;
-  const float content_bottom = rows_top + static_cast<float>(total) * row_height;
+  const float rows_top = bounds.y + header_height - table.scroll_offset_y();
+  const float content_bottom = rows_top + table.content_height();
   if (clip_bottom <= rows_top || clip_top >= content_bottom) return {0U, total};
 
-  const float first_f = std::max(0.0f, clip_top - rows_top) / row_height;
-  const float last_f = std::min(static_cast<float>(total) * row_height,
-                                clip_bottom - rows_top) /
-                       row_height;
-  const auto first = static_cast<std::size_t>(std::floor(first_f));
+  // 行高可逐行不同 ⇒ 不能“除行高”求下标，改用**前缀和二分**（`row_offsets`）。
+  // 两处都是 O(log n)：1000 行也不会在滚动时逐行扫。
+  const std::vector<float>& offsets = table.row_offsets();
+  if (offsets.size() != total + 1U) return {0U, total};
+  const float want_top = std::max(0.0f, clip_top - rows_top);
+  const float want_bottom = std::min(content_bottom - rows_top, clip_bottom - rows_top);
+  const auto first = static_cast<std::size_t>(
+      std::max<std::ptrdiff_t>(0, static_cast<std::ptrdiff_t>(
+                                      std::upper_bound(offsets.begin(), offsets.end(), want_top) -
+                                      offsets.begin()) - 1));
   // 上界宽出一行：避免“裁剪区底边正落在行中”时漏画那一行。
-  const auto last = static_cast<std::size_t>(std::ceil(last_f)) + 1U;
+  const auto last = static_cast<std::size_t>(
+      std::min<std::ptrdiff_t>(static_cast<std::ptrdiff_t>(total),
+                               static_cast<std::ptrdiff_t>(
+                                   std::lower_bound(offsets.begin(), offsets.end(), want_bottom) -
+                                   offsets.begin()) +
+                                   1));
   return {std::min(first, total), std::min(last, total)};
 }
 
@@ -392,12 +505,18 @@ auto Table::visible_row_count() const noexcept -> std::size_t {
 }
 
 auto Table::row_rect(std::size_t row) const noexcept -> math::Rect {
-  return math::Rect{bounds_.x, bounds_.y + kHeaderHeight + row_height_ * static_cast<float>(row),
-                    bounds_.width, row_height_};
+  // 纵向偏移在这里减：行矩形是**视口坐标**（绘制/命中/泳道图几何全部经它，
+  // 于是“滚了就跟着挪”自动成立）。行高逐行可异，y 取前缀和。
+  ensure_row_offsets();
+  const float top = row < row_offsets_.size() ? row_offsets_[row]
+                                             : row_height_ * static_cast<float>(row);
+  return math::Rect{bounds_.x, bounds_.y + kHeaderHeight + top - scroll_offset_y_,
+                    bounds_.width, row_height_at(row)};
 }
 
 auto Table::cell_rect(std::size_t row, std::size_t column) const noexcept -> math::Rect {
-  return math::Rect{column_x(column), row_rect(row).y, column_width(column), row_height_};
+  const math::Rect row_box = row_rect(row);
+  return math::Rect{column_x(column), row_box.y, column_width(column), row_box.height};
 }
 
 auto Table::header_cell_rect(std::size_t column) const noexcept -> math::Rect {
@@ -428,6 +547,7 @@ void Table::measure(const RenderContext& context, const Constraints& constraints
   measured_ = math::Size{width, height};
   recompute_columns(width);
   if (scroll_offset_ > max_scroll()) scroll_offset_ = max_scroll();
+  if (scroll_offset_y_ > max_scroll_y()) scroll_offset_y_ = max_scroll_y();
 }
 
 void Table::arrange(const RenderContext& context, math::Rect rect) {
@@ -435,14 +555,23 @@ void Table::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
   recompute_columns(bounds_.width);
   if (scroll_offset_ > max_scroll()) scroll_offset_ = max_scroll();
+  if (scroll_offset_y_ > max_scroll_y()) scroll_offset_y_ = max_scroll_y();
   layout_dirty_ = false;
 }
 
 auto Table::row_at(math::Point point) const noexcept -> std::size_t {
   if (!bounds_.contains(point) || row_height_ <= 0.0f) return kNoRow;
-  const float top = bounds_.y + kHeaderHeight;
+  const float top = bounds_.y + kHeaderHeight - scroll_offset_y_;
   if (point.y < top) return kNoRow;
-  const auto index = static_cast<std::size_t>((point.y - top) / row_height_);
+  // 行高逐行可异 ⇒ 用前缀和二分（不能除行高）。
+  ensure_row_offsets();
+  if (row_offsets_.size() != rows_.size() + 1U) return kNoRow;
+  const float local = point.y - top;
+  const auto index = static_cast<std::size_t>(
+      std::max<std::ptrdiff_t>(0, static_cast<std::ptrdiff_t>(
+                                      std::upper_bound(row_offsets_.begin(), row_offsets_.end(),
+                                                       local) -
+                                      row_offsets_.begin()) - 1));
   return index < rows_.size() ? index : kNoRow;
 }
 
@@ -452,6 +581,7 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   const Metrics& metrics = context.theme.metrics();
 
   canvas.push_clip_rect(bounds_);
+
 
   // **逐行视口剔除**（见 `visible_row_range` 的说明）：只画可见那几行——
   // 1000 行的表格在 400px 视口里是 12 行而不是 1000 行。
@@ -481,6 +611,10 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   }
 
   // 表头（顶部圆角）与底部分隔线。
+  //
+  // ⚠ 表头必须画在**数据区裁剪之外**：它固定在顶部不随纵向滚动，而行矩形已减纵向偏移
+  // （滚到中间时第一行会落到表头高度以内）。不 `pop_clip` 就会被 body_clip 切掉一半。
+  canvas.pop_clip();   // body_clip
   const math::Rect header = header_rect();
   if (header.height > 0.0f) {
     fill_round_rect(canvas, header, metrics.radius_md, metrics.radius_md, 0.0f, 0.0f,
@@ -532,37 +666,124 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
                    columns_[column].align, header_font, colors.text_muted);
   }
 
-  // —— 行首泳道标记（图形分支线）——
+  // —— 行首连线图（图形分支线）——
   //
-  // 画在**最左侧**（表头不占这一块），每个提交一个圆点 + 一条竖线：
-  //   竖线：连接同一泳道的相邻提交（lane 相同就连）；
-  //   圆点：该提交本身（主干主色、分支 muted）。
-  // 为何进框架：泳道是**行属性**，它要和行高/滚动/斑马纹同一套几何算；
+  // 两种通道，**连线图优先**：
+  // ① `row_links_`（字格）：能画竖线、斜线、圆点，可表达合并/分叉；
+  // ② `row_lanes_`（旧接口）：只能圆点 + 同列竖线。
+  //
+  // 为何进框架：泳道是**行属性**，它要和行高/纵向偏移/裁剪同一套几何算；
   // 应用自己画得不到 `row_rect` 的内部知识（现在屏幕上第几像素）。
-  for (std::size_t row = first_row; row < last_row; ++row) {
-    if (row >= row_lanes_.size() || row_lanes_[row] < 0) continue;
-    const math::Rect row_box = row_rect(row);
-    if (row_box.height <= 0.0f) continue;
-    const float lane_x = bounds_.x + 10.0f + static_cast<float>(row_lanes_[row]) * 12.0f;
-    const float cy = row_box.y + row_box.height * 0.5f;
-    if (lane_x >= clip_right || lane_x <= clip_left) continue;
-    // 竖线：连到**下一条同泳道**的行（相邻行不同泳道时断开，如实反映分支）。
-    const bool next_same = row + 1 < row_lanes_.size() && row_lanes_[row + 1] == row_lanes_[row];
-    const bool prev_same = row > 0 && row_lanes_[row - 1] == row_lanes_[row];
-    const math::Color lane_color =
-        row_lanes_[row] == 0 ? colors.primary : colors.border_strong;
-    const float half = row_box.height * 0.5f;
-    if (prev_same) {
-      canvas.fill_rect(math::Rect{lane_x - 0.5f, row_box.y, 1.0f, half},
-                       raster::Paint::solid(lane_color));
+  if (!row_links_.empty() && lane_columns_ > 0U) {
+    const float band_x = bounds_.x + 4.0f;
+    const float cell =
+        std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_));
+    // 线宽/圆点半径跟**格宽**走（不写死 px）：泳道带被窄栏挤窄时不能变成一园糊。
+    // 下限 1.5px：1px 在 1.5× DPI 下会因亚像素定位而时粗时细（实测：同一列的竖线
+    // 看起来深浅不一）。
+    const float lane_width = std::max(1.5f, std::min(2.5f, cell * 0.18f));
+    const float dot_radius = std::max(2.8f, std::min(4.2f, cell * 0.34f));
+    for (std::size_t row = first_row; row < last_row; ++row) {
+      if (row >= row_links_.size()) continue;
+      const std::string& glyphs = row_links_[row];
+      if (glyphs.empty()) continue;
+      const math::Rect row_box = row_rect(row);
+      if (row_box.height <= 0.0f) continue;
+      const float cy = row_box.y + row_box.height * 0.5f;
+      for (std::size_t col = 0; col < glyphs.size(); ++col) {
+        const char glyph = glyphs[col];
+        if (glyph == ' ') continue;
+        const float cx = band_x + cell * (static_cast<float>(col) + 0.5f);
+        if (cx >= clip_right || cx <= clip_left) continue;
+        // 颜色：**按泳道取色**，不是“第0道主色、其他一律灰”。
+        //
+        // 为何要有色差：多分支并行时，全用同一种灰就看不出“哪条线属于哪个分支”，
+        // 汇合处尤其乱（实测：两条灰线交叉后完全分不清走向）。
+        // 调色板取三个语义色循环：primary（主干/当前分支）、accent、success。
+        // ⚠ 不用 `border_*`：那是**分隔线**的色，在暗色主题下与背景差不到 1.2:1，
+        // 画分支线会看起来“要断不断”（实测：截图里分支泳道像没有一样）。
+        const std::size_t lane_index = col / 2U;
+        const math::Color color =
+            lane_index == 0U ? colors.primary
+                             : (lane_index % 2U == 1U ? colors.accent : colors.success);
+        const raster::Paint paint = raster::Paint::solid(color);
+        switch (glyph) {
+          case '|':
+            // 整行高的竖线（**不断线**：连不连得上由调用方的字格决定，不由相邻行推断）
+            canvas.fill_rect(
+                math::Rect{cx - lane_width * 0.5f, row_box.y, lane_width, row_box.height}, paint);
+            break;
+          case '*':
+            // 提交点：上下各半行竖线（把行间连起来）+ 实心圆。
+            canvas.fill_rect(
+                math::Rect{cx - lane_width * 0.5f, row_box.y, lane_width, row_box.height * 0.5f},
+                paint);
+            canvas.fill_rect(
+                math::Rect{cx - lane_width * 0.5f, cy, lane_width, row_box.height * 0.5f}, paint);
+            canvas.fill_rect(math::Rect{cx - dot_radius, cy - dot_radius, dot_radius * 2.0f,
+                                        dot_radius * 2.0f},
+                             paint, dot_radius);
+            break;
+          case '/':
+          case '\\': {
+            // 斜线：跨道连线（`/` = 左下→右上；`\` = 左上→右下）。
+            //
+            // ## 端点必须落在**相邻行圆点的中心**
+            //
+            // 斜线表达的连接是“上一行的 A 道提交 → 下一行的 B 道提交”。两个端点就是
+            // 那两行的行中线。⚠ 不能用“本行高”算：连线行被压到 0.35 倍高（见 gbcode
+            // 的 `set_row_scales`），而相邻提交行是 1.0 倍——用本行高算会得到一个
+            // 明显偏短的跨距，斜线两端够不到圆点，看上去就是“几段断开的短线”（实测）。
+            const float half = lane_width * 0.5f;
+            const float prev_h = row > 0 ? row_height_at(row - 1) : row_box.height;
+            const float next_h = row + 1 < rows_.size() ? row_height_at(row + 1) : row_box.height;
+            const float above = row_box.y - prev_h * 0.5f;
+            const float below = row_box.bottom() + next_h * 0.5f;
+            math::Path line;
+            if (glyph == '/') {
+              line.move_to(math::Point{cx - cell + half, below});        // 左下（下一行左道）
+              line.line_to(math::Point{cx + cell - half, above});        // 右上（上一行右道）
+            } else {
+              line.move_to(math::Point{cx - cell + half, above});        // 左上（上一行左道）
+              line.line_to(math::Point{cx + cell - half, below});        // 右下（下一行右道）
+            }
+            canvas.stroke_path(line, paint, lane_width,
+                               raster::StrokeStyle{raster::LineCap::Round,
+                                                    raster::LineJoin::Round});
+            break;
+          }
+          default:
+            break;
+        }
+      }
     }
-    if (next_same) {
-      canvas.fill_rect(math::Rect{lane_x - 0.5f, cy, 1.0f, half},
-                       raster::Paint::solid(lane_color));
+  } else {
+    // 旧通道：圆点 + 同列相邻行的半行竖线。
+    for (std::size_t row = first_row; row < last_row; ++row) {
+      if (row >= row_lanes_.size() || row_lanes_[row] < 0) continue;
+      const math::Rect row_box = row_rect(row);
+      if (row_box.height <= 0.0f) continue;
+      const float lane_x = bounds_.x + 10.0f + static_cast<float>(row_lanes_[row]) * 12.0f;
+      const float cy = row_box.y + row_box.height * 0.5f;
+      if (lane_x >= clip_right || lane_x <= clip_left) continue;
+      // 竖线：连到**下一条同泳道**的行（相邻行不同泳道时断开，如实反映分支）。
+      const bool next_same = row + 1 < row_lanes_.size() && row_lanes_[row + 1] == row_lanes_[row];
+      const bool prev_same = row > 0 && row_lanes_[row - 1] == row_lanes_[row];
+      const math::Color lane_color =
+          row_lanes_[row] == 0 ? colors.primary : colors.border_strong;
+      const float half = row_box.height * 0.5f;
+      if (prev_same) {
+        canvas.fill_rect(math::Rect{lane_x - 0.5f, row_box.y, 1.0f, half},
+                         raster::Paint::solid(lane_color));
+      }
+      if (next_same) {
+        canvas.fill_rect(math::Rect{lane_x - 0.5f, cy, 1.0f, half},
+                         raster::Paint::solid(lane_color));
+      }
+      // 圆点（半径 3）。
+      canvas.fill_rect(math::Rect{lane_x - 3.0f, cy - 3.0f, 6.0f, 6.0f},
+                       raster::Paint::solid(lane_color), 3.0f);
     }
-    // 圆点（半径 3）。
-    canvas.fill_rect(math::Rect{lane_x - 3.0f, cy - 3.0f, 6.0f, 6.0f},
-                     raster::Paint::solid(lane_color), 3.0f);
   }
 
   // 横向滚动指示（内容超出容器时）。
@@ -577,7 +798,23 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
     fill_round_rect(canvas, bar, kScrollBarHeight * 0.5f, colors.border_strong);
   }
 
-  canvas.pop_clip();
+  // 纵向滚动指示（贴右缘，与横向同一套口径）。
+  // 为何必须有：表里有几百行时，“现在看到的是全部还是前几行”只能靠它回答；
+  // 缺了就只能观察到“最后一行的日期被截了一半”（那是不对的，但很难归因）。
+  const float limit_y = max_scroll_y();
+  if (limit_y > 0.0f && bounds_.width > 24.0f) {
+    const float content = row_height_ * static_cast<float>(rows_.size());
+    const float viewport = std::max(1.0f, bounds_.height - kHeaderHeight);
+    const float ratio = std::clamp(viewport / std::max(content, 1.0f), 0.0f, 1.0f);
+    const float thumb = std::max(24.0f, viewport * ratio);
+    const float travel = std::max(0.0f, viewport - thumb);
+    const float progress = scroll_offset_y_ / limit_y;
+    const math::Rect bar{bounds_.right() - kScrollBarHeight - 2.0f,
+                         bounds_.y + kHeaderHeight + travel * progress, kScrollBarHeight, thumb};
+    fill_round_rect(canvas, bar, kScrollBarHeight * 0.5f, colors.border_strong);
+  }
+
+  canvas.pop_clip();   // 回到 clip_depth_in（守卫兼底）
 }
 
 auto Table::on_event(const RenderContext& context, Event& event) -> bool {
@@ -614,15 +851,42 @@ auto Table::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::Wheel: {
-      if (!event.shift) return false;  // 横向滚动要 Shift（纵向由外层容器管）
-      // 方向/步长约定见 `st/ui/wheel.hpp`（`< 0` = 没内容可滚，冒泡给外层）。
-      const float next = wheel_target(scroll_offset_, event, max_scroll(), context.theme);
-      if (next < 0.0f) return false;
-      set_scroll_offset(next);
+      // 两个轴各有归属：**Shift = 横向**（电子表格/IDE 的通行约定），
+      // 不按 Shift = 纵向。两个轴都没内容可滚时返回 false 冒泡给外层
+      // （如放进 `ScrollView` 时让外层接管）。
+      //
+      // 为何不能只做横向（旧行为）：旧注释写“纵向由外层容器管”，但全仓零处把
+      // Table 放进 ScrollView——于是纵向恒不可滚且不报错（gbcode 日志表 200 行
+      // 只看得到 6 行）。约定没人兑现，就必须自己兜住。
+      const float limit = event.shift ? max_scroll() : max_scroll_y();
+      if (limit <= 0.0f) return false;
+      if (event.shift) {
+        const float next = wheel_target(scroll_offset_, event, limit, context.theme);
+        if (next < 0.0f) return false;
+        set_scroll_offset(next);
+      } else {
+        const float next = wheel_target(scroll_offset_y_, event, limit, context.theme);
+        if (next < 0.0f) return false;
+        set_scroll_offset_y(next);
+      }
       event.handled = true;
       return true;
     }
     case EventKind::KeyDown: {
+      // 方向键：上下滚纵向、左右滚横向（各管各的轴，没量的方向就放行）。
+      if (event.key == "PageDown" || event.key == "PageUp") {
+        if (max_scroll_y() <= 0.0f) return false;
+        scroll_by_y((event.key == "PageDown" ? 1.0f : -1.0f) *
+                    row_height_ * static_cast<float>(std::max<std::size_t>(1U, viewport_row_count() - 1U)));
+        event.handled = true;
+        return true;
+      }
+      if (event.key == "ArrowDown" || event.key == "ArrowUp") {
+        if (max_scroll_y() <= 0.0f) return false;
+        scroll_by_y((event.key == "ArrowDown" ? 1.0f : -1.0f) * row_height_);
+        event.handled = true;
+        return true;
+      }
       if (max_scroll() <= 0.0f) return false;
       if (event.key == "ArrowRight") {
         scroll_by(kScrollStep);
@@ -688,6 +952,8 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "zebra") return std::string(zebra_ ? kFlagTrue : "false");
   if (name == "scroll") return std::format("{}", scroll_offset_);
   if (name == "max_scroll") return std::format("{}", max_scroll());
+  if (name == "scroll_y") return std::format("{}", scroll_offset_y_);
+  if (name == "max_scroll_y") return std::format("{}", max_scroll_y());
   // 视口契约（与 Tree/List 对齐）：首可见行来自**上一帧绘制**，不是恒 0。
   if (name == "first_visible") return std::format("{}", last_visible_first_);
   if (name == "visible_rows") return std::format("{}", visible_row_count());
@@ -741,6 +1007,12 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
     set_scroll_offset(static_cast<float>(*parsed));
     return true;
   }
+  if (name == "scroll_y") {
+    const auto parsed = st::parse_f64(value);
+    if (!parsed.has_value()) return false;
+    set_scroll_offset_y(static_cast<float>(*parsed));
+    return true;
+  }
   if (name == "selected_row" || name == "select") {
     // `-1` / 空串 = 清除选中；越界拒绝（静默改写会掩盖调用方错误）。
     if (value == "-1" || value.empty()) {
@@ -757,7 +1029,8 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
 
 auto Table::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"columns", "rows", "row_height", "zebra", "scroll", "max_scroll",
-          "selected_row", "value", "first_visible", "visible_rows"});
+                                  "scroll_y", "max_scroll_y", "selected_row", "value",
+                                  "first_visible", "visible_rows"});
 }
 
 /// 只读属性（不进 `property_names()`：那张表是“可读写”契约，`get` 在两处都查）。
