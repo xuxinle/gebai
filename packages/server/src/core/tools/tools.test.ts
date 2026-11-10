@@ -2219,10 +2219,14 @@ describe("global tools", () => {
     expect(miss.output).toContain("更新未匹配 标题「不存在」")
   })
 
-  test("todo update 拒绝白名单外的 status（如 deleted）：不落盘、收集为失败", async () => {
+  test("todo update 对白名单外的 status（如 deleted）**抛错**：不落盘、不静默降级", async () => {
     // 事故现场（会话 ace35552d，2026-11-10）：模型想「删掉」待办，传了 status: "deleted"。
-    // 服务端原样落盘 → 前端按状态查图标表拿到 undefined 抛错 → 消息块渲染中断 → 整段会话空白
-    // （窗口化把该块永久留白）。状态是渲染的枚举键，必须在这里拦住。
+    // 服务端原样落盘 → 前端按状态查图标表拿到 undefined 抛错 → 消息块渲染中断 → 一整段会话空白
+    // （窗口化把该块永久留白）。
+    //
+    // 为什么必须是抛错而不是“收集为失败项”：工具抛错由引擎转成「工具执行失败: …」返回给模型，
+    // 任务不中断、模型看得见并能自己纠正；而混在「未匹配/无字段可改」那类局部摩擦里降级，
+    // 模型很容易当成小事跳过，脏值依旧会进 chat.json。
     const home = mkdtempSync(join(tmpdir(), "gebai-todos-bad-status-"))
     const todos: import("@gebai/sdk").TodoItem[] = []
     const c: ToolContext = {
@@ -2233,35 +2237,42 @@ describe("global tools", () => {
       },
     }
     const tools = createGlobalTools()
-    await tools.todo.execute({ entries: [{ op: "add", title: "要清理的项" }] }, c)
+    await tools.todo.execute({ entries: [{ op: "add", title: "要清理的项" }, { op: "add", title: "另一项" }] }, c)
     const id = todos[0]!.id
-    const r = await tools.todo.execute({ entries: [{ op: "update", id, status: "deleted" }] }, c)
-    // 拒绝：状态保持原值，且失败信息点明合法取值
+    // 抛错，且错误文本直接给出白名单与“删除请用 op=delete”
+    await expect(tools.todo.execute({ entries: [{ op: "update", id, status: "deleted" }] }, c)).rejects.toThrow(/status「deleted」/)
+    await expect(tools.todo.execute({ entries: [{ op: "update", id, status: "deleted" }] }, c)).rejects.toThrow(/op=delete/)
+    // 不落盘：状态保持原值
     expect(todos[0]!.status).toBe("pending")
-    expect(r.output).toContain("1 失败")
-    expect(r.output).toContain("状态「deleted」无效")
-    expect(r.output).toContain("pending/in_progress/completed/failed/cancelled")
-    // 同一批里的合法项照常生效（不会被一条脏数据带塌）
-    const r2 = await tools.todo.execute(
-      {
-        entries: [
-          { op: "update", id, status: "completed" },
-          { op: "add", title: "新增项" },
-        ],
-      },
-      c,
-    )
-    expect(r2.output).toContain("2 成功")
+    // 同一调用里的合法项也一并不写（一次调用 = 一个意图；部分成功会让模型误以为整批都好了）
+    await expect(
+      tools.todo.execute(
+        {
+          entries: [
+            { op: "update", id, status: "completed" },
+            { op: "update", id: todos[1]!.id, status: "deleted" },
+          ],
+        },
+        c,
+      ),
+    ).rejects.toThrow(/未修改任何待办/)
+    expect(todos.find((t) => t.id === id)!.status).toBe("pending")
+    // 修对之后照常生效
+    const ok = await tools.todo.execute({ entries: [{ op: "update", id, status: "completed" }] }, c)
+    expect(ok.output).toContain("1 成功")
     expect(todos.find((t) => t.id === id)!.status).toBe("completed")
     // 落盘全量状态均落在白名单内（守住「渲染层拿到的状态永远可查表」）
     const legal = new Set(["pending", "in_progress", "completed", "failed", "cancelled"])
     expect(todos.every((t) => legal.has(t.status))).toBe(true)
-    // progress 同样要干净：非数字拒绝，越界夹到 0-100（否则 UI 直接显示 NaN% / 300%）
-    const badP = await tools.todo.execute({ entries: [{ op: "update", id, progress: "半成" }] }, c)
-    expect(badP.output).toContain("不是数字")
+    // progress 同样要干净：非数字报错，越界夹到 0-100（否则 UI 直接显示 NaN% / 300%）
+    await expect(tools.todo.execute({ entries: [{ op: "update", id, progress: "半成" }] }, c)).rejects.toThrow(/progress「半成」/)
     expect(todos.find((t) => t.id === id)!.progress).toBeUndefined()
     await tools.todo.execute({ entries: [{ op: "update", id, progress: 300 }] }, c)
     expect(todos.find((t) => t.id === id)!.progress).toBe(100)
+    // add 的 priority/eta 也不收脏值
+    await expect(tools.todo.execute({ entries: [{ op: "add", title: "x", priority: "urgent" }] }, c)).rejects.toThrow(/priority「urgent」/)
+    await expect(tools.todo.execute({ entries: [{ op: "add", title: "x", eta: "半天" }] }, c)).rejects.toThrow(/eta「半天」/)
+    expect(todos.map((t) => t.title)).not.toContain("x")
     cleanup(home)
   })
 

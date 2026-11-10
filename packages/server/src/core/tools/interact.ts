@@ -70,7 +70,10 @@ export function makeTodoTool(): Tool {
             op: { enum: ["add", "update", "delete"], description: "操作类型" },
             title: { type: "string", description: "add：标题；update/delete：定位目标（无 id 时按标题精确或唯一包含匹配，多条同名用 id；update 有 id 时作为新标题）" },
             id: { type: "string", description: "update/delete：待办 id（清单返回，优先于标题定位）" },
-            status: { enum: ["pending", "in_progress", "completed", "failed", "cancelled"], description: "update：目标状态" },
+            status: {
+              enum: ["pending", "in_progress", "completed", "failed", "cancelled"],
+              description: "update：目标状态。删除待办请用 op=delete，不要把状态改成某个自定义值",
+            },
             progress: { type: "number", description: "update：目标进度（0-100）" },
             priority: { enum: ["low", "medium", "high"], description: "add：优先级" },
             note: { type: "string", description: "add：备注" },
@@ -97,21 +100,31 @@ export function makeTodoTool(): Tool {
       if (!entries.length) return { output: `查询待办：\n${todoSnapshot(todos, { expandCompleted: true })}`, data: { todos } }
       const results: string[] = []
       const failures: string[] = []
+      /** 参数级非法项（这次调用本身写错了）：与 failures（批量里的局部摩擦：未匹配、无字段可改）
+       *  分开处理——非法参数**一律报错、一律落盘**（见下方分段校验的注释）。 */
+      const invalid: string[] = []
+      // ── 第一遍：**只校验，不改数据** ──
+      // 不能边校验边改：`ctx.getTodos()` 返回的是会话缓存对象（同一引用），先改了合法项再为非法项
+      // 抛错，内存里的脏改就留在缓存对象上了——后续任何一次 save 都会把它写进 chat.json
+      // （实测：同一调用里“合法 update + 非法 status”，抛错后前一项已经改掉了）。
+      // 所以先全量过一遍：定位每条对应的待办 + 算好要应用的变更，有非法就当场收工。
+      type Plan =
+        | { kind: "add"; title: string; e: Record<string, unknown> }
+        | { kind: "update"; target: TodoItem; apply: (t: TodoItem) => void }
+        | { kind: "delete"; target: TodoItem }
+      const plan: Plan[] = []
       for (const raw of entries) {
         const e = raw ?? {}
         const op = String(e.op ?? "")
         if (op === "add") {
           const title = String(e.title ?? "").trim()
           if (!title) throw new Error("add 操作缺少 title")
-          todos.push({
-            id: randomUUID().replace(/-/g, ""),
-            title,
-            status: "pending",
-            priority: (e.priority as TodoItem["priority"]) || "medium",
-            etaMin: e.eta !== undefined ? Number(e.eta) : undefined,
-            note: e.note ? String(e.note) : undefined,
-          })
-          results.push(`新增: ${title}`)
+          // priority / eta 同样不得把脏值落盘（priority 被前端当查表键，eta 非数字会显示成 NaN）
+          const bad: string[] = []
+          if (e.priority !== undefined && !["low", "medium", "high"].includes(String(e.priority))) bad.push(`priority「${String(e.priority)}」`)
+          if (e.eta !== undefined && !Number.isFinite(Number(e.eta))) bad.push(`eta「${String(e.eta)}」`)
+          if (bad.length) invalid.push(`新增「${title}」：${bad.join("、")}`)
+          else plan.push({ kind: "add", title, e })
         } else if (op === "update" || op === "delete") {
           const t = matchTodo(e, todos)
           if (!t) {
@@ -122,43 +135,70 @@ export function makeTodoTool(): Tool {
             failures.push(`${op === "update" ? "更新" : "删除"}未匹配 ${key}${tip}`)
             continue
           }
-          if (op === "update") {
-            // 有 id 时 title 表示新标题；无 id（按 title 定位）时 title 仅用于定位，不改标题
-            if (String(e.id ?? "").trim()) {
-              if (e.title !== undefined) t.title = String(e.title)
-            } else {
-              if (e.status === undefined && e.progress === undefined) {
-                failures.push(`更新未变更任何字段（无 id 时 title 仅用于定位，改标题请用 id）: ${t.title}`)
-                continue
-              }
-            }
-            // 状态必须落在白名单内：越界值拒绝（而不是原样落盘）。删除待办是 op=delete，
-            // 与「把状态改成某个值」是两件事——模型常把两者混为一谈。
-            if (e.status !== undefined) {
-              const next = String(e.status)
-              if (!isTodoStatus(next)) {
-                failures.push(`状态「${next}」无效（只能是 ${TODO_STATUSES.join("/")}），未修改: ${t.title}`)
-                continue
-              }
-              t.status = next
-            }
-            // progress 同理：非数字/NaN 会直接显示成「NaN%」（渲染层不炸，但显示是垃圾），夹到 0-100
-            if (e.progress !== undefined) {
-              const p = Number(e.progress)
-              if (!Number.isFinite(p)) {
-                failures.push(`进度「${String(e.progress)}」不是数字，未修改: ${t.title}`)
-                continue
-              }
-              t.progress = Math.max(0, Math.min(100, Math.round(p)))
-            }
-            results.push(`更新: ${t.title}`)
-          } else {
-            const idx = todos.indexOf(t)
-            todos.splice(idx, 1)
-            results.push(`删除: ${t.title}`)
+          if (op === "delete") {
+            plan.push({ kind: "delete", target: t })
+            continue
           }
+          // ── update：参数校验 ──
+          // 状态必须落在白名单内：越界值是**参数非法**（不是「某条待办没对上」），一律报错。
+          // 为什么不是收集成 failures：failures 的语义是「这条没匹配上 / 没字段可改」——批量操作的
+          // 局部摩擦；而传入臆造的状态是**调用写错了**，且它会把脏值写进 chat.json（前端按状态查
+          // 图标表，脏值直接抛错 → 块渲染中断 → 整段会话永久留白，实测事故）。工具报错后引擎转成
+          // 「工具执行失败: …」返回给模型，任务不中断、模型看得见并能自己纠正；降级成「1 失败」
+          // 则混在一堆局部摩擦里，很容易被当成小事跳过。
+          const bad: string[] = []
+          // 用类型守卫**正向**收窄（不写 !isTodoStatus，否则收窄拿不到）
+          const rawStatus = e.status !== undefined ? String(e.status) : undefined
+          const nextStatus = isTodoStatus(rawStatus) ? rawStatus : undefined
+          if (rawStatus !== undefined && nextStatus === undefined) bad.push(`status「${rawStatus}」`)
+          // progress 同理：非数字会直接显示成「NaN%」，属参数非法
+          const rawProgress = e.progress !== undefined ? Number(e.progress) : undefined
+          if (rawProgress !== undefined && !Number.isFinite(rawProgress)) bad.push(`progress「${String(e.progress)}」`)
+          if (bad.length) {
+            invalid.push(`待办「${t.title}」：${bad.join("、")}`)
+            continue
+          }
+          // 有 id 时 title 表示新标题；无 id（按 title 定位）时 title 仅用于定位，不改标题
+          const newTitle = String(e.id ?? "").trim() && e.title !== undefined ? String(e.title) : undefined
+          if (!newTitle && nextStatus === undefined && rawProgress === undefined) {
+            failures.push(`更新未变更任何字段（无 id 时 title 仅用于定位，改标题请用 id）: ${t.title}`)
+            continue
+          }
+          plan.push({
+            kind: "update",
+            target: t,
+            apply: (x) => {
+              if (newTitle !== undefined) x.title = newTitle
+              if (nextStatus !== undefined) x.status = nextStatus
+              if (rawProgress !== undefined) x.progress = Math.max(0, Math.min(100, Math.round(rawProgress)))
+            },
+          })
         } else {
           throw new Error(`未知操作: ${op || "(空)"}（应为 add/update/delete）`)
+        }
+      }
+      // 有非法参数：整批不执行（一次调用是一个意图，部分成功会让模型误以为整批都好了），
+      // 抛错让引擎转成「工具执行失败: …」—— 模型下一轮看得见原因并可自行纠正
+      if (invalid.length) throw new Error(`${invalid.join("；")}——参数非法，本次未修改任何待办。status 只能是 ${TODO_STATUSES.join("/")}（删除待办请用 op=delete）；progress 必须是 0-100 的数字`)
+      // ── 第二遍：校验全过才真正应用 ──
+      for (const p of plan) {
+        if (p.kind === "add") {
+          todos.push({
+            id: randomUUID().replace(/-/g, ""),
+            title: p.title,
+            status: "pending",
+            priority: (p.e.priority as TodoItem["priority"]) || "medium",
+            etaMin: p.e.eta !== undefined ? Number(p.e.eta) : undefined,
+            note: p.e.note ? String(p.e.note) : undefined,
+          })
+          results.push(`新增: ${p.title}`)
+        } else if (p.kind === "update") {
+          p.apply(p.target)
+          results.push(`更新: ${p.target.title}`)
+        } else {
+          const idx = todos.indexOf(p.target)
+          if (idx >= 0) todos.splice(idx, 1)
+          results.push(`删除: ${p.target.title}`)
         }
       }
       await ctx.setTodos(todos)

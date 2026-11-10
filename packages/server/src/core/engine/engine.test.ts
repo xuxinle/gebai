@@ -4117,8 +4117,29 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("todo continuation: completed/cancelled todos do not re-prompt", async () => {
-    const s = await setup("text")
+  test("todo 传白名单外的 status：工具报错转成「工具执行失败」交给模型，数据不变、任务不中断", async () => {
+    // 端到端守“工具该报错”这条：工具抛错 → 引擎包成 tool 结果 → 模型下一轮看得见并能自己纠正。
+    // 事故背景：`status: "deleted"` 曾被原样落盘，前端渲染该块抛错 → 整段会话空白。
+    const s = await setup("tool")
+    const session = await s.store.createSession("default", "t")
+    await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "pending", priority: "medium" }])
+    s.provider.toolName = "todo"
+    s.provider.toolArgs = { entries: [{ op: "update", id: "t1", status: "deleted" }] }
+    await s.engine.run(session.id, "default", "把这项删了")
+    const loaded = await s.store.load(session.id)
+    // 报错落到 tool 消息里，模型看得见（不是静默失败）
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "todo")
+    expect(String(toolMsg!.content)).toContain("工具执行失败")
+    expect(String(toolMsg!.content)).toContain("status「deleted」")
+    expect(String(toolMsg!.content)).toContain("op=delete")
+    // 数据没脏：状态仍是 pending（脏值绝不进 chat.json）
+    expect(loaded!.todos[0].status).toBe("pending")
+    // 任务未被报错中断：模型拿到了第二轮机会（工具轮 + 后续）
+    expect(s.provider.calls).toBeGreaterThanOrEqual(2)
+    cleanup(s.home)
+  })
+
+  test("todo continuation: completed/cancelled todos do not re-prompt", async () => {    const s = await setup("text")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [
       { id: "t1", title: "任务A", status: "completed", priority: "medium" },
