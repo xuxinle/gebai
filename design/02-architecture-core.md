@@ -2156,6 +2156,7 @@ TTL 内全群消息直接命中；群成员表没有此人/单聊时再逐条查
 
 - **工具**：`todo`（待办增删改查统一入口——`entries` 为操作列表，每项 `op=add/update/delete`：add 需 `title`（可带 `priority`/`note`/`eta`），update/delete 按 `id` 或 `title` 定位（id 优先，无 id 时 title 精确匹配、唯一包含匹配兜底，多个同名提示改用 id；update 改标题需用 id），省略或空数组 = 查询；返回操作摘要与**当前全部待办状态**快照（含 id），模型一次掌握最新清单，无需再查 id。工具描述引导：新增待办开启新任务时，及时 delete 清理与当前任务无关的历史残留待办——待办只跟踪当前任务，陈旧条目徒增干扰与 token 浪费）
 - **状态机**：`pending → in_progress → completed`，异常终止为 `failed`/`cancelled`
+- **状态白名单校验（服务端 + 渲染侧两道防线）**：状态是前端渲染的**枚举键**（图标/语义色/折叠判定都按它查表），因此白名单外的值一律不得落盘——`todo` 工具的 update 分支对 `status` 做白名单校验（`interact.ts` 的 `isTodoStatus`），越界值收集为失败项并保持原状态，同批其它合法项照常生效（实测事故：模型想「删除」待办而传 `status: "deleted"`，原样落盘后前端 `TODO_STATUS_ICONS[status].svg` 在 undefined 上取 `.svg` 抛 TypeError，整个消息块渲染中断、窗口化把该段永久留白，见「消息列窗口化 → 单块渲染失败降级」）；导入路径（`SessionStore.parseImport`）同样把非法状态归一为 `pending`。渲染侧**第二道防线**为 `web/src/todo-status.ts`：陌生状态不抛错，回退带问号的兜底图标、原值进悬浮提示、语义色类名归 `st-unknown`（旧数据/手工导入/未来新增状态都不会把界面炸掉）；左侧：删除待办是 `op=delete`，与「改成某个状态值」是两件事
 - **字段**：标题、状态、优先级、进度（0-100%）、预计耗时（分钟）、依赖项（`TodoItem.dependencies` 类型保留，但 `todo` 工具 schema 与 UI 均未开放）、备注
 - **持久化**：随 `chat.json` 的 `todos` 字段持久化（会话级，随会话隔离与恢复；无独立 `todo.json`）
 - **Agent 引导**：系统提示词引导模型在复杂多步任务开始时先 `todo` 拆解计划（entries 批量建清单），每完成一步 `todo` 更新，任务结束 `todo`（空 entries）汇报

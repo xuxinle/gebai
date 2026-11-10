@@ -466,6 +466,8 @@
 .todo-item .todo-ico.st-completed { color: var(--success); }
 .todo-item .todo-ico.st-failed { color: var(--danger); }
 .todo-item .todo-ico.st-cancelled { color: var(--text-faint); }
+/* 未知状态（数据里的白名单外值，见 todo-status.ts）：淡色 + 不报错，只让人看出“这条状态不认识” */
+.todo-item .todo-ico.st-unknown { color: var(--warning, var(--text-faint)); }
 .todo-body { min-width: 0; flex: 1; }
 .todo-title { font-family: var(--font-ui); font-size: 13px; color: var(--text); line-height: 1.5; }
 .todo-meta { font-size: 11px; color: var(--text-faint); margin-top: 1px; }

@@ -29,6 +29,17 @@ export function todoSnapshot(todos: TodoItem[], opts: { expandCompleted?: boolea
   return `当前全部待办（${todos.length} 项）：\n${shown.map(todoLine).join("\n")}${hiddenNote}`
 }
 
+/** 待办状态白名单（与 SDK `TodoItem["status"]` 同一份口径）。
+ *  **必须校验**：状态是前端渲染的枚举键（图标/语义色/折叠判定都按它查表），写进白名单外的值
+ *  等于给 UI 埋一颗哑弹——实测过一次：`update` 传了 `status: "deleted"`（模型想「删除」），
+ *  服务端原样落盘，前端查表拿到 undefined 抛错，该块渲染中断、窗口化把整段消息永久留白。 */
+export const TODO_STATUSES: readonly TodoItem["status"][] = ["pending", "in_progress", "completed", "failed", "cancelled"]
+
+/** 状态值是否合法（导出给导入/渲染侧的兜底判定复用）。 */
+export function isTodoStatus(v: unknown): v is TodoItem["status"] {
+  return typeof v === "string" && (TODO_STATUSES as readonly string[]).includes(v)
+}
+
 export function makeTodoTool(): Tool {
   /**
    * 定位待办：id 优先（精确）；无 id 时按 title 定位——先精确匹配，唯一时命中；
@@ -121,8 +132,25 @@ export function makeTodoTool(): Tool {
                 continue
               }
             }
-            if (e.status) t.status = e.status as TodoItem["status"]
-            if (e.progress !== undefined) t.progress = Number(e.progress)
+            // 状态必须落在白名单内：越界值拒绝（而不是原样落盘）。删除待办是 op=delete，
+            // 与「把状态改成某个值」是两件事——模型常把两者混为一谈。
+            if (e.status !== undefined) {
+              const next = String(e.status)
+              if (!isTodoStatus(next)) {
+                failures.push(`状态「${next}」无效（只能是 ${TODO_STATUSES.join("/")}），未修改: ${t.title}`)
+                continue
+              }
+              t.status = next
+            }
+            // progress 同理：非数字/NaN 会直接显示成「NaN%」（渲染层不炸，但显示是垃圾），夹到 0-100
+            if (e.progress !== undefined) {
+              const p = Number(e.progress)
+              if (!Number.isFinite(p)) {
+                failures.push(`进度「${String(e.progress)}」不是数字，未修改: ${t.title}`)
+                continue
+              }
+              t.progress = Math.max(0, Math.min(100, Math.round(p)))
+            }
             results.push(`更新: ${t.title}`)
           } else {
             const idx = todos.indexOf(t)

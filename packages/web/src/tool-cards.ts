@@ -5,6 +5,7 @@ import { loadLocalEnv, saveLocalEnv } from "./env-local"
 import { toast } from "./ui"
 import { isFilePopup } from "./file-display"
 import { taskLabel } from "./task-labels"
+import { statusClassSuffix, statusIcon } from "./todo-status"
 
 /** 待决卡增减通知：会话列表的运行角标据此从「运行中」变成「⌛ 等待你的输入」再变回去
  *  （与 approvals.ts / messages.ts 同口径）。实时交互卡在提交成功或已失效后由本模块自己揭掉，
@@ -500,18 +501,10 @@ function toolBubble(content: string): HTMLElement {
 const TODO_COLLAPSE_THRESHOLD = 8
 const TODO_KEEP_COMPLETED = 3
 
-/** 待办状态图标：内联 SVG 描边风格（16×16、stroke currentColor，与全站图标语言一致、随主题着色），
- *  label 为中文状态标签（悬浮提示，替代元信息行中的状态词）。 */
-const TODO_STATUS_ICONS: Record<TodoItem["status"], { svg: string; label: string }> = {
-  pending: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>', label: "待处理" },
-  in_progress: { svg: '<svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg>', label: "进行中" },
-  completed: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M5.3 8.4l1.9 1.9 3.5-4.3"/></svg>', label: "已完成" },
-  failed: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6 6l4 4M10 6l-4 4"/></svg>', label: "已失败" },
-  cancelled: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M3.8 3.8l8.4 8.4"/></svg>', label: "已取消" },
-}
+/** 待办状态图标/兜底：查表逻辑在 todo-status.ts（纯逻辑、可单测），此处只负责挂载。 */
 
 /** 待办优先级中文标签（元信息行展示）。 */
-const TODO_PRIORITY_LABELS: Record<NonNullable<TodoItem["priority"]>, string> = { high: "高", medium: "中", low: "低" }
+const TODO_PRIORITY_LABELS: Record<string, string> = { high: "高", medium: "中", low: "低" }
 
 /** 待办行元信息：优先级（中文标签）· 进度 · 备注，纯文本弱化展示（不做视觉区分）。 */
 function todoMeta(t: TodoItem): HTMLElement | null {
@@ -522,10 +515,11 @@ function todoMeta(t: TodoItem): HTMLElement | null {
 /** 待办行：状态图标（st-{status} 类驱动语义色）+ 标题 + 元信息（优先级/进度/备注，状态由图标承载）。 */
 function todoRow(t: TodoItem): HTMLElement {
   const row = el("div", "todo-item")
-  const ico = el("span", `todo-ico st-${t.status}`)
-  ico.innerHTML = TODO_STATUS_ICONS[t.status].svg
-  ico.title = TODO_STATUS_ICONS[t.status].label
-  row.appendChild(ico)
+  const ico = statusIcon(t.status)
+  const icoEl = el("span", `todo-ico st-${statusClassSuffix(t.status)}`)
+  icoEl.innerHTML = ico.svg
+  icoEl.title = ico.label
+  row.appendChild(icoEl)
   const body = el("div", "todo-body")
   body.appendChild(el("div", "todo-title", t.title))
   const meta = todoMeta(t)

@@ -65,6 +65,27 @@ export interface Virtualizer {
   contentTop(): number
 }
 
+/** 渲染失败占位（窗口化的降级路径）：一条消息块没渲染出来时，用户看得见“这里缺了一块”，
+ *  而不是一大片莫名空白。样式内联——本模块不关心页面 CSS 是否已加载，也不新增全局类。 */
+function renderFailure(index: number, err: unknown): HTMLElement {
+  const box = document.createElement("div")
+  box.style.cssText = [
+    "margin: 8px 0",
+    "padding: 10px 12px",
+    "border: 1px solid rgba(220,90,90,.45)",
+    "border-radius: 8px",
+    "color: inherit",
+    "opacity: .85",
+    "font-size: 12px",
+    "line-height: 1.6",
+    "white-space: pre-wrap",
+    "word-break: break-word",
+  ].join(";")
+  const msg = err instanceof Error ? err.message : String(err)
+  box.textContent = `这段消息渲染失败（块 ${index + 1}）：${msg || "未知错误"}\n数据本身没丢，刷新页面或升级后可重试。`
+  return box
+}
+
 export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
   const container = opts.container
   const model: VzModel = createVzModel()
@@ -132,7 +153,16 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     if (!el) {
       el = document.createElement("div")
       el.className = "vz-block"
-      opts.renderBlock(index, el)
+      // 块渲染失败必须就地降级：渲染回调抛异常时若继续往外抛，它会穿过 sync() 的挂载循环——
+      // 本块永远挂不上、spacer 也不更新，整段消息区就成了一大片空白（而且每次滚动重试都再抛一次，
+      // 后面的块也跟着挂不上）。实测事故：待办卡片遇到陌生状态值抛 TypeError，"提交里混入了…"
+      // 之后几千像素全白。降级成错误占位：用户至少看得见“这里有一条消息没渲染出来”，
+      // 块高度照常实测、窗口化不受影响，同块不会反复重试。
+      try {
+        opts.renderBlock(index, el)
+      } catch (err) {
+        el.replaceChildren(renderFailure(index, err))
+      }
       blocks[index] = el
       blockIndexOf.set(el, index)
       model.markRendered(index)
@@ -154,8 +184,7 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     measureBlock(index)
   }
 
-  function unmountBlock(index: number) {
-    const el = blocks[index]
+  function unmountBlock(index: number) {    const el = blocks[index]
     if (!el) return
     if (el.isConnected) {
       measureBlock(index) // 摘除前确认真实高度（RO 已缓存，此处兜底）

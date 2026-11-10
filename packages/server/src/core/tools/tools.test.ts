@@ -2219,6 +2219,52 @@ describe("global tools", () => {
     expect(miss.output).toContain("更新未匹配 标题「不存在」")
   })
 
+  test("todo update 拒绝白名单外的 status（如 deleted）：不落盘、收集为失败", async () => {
+    // 事故现场（会话 ace35552d，2026-11-10）：模型想「删掉」待办，传了 status: "deleted"。
+    // 服务端原样落盘 → 前端按状态查图标表拿到 undefined 抛错 → 消息块渲染中断 → 整段会话空白
+    // （窗口化把该块永久留白）。状态是渲染的枚举键，必须在这里拦住。
+    const home = mkdtempSync(join(tmpdir(), "gebai-todos-bad-status-"))
+    const todos: import("@gebai/sdk").TodoItem[] = []
+    const c: ToolContext = {
+      ...ctx(home),
+      getTodos: async () => todos,
+      setTodos: async (t) => {
+        todos.splice(0, todos.length, ...t)
+      },
+    }
+    const tools = createGlobalTools()
+    await tools.todo.execute({ entries: [{ op: "add", title: "要清理的项" }] }, c)
+    const id = todos[0]!.id
+    const r = await tools.todo.execute({ entries: [{ op: "update", id, status: "deleted" }] }, c)
+    // 拒绝：状态保持原值，且失败信息点明合法取值
+    expect(todos[0]!.status).toBe("pending")
+    expect(r.output).toContain("1 失败")
+    expect(r.output).toContain("状态「deleted」无效")
+    expect(r.output).toContain("pending/in_progress/completed/failed/cancelled")
+    // 同一批里的合法项照常生效（不会被一条脏数据带塌）
+    const r2 = await tools.todo.execute(
+      {
+        entries: [
+          { op: "update", id, status: "completed" },
+          { op: "add", title: "新增项" },
+        ],
+      },
+      c,
+    )
+    expect(r2.output).toContain("2 成功")
+    expect(todos.find((t) => t.id === id)!.status).toBe("completed")
+    // 落盘全量状态均落在白名单内（守住「渲染层拿到的状态永远可查表」）
+    const legal = new Set(["pending", "in_progress", "completed", "failed", "cancelled"])
+    expect(todos.every((t) => legal.has(t.status))).toBe(true)
+    // progress 同样要干净：非数字拒绝，越界夹到 0-100（否则 UI 直接显示 NaN% / 300%）
+    const badP = await tools.todo.execute({ entries: [{ op: "update", id, progress: "半成" }] }, c)
+    expect(badP.output).toContain("不是数字")
+    expect(todos.find((t) => t.id === id)!.progress).toBeUndefined()
+    await tools.todo.execute({ entries: [{ op: "update", id, progress: 300 }] }, c)
+    expect(todos.find((t) => t.id === id)!.progress).toBe(100)
+    cleanup(home)
+  })
+
   test("todo 终态项折叠：操作后只留最近 3 条已完成，查询时全量展开", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-todos-fold-"))
     const todos: import("@gebai/sdk").TodoItem[] = []
