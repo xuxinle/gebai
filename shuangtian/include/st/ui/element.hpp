@@ -517,6 +517,17 @@ class Element {
   [[nodiscard]] auto style() const noexcept -> const Style& { return style_; }
   void set_style(Style style) { style_ = std::move(style); }
   [[nodiscard]] auto visible() const noexcept -> bool { return visible_; }
+  /// **实际可见**：自身与全部祖先都可见。
+  ///
+  /// 与 `visible()` 的分工：后者是**自身状态**（可写回验证），这个是“**观众看不看得见**”。
+  /// 两者都必须存在：拿 `visible()` 当“看不看得见”会让隐藏页里的控件误报可见
+  /// （`find` 会把它们一并返回，自动化据此去点就是在点屏外的东西）。
+  [[nodiscard]] auto effective_visible() const noexcept -> bool {
+    for (const Element* node = this; node != nullptr; node = node->parent_) {
+      if (!node->visible_) return false;
+    }
+    return true;
+  }
   void set_visible(bool visible) noexcept {
     if (visible_ == visible) return;
     visible_ = visible;
@@ -973,28 +984,42 @@ class Element {
   // （Text/Heading/Button/Badge/List 项…），而在每个 `apply_theme` 里重抄一遍
   // “有没有显式覆盖”的判定，漏一个就是那个组件静默不生效。
   // 这里把「意图」与「落位」分开：调用方设一次意图（set_text_*），
-  // `apply_theme` 末尾统一回放（`apply_text_overrides`）。
+  // `refresh_theme` 末尾统一回放（`apply_text_overrides`）。
+  //
+  // ⚠ 但**意图落盘时也要立即写一次 `style_`**（2026-11-10 修）。
+  // 只记 override 不落位的后果：`set color=#ff0000` 返回成功，而**紧接着**的
+  // `get color` 仍返回旧值——写入方无从判断到底成不成，“写后读”这条最基本的
+  // 契约被破坏（实测：override=#ff0000 已存，而 style.color 还是 #ffffff，
+  // 直到下一次 layout 才生效）。
+  // 立即写一次没有副作用：下一帧 `refresh_theme` 会把同一个值再写一遍。
 
   /// 设文本色（显式值，盖过主题的 tone 映射）。已存的**色调覆盖被清除**（二者互斥）。
   void set_text_color(math::Color color) {
     extras().text_color_override = color;
     extras().text_tone_override.reset();
+    style_.color = color;   // 立即生效（见上方注释：写后读要一致）
     mark_dirty();
   }
   /// 设文本色为**主题语义色调**（跟着主题走；首选方式）。已存的字面色覆盖被清除。
   void set_text_tone(Tone tone) {
     extras().text_tone_override = tone;
     extras().text_color_override.reset();
+    // 色调要查主题才能得出具体色值：有宿主就当场解，没宿主要等下一帧。
+    if (const Theme* theme = host() != nullptr ? host()->host_theme() : nullptr) {
+      style_.color = tone_color(*theme, tone);
+    }
     mark_dirty();
   }
   /// 设字号（显式值，盖过主题的 `font_base`）。
   void set_text_size(float size) {
     extras().text_size_override = size;
-    mark_layout_dirty();   // 字号变 → 度量变（不只是重绘）
+    style_.font_size = size;   // 立即生效（同上）
+    mark_layout_dirty();       // 字号变 → 度量变（不只是重绘）
   }
   /// 设字重（显式值）。
   void set_text_weight(FontWeight weight) {
     extras().text_weight_override = weight;
+    style_.font_weight = weight;   // 立即生效（同上）
     mark_dirty();
   }
   // 读取侧不分配：无附属状态时返回静态空值（`extras_if_any()` 为 nullptr 即"未设过"）。
@@ -1133,11 +1158,83 @@ class Element {
   void collect_visual(VisualNode& node) const;
 
   // —— 通用属性面（控制通道 get/set 用；组件按需覆写）——
-  /// 读取自定义属性（返回空表示不支持）。
+  //
+  // ## 写法约定（三个方法各有各的坑）
+  //
+  // | 方法 | 覆写时 |
+  // |---|---|
+  // | `get_property` | 自己的分支 returns，**末尾 `return Element::get_property(name);`** |
+  // | `set_property` | 同上，末尾 `return Element::set_property(name, value);` |
+  // | `property_names` | 只列自己的名字，**末尾包一层 `with_universal(...)`** |
+  // | `readonly_property_names` | 同上（也包 `with_universal`） |
+  //
+  // 实测代价（2026-11-10）：58 个组件覆写 `get_property`，只有 13 个回退基类；
+  // 66 个覆写 `property_names`，**一个都没并上基类名**——于是动画五项 /
+  // hovered / color / font_size / weight 在它们上全部消失（75 个组件缺 462 项）。
+  // 现象是 `get animation` 返回空，而元素明明在播动画。
+  //
+  // 为何 `property_names` 给了一个**辅助函数**而不是靠“记得并上”：后者是纯人工约定
+  //（现有 66 处全要改、且新增组件必漏）。`with_universal` 只需末尾包一句。
   [[nodiscard]] virtual auto get_property(std::string_view name) const
-      -> std::optional<std::string>;
+  -> std::optional<std::string>;
   /// 写入自定义属性；返回是否生效。
   virtual auto set_property(std::string_view name, std::string_view value) -> bool;
+
+  /// 基类**可写通用名**（`with_universal` 用它）。
+  ///
+  /// ## 收录判据（两条契约同时成立才能收）
+  ///
+  /// 1. "表里声明的名字，`set` 必须生效（填任意字符串）"
+  ///    —— `ui_actions_set_changes_all_declared_string_properties`
+  /// 2. "表里声明的名字，`get` 必须读得到（不能返回 nullopt）"
+  ///    —— `scene_view_reports_property_surface`
+  ///
+  /// 两条都是既有契约，所以只收**真正无条件可读可写**的名字。
+  ///
+  /// 三类**不收**（各有其正确位置）：
+  /// - 动画五项 / `transition` / `hovered` / `hover_progress` / `hover_effect`：
+  ///   只读诊断 → `kUniversalReadonlyNames`
+  /// - `color` / `font_size` / `weight`：值必须合法（颜色要能解析、字号 >0、
+  ///   字重是枚举名）→ **不随 `with_universal` 下发**，但仍**可写**
+  ///   （`Element::set_property` 认它们，见那里的 `base_accepts`）
+  /// - `color_override` / `tone_override`：未设时**返回 nullopt**（"没设过"本身是信息，
+  ///   不该伪造成空串）→ 归只读诊断
+  ///
+  /// 所以这张表当前是**空的**：没有哪个通用名能同时满足两条契约。
+  /// 保留结构是因为"以后可能有"；空表不会颁假契约（比收错名静默失效好）。
+  static constexpr std::span<const std::string_view> kUniversalPropertyNames{};
+
+  /// 基类的**只读**诊断名（动画五项；同由 `with_universal` 并入）。
+  static constexpr std::string_view kUniversalReadonlyNames[] = {
+      "animation", "animation_running", "animation_opacity", "animation_translate",
+      "transition", "hovered", "hover_progress", "hover_effect"};
+
+  /// 把**基类的通用名字**并进组件自己的表。
+  ///
+  /// 两个变体，**各表只并自己那组**（两表不得重叠是既有契约，见
+  /// `contract_property_name_lists_are_well_formed`）：
+  /// - `with_universal(local)` → 可写表用：并入 `kUniversalPropertyNames`
+  /// - `with_universal_readonly(local)` → 只读表用：并入 `kUniversalReadonlyNames`
+  ///
+  /// 为何需要它们而不是让组件手写：实测 66 个组件覆写这两张表，
+  /// **一个都没并上基类名**（于是动画五项在它们上消失）。靠人记得是必漏。
+  [[nodiscard]] static auto with_universal(std::vector<std::string_view> local)
+      -> std::vector<std::string_view> {
+    for (const std::string_view each : kUniversalPropertyNames) {
+      if (std::ranges::find(local, each) == local.end()) local.push_back(each);
+    }
+    return local;
+  }
+
+  /// 只读表的对应版本（见 `with_universal`）。
+  [[nodiscard]] static auto with_universal_readonly(std::vector<std::string_view> local)
+      -> std::vector<std::string_view> {
+    for (const std::string_view each : kUniversalReadonlyNames) {
+      if (std::ranges::find(local, each) == local.end()) local.push_back(each);
+    }
+    return local;
+  }
+
   /// 组件暴露的**可读写**属性名（`set` 只认这一份；`get` 也遍历它）。
   [[nodiscard]] virtual auto property_names() const -> std::vector<std::string_view>;
   /// 组件暴露的**只读**属性名（`get` 能读、`set` 不应生效）。

@@ -159,6 +159,16 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   // 不先看看可不可见，就会点到不在屏上的东西（本会话实测因它踩过“点了没反应”）。
   const ui::SemanticsFlags flags = element.semantics_flags();
   value["visible"] = flags.visible;
+  // `effective_visible`：**含祖先链**的“真正看不看得见”。
+  //
+  // 为何需要两个字段而不是把 `visible` 改成含祖先链：`visible` 是**自身状态**，
+  // 它必须能被写回验证（`set visible=false; get visible` → false）——
+  // 变成含祖先链后，一个藏在隐藏页里的复选框会读回 false，而它自己并没被设过。
+  // 两个词分工明确：`visible` = “我让没让自己显示”，`effective_visible` = “观众看不看得见”。
+  //
+  // 为何必须有后者（实测踩过）：`find` 会把隐藏页里的元素一并返回，
+  // 它们 `visible: true`——调用方（尤其自动化）以为可以点，而实际在屏外/被掩。
+  value["effective_visible"] = element.effective_visible();
   value["enabled"] = flags.enabled;
   const std::string text = element.semantics_text();
   if (!text.empty()) value["text"] = text;
@@ -189,6 +199,8 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   }
   properties["enabled"] = element.enabled();
   properties["visible"] = element.visible();
+  // 含祖先链的“真正看不看得见”（与元素 JSON 里的同名字段一致；见那边注释）。
+  properties["effective_visible"] = element.effective_visible();
   // 核心交互态由**框架统一**提供（不依赖各组件的属性表）：
   // 悬浮是"只能从像素看出来"的状态——若某个组件忘了导出自己的 `hovered`，
   // 自动化验证就只能靠截图猜。这类"看不见"的缺口正是最难查的。
@@ -384,6 +396,14 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
       style.right = as_float();
     } else if (name == "bottom") {
       style.bottom = as_float();
+    } else if (name == "intercepts") {
+      // 输入穿透：`false` = 这一层不接收鼠标，点击落到下层。
+      //
+      // 为何不能只靠叠放：叠在内容上的覆盖层（文字层、缩略条、拖拽角）
+      // 默认会吃掉整块区域的命中，于是“看得见但下面的东西点不动”。
+      // 这是 `Element` 级状态（不是 `Style`），因为命中判定在 `UiRoot` 分配事件的路径上。
+      element.set_intercepts_input(st::json_as_bool(value, true));
+      return true;   // 不改布局，不走下面的 mark_layout_dirty
     } else if (is_appearance_name(name)) {
       // 样式系统（`Appearance`）：五个字段都是**档位语义**，不是具体数值——
       // 落位要过 `Tokens` 解析（抬升→表面+阴影+高光、尺寸→高+字+图标三联动、
@@ -483,13 +503,32 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
 }
 
 /// 触发元素动作（控制通道 `invoke` 与脚本宿主 `ui.invoke` 共用）。
+///
+/// ## `force`：对“看不见的元素”装不装
+///
+/// 默认（`false`）**拒绝对 `effective_visible() == false` 的元素触发点击类动作**。
+/// 为何：`find`/`query` 会把隐藏页里的元素一并返回，而它们自己 `visible=true`。
+/// 调用方（尤其自动化）拿到 id 就去 invike，而实际东西在屏外/被掩——
+/// 结果是“回调执行了、界面没变”，比“找不到元素”难查得多。
+///
+/// 为何只卡**点击类**：它们语义是“用户在这里点了一下”，而看不见的东西点不到。
+/// 其余动作（`animate` / `select` / `toggle` / `stop-animation`…）是**程序化状态变更**，
+/// 恰恰有用例需要作用于隐藏元素（先藏后播）。
+///
+/// 确实要强行点隐藏元素（自动化补测/故意模拟）时传 `force=true`——
+/// 它存在，但不该是默认。
 [[nodiscard]] auto invoke_element(ui::UiRoot& root, ui::Element& element, std::string_view action,
-                                  std::string_view argument) -> bool {
+                                  std::string_view argument, bool force) -> bool {
   if (action == "focus" || action == "blur") {
     // 焦点必须经 UiRoot 设置：键盘事件按 root 的焦点元素派发，
     // 只改元素自身的 focused 标志会导致后续 input.text/input.key 无处可送。
     // 返回值 = 是否真的应用（不可聚焦元素返回 false，调用方据此报未生效）。
     return action == "blur" ? root.set_focus(nullptr) : root.set_focus(&element);
+  }
+  const bool click_like =
+      action == "click" || action == "dblclick" || action == "tripleclick";
+  if (click_like && !force && !element.effective_visible()) {
+    return false;   // 看不见的东西点不到（调用方应报“未生效”，不要假装成功）
   }
   // 先让元素处理动作，**再**通知观察者（与 `UiRoot::dispatch_to` 同序）：
   // 否则脚本写入会被 C++ 处理器随即覆盖，表现为"JS 改了没生效"。

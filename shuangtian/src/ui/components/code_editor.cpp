@@ -2939,7 +2939,7 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
   if (name == "find_active") {
     return find_active_ == kNoFindMatch ? std::string("-1") : std::to_string(find_active_);
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto CodeEditor::set_property(std::string_view name, std::string_view value) -> bool {
@@ -3077,18 +3077,18 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
     }
     return false;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto CodeEditor::property_names() const -> std::vector<std::string_view> {
-  return {"text",   "language",  "cursor",   "line",       "column",     "lines",
+  return Element::with_universal({"text",   "language",  "cursor",   "line",       "column",     "lines",
           "selection", "selected_text", "read_only", "highlight", "show_line_numbers",
           "tab_width", "indent_guides", "auto_pairs", "scroll_beyond_last_line", "font_size",
           "font_scale", "scroll",
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
               "find_active", "find_case",  "find_word", "line_height", "text_offset", "caret_top",
     "ink_height", "baseline", "caret_blink", "diagnostics", "diagnostic_errors",
-    "hover_diagnostic", "end_annotations"};
+    "hover_diagnostic", "end_annotations"});
 }
 
 // —— 查找与替换 ——

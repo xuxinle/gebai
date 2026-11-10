@@ -441,7 +441,7 @@ auto Steps::get_property(std::string_view name) const -> std::optional<std::stri
     }
     return out;
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Steps::set_property(std::string_view name, std::string_view value) -> bool {
@@ -470,15 +470,15 @@ auto Steps::set_property(std::string_view name, std::string_view value) -> bool 
     }
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Steps::property_names() const -> std::vector<std::string_view> {
-  return {"current", "steps", "orientation"};
+  return Element::with_universal({"current", "steps", "orientation"});
 }
 
 auto Steps::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count", "all_done", "states"};
+  return Element::with_universal_readonly({"count", "all_done", "states"});
 }
 
 auto Steps::invoke_action(std::string_view action, std::string_view argument) -> bool {

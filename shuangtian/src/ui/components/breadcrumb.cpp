@@ -404,7 +404,7 @@ auto Breadcrumb::get_property(std::string_view name) const -> std::optional<std:
   if (name == "count") return std::to_string(segments_.size());
   if (name == "separator") return separator_;
   if (name == "last_clickable") return std::string(last_clickable_ ? kFlagTrue : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Breadcrumb::set_property(std::string_view name, std::string_view value) -> bool {
@@ -441,15 +441,15 @@ auto Breadcrumb::set_property(std::string_view name, std::string_view value) -> 
     set_last_clickable(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Breadcrumb::property_names() const -> std::vector<std::string_view> {
-  return {"segments", "current", "separator", "last_clickable"};
+  return Element::with_universal({"segments", "current", "separator", "last_clickable"});
 }
 
 auto Breadcrumb::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count"};
+  return Element::with_universal_readonly({"count"});
 }
 
 auto Breadcrumb::invoke_action(std::string_view action, std::string_view argument) -> bool {

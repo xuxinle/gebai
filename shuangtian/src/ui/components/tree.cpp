@@ -549,7 +549,7 @@ auto Tree::property_names() const -> std::vector<std::string_view> {
   names.push_back("keys");
   names.push_back("rows_detail");
   names.push_back("activate_key");
-  return names;
+  return Element::with_universal(names);
 }
 
 }  // namespace st::ui

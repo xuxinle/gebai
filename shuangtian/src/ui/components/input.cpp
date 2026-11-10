@@ -158,7 +158,7 @@ auto Input::get_property(std::string_view name) const -> std::optional<std::stri
     // 选中文本（只读快照）；无选区/密码框 → 空串。
     return selected_text();
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Input::set_property(std::string_view name, std::string_view value) -> bool {
@@ -189,18 +189,18 @@ auto Input::set_property(std::string_view name, std::string_view value) -> bool 
     set_visible(value == "true" || value == "1");
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Input::property_names() const -> std::vector<std::string_view> {
   // 只列**可读写**属性（契约见 `Element::property_names`）。
-  return {"value", "placeholder", "password", "enabled", "visible"};
+  return Element::with_universal({"value", "placeholder", "password", "enabled", "visible"});
 }
 
 auto Input::readonly_property_names() const -> std::vector<std::string_view> {
   // `selection` 只读（`get` 能读、`set` 不应生效）——与 TextArea / Terminal /
   // CodeEditor 同一组名字，自动化可用同一个判据。
-  return {"selection"};
+  return Element::with_universal_readonly({"selection"});
 }
 
 // —— 动作面（与 `TextArea` 对齐）——
@@ -1398,7 +1398,7 @@ auto TextArea::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "scroll") return std::format("{:.1f}", static_cast<double>(scroll_));
   if (name == "read_only") return read_only_ ? "true" : "false";
   if (name == "selection") return selected_text();
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto TextArea::set_property(std::string_view name, std::string_view value) -> bool {
@@ -1432,15 +1432,15 @@ auto TextArea::set_property(std::string_view name, std::string_view value) -> bo
     set_read_only(value == "true" || value == "1");
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto TextArea::property_names() const -> std::vector<std::string_view> {
-  return {"value", "text", "placeholder", "cursor_index", "scroll", "read_only"};
+  return Element::with_universal({"value", "text", "placeholder", "cursor_index", "scroll", "read_only"});
 }
 
 auto TextArea::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"selection"};
+  return Element::with_universal_readonly({"selection"});
 }
 
 auto TextArea::invoke_action(std::string_view action, std::string_view argument) -> bool {

@@ -498,7 +498,7 @@ auto Text::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "selectable") return selectable_ ? "true" : "false";
   if (name == "selection") return selected_text();
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Text::set_property(std::string_view name, std::string_view value) -> bool {
@@ -532,19 +532,19 @@ auto Text::set_property(std::string_view name, std::string_view value) -> bool {
     set_selectable(value == "true" || value == "1");
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Text::property_names() const -> std::vector<std::string_view> {
   // `size` 是字号（与 `Button` 的尺寸档位**同名不同义**——各自解释，见 `xml_ui.cpp`
   // 里 `normalize_property` 的说明）。
   // `selectable` 可读写（自动化/声明式都靠它开启选区）。
-  return {"text", "content", "multiline", "font_size", "selectable", "tone"};
+  return Element::with_universal({"text", "content", "multiline", "font_size", "selectable", "tone"});
 }
 
 auto Text::readonly_property_names() const -> std::vector<std::string_view> {
   // `selection` 只读（`get` 能读、`set` 不生效），与其他文本组件同一组名字。
-  return {"selection"};
+  return Element::with_universal_readonly({"selection"});
 }
 
 auto Text::invoke_action(std::string_view action, std::string_view argument) -> bool {
@@ -698,11 +698,19 @@ auto IconView::get_property(std::string_view name) const -> std::optional<std::s
   // 避免与 `font_size` 混淆（同一层里两个"大小"必须能区分开）。
   if (name == "diameter") return std::format("{}", size_);
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 // 与 `get/set_property` 对称（见头文件里的说明）：不报名字 = 这条路命不中。
 auto IconView::property_names() const -> std::vector<std::string_view> {
+  // ⚠ **刻意不包 `with_universal`**（与其它组件不同）。
+  //
+  // 图标/头像的“大小”是**直径**而不是字号：`set_property` 不接 `font_size`/`weight`
+  //（图标压根不画字），所以这两名也不该进可写表。包上通用名会把“直径 vs 字号”
+  // 这条语义边界抹掉（既有护欄 `ui_icon_diameter_is_not_font_size` 就是钉它的）。
+  //
+  // 代价：图标确实读不到 `hovered`/`animation`——那是**已知取舍**而非遗漏；
+  // 要查那些就取它的父元素，或看可视化树。
   return {"icon", "diameter", "tone"};
 }
 
@@ -724,7 +732,16 @@ auto IconView::set_property(std::string_view name, std::string_view value) -> bo
     }
     return false;
   }
-  return false;
+  // ⚠ **显式拒绝文字属性**（与 `property_names` 里不包 `with_universal` 配套）。
+  //
+  // 图标不画字：它的“大小”是直径（`diameter`）。不拦这一截的话，
+  // 基类 `set_property` 会接 `font_size`/`weight`/`color`（它看的是**基类支不支持**，
+  // 而不知图标不画字），于是“直径 vs 字号”这条语义边界又被抹掉。
+  // 既有护欄：`ui_icon_diameter_is_not_font_size`。
+  if (name == "font_size" || name == "text_size" || name == "weight" || name == "color") {
+    return false;
+  }
+  return Element::set_property(name, value);
 }
 
 Button::Button(std::string label, Variant variant, Size size)
@@ -1104,7 +1121,7 @@ auto Button::get_property(std::string_view name) const -> std::optional<std::str
   }
   if (name == "hint") return hint();
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Button::set_property(std::string_view name, std::string_view value) -> bool {
@@ -1176,14 +1193,14 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
     set_hint(std::string(value));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Button::property_names() const -> std::vector<std::string_view> {
   // `variant` **在这张表里**（名字认得、可写），但它的写入落到**声明**
   // （`Appearance`）而不是组件自己的 `variant_` 成员——见 `set_property` 的说明。
   // 读回也走同一份事实（`get_property` 优先报声明的值）。
-  return {"label", "text", "icon", "variant", "scale", "hint", "tone"};
+  return Element::with_universal({"label", "text", "icon", "variant", "scale", "hint", "tone"});
 }
 
 auto Button::invoke_action(std::string_view action, std::string_view argument) -> bool {

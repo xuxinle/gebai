@@ -212,7 +212,7 @@ auto ProgressRing::get_property(std::string_view name) const -> std::optional<st
   if (name == "text") return text_;
   if (name == "thickness") return std::format("{}", thickness_);
   if (name == "tone") return std::string(tone_name(tone_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto ProgressRing::set_property(std::string_view name, std::string_view value) -> bool {
@@ -246,15 +246,15 @@ auto ProgressRing::set_property(std::string_view name, std::string_view value) -
     set_tone(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto ProgressRing::property_names() const -> std::vector<std::string_view> {
-  return {"value", "indeterminate", "text", "thickness", "tone"};
+  return Element::with_universal({"value", "indeterminate", "text", "thickness", "tone"});
 }
 
 auto ProgressRing::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"percent"};
+  return Element::with_universal_readonly({"percent"});
 }
 
 }  // namespace st::ui

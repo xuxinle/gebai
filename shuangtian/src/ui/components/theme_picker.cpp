@@ -480,7 +480,7 @@ auto ThemePicker::get_property(std::string_view name) const -> std::optional<std
     return joined;
   }
   if (name == "open") return std::string(open_ ? "true" : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto ThemePicker::set_property(std::string_view name, std::string_view value) -> bool {
@@ -495,11 +495,11 @@ auto ThemePicker::set_property(std::string_view name, std::string_view value) ->
     close();
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto ThemePicker::property_names() const -> std::vector<std::string_view> {
-  return {"value", "label", "text", "options", "open"};
+  return Element::with_universal({"value", "label", "text", "options", "open"});
 }
 
 auto ThemePicker::invoke_action(std::string_view action, std::string_view argument)

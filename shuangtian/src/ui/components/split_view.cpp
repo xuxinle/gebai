@@ -634,7 +634,7 @@ auto SplitView::get_property(std::string_view name) const -> std::optional<std::
     return orientation_ == Orientation::Horizontal ? std::string("horizontal")
                                                    : std::string("vertical");
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto SplitView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -675,14 +675,14 @@ auto SplitView::set_property(std::string_view name, std::string_view value) -> b
     set_orientation(value == "vertical" ? Orientation::Vertical : Orientation::Horizontal);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto SplitView::property_names() const -> std::vector<std::string_view> {
   // `handle_size` 是**只读**的（不列在 `set_property` 里）：它供自动化计算
   // 拖拽把手的真实落点，改了它只会让命中区与视觉错位。
-  return {"ratio",       "default_ratio", "min_ratio", "step",      "orientation",
-          "first_hidden", "second_hidden", "handle_size"};
+  return Element::with_universal({"ratio",       "default_ratio", "min_ratio", "step",      "orientation",
+          "first_hidden", "second_hidden", "handle_size"});
 }
 
 auto SplitView::invoke_action(std::string_view action, std::string_view argument) -> bool {

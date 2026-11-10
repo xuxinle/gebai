@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/link.hpp"
+#include "st/ui/components/link.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -217,7 +217,7 @@ auto Link::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "external") return std::string(external_ ? kFlagTrue : "false");
   if (name == "underline") return std::string(underline_ ? kFlagTrue : "false");
   if (name == "tone") return std::string(tone_name(tone_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Link::set_property(std::string_view name, std::string_view value) -> bool {
@@ -247,11 +247,11 @@ auto Link::set_property(std::string_view name, std::string_view value) -> bool {
     set_tone(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Link::property_names() const -> std::vector<std::string_view> {
-  return {"text", "url", "external", "underline", "tone"};
+  return Element::with_universal({"text", "url", "external", "underline", "tone"});
 }
 
 auto Link::invoke_action(std::string_view action, std::string_view argument) -> bool {

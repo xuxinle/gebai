@@ -242,7 +242,7 @@ auto DividerLabel::get_property(std::string_view name) const -> std::optional<st
     return std::string("left");
   }
   if (name == "line") return std::string(line_visible_ ? kFlagTrue : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto DividerLabel::set_property(std::string_view name, std::string_view value) -> bool {
@@ -268,11 +268,11 @@ auto DividerLabel::set_property(std::string_view name, std::string_view value) -
     set_line_visible(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto DividerLabel::property_names() const -> std::vector<std::string_view> {
-  return {"text", "action", "align", "line"};
+  return Element::with_universal({"text", "action", "align", "line"});
 }
 
 auto DividerLabel::invoke_action(std::string_view action, std::string_view argument) -> bool {

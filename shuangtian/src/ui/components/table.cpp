@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/table.hpp"
+#include "st/ui/components/table.hpp"
 #include "st/ui/wheel.hpp"
 
 #include <algorithm>
@@ -701,7 +701,7 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
   }
   if (name == "value") return semantics_value();
   if (name == "text") return semantics_text();
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Table::set_property(std::string_view name, std::string_view value) -> bool {
@@ -752,17 +752,17 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
     set_selected_row(static_cast<std::size_t>(*parsed));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Table::property_names() const -> std::vector<std::string_view> {
-  return {"columns", "rows", "row_height", "zebra", "scroll", "max_scroll",
-          "selected_row", "value", "first_visible", "visible_rows"};
+  return Element::with_universal({"columns", "rows", "row_height", "zebra", "scroll", "max_scroll",
+          "selected_row", "value", "first_visible", "visible_rows"});
 }
 
 /// 只读属性（不进 `property_names()`：那张表是“可读写”契约，`get` 在两处都查）。
 auto Table::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"column_widths", "lane_inset"};
+  return Element::with_universal_readonly({"column_widths", "lane_inset"});
 }
 
 auto Table::invoke_action(std::string_view action, std::string_view argument) -> bool {

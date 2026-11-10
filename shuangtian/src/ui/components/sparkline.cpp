@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/sparkline.hpp"
+#include "st/ui/components/sparkline.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -279,7 +279,7 @@ auto Sparkline::get_property(std::string_view name) const -> std::optional<std::
                                        : std::nullopt;
   if (name == "max") return has_range_ ? std::optional<std::string>(std::format("{}", range_max_))
                                        : std::nullopt;
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Sparkline::set_property(std::string_view name, std::string_view value) -> bool {
@@ -321,15 +321,15 @@ auto Sparkline::set_property(std::string_view name, std::string_view value) -> b
     else set_range(other, *parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Sparkline::property_names() const -> std::vector<std::string_view> {
-  return {"values", "shape", "tone", "baseline", "emphasis_tail", "min", "max"};
+  return Element::with_universal({"values", "shape", "tone", "baseline", "emphasis_tail", "min", "max"});
 }
 
 auto Sparkline::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count", "data_min", "data_max"};
+  return Element::with_universal_readonly({"count", "data_min", "data_max"});
 }
 
 }  // namespace st::ui

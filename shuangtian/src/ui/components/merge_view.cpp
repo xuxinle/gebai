@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/merge_view.hpp"
+#include "st/ui/components/merge_view.hpp"
 #include "st/ui/wheel.hpp"
 
 #include <algorithm>
@@ -485,7 +485,7 @@ auto MergeView::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(), {"conflicts", "resolved", "pending", "segments", "current",
                              "show_base", "scroll"});
-  return names;
+  return Element::with_universal(names);
 }
 
 auto MergeView::invoke_action(std::string_view action, std::string_view argument) -> bool {

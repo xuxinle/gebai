@@ -261,7 +261,7 @@ auto FormRow::get_property(std::string_view name) const -> std::optional<std::st
   if (name == "label_width") return std::format("{}", label_width_);
   if (name == "stacked") return std::string(stacked_ ? kFlagTrue : "false");
   if (name == "effective_label_width") return std::format("{}", effective_label_);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto FormRow::set_property(std::string_view name, std::string_view value) -> bool {
@@ -295,15 +295,15 @@ auto FormRow::set_property(std::string_view name, std::string_view value) -> boo
     set_stacked(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto FormRow::property_names() const -> std::vector<std::string_view> {
-  return {"label", "hint", "error", "required", "label_width", "stacked"};
+  return Element::with_universal({"label", "hint", "error", "required", "label_width", "stacked"});
 }
 
 auto FormRow::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"effective_label_width"};
+  return Element::with_universal_readonly({"effective_label_width"});
 }
 
 }  // namespace st::ui

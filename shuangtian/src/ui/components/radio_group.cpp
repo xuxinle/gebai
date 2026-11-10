@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/radio_group.hpp"
+#include "st/ui/components/radio_group.hpp"
 
 #include <algorithm>
 #include <format>
@@ -427,7 +427,7 @@ auto RadioGroup::get_property(std::string_view name) const -> std::optional<std:
   }
   if (name == "wrap") return std::string(wrap_ ? kFlagTrue : "false");
   if (name == "count") return std::to_string(options_.size());
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto RadioGroup::set_property(std::string_view name, std::string_view value) -> bool {
@@ -473,15 +473,15 @@ auto RadioGroup::set_property(std::string_view name, std::string_view value) -> 
     set_wrap(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto RadioGroup::property_names() const -> std::vector<std::string_view> {
-  return {"items", "value", "index", "direction", "wrap"};
+  return Element::with_universal({"items", "value", "index", "direction", "wrap"});
 }
 
 auto RadioGroup::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count"};
+  return Element::with_universal_readonly({"count"});
 }
 
 auto RadioGroup::invoke_action(std::string_view action, std::string_view argument) -> bool {

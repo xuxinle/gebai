@@ -290,7 +290,7 @@ auto Rating::get_property(std::string_view name) const -> std::optional<std::str
   if (name == "allow_clear") return std::string(allow_clear_ ? kFlagTrue : "false");
   if (name == "show_value") return std::string(show_value_ ? kFlagTrue : "false");
   if (name == "star_size") return std::format("{}", star_size_);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Rating::set_property(std::string_view name, std::string_view value) -> bool {
@@ -336,14 +336,14 @@ auto Rating::set_property(std::string_view name, std::string_view value) -> bool
     set_star_size(static_cast<float>(*parsed));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Rating::property_names() const -> std::vector<std::string_view> {
-  return {"value", "max", "readonly", "allow_half", "allow_clear", "show_value", "star_size"};
+  return Element::with_universal({"value", "max", "readonly", "allow_half", "allow_clear", "show_value", "star_size"});
 }
 
-auto Rating::readonly_property_names() const -> std::vector<std::string_view> { return {}; }
+auto Rating::readonly_property_names() const -> std::vector<std::string_view> { return Element::with_universal_readonly({}); }
 
 auto Rating::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "set" || action == "clear") {

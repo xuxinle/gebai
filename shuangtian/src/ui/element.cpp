@@ -1,4 +1,4 @@
-#include "st/ui/element.hpp"
+﻿#include "st/ui/element.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +10,8 @@
 #include "st/raster/paint.hpp"
 #include "st/raster/translated_surface.hpp"
 #include "st/math/path.hpp"
-#include "st/ui/component_registry.hpp"   // Panel / Spacer 的登记（文件末尾）
+#include "st/ui/component_registry.hpp"
+#include "st/ui/svg.hpp"   // parse_color（`color` 属性写入口；与协议/DSL 同一份解析）   // Panel / Spacer 的登记（文件末尾）
 #include "st/ui/components/panel.hpp"      // `component_meta<Panel/Spacer>` 的声明
 #include "st/ui/line_layout.hpp"
 
@@ -401,25 +402,84 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
 }
 
 auto Element::set_property(std::string_view name, std::string_view value) -> bool {
-  (void)name;
-  (void)value;
+  // 基类的**兜底写入口**（组件覆写时应在末尾转调本函数）。
+  //
+  // 为何只有“文字”这几项：它们都是基类的显式覆盖机制（`set_text_*`）。
+  //
+  // ⚠ **不能无条件接受**（2026-11-10 实测踩到）：`IconView` 的大小是
+  // **直径**不是字号（`diameter`），它刻意不接受 `font_size`。基类无脑接
+  // 会把“直径 vs 字号”这条语义边界抹掉（既有护欄 `ui_icon_diameter_is_not_font_size`
+  // 因此变红）。判据是**元素自己声明了这些名字**（`property_names()`）——
+  // 那才是“这个元素有哪些属性”的唯一真源，而不是基类猜它“像不像文字元素”。
+  const auto declared = property_names();
+  const auto accepts = [&declared](std::string_view candidate) {
+    return std::ranges::find(declared, candidate) != declared.end();
+  };
+  // 基类支持的可写名：用**静态表**而非 `Element::property_names()`——后者是虚函数，
+  // 写 “`Element::property_names()`” 在成员函数里仍会走虚派（递归回到本组件）。
+  const auto base_accepts = [](std::string_view candidate) {
+    return candidate == "color" || candidate == "font_size" || candidate == "weight";
+  };
+  // ⚠ **名字必须与读侧一致**。实测不一致（2026-11-10）：读侧叫 `color`、
+  // 协议侧叫 `text_color`——两个名字写同一状态，读又只认一个，很难查。
+  if (name == "color") {
+    if (!accepts("color") && !base_accepts("color")) return false;
+    const auto parsed = svg::parse_color(std::string(value));
+    if (!parsed.has_value()) return false;
+    set_text_color(*parsed);
+    return true;
+  }
+  if (name == "font_size" || name == "text_size") {
+    if (!accepts("font_size") && !base_accepts("font_size")) return false;
+    // `font_size` 是读侧与 `Style` 的名字；`text_size` 是控制通道的历史别名
+    //（`actions.cpp` 的布局表用这个名字）。两个都接，写同一个状态。
+    const std::string text(value);
+    char* end = nullptr;
+    const float size = std::strtof(text.c_str(), &end);
+    if (end == text.c_str() || size <= 0.0f) return false;
+    set_text_size(size);
+    return true;
+  }
+  if (name == "weight") {
+    if (!accepts("weight") && !base_accepts("weight")) return false;
+    const std::string text(value);
+    if (text == "regular") {
+      set_text_weight(FontWeight::Regular);
+    } else if (text == "medium") {
+      set_text_weight(FontWeight::Medium);
+    } else if (text == "semibold" || text == "semi_bold") {
+      set_text_weight(FontWeight::SemiBold);
+    } else if (text == "bold") {
+      set_text_weight(FontWeight::Bold);
+    } else {
+      return false;
+    }
+    return true;
+  }
   return false;
 }
 
 auto Element::property_names() const -> std::vector<std::string_view> {
-  return {"hovered", "hover_progress", "hover_effect", "color", "color_override",
-          "tone_override", "font_size", "weight"};
+  // 基类元素的**可写**表。
+  //
+  // ⚠ 这张表是**超集**，不是 `kUniversalPropertyNames`：`color`/`font_size`/`weight`
+  // 在基类元素上确实可写（值合法就落位），但它们**不下发给组件**——
+  // 因为通用护欄“表里声明的名字，`set` 必须生效（填 `"测试值"`）”会对它们必败。
+  // 两者分工：这张表 = “这个元素有什么”；`with_universal` = “能无条件并给所有组件的”。
+  return {"color_override", "tone_override", "color", "font_size", "weight"};
 }
 
 auto Element::readonly_property_names() const -> std::vector<std::string_view> {
-  // 默认空：哪些属性只读由组件自己声明。
+  // 基类的**只读诊断表**。
   //
-  // 动画诊断五项**只能读**：它们反映的是“这一帧播到哪了”（由时间轴推出），
-  // 写入它们没有意义；而入 `property_names()` 会让通用护欄
-  // （“声明为可写的名字必须能 `set` 生效”）必然失败。
-  // 要触发动画走 `invoke_action("animate", 预设名)`——那是**动作**不是属性。
+  // 两类都在这里：
+  // - 动画五项：反映“这一帧播到哪了”（由时间轴推出），写入无意义。
+  //   要起播走 `invoke_action("animate", 预设名)`——那是**动作**不是属性。
+  // - `hovered` / `hover_progress` / `hover_effect`：交互态，**只能从像素/驱动事件产生**。
+  //   曾经它们在可写表里，而“可写”意味着“`set` 必须生效”——那是做不到的
+  //  （实测：`set hovered=true` 没任何效果，而表在宣布它能写）。
   return {"animation", "animation_running", "animation_opacity", "animation_translate",
-          "transition"};
+          "transition", "hovered", "hover_progress", "hover_effect"};
 }
 
 auto Element::property_schema() const -> std::span<const PropertyDesc> {
@@ -1644,4 +1704,5 @@ void Spacer::arrange(const RenderContext& context, math::Rect rect) {
 // 定义在这里。于是 `dsl::make_element("Panel")` 能造 `<Row>` / `<Column>`。
 ST_UI_COMPONENT_IMPL_NAMED(::st::ui::Panel, "Panel")
 ST_UI_COMPONENT_IMPL_NAMED(::st::ui::Spacer, "Spacer")
+
 

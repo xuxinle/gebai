@@ -259,7 +259,7 @@ auto Viewport::set_property(std::string_view name, std::string_view value) -> bo
 auto Viewport::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(), {"zoom", "pan_x", "pan_y", "checkerboard"});
-  return names;
+  return Element::with_universal(names);
 }
 
 auto Viewport::invoke_action(std::string_view action, std::string_view argument) -> bool {

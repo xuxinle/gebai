@@ -248,7 +248,7 @@ auto Slider::get_property(std::string_view name) const -> std::optional<std::str
   if (name == "value") return std::format("{}", value_);
   if (name == "step") return std::format("{}", step_);
   if (name == "label" || name == "text") return label_;
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Slider::set_property(std::string_view name, std::string_view value) -> bool {
@@ -268,11 +268,11 @@ auto Slider::set_property(std::string_view name, std::string_view value) -> bool
     set_label(std::string(value));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Slider::property_names() const -> std::vector<std::string_view> {
-  return {"value", "step", "label"};
+  return Element::with_universal({"value", "step", "label"});
 }
 
 auto Slider::invoke_action(std::string_view action, std::string_view argument) -> bool {

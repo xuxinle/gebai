@@ -476,7 +476,7 @@ auto CompletionPopup::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(), {"items", "visible_items", "selected", "selected_label", "filter",
                              "detail", "labels", "visible_labels", "scroll"});
-  return names;
+  return Element::with_universal(names);
 }
 
 auto CompletionPopup::invoke_action(std::string_view action, std::string_view argument) -> bool {

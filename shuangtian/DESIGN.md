@@ -1881,6 +1881,58 @@ void refresh_theme(const Theme& theme) {      // 非虚：唯一调度入口
 必须**走 `UiRoot::layout()` 真实链路**。直接调 `refresh_theme` 会绕过调度点，
 于是“调度点调错函数”测不出来（实测：把调度退回 `apply_theme` 后直调版测试仍全绿）。
 
+### 4.2.20.1.1 通用属性面：三张表必须都能下落（2026-11-10）
+
+同一类结构性缺陷的第二个面（上一个面是主题派发）：
+**覆写时不转调基类，于是基类的能力在一个个组件上静默消失**。
+
+实测（75 个组件逐个建树）：
+
+| 方法 | 覆写数 | 转调基类 | 后果 |
+|---|---|---|---|
+| `apply_theme` | 72 | 7 | `surface` / `appearance` / 文本覆盖在 65 个上是死代码 |
+| `get_property` | 58 | 13 | 动画五项 / `hovered` / `color` 在 45 个上读不到 |
+| `property_names` | 66 | **0** | 通用名在全部 66 个上不入表 |
+
+合计缺失 **462 项**。现象是 `get animation` 返回空，而元素明明在播动画——
+很容易误判成“动画没起播”。
+
+**修法不是让 93 处都记得转调**（那是靠自觉保护的不变式，新增组件必漏）：
+
+- 调度点收口：`refresh_theme`（非虚）包住 `apply_theme`（虚）——见上一节；
+- 名字表给**辅助函数**：`with_universal(...)` / `with_universal_readonly(...)`；
+- `get/set_property` 的尾巴改成转调基类（脚本批量做，逐处核对）。
+
+**两张名字表不得重叠**（既有契约 `contract_property_name_lists_are_well_formed`），
+所以辅助函数分两个：可写组与只读组各并各的。
+
+#### 哪些通用名能并给所有组件
+
+不是“基类支持就能并”。两条既有契约把范围卡得很死：
+
+1. “表里声明的名字，`set` 必须生效（填任意字符串）”
+   —— `ui_actions_set_changes_all_declared_string_properties`
+2. “表里声明的名字，`get` 必须读得到”
+   —— `scene_view_reports_property_surface`
+
+于是：
+
+| 名 | 处置 | 理由 |
+|---|---|---|
+| 动画五项 / `transition` / `hovered` / `hover_progress` / `hover_effect` | 只读表 | 写它无意义 |
+| `color` / `font_size` / `weight` | **不下发**，但仍可写 | 值必须合法（颜色要解析、字号 >0、字重是枚举）——拿 `"测试值"` 填必败 |
+| `color_override` / `tone_override` | 只读表 | 未设时返 `nullopt`（“没设过”是信息，不该伪造成空串） |
+
+所以 `kUniversalPropertyNames` 当前是**空的**：没有哪个通用名能同时满足两条。
+空表不会颁假契约，比收错名静默失效好。
+
+#### 一个显式例外：`IconView`
+
+图标的“大小”是**直径**（`diameter`）不是字号。它刻意不包 `with_universal`，
+`set_property` 里也显式拒 `font_size`/`weight`/`color`——否则“直径 vs 字号”
+这条语义边界会被抹掉（护栏：`ui_icon_diameter_is_not_font_size`）。
+代价是图标读不到 `hovered`/`animation`；那是**已知取舍**，不是遗漏。
+
 ### 4.2.20.2 样式词表只能有一份：`Variant` 分叉事故（2026-11-10）
 
 **症状**：相期右上角「全部忽略」按钮（`variant="ghost"`）**多出一块蓝紫渐变底**，

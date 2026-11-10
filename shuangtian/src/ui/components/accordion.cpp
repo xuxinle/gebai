@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/accordion.hpp"
+#include "st/ui/components/accordion.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -456,7 +456,7 @@ auto Accordion::get_property(std::string_view name) const -> std::optional<std::
   if (name == "allow_collapse") return std::string(allow_collapse_ ? kFlagTrue : "false");
   if (name == "separated") return std::string(separated_ ? kFlagTrue : "false");
   if (name == "count") return std::to_string(panels_.size());
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Accordion::set_property(std::string_view name, std::string_view value) -> bool {
@@ -510,15 +510,15 @@ auto Accordion::set_property(std::string_view name, std::string_view value) -> b
     mark_layout_dirty();
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Accordion::property_names() const -> std::vector<std::string_view> {
-  return {"items", "open", "mode", "allow_collapse", "separated"};
+  return Element::with_universal({"items", "open", "mode", "allow_collapse", "separated"});
 }
 
 auto Accordion::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count"};
+  return Element::with_universal_readonly({"count"});
 }
 
 auto Accordion::invoke_action(std::string_view action, std::string_view argument) -> bool {

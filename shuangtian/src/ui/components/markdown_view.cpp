@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/markdown_view.hpp"
 #include "st/ui/wheel.hpp"
 
 #include <algorithm>
@@ -509,7 +509,7 @@ auto MarkdownView::get_property(std::string_view name) const -> std::optional<st
   if (name == "selectable") return selectable_ ? "true" : "false";
   if (name == "stick_to_bottom") return stick_to_bottom_ ? "true" : "false";
   if (name == "pending") return stream_.pending() ? "true" : "false";
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto MarkdownView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -556,11 +556,11 @@ auto MarkdownView::set_property(std::string_view name, std::string_view value) -
     else set_code_font_size(size);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto MarkdownView::property_names() const -> std::vector<std::string_view> {
-  return {"markdown",       "text",          "block_count",    "content_height",
+  return Element::with_universal({"markdown",       "text",          "block_count",    "content_height",
           "scroll",         "max_scroll",    "viewport_height", "base_font_size",
           "code_font_size", "max_width",     "selectable",     "stick_to_bottom",
           "pending",        "selection",     "layout_width",
@@ -570,7 +570,7 @@ auto MarkdownView::property_names() const -> std::vector<std::string_view> {
           // 当时它只有 C++ 接口（`visible_row_range_now`），属性面拿不到，
           // 只能靠截图猜。
           "row_count", "first_visible", "last_visible", "row_at_probe", "draw_stats",
-          "painted_groups"};
+          "painted_groups"});
 }
 
 auto MarkdownView::invoke_action(std::string_view action, std::string_view argument) -> bool {

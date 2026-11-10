@@ -207,11 +207,11 @@ auto SlowContent::get_property(std::string_view name) const -> std::optional<std
   if (name == "measure_ms") return std::format("{:.2f}", last_measure_ms_);
   if (name == "source_bytes") return std::to_string(params_.source.size());
   if (name == "generation") return std::to_string(generation_);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto SlowContent::property_names() const -> std::vector<std::string_view> {
-  return {"layout_pending", "layout_ms", "measure_ms", "source_bytes", "generation"};
+  return Element::with_universal({"layout_pending", "layout_ms", "measure_ms", "source_bytes", "generation"});
 }
 
 void SlowContent::measure(const RenderContext& context, const Constraints& constraints) {

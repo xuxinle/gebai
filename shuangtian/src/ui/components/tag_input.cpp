@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/tag_input.hpp"
+#include "st/ui/components/tag_input.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -439,7 +439,7 @@ auto TagInput::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "max" || name == "max_tags") return std::to_string(max_tags_);
   if (name == "addable") return std::string(addable_ ? kFlagTrue : "false");
   if (name == "count") return std::to_string(tags_.size());
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto TagInput::set_property(std::string_view name, std::string_view value) -> bool {
@@ -469,15 +469,15 @@ auto TagInput::set_property(std::string_view name, std::string_view value) -> bo
     set_addable(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto TagInput::property_names() const -> std::vector<std::string_view> {
-  return {"tags", "draft", "placeholder", "max", "addable"};
+  return Element::with_universal({"tags", "draft", "placeholder", "max", "addable"});
 }
 
 auto TagInput::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count"};
+  return Element::with_universal_readonly({"count"});
 }
 
 auto TagInput::invoke_action(std::string_view action, std::string_view argument) -> bool {

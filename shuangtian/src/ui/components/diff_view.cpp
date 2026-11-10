@@ -1123,7 +1123,7 @@ auto DiffView::get_property(std::string_view name) const -> std::optional<std::s
   }
   if (name == "numbers_old") return join_numbers(old_side_.numbers);
   if (name == "numbers_new") return join_numbers(new_side_.numbers);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto DiffView::join_numbers(const std::vector<std::size_t>& values) -> std::string {
@@ -1205,16 +1205,16 @@ auto DiffView::set_property(std::string_view name, std::string_view value) -> bo
       return false;
     }
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto DiffView::property_names() const -> std::vector<std::string_view> {
-  return {"hunks",      "current_hunk",       "additions",  "deletions", "layout",
+  return Element::with_universal({"hunks",      "current_hunk",       "additions",  "deletions", "layout",
           "editable",   "binary",             "summary",    "old_lines", "new_lines",
           "logical_left", "logical_right",
           "numbers_old",
           "numbers_new", "left_text",         "right_text", "scroll",    "disabled_old_lines",
-          "disabled_new_lines", "current_hunk_line"};
+          "disabled_new_lines", "current_hunk_line"});
 }
 
 auto DiffView::invoke_action(std::string_view action, std::string_view argument) -> bool {

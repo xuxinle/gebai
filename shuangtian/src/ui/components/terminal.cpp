@@ -1,4 +1,4 @@
-﻿/// 终端组件实现（见 `terminal.hpp` 的设计说明）。
+/// 终端组件实现（见 `terminal.hpp` 的设计说明）。
 ///
 /// 结构（真终端）：
 ///
@@ -2107,12 +2107,12 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
                // `running_name` = 正在跑的命令名（忙时非空）；
                // `idle_ms` = 距最近一次输出的毫秒。
                "running", "running_name", "idle_ms", "command_issued"});
-  return names;
+  return Element::with_universal(names);
 }
 
 auto Terminal::readonly_property_names() const -> std::vector<std::string_view> {
   // `selection` 只读（`get` 能读、`set` 不生效）。
-  return {"selection"};
+  return Element::with_universal_readonly({"selection"});
 }
 
 auto Terminal::get_property(std::string_view name) const -> std::optional<std::string> {

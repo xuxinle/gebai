@@ -805,7 +805,7 @@ auto TitleBar::get_property(std::string_view name) const -> std::optional<std::s
     return std::string(control_ != nullptr && control_->window_control_available() ? "true"
                                                                                    : "false");
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto TitleBar::set_property(std::string_view name, std::string_view value) -> bool {
@@ -821,12 +821,12 @@ auto TitleBar::set_property(std::string_view name, std::string_view value) -> bo
     set_show_controls(value == "true" || value == "1" || value == "on");
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto TitleBar::property_names() const -> std::vector<std::string_view> {
-  return {"title", "text", "icon", "show_controls", "maximized", "window_control_available",
-          "hovered_button", "hovered_caption"};
+  return Element::with_universal({"title", "text", "icon", "show_controls", "maximized", "window_control_available",
+          "hovered_button", "hovered_caption"});
 }
 
 auto TitleBar::invoke_action(std::string_view action, std::string_view argument) -> bool {

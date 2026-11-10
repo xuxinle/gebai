@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/empty_state.hpp"
+#include "st/ui/components/empty_state.hpp"
 
 #include <algorithm>
 #include <format>
@@ -326,7 +326,7 @@ auto EmptyState::get_property(std::string_view name) const -> std::optional<std:
     }
     return std::string("medium");
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto EmptyState::set_property(std::string_view name, std::string_view value) -> bool {
@@ -355,11 +355,11 @@ auto EmptyState::set_property(std::string_view name, std::string_view value) -> 
     else return false;
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto EmptyState::property_names() const -> std::vector<std::string_view> {
-  return {"title", "description", "icon", "action", "size"};
+  return Element::with_universal({"title", "description", "icon", "action", "size"});
 }
 
 auto EmptyState::invoke_action(std::string_view action, std::string_view argument) -> bool {

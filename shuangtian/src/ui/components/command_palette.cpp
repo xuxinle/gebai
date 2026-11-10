@@ -308,7 +308,7 @@ auto CommandPalette::property_names() const -> std::vector<std::string_view> {
   names.push_back("command_count");
   names.push_back("match_count");
   names.push_back("active");
-  return names;
+  return Element::with_universal(names);
 }
 
 auto CommandPalette::invoke_action(std::string_view action, std::string_view argument) -> bool {

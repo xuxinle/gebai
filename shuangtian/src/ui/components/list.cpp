@@ -486,7 +486,7 @@ auto List::property_names() const -> std::vector<std::string_view> {
   names.push_back("scroll");
   names.push_back("selected");
   names.push_back("selected_key");
-  return names;
+  return Element::with_universal(names);
 }
 
 }  // namespace st::ui

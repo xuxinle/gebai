@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/number_input.hpp"
+#include "st/ui/components/number_input.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -453,7 +453,7 @@ auto NumberInput::get_property(std::string_view name) const -> std::optional<std
   if (name == "step") return format(step_);
   if (name == "precision") return std::to_string(precision_);
   if (name == "suffix") return suffix_;
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto NumberInput::set_property(std::string_view name, std::string_view value) -> bool {
@@ -495,15 +495,15 @@ auto NumberInput::set_property(std::string_view name, std::string_view value) ->
     set_suffix(std::string(value));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto NumberInput::property_names() const -> std::vector<std::string_view> {
-  return {"value", "text", "min", "max", "step", "precision", "suffix"};
+  return Element::with_universal({"value", "text", "min", "max", "step", "precision", "suffix"});
 }
 
 auto NumberInput::readonly_property_names() const -> std::vector<std::string_view> {
-  return {};
+  return Element::with_universal_readonly({});
 }
 
 auto NumberInput::invoke_action(std::string_view action, std::string_view argument) -> bool {

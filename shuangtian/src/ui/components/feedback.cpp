@@ -125,7 +125,7 @@ auto ProgressBar::get_property(std::string_view name) const -> std::optional<std
   if (name == "value") return std::format("{}", value_);
   if (name == "tone") return std::string(tone_name(tone_));
   if (name == "text") return semantics_value();
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto ProgressBar::set_property(std::string_view name, std::string_view value) -> bool {
@@ -141,11 +141,11 @@ auto ProgressBar::set_property(std::string_view name, std::string_view value) ->
     set_tone(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto ProgressBar::property_names() const -> std::vector<std::string_view> {
-  return {"value", "tone", "text"};
+  return Element::with_universal({"value", "tone", "text"});
 }
 
 auto ProgressBar::invoke_action(std::string_view action, std::string_view argument) -> bool {
@@ -234,7 +234,7 @@ auto Spinner::get_property(std::string_view name) const -> std::optional<std::st
   // 直径类：主名 `diameter`（旧 `size` 兼容）
   if (name == "diameter") return std::format("{}", diameter_);
   if (name == "tone") return std::string(tone_name(tone_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Spinner::set_property(std::string_view name, std::string_view value) -> bool {
@@ -250,11 +250,11 @@ auto Spinner::set_property(std::string_view name, std::string_view value) -> boo
     set_tone(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Spinner::property_names() const -> std::vector<std::string_view> {
-  return {"size", "diameter", "tone"};
+  return Element::with_universal({"size", "diameter", "tone"});
 }
 
 // —— Badge ——
@@ -313,7 +313,7 @@ auto Badge::semantics_value() const -> std::string { return std::string(tone_nam
 auto Badge::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "text" || name == "value") return text_;
   if (name == "tone") return std::string(tone_name(tone_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Badge::set_property(std::string_view name, std::string_view value) -> bool {
@@ -327,11 +327,11 @@ auto Badge::set_property(std::string_view name, std::string_view value) -> bool 
     set_tone(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Badge::property_names() const -> std::vector<std::string_view> {
-  return {"text", "value", "tone"};
+  return Element::with_universal({"text", "value", "tone"});
 }
 
 // —— Chip ——
@@ -456,7 +456,7 @@ auto Chip::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "tone") return std::string(tone_name(tone_));
   if (name == "dot") return std::string(dot_ ? kFlagTrue : "false");
   if (name == "closable") return std::string(closable_ ? kFlagTrue : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Chip::set_property(std::string_view name, std::string_view value) -> bool {
@@ -480,11 +480,11 @@ auto Chip::set_property(std::string_view name, std::string_view value) -> bool {
     }
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Chip::property_names() const -> std::vector<std::string_view> {
-  return {"text", "value", "tone", "dot", "closable"};
+  return Element::with_universal({"text", "value", "tone", "dot", "closable"});
 }
 
 // —— Avatar ——
@@ -569,7 +569,7 @@ auto Avatar::get_property(std::string_view name) const -> std::optional<std::str
   if (name == "name" || name == "text") return name_;
   if (name == "initials") return initials();
   if (name == "diameter") return std::format("{}", size_);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Avatar::set_property(std::string_view name, std::string_view value) -> bool {
@@ -583,11 +583,11 @@ auto Avatar::set_property(std::string_view name, std::string_view value) -> bool
     set_size(static_cast<float>(*parsed));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Avatar::property_names() const -> std::vector<std::string_view> {
-  return {"name", "text", "initials", "size"};
+  return Element::with_universal({"name", "text", "initials", "size"});
 }
 
 // —— Tooltip ——
@@ -746,7 +746,7 @@ auto Tooltip::get_property(std::string_view name) const -> std::optional<std::st
   if (name == "target") {
     return std::format("{},{},{},{}", target_.x, target_.y, target_.width, target_.height);
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Tooltip::set_property(std::string_view name, std::string_view value) -> bool {
@@ -781,11 +781,11 @@ auto Tooltip::set_property(std::string_view name, std::string_view value) -> boo
     set_target_rect(rect);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Tooltip::property_names() const -> std::vector<std::string_view> {
-  return {"text", "value", "active", "target"};
+  return Element::with_universal({"text", "value", "active", "target"});
 }
 
 }  // namespace st::ui

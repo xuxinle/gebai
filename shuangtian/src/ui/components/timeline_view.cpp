@@ -692,7 +692,7 @@ auto TimelineView::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(), {"playhead", "pixels_per_second", "scroll", "tracks", "duration",
                              "snap", "hover_clip", "trim_handles", "track_headers"});
-  return names;
+  return Element::with_universal(names);
 }
 
 auto TimelineView::invoke_action(std::string_view action, std::string_view argument) -> bool {

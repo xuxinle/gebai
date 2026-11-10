@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/banner.hpp"
+#include "st/ui/components/banner.hpp"
 
 #include <algorithm>
 #include <format>
@@ -310,7 +310,7 @@ auto Banner::get_property(std::string_view name) const -> std::optional<std::str
   if (name == "icon") return icon_.empty() ? std::string(default_icon()) : icon_;
   if (name == "action" || name == "label") return action_;
   if (name == "closable") return std::string(closable_ ? kFlagTrue : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Banner::set_property(std::string_view name, std::string_view value) -> bool {
@@ -342,15 +342,15 @@ auto Banner::set_property(std::string_view name, std::string_view value) -> bool
     set_closable(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Banner::property_names() const -> std::vector<std::string_view> {
-  return {"title", "description", "tone", "icon", "action", "closable"};
+  return Element::with_universal({"title", "description", "tone", "icon", "action", "closable"});
 }
 
 auto Banner::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"visible"};
+  return Element::with_universal_readonly({"visible"});
 }
 
 auto Banner::invoke_action(std::string_view action, std::string_view argument) -> bool {

@@ -491,3 +491,105 @@ ST_TEST(xml_ui_appearance_same_value_is_not_rejected) {
   if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
   ST_CHECK(report.clean());
 }
+
+ST_TEST(xml_ui_intercepts_lands_on_element) {
+  // `intercepts` 是 `Element` 级状态（不是 `Style`）：命中判定在 UiRoot 分配事件的路径上。
+  // 叠放层几乎总需要“上层穿透”（文字盖在可点区上），而叠放与穿透是两件事——
+  // 只写 `absolute` 不写 `intercepts=false`，上层会把下层的点击全吃掉。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(
+      R"(<Column id="layer" absolute="true" intercepts="false"/>)", &report);
+  ST_REQUIRE(tree != nullptr);
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
+  ST_CHECK(report.clean());
+  ST_CHECK(!tree->intercepts_input());
+  // 夹具要推到非默认值：默认就是 `true`，拿 `true` 断言恒绿。
+  st::ui::Panel plain(st::ui::FlexDirection::Column);
+  ST_CHECK(plain.intercepts_input());
+}
+
+// ── `effective_visible`：含祖先链的“看不看得见” ─────────────────
+
+ST_TEST(element_effective_visible_includes_ancestors) {
+  // 两词分工：`visible` = “我让没让自己显示”（可写回验证），
+  //        `effective_visible` = “观众看不看得见”（含祖先链）。
+  //
+  // 为何必须有后者（实测踩过）：`find` 会把隐藏页里的元素一并返回，它们
+  // `visible: true`——自动化拿到就去点，而东西在屏外。现象是“回调执行了、界面没变”，
+  // 比“找不到元素”难查得多。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(
+      R"(<Column id="page"><Row id="inner"><Text id="leaf">x</Text></Row></Column>)",
+      &report);
+  ST_REQUIRE(tree != nullptr);
+  UiRoot root;
+  root.set_viewport({320.0f, 200.0f});
+  root.set_content(std::move(tree));
+  root.layout(true);
+  Element* page = root.find("page");
+  Element* leaf = root.find("leaf");
+  ST_REQUIRE(page != nullptr);
+  ST_REQUIRE(leaf != nullptr);
+  ST_CHECK(leaf->effective_visible());
+
+  page->set_visible(false);
+  // 叶子自己没被改过，但观众已经看不见它了。
+  ST_CHECK(leaf->visible());                 // 自身状态不变
+  ST_CHECK(!leaf->effective_visible());      // 但含祖先链后不可见
+
+  page->set_visible(true);
+  ST_CHECK(leaf->effective_visible());
+}
+
+ST_TEST(invoke_click_on_hidden_element_is_rejected) {
+  // 默认拒绝对“看不见的元素”触发点击类动作，而不是静默执行回调。
+  // 静默执行的实际代价：隐藏页里的按钮被“点到”（回调改了状态、界面没变），
+  // 排查时得先想到“它其实没在屏上”。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(
+      R"(<Column id="page"><Row id="hidden-row"><Button id="btn">x</Button></Row></Column>)",
+      &report);
+  ST_REQUIRE(tree != nullptr);
+  UiRoot root;
+  root.set_viewport({320.0f, 200.0f});
+  root.set_content(std::move(tree));
+  root.layout(true);
+  Element* page = root.find("page");
+  Element* btn = root.find("btn");
+  ST_REQUIRE(page != nullptr);
+  ST_REQUIRE(btn != nullptr);
+
+  // 可见时能点
+  ST_CHECK(st::ui::invoke_element(root, *btn, "click", "", false));
+
+  page->set_visible(false);
+  // 不可见：拒绝（返回 false，调用方据此报未生效）
+  ST_CHECK(!st::ui::invoke_element(root, *btn, "click", "", false));
+  // `force=true` 仍可强行触发（自动化补测/故意模拟用）
+  ST_CHECK(st::ui::invoke_element(root, *btn, "click", "", true));
+}
+
+ST_TEST(invoke_non_click_actions_ignore_visibility) {
+  // 只有点击类受可见性限制。`animate` / `submit` 这类是**程序化状态变更**，
+  // 确实有用例需要作用于隐藏元素（先藏后播）。把它一并卡死会削掉正当用法。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(
+      R"(<Column id="page"><Button id="btn">x</Button></Column>)", &report);
+  ST_REQUIRE(tree != nullptr);
+  UiRoot root;
+  root.set_viewport({320.0f, 200.0f});
+  root.set_content(std::move(tree));
+  root.layout(true);
+  Element* page = root.find("page");
+  Element* btn = root.find("btn");
+  ST_REQUIRE(page != nullptr);
+  ST_REQUIRE(btn != nullptr);
+  page->set_visible(false);
+  // `animate` 在隐藏元素上也该成功（它为后续显示做准备）
+  (void)st::ui::invoke_element(root, *btn, "animate", "fadeInUp", false);
+  // 起播成功的判据用**属性面**（`animation` 名字），而不是“这一刻在不在播”：
+  // 时长为 0 的瞬时帧里 `animation_running()` 可能已经结束（拿它断言会闪。）。
+  const auto name = btn->get_property("animation");
+  ST_CHECK(name.has_value());
+  if (name.has_value()) ST_CHECK_EQ(*name, std::string("fadeInUp"));
+}

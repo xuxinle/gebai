@@ -969,7 +969,7 @@ auto Tabs::get_property(std::string_view name) const -> std::optional<std::strin
     }
     return joined;
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
@@ -1021,11 +1021,11 @@ auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
     set_tabs(std::move(labels));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Tabs::property_names() const -> std::vector<std::string_view> {
-  return {"active", "label", "options", "scroll", "show_add", "max_tab_width", "trailing"};
+  return Element::with_universal({"active", "label", "options", "scroll", "show_add", "max_tab_width", "trailing"});
 }
 
 auto Tabs::invoke_action(std::string_view action, std::string_view argument) -> bool {

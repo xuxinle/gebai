@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/status_dot.hpp"
+#include "st/ui/components/status_dot.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -152,7 +152,7 @@ auto StatusDot::get_property(std::string_view name) const -> std::optional<std::
   if (name == "label" || name == "text") return label_;
   if (name == "pulse") return std::string(pulse_ ? kFlagTrue : "false");
   if (name == "dot_size" || name == "size") return std::format("{}", dot_size_);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto StatusDot::set_property(std::string_view name, std::string_view value) -> bool {
@@ -182,11 +182,11 @@ auto StatusDot::set_property(std::string_view name, std::string_view value) -> b
     set_dot_size(static_cast<float>(*parsed));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto StatusDot::property_names() const -> std::vector<std::string_view> {
-  return {"state", "label", "pulse", "dot_size"};
+  return Element::with_universal({"state", "label", "pulse", "dot_size"});
 }
 
 }  // namespace st::ui

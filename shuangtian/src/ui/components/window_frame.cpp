@@ -237,7 +237,7 @@ auto WindowFrame::get_property(std::string_view name) const -> std::optional<std
   if (name == "show_title_bar") return std::string(show_title_bar_ ? "true" : "false");
   if (name == "show_resize_edges") return std::string(show_resize_edges_ ? "true" : "false");
   if (name == "edge_band") return std::format("{}", static_cast<double>(edge_thickness()));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto WindowFrame::set_property(std::string_view name, std::string_view value) -> bool {
@@ -254,11 +254,11 @@ auto WindowFrame::set_property(std::string_view name, std::string_view value) ->
     set_show_resize_edges(value == "true" || value == "1" || value == "on");
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto WindowFrame::property_names() const -> std::vector<std::string_view> {
-  return {"title", "text", "show_title_bar", "show_resize_edges", "edge_band"};
+  return Element::with_universal({"title", "text", "show_title_bar", "show_resize_edges", "edge_band"});
 }
 
 auto WindowFrame::invoke_action(std::string_view action, std::string_view argument) -> bool {

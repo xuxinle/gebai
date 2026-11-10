@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/skeleton.hpp"
+#include "st/ui/components/skeleton.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -199,7 +199,7 @@ auto Skeleton::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "pulse") return std::string(pulse_ ? kFlagTrue : "false");
   if (name == "radius") return std::format("{}", radius_);
   if (name == "height") return std::format("{}", measured_.height);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Skeleton::set_property(std::string_view name, std::string_view value) -> bool {
@@ -235,15 +235,15 @@ auto Skeleton::set_property(std::string_view name, std::string_view value) -> bo
     set_radius(static_cast<float>(*parsed));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Skeleton::property_names() const -> std::vector<std::string_view> {
-  return {"lines", "shape", "last_line_ratio", "pulse", "radius"};
+  return Element::with_universal({"lines", "shape", "last_line_ratio", "pulse", "radius"});
 }
 
 auto Skeleton::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"height"};
+  return Element::with_universal_readonly({"height"});
 }
 
 }  // namespace st::ui

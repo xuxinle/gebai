@@ -1053,7 +1053,7 @@ auto ThreeView::get_property(std::string_view name) const -> std::optional<std::
     }
     return std::string("none");
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto ThreeView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -1105,7 +1105,7 @@ auto ThreeView::set_property(std::string_view name, std::string_view value) -> b
     mark_dirty();
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto ThreeView::property_names() const -> std::vector<std::string_view> {
@@ -1113,7 +1113,7 @@ auto ThreeView::property_names() const -> std::vector<std::string_view> {
   //
   // 只列“能被外部改动”的那些。只读观测值（物体数/后端/悬浮命中/计数）
   // 走 `readonly_property_names()`。
-  return {"distance", "yaw", "pitch", "selected_name"};
+  return Element::with_universal({"distance", "yaw", "pitch", "selected_name"});
 }
 
 auto ThreeView::readonly_property_names() const -> std::vector<std::string_view> {
@@ -1126,10 +1126,10 @@ auto ThreeView::readonly_property_names() const -> std::vector<std::string_view>
   // 是遍历 `property_names()` + `readonly_property_names()` 生成的，
   // 没列进去就**永远不会被导出**——而症状是“属性读出来是空的”，
   // 看上去像“组件没实现”。
-  return {"objects",      "backend",      "picked",       "selected_name",
+  return Element::with_universal_readonly({"objects",      "backend",      "picked",       "selected_name",
           "error",        "hover_events", "click_events", "pick_distance",
           "paint_frames", "anim_time", "backend_rebuilds", "render_size",
-          "mesh_stats", "first_anim_deg", "backend_pref", "camera_state", "frame_bounds"};
+          "mesh_stats", "first_anim_deg", "backend_pref", "camera_state", "frame_bounds"});
 }
 
 auto ThreeView::invoke_action(std::string_view action, std::string_view argument) -> bool {

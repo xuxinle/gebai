@@ -247,7 +247,7 @@ auto Dialog::get_property(std::string_view name) const -> std::optional<std::str
   if (name == "card") {
     return std::format("{},{},{},{}", card_.x, card_.y, card_.width, card_.height);
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Dialog::set_property(std::string_view name, std::string_view value) -> bool {
@@ -281,11 +281,11 @@ auto Dialog::set_property(std::string_view name, std::string_view value) -> bool
     set_viewport_rect(math::Rect{numbers[0], numbers[1], numbers[2], numbers[3]});
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Dialog::property_names() const -> std::vector<std::string_view> {
-  return {"title", "body", "actions", "viewport", "card", "value"};
+  return Element::with_universal({"title", "body", "actions", "viewport", "card", "value"});
 }
 
 auto Dialog::invoke_action(std::string_view action, std::string_view argument) -> bool {
@@ -432,7 +432,7 @@ auto Toast::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "tone") return std::string(tone_name(tone_));
   if (name == "auto_dismiss_ms") return std::format("{:.0f}", auto_dismiss_ms_);
   if (name == "expired") return expired_ ? "true" : "false";
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Toast::set_property(std::string_view name, std::string_view value) -> bool {
@@ -452,11 +452,11 @@ auto Toast::set_property(std::string_view name, std::string_view value) -> bool 
     set_auto_dismiss_ms(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Toast::property_names() const -> std::vector<std::string_view> {
-  return {"message", "text", "value", "tone", "auto_dismiss_ms", "expired"};
+  return Element::with_universal({"message", "text", "value", "tone", "auto_dismiss_ms", "expired"});
 }
 
 }  // namespace st::ui

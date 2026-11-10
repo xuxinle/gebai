@@ -1102,7 +1102,11 @@ if (element == nullptr) {
 }
 const std::string action = json_get_string(params, "action", "click");
 const std::string argument = json_get_string(params, "argument");
-const bool handled = ui::invoke_element(root, *element, action, argument);
+// `force`：对“看不见的元素”也强行触发点击类动作（默认不开）。
+// 默认拒绝的理由见 `ui::invoke_element` 的注释——隐藏页里的元素 `visible=true`，
+// 调用方拿到就点，结果是“回调执行了、界面没变”，比找不到更难查。
+const bool force = json_get_bool(params, "force", false);
+const bool handled = ui::invoke_element(root, *element, action, argument, force);
 host.request_repaint();
 Json result = Json::object();
 result["handled"] = handled;
@@ -1116,8 +1120,18 @@ result["id"] = element->derived_id();
 // invoke 元素存在即 ok，动作是否被处理看 `handled`），但**必须**让不读 `handled`
 // 的人也能看见异常——顶层 `error` 字段就是给他们的红线。
 if (!handled) {
-  result["error"] = std::format("元素 {} 不支持动作 {}（handled=false）",
-                                element->derived_id(), action);
+  // 区分“元素看不见”与“组件不支持这个动作”：两者修复动作完全不同。
+  const bool click_like =
+      action == "click" || action == "dblclick" || action == "tripleclick";
+  if (click_like && !force && !element->effective_visible()) {
+    result["error"] = std::format(
+        "元素 {} 当前看不见（自己或祖先 visible=false），点击未执行；"
+        "确实要强行触发传 force=true",
+        element->derived_id());
+  } else {
+    result["error"] = std::format("元素 {} 不支持动作 {}（handled=false）",
+                                  element->derived_id(), action);
+  }
 }
 // **回带变更后的属性快照**：`invoke` 之后几乎总要看一眼“变成什么了”。
 // 不随身带就得再发一次 `get`——每个动作多一次往返（实测本地回环 0.1ms 可忽略，

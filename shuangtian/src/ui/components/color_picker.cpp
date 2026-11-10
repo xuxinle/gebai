@@ -496,7 +496,7 @@ auto ColorPicker::property_names() const -> std::vector<std::string_view> {
   // 于是同一名字在快照里出现**两遍**；而“声明表不重复”是它作为**契约**的基本要求。
   // 实测：`tests/ui_component_contract_test.cpp` 遍历 48 个组件时这条立刻变红。
   names.insert(names.end(), {"hue", "saturation", "value", "eyedropper"});
-  return names;
+  return Element::with_universal(names);
 }
 
 auto ColorPicker::invoke_action(std::string_view action, std::string_view argument) -> bool {

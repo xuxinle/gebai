@@ -401,7 +401,7 @@ auto Pagination::get_property(std::string_view name) const -> std::optional<std:
     return out;
   }
   if (name == "show_edges") return std::string(show_edges_ ? kFlagTrue : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Pagination::set_property(std::string_view name, std::string_view value) -> bool {
@@ -429,15 +429,15 @@ auto Pagination::set_property(std::string_view name, std::string_view value) -> 
     set_show_edges(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Pagination::property_names() const -> std::vector<std::string_view> {
-  return {"page", "page_count", "sibling_count", "show_edges"};
+  return Element::with_universal({"page", "page_count", "sibling_count", "show_edges"});
 }
 
 auto Pagination::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count", "items"};
+  return Element::with_universal_readonly({"count", "items"});
 }
 
 auto Pagination::invoke_action(std::string_view action, std::string_view argument) -> bool {

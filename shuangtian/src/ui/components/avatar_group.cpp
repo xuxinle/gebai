@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/avatar_group.hpp"
+#include "st/ui/components/avatar_group.hpp"
 
 #include <algorithm>
 #include <format>
@@ -250,7 +250,7 @@ auto AvatarGroup::get_property(std::string_view name) const -> std::optional<std
   if (name == "max" || name == "max_visible") return std::to_string(max_visible_);
   if (name == "size" || name == "avatar_size") return std::format("{}", avatar_size_);
   if (name == "count") return std::to_string(names_.size());
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto AvatarGroup::set_property(std::string_view name, std::string_view value) -> bool {
@@ -274,15 +274,15 @@ auto AvatarGroup::set_property(std::string_view name, std::string_view value) ->
     set_avatar_size(static_cast<float>(*parsed));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto AvatarGroup::property_names() const -> std::vector<std::string_view> {
-  return {"members", "max", "size"};
+  return Element::with_universal({"members", "max", "size"});
 }
 
 auto AvatarGroup::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"count"};
+  return Element::with_universal_readonly({"count"});
 }
 
 }  // namespace st::ui

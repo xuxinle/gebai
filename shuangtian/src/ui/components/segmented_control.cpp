@@ -456,7 +456,7 @@ auto SegmentedControl::get_property(std::string_view name) const -> std::optiona
   if (name == "orientation") {
     return std::string(orientation_ == FlexDirection::Row ? "horizontal" : "vertical");
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto SegmentedControl::set_property(std::string_view name, std::string_view value) -> bool {
@@ -494,11 +494,11 @@ auto SegmentedControl::set_property(std::string_view name, std::string_view valu
     }
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto SegmentedControl::property_names() const -> std::vector<std::string_view> {
-  return {"options", "index", "stretch", "orientation"};
+  return Element::with_universal({"options", "index", "stretch", "orientation"});
 }
 
 auto SegmentedControl::invoke_action(std::string_view action, std::string_view argument) -> bool {

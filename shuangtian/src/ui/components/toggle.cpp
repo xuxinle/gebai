@@ -241,7 +241,7 @@ auto Checkbox::semantics_flags() const -> SemanticsFlags {
 auto Checkbox::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "checked" || name == "value") return std::string(checked_ ? "true" : "false");
   if (name == "label" || name == "text") return label_;
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Checkbox::set_property(std::string_view name, std::string_view value) -> bool {
@@ -255,11 +255,11 @@ auto Checkbox::set_property(std::string_view name, std::string_view value) -> bo
     set_label(std::string(value));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Checkbox::property_names() const -> std::vector<std::string_view> {
-  return {"checked", "value", "label"};
+  return Element::with_universal({"checked", "value", "label"});
 }
 
 // ————————————————— Radio —————————————————
@@ -387,7 +387,7 @@ auto Radio::semantics_flags() const -> SemanticsFlags {
 auto Radio::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "checked" || name == "value") return std::string(checked_ ? "true" : "false");
   if (name == "label" || name == "text") return label_;
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Radio::set_property(std::string_view name, std::string_view value) -> bool {
@@ -401,11 +401,11 @@ auto Radio::set_property(std::string_view name, std::string_view value) -> bool 
     set_label(std::string(value));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Radio::property_names() const -> std::vector<std::string_view> {
-  return {"checked", "value", "label"};
+  return Element::with_universal({"checked", "value", "label"});
 }
 
 // ————————————————— Switch —————————————————
@@ -578,7 +578,7 @@ auto Switch::semantics_flags() const -> SemanticsFlags {
 auto Switch::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "checked" || name == "value") return std::string(checked_ ? "true" : "false");
   if (name == "label" || name == "text") return label_;
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Switch::set_property(std::string_view name, std::string_view value) -> bool {
@@ -592,11 +592,11 @@ auto Switch::set_property(std::string_view name, std::string_view value) -> bool
     set_label(std::string(value));
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Switch::property_names() const -> std::vector<std::string_view> {
-  return {"checked", "value", "label"};
+  return Element::with_universal({"checked", "value", "label"});
 }
 
 }  // namespace st::ui

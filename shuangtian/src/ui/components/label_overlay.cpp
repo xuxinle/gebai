@@ -211,7 +211,7 @@ auto LabelOverlay::get_property(std::string_view name) const -> std::optional<st
   if (name == "painted") return std::to_string(painted_);
   if (name == "painted_edges") return std::to_string(painted_edges_);
   if (name == "font_scale") return std::format("{:.2f}", static_cast<double>(font_scale_));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto LabelOverlay::set_property(std::string_view name, std::string_view value) -> bool {
@@ -223,11 +223,11 @@ auto LabelOverlay::set_property(std::string_view name, std::string_view value) -
       return false;
     }
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto LabelOverlay::property_names() const -> std::vector<std::string_view> {
-  return {"label_count", "edge_count", "painted", "painted_edges", "font_scale"};
+  return Element::with_universal({"label_count", "edge_count", "painted", "painted_edges", "font_scale"});
 }
 
 auto LabelOverlay::edge_snapshot() const -> std::vector<std::pair<std::string, std::string>> {

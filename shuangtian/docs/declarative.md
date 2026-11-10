@@ -313,6 +313,34 @@ for_each(c, items, key_fn, item_fn);   // ≈ For/ForEach
 （非子元素）由专用包装承接（`list(c, {.items, .selected})` 内部调 `sync_items`），
 v1 覆盖 List/Table/Tabs 三件套，其余组件 v1.1 逐个审查（§10）。
 
+### 5.3.1 `BoxProps` 涵盖范围（**常用子集，不是全部**）
+
+`BoxProps` 刻意为**日常声明**服务，不追求覆盖 `Style` 的所有字段。当前三套写入面的
+覆盖关系（实测逐项比对，2026-11-10）：
+
+| 层 | 范围 | 用途 |
+|---|---|---|
+| **协议 `set` / XML 属性** | 最大（44 个名，含 `max_width`/`shrink`/`monospace`…） | 运行时动态修改、外部驱动 |
+| **`BoxProps`（DSL）** | 常用子集（布局/外观/对齐/动画/样式五档） | 一行声明写出界面 |
+| **`custom<T>` 逃生舱** | 任意 `style()` / 组件专有接口 | 其余情形 |
+
+**缺的那部分怎么补**（确实需要 DSL 里一行写出来时）：
+
+```cpp
+custom<Panel>(c, [](Panel& p) {
+  p.style().max_width = 480.0f;   // 任何 Style 字段
+  p.style().shrink = false;
+});
+```
+
+为何不把 `Style` 全部字段都搬进 `BoxProps`：声明式每帧重建，`BoxProps` 的语义是
+“**声明式值**”（缺省 = 不动），而 `Style` 里有不少是“改动即触发特定重算”的��态量
+（如 `background_gradient` 的几何归一化、`shadow` 的两层参数）；把它们都搬进来会让
+“声明式改了一帧后又被下一帧覆盖”这类问题变多。需要时走 `custom<T>` 反而更清楚。
+
+> 例外：**动画与样式五档（`variant`/`elevation`/`radius_mode`/`control_size`/`density`）
+> 已在 `BoxProps` 里**——它们是“声明式意图”（主题切了自动跟随），与普通静态值不同。
+
 ### 5.4 C++ 生命周期安全（悬垂防护，条款化）
 
 | 风险 | 防护 |

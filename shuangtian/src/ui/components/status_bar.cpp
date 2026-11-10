@@ -321,7 +321,7 @@ auto StatusBar::get_property(std::string_view name) const -> std::optional<std::
   if (name == "text" || name == "content") return semantics_text();
   if (name == "separators") return std::string(separators_ ? kFlagTrue : "false");
   if (name == "height") return std::to_string(static_cast<int>(measured_.height));
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto StatusBar::set_property(std::string_view name, std::string_view value) -> bool {
@@ -349,15 +349,15 @@ auto StatusBar::set_property(std::string_view name, std::string_view value) -> b
     set_separators(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto StatusBar::property_names() const -> std::vector<std::string_view> {
-  return {"left", "right", "separators"};
+  return Element::with_universal({"left", "right", "separators"});
 }
 
 auto StatusBar::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"text", "height"};
+  return Element::with_universal_readonly({"text", "height"});
 }
 
 auto StatusBar::invoke_action(std::string_view action, std::string_view argument) -> bool {

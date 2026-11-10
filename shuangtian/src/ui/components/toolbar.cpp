@@ -351,7 +351,7 @@ auto Toolbar::get_property(std::string_view name) const -> std::optional<std::st
   if (name == "count" || name == "item_count") return std::to_string(items_.size());
   if (name == "collapsed") return std::to_string(collapsed_);
   if (name == "overflow_label") return overflow_label_;
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Toolbar::set_property(std::string_view name, std::string_view value) -> bool {
@@ -361,15 +361,15 @@ auto Toolbar::set_property(std::string_view name, std::string_view value) -> boo
   }
   // `items` / `count` 只读：条目是**拥有所有权**的对象，不能靠字符串重建
   // （那会丢掉每个按钮的回调与状态）。
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Toolbar::property_names() const -> std::vector<std::string_view> {
-  return {"overflow_label"};
+  return Element::with_universal({"overflow_label"});
 }
 
 auto Toolbar::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"items", "count", "collapsed"};
+  return Element::with_universal_readonly({"items", "count", "collapsed"});
 }
 
 }  // namespace st::ui

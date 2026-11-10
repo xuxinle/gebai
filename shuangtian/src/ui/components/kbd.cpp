@@ -226,7 +226,7 @@ auto Kbd::get_property(std::string_view name) const -> std::optional<std::string
     }
     return std::string("auto");
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Kbd::set_property(std::string_view name, std::string_view value) -> bool {
@@ -250,11 +250,11 @@ auto Kbd::set_property(std::string_view name, std::string_view value) -> bool {
     else return false;
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Kbd::property_names() const -> std::vector<std::string_view> {
-  return {"keys", "separator", "platform"};
+  return Element::with_universal({"keys", "separator", "platform"});
 }
 
 }  // namespace st::ui

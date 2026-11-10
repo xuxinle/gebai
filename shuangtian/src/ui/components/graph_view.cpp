@@ -535,7 +535,7 @@ auto GraphView::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.emplace_back("backend");
   names.emplace_back("render_scale");
-  return names;
+  return Element::with_universal(names);
 }
 
 auto GraphView::readonly_property_names() const -> std::vector<std::string_view> {
@@ -550,7 +550,7 @@ auto GraphView::readonly_property_names() const -> std::vector<std::string_view>
   names.emplace_back("labels");
   names.emplace_back("error");
   names.emplace_back("camera");
-  return names;
+  return Element::with_universal_readonly(names);
 }
 
 auto GraphView::invoke_action(std::string_view action, std::string_view argument) -> bool {

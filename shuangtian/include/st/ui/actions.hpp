@@ -80,8 +80,12 @@ struct RejectedProperty {
 ///
 /// `focus`/`blur` 必须经 `UiRoot` 设置：键盘事件按 root 的焦点元素派发，
 /// 只改元素自身的 `focused` 标志会导致后续输入无处可送。
+///
+/// **`force`**：默认 `false` 时拒绝对 `effective_visible() == false` 的元素触发
+/// 点击类动作（返回 `false`）；`true` 则强行执行。其余动作（`animate`/`select`/…）
+/// 是程序化状态变更，不受可见性限制（理由见 `actions.cpp`）。
 [[nodiscard]] auto invoke_element(UiRoot& root, Element& element, std::string_view action,
-                                  std::string_view argument) -> bool;
+                                  std::string_view argument, bool force = false) -> bool;
 
 /// 选择器查询（`limit` 为 0 表示不限制）。
 [[nodiscard]] auto query_elements(UiRoot& root, std::string_view selector, std::size_t limit)

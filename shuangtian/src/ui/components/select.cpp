@@ -523,7 +523,7 @@ auto Select::get_property(std::string_view name) const -> std::optional<std::str
     return joined;
   }
   if (name == "open") return std::string(open_ ? "true" : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto Select::set_property(std::string_view name, std::string_view value) -> bool {
@@ -566,11 +566,11 @@ auto Select::set_property(std::string_view name, std::string_view value) -> bool
     set_open(*flag);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto Select::property_names() const -> std::vector<std::string_view> {
-  return {"value", "active", "label", "options", "open"};
+  return Element::with_universal({"value", "active", "label", "options", "open"});
 }
 
 auto Select::invoke_action(std::string_view action, std::string_view argument) -> bool {

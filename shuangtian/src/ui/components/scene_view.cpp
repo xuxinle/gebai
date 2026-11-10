@@ -119,7 +119,7 @@ auto SceneView::get_property(std::string_view name) const -> std::optional<std::
   if (name == "scene_ready") {
     return raster::Scene3D::available() ? "true" : "false";
   }
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto SceneView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -143,11 +143,11 @@ auto SceneView::set_property(std::string_view name, std::string_view value) -> b
     mark_dirty();
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto SceneView::property_names() const -> std::vector<std::string_view> {
-  return {"shape", "spin", "spin_speed", "scene_frames", "scene_ready", "mesh_vertices"};
+  return Element::with_universal({"shape", "spin", "spin_speed", "scene_frames", "scene_ready", "mesh_vertices"});
 }
 
 }  // namespace st::ui

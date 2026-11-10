@@ -328,7 +328,7 @@ auto SearchBox::get_property(std::string_view name) const -> std::optional<std::
   if (name == "placeholder") return placeholder_;
   if (name == "count") return std::to_string(count_);
   if (name == "clearable") return std::string(clearable_ ? kFlagTrue : "false");
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto SearchBox::set_property(std::string_view name, std::string_view value) -> bool {
@@ -352,14 +352,14 @@ auto SearchBox::set_property(std::string_view name, std::string_view value) -> b
     set_clearable(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto SearchBox::property_names() const -> std::vector<std::string_view> {
-  return {"value", "placeholder", "count", "clearable"};
+  return Element::with_universal({"value", "placeholder", "count", "clearable"});
 }
 
-auto SearchBox::readonly_property_names() const -> std::vector<std::string_view> { return {}; }
+auto SearchBox::readonly_property_names() const -> std::vector<std::string_view> { return Element::with_universal_readonly({}); }
 
 auto SearchBox::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "clear") {

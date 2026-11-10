@@ -1,4 +1,4 @@
-﻿#include "st/ui/components/html_view.hpp"
+#include "st/ui/components/html_view.hpp"
 #include "st/ui/wheel.hpp"
 
 #include <algorithm>
@@ -1092,7 +1092,7 @@ auto HtmlView::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "rules") return std::to_string(style_sheet_.rules.size());
   if (name == "lines" || name == "rows") return std::to_string(rows_.size());
   if (name == "height") return std::format("{}", content_height_ + padding_ * 2.0f);
-  return std::nullopt;
+  return Element::get_property(name);
 }
 
 auto HtmlView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -1130,15 +1130,15 @@ auto HtmlView::set_property(std::string_view name, std::string_view value) -> bo
     set_follow_theme(*parsed);
     return true;
   }
-  return false;
+  return Element::set_property(name, value);
 }
 
 auto HtmlView::property_names() const -> std::vector<std::string_view> {
-  return {"html", "padding", "font_size", "max_content_width", "follow_theme", "scroll"};
+  return Element::with_universal({"html", "padding", "font_size", "max_content_width", "follow_theme", "scroll"});
 }
 
 auto HtmlView::readonly_property_names() const -> std::vector<std::string_view> {
-  return {"title", "plain", "rules", "lines", "height"};
+  return Element::with_universal_readonly({"title", "plain", "rules", "lines", "height"});
 }
 
 auto HtmlView::invoke_action(std::string_view action, std::string_view argument) -> bool {

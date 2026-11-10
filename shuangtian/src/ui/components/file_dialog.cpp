@@ -1119,7 +1119,7 @@ auto FileDialog::property_names() const -> std::vector<std::string_view> {
                {"directory", "filename", "mode", "error", "selected", "pending_path",
                 "pending_paths", "multi_select", "selected_paths",
                 "show_hidden", "filters", "places", "scroll"});
-  return names;
+  return Element::with_universal(names);
 }
 
 auto FileDialog::invoke_action(std::string_view action, std::string_view argument) -> bool {

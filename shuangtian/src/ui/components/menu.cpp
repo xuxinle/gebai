@@ -93,7 +93,7 @@ auto MenuPanel::get_property(std::string_view name) const -> std::optional<std::
 auto MenuPanel::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.push_back("anchor");
-  return names;
+  return Element::with_universal(names);
 }
 
 auto MenuPanel::invoke_action(std::string_view action, std::string_view argument) -> bool {

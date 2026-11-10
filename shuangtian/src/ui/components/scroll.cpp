@@ -483,7 +483,7 @@ auto ScrollView::property_names() const -> std::vector<std::string_view> {
   names.push_back("max_scroll");
   names.push_back("viewport_height");
   names.push_back("content_height");
-  return names;
+  return Element::with_universal(names);
 }
 
 }  // namespace st::ui
