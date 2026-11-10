@@ -56,7 +56,7 @@ namespace gallery {
 /// 与 apps/gallery/{pages,main}.cpp 的实例化点一一对应。
 /// 「直接实例化」含两种形态：建卡时实例化，以及懒创建组件经按钮触发构造后挂
 /// 叠加层（后者另列 kGalleryLazy；树自检时两类都在场断言里放行）。
-inline constexpr std::array<std::string_view, 69> kGalleryExhibits{
+inline constexpr std::array<std::string_view, 70> kGalleryExhibits{
     "Panel",       "Text",       "Heading",     "Icon",        "Button",
     "Card",        "Divider",    "KeyValueRow", "Input",       "TextArea",
     "Checkbox",    "Radio",      "Switch",      "Slider",      "Select",
@@ -79,6 +79,8 @@ inline constexpr std::array<std::string_view, 69> kGalleryExhibits{
       "Accordion",   "Toolbar",   "StatusBar",   "DividerLabel",
       // 2026-11-08 补全包五 · 展示微件
       "Sparkline",   "ProgressRing", "Rating",   "Kbd",         "Link",
+      // 2026-11-10 · 连线组件
+      "Connector",
   };
 
 /// gallery 懒创建展示集：交互时才构造、挂 UiRoot 叠加层的展示卡组件。

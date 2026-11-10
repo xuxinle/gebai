@@ -317,6 +317,41 @@ note: forward declaration of 'class st::ui::TitleBar'
 其余每个组件一个头：`terminal.hpp`、`table.hpp`、`code_editor.hpp`、`diff_view.hpp`
 …… 名字即组件名。
 
+### 连线：`Connector`
+
+把**任意两个点/元素**连起来（流程图、节点编辑器、思维导图、状态机、拓扑图）。
+它是**自绘单件**，不依赖任何容器：
+
+```cpp
+#include "st/ui/components/connector.hpp"
+
+auto line = std::make_unique<st::ui::Connector>();
+line->set_points({20, 60}, {180, 120});                 // 本地坐标（= 自身 bounds 内）
+line->set_route(st::ui::Connector::Route::Curve);       // Straight / Orthogonal / Curve
+line->set_arrow(st::ui::Connector::Arrow::End);         // None / Start / End / Both
+line->set_dash_csv("6 4");                             // 空 = 实线
+line->style().absolute = true;   // 铺满父级、不进 flex 流（推荐形态）
+line->style().width = 200.0f;
+line->style().height = 140.0f;
+parent->add_child(std::move(line));
+```
+
+端点四种给法（优先级从高到低）：`set_source_fn/set_target_fn`（每次绘制现算的表达式）
+→ `set_source/set_target(element, side)`（跟随元素，元素不可见时整条不画）
+→ `set_points`（固定坐标）→ 什么都不设（用自身 bounds 的对角）。
+
+三件容易踩的：
+
+- **坐标是本地坐标**（原点 = 自身 `bounds` 左上角）。给元素端点时组件内部会把
+  `bounds()` 的绝对坐标换成同一套坐标；自己算多边形时别再把原点加一次。
+- **命中是沿线窄带**（`hit_tolerance`），不是整块 bounds——所以 `absolute` 铺满父级
+  时它**不会吃掉**下层按钮的点击。要“点线选中”就在 `on_line_event` 上接回调。
+- **虚线是路径层切段**：光栅层没有 dash（`StrokeStyle` 只有 cap/join），
+  段数越多描边次数越多——界面里几十条线的规模完全够用。
+
+回归：`tests/ui_connector_test.cpp`（几何/路由/虚线/箭头/命中/属性面），
+逆向验证：`tools/connector_reverse_verify.py`。
+
 ### 不进声明式注册表的组件
 
 三维族（`three_view.hpp` / `scene_view.hpp` / `graph_view.hpp` / `label_overlay.hpp`）

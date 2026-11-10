@@ -879,6 +879,27 @@ void Element::measure(const RenderContext& context, const Constraints& constrain
 
   for (auto& child : children_) {
     if (!child->visible_) continue;
+    // **绝对定位的子元素不进流，也不参与父的测量**（与 `layout_children` 同一口径）。
+    //
+    // 但它**自己要被量一次**：`place_absolute` 拿的是 `measured_size()`，而绝对定位
+    // 元素的 `width/height` 常为 `kAuto`（靠内容定尺寸）。跳过量会把它摆成 0×0。
+    //
+    // 为何必须跳过（实测）：`Style::absolute` 的文档承诺“不影响父的 `measure`”，
+    // 而旧实现只改了一半（排流跳了、测量没跳）。后果是任何 absolute 覆盖层
+    //（连线层、缩略图、拖拽浮标）都会把父容器量得更大 → 兄弟位置、页面高度、
+    // 滚动范围全跟着变，而样式里明明写着 absolute、`get` 回来也是 true。
+    if (child->style().absolute) {
+      // 约束与流内子元素**完全一致**（只是不把结果计入本元素的尺寸）：
+      // 绝对定位改变的是“占不占位”，不是“能多大”。约束不同的话，同一个子元素
+      // 在两种摆法下会量出不同尺寸——那不是这个字段该管的事。
+      Constraints own;
+      own.max_width = row ? kUnbounded : available_width;
+      own.max_height = row ? available_height : kUnbounded;
+      own.available_width = available_width;
+      own.available_height = available_height;
+      child->measure(context, own);
+      continue;
+    }
     Constraints child_constraints;
     child_constraints.max_width = row ? kUnbounded : available_width;
     child_constraints.max_height = row ? available_height : kUnbounded;

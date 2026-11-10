@@ -74,6 +74,7 @@
 #include "st/ui/components/rating.hpp"
 #include "st/ui/components/kbd.hpp"
 #include "st/ui/components/link.hpp"
+#include "st/ui/components/connector.hpp"
 #include "st/ui/components/select_box.hpp"
 #include "st/ui/components/select_panel.hpp"
 #include "st/ui/components/slider.hpp"
@@ -159,7 +160,7 @@ inline void import_all_components() {
       // 结构与容器（包四）
       Accordion, Toolbar, StatusBar, DividerLabel,
       // 展示微件（包五）
-      Sparkline, ProgressRing, Rating, Kbd, Link,
+      Sparkline, ProgressRing, Rating, Kbd, Link, Connector,
       // 容器与列表
       List, ListItem, ScrollView, ScrollBar, SplitView, Table, Tabs, Tree, Viewport,
       // 浮层与反馈

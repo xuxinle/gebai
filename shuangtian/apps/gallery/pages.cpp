@@ -35,6 +35,7 @@
 #include "st/ui/components/rating.hpp"
 #include "st/ui/components/kbd.hpp"
 #include "st/ui/components/link.hpp"
+#include "st/ui/components/connector.hpp"
 #include "st/ui/builtin_themes.hpp"   // builtin_theme_display_name（主题卡回显）
 #include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/html_view.hpp"
@@ -102,6 +103,7 @@ using st::ui::Sparkline;
 using st::ui::ProgressRing;
 using st::ui::Rating;
 using st::ui::Kbd;
+using st::ui::Connector;
 using st::ui::Link;
 using st::ui::FileDialog;
 using st::ui::FlexDirection;
@@ -1481,6 +1483,128 @@ namespace {
   auto* widget_state_ptr = widget_state.get();
   widget_card->add_child(std::move(widget_state));
   page->add_child(std::move(widget_card));
+
+  // —— 连线（Connector：三种路由 + 箭头 + 虚线 + 跟随元素）——
+  //
+  // 每条线挂在**一块独立的小卡片**上（卡片即它的坐标盒）：`absolute` 铺满卡片，
+  // 于是 `set_points` 的坐标就是卡片内的局部坐标——页面重排/滚动都不会飘。
+  auto connector_card = make_card("card-connector",
+                                  "连线（直线 / 正交折线 / 贝塞尔曲线；箭头、虚线、元素跟随）");
+  connector_card->add_child(make_caption(
+      "Straight 直连；Orthogonal 按两端法线走折线（转角圆化）；Curve 控制点沿出线方向外推→端点切线水平。"
+      "虚线是路径层切段（StrokeStyle 没有 dash）；末格是 set_source/set_target 跟着元素走——"
+      "节点一动线就跟着动，节点不可见时整条不画"));
+
+  auto connector_stage = std::make_unique<Panel>();
+  connector_stage->set_id("connector-stage");
+  connector_stage->style().height = 150.0f;
+  connector_stage->style().direction = FlexDirection::Row;
+  connector_stage->style().gap = 12.0f;
+  connector_stage->style().align_items = Align::Stretch;
+  // 展示格 = 一块固定尺寸的容器 + 一行标题 + 一条 absolute 铺满它的线。
+  auto make_cell = [](std::string_view id, std::string_view title, Tone tone) {
+    auto cell = std::make_unique<Card>(10.0f);
+    cell->set_id(std::string(id));
+    cell->style().width = 150.0f;
+    cell->style().direction = FlexDirection::Column;
+    cell->style().gap = 4.0f;
+    auto name = std::make_unique<Text>(std::string(title));
+    name->set_tone(tone);
+    name->set_scale(Text::Scale::Xs);
+    cell->add_child(std::move(name));
+    return cell;
+  };
+  // ① 直线（固定端点 + 末端箭头）
+  {
+    auto cell = make_cell("connector-node-a", "A · 直线", Tone::Primary);
+    auto line = std::make_unique<Connector>();
+    line->set_id("demo-connector-straight");
+    line->style().absolute = true;
+    line->style().left = 0.0f;
+    line->style().top = 0.0f;
+    line->style().width = 150.0f;
+    line->style().height = 110.0f;
+    line->set_route(Connector::Route::Straight);
+    line->set_arrow(Connector::Arrow::End);
+    line->set_points({14.0f, 50.0f}, {132.0f, 100.0f});
+    cell->add_child(std::move(line));
+    connector_stage->add_child(std::move(cell));
+  }
+  // ② 正交折线（转角圆化 + 中点标注）
+  {
+    auto cell = make_cell("connector-node-b", "B · 正交", Tone::Accent);
+    auto line = std::make_unique<Connector>();
+    line->set_id("demo-connector-orthogonal");
+    line->style().absolute = true;
+    line->style().left = 0.0f;
+    line->style().top = 0.0f;
+    line->style().width = 150.0f;
+    line->style().height = 110.0f;
+    line->set_route(Connector::Route::Orthogonal);
+    line->set_points({14.0f, 52.0f}, {136.0f, 100.0f});
+    line->set_label("正交");
+    cell->add_child(std::move(line));
+    connector_stage->add_child(std::move(cell));
+  }
+  // ③ 贝塞尔曲线 + 虚线 + 双箭头
+  {
+    auto cell = make_cell("connector-node-c", "C · 曲线", Tone::Success);
+    auto line = std::make_unique<Connector>();
+    line->set_id("demo-connector-curve");
+    line->style().absolute = true;
+    line->style().left = 0.0f;
+    line->style().top = 0.0f;
+    line->style().width = 150.0f;
+    line->style().height = 110.0f;
+    line->set_route(Connector::Route::Curve);
+    line->set_dash_csv("6 4");
+    line->set_arrow(Connector::Arrow::Both);
+    line->set_points({14.0f, 52.0f}, {136.0f, 100.0f});
+    cell->add_child(std::move(line));
+    connector_stage->add_child(std::move(cell));
+  }
+  // ④ 跟随元素：两个小节点 + 一条连接它们的曲线（`set_source/set_target`）
+  //
+  // 这是**节点编辑器/流程图的实际形态**：线不持有坐标，每次绘制现读两端元素的
+  // `bounds()`（所以节点重排、窗口缩放、列表重建后线自动跟上，无需 `refresh()`）。
+  {
+    auto cell = make_cell("connector-node-d", "D · 跟随元素", Tone::Warning);
+    auto from = std::make_unique<Panel>();
+    from->set_id("connector-d-from");
+    from->style().absolute = true;
+    from->style().left = 12.0f;
+    from->style().top = 34.0f;
+    from->style().width = 44.0f;
+    from->style().height = 26.0f;
+    from->set_surface(Element::Surface::Sunken);
+    auto* from_ptr = from.get();
+    auto to = std::make_unique<Panel>();
+    to->set_id("connector-d-to");
+    to->style().absolute = true;
+    to->style().left = 94.0f;
+    to->style().top = 84.0f;
+    to->style().width = 44.0f;
+    to->style().height = 26.0f;
+    to->set_surface(Element::Surface::Sunken);
+    auto* to_ptr = to.get();
+    auto line = std::make_unique<Connector>();
+    line->set_id("demo-connector-follow");
+    line->style().absolute = true;
+    line->style().left = 0.0f;
+    line->style().top = 0.0f;
+    line->style().width = 150.0f;
+    line->style().height = 110.0f;
+    line->set_route(Connector::Route::Curve);
+    line->set_arrow(Connector::Arrow::End);
+    line->set_source(from_ptr, Connector::Side::Right);
+    line->set_target(to_ptr, Connector::Side::Left);
+    cell->add_child(std::move(from));
+    cell->add_child(std::move(to));
+    cell->add_child(std::move(line));
+    connector_stage->add_child(std::move(cell));
+  }
+  connector_card->add_child(std::move(connector_stage));
+  page->add_child(std::move(connector_card));
 
   rating_ptr->on_change = [hooks, widget_state_ptr](float value) {
     widget_state_ptr->set_content(std::format("评分改成：{}", value));
