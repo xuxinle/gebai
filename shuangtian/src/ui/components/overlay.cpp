@@ -60,7 +60,7 @@ void Dialog::set_actions(std::vector<std::string> actions) {
   for (std::size_t index = 0; index < count; ++index) {
     const bool primary = index + 1U == count;  // 末项为主按钮
     auto button = std::make_unique<Button>(
-        actions_[index], primary ? Button::Variant::Primary : Button::Variant::Secondary,
+        actions_[index], primary ? Button::Variant::Primary : Button::Variant::Neutral,
         Button::Size::Medium);
     // 可预测 id：控制通道/自动化要能**点到**确认按钮。
     // 没有 id 时“确认对话框”只能靠坐标戳——“危险操作先确认”这条安全路径

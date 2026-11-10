@@ -25,7 +25,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 18> kRules{{
+constexpr std::array<RuleSpec, 19> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -151,6 +151,21 @@ constexpr std::array<RuleSpec, 18> kRules{{
     // platform_crash.cpp）、平台层（platform_* 直调系统输出是点名要求）。
     {"L18", "禁止绕过日志通道的裸打印（printf/puts/fprintf/cout/cerr；用 st::log::out/err 或 ST_LOG_*）",
      R"((?:^|[\s:;(])std::cout\b|(?:^|[\s:;(])std::cerr\b|\bstd::puts|\bstd::printf|\bprintf\s*\(|\bputs\s*\(|\bfprintf\s*\(|\bfprintf_s?\s*\()"},
+    // L19：**组件不得自定义与样式系统同名的属性面**。
+    //
+    // 为什么（2026-11-10，相期「全部忽略」蓝底事故的根因层）：
+    // `variant` 曾同时存在 `ui::Variant`（样式系统，8 档）与
+    // `Button::Variant`（组件私有，5 档）——两份词表共存时：
+    //   · 声明式那条写 `style.background`，组件那条写自己的 `variant_` 成员；
+    //   · 两者永不互相同步，于是“读回”“实际渲染”“主题重放”三处各看一半；
+    //   · 且任一侧词表都不可能完整（`Soft` 只在按钮有，`Plain/Neutral/...` 只在样式系统有）。
+    // 症状极难查：`get` 报 primary、屏幕上是 ghost 字 + primary 底。
+    //
+    // 判据（刻意收窄，只看**确定性的形态**）：组件头文件里
+    // `enum class Variant|Elevation|RadiusMode|ControlSize|Density`，
+    // 或 `set_variant|set_elevation|...` 的**新声明**。
+    // 合法写法是 `using Variant = st::ui::Variant;`（同名即同一份词表）。
+    {"L19", "组件不得自定义与样式系统同名的属性面（用 using X = st::ui::X）", ""},
 }};
 
 /// 裸字符串（raw string）的**跨行状态**：`R"delim( … )delim"` 的定界符必须记住，
@@ -781,6 +796,59 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
   return patterns;
 }
 
+/// **样式词汇表分叉检查（L19）**：组件不得自己定义与样式系统同名的档位词表。
+///
+/// ## 为何这条必须是 lint（2026-11-10，相期「全部忽略」蓝底事故）
+///
+/// 灯下黑教训：両份词表在**编译期完全合法**（各自 enum、各自 switch 都全），
+/// 单测也全绿（每个组件只测自己那一份）。缺陷只在**两者叠在同一个元素上**时才显形：
+///
+/// ```
+/// <Button variant="ghost"/>   声明式 → 写 style.background（透明，对）
+///                             组件成员 → 仍是构造默认 Primary
+/// apply_theme                  → 把主色渐变又铺一遍
+/// paint_box（渐变优先于纯色）→ 屏幕上是主色块
+/// get(variant)                 → 报 primary（读成员，不是声明）
+/// ```
+///
+/// 而这四条没有一条能被编译器或单测拦住。词表只能有一份——**这是结构约束**，
+/// 就得靠结构检查守，不能靠“下次记得”。
+///
+/// ## 判据（刻意收窄，只判确定形态）
+///
+/// 命中：`enum class Variant/Elevation/RadiusMode/ControlSize/Density`
+/// 合法：`using Variant = st::ui::Variant;`（同名即同一份词表）
+[[nodiscard]] auto check_style_vocabulary_fork(const std::vector<std::string_view>& lines,
+                                                std::string_view path, std::size_t& suppressed)
+    -> std::vector<LintViolation> {
+  // 只在组件头文件里查（框架自己的 `styling.hpp` 是词表的**产地**，不在此列）。
+  const std::string file_name = fs::file_name(path);
+  const bool is_component_header =
+      path.find("include/st/ui/components/") != std::string_view::npos;
+  if (!is_component_header) return {};
+  (void)file_name;
+
+  // 五个档位名：与样式系统 `Appearance` 字段一一对应。
+  static const std::regex fork_pattern(
+      R"(\benum\s+class\s+(Variant|Elevation|RadiusMode|ControlSize|Density)\b)");
+
+  std::vector<LintViolation> violations;
+  LexState lex;
+  for (std::size_t index = 0; index < lines.size(); ++index) {
+    const std::string_view raw = lines[index];
+    const LexedLine lexed = lex_line(raw, lex);
+    std::smatch hit;
+    if (!std::regex_search(lexed.code, hit, fork_pattern)) continue;
+    if (has_allow_comment(raw, "L19")) {
+      ++suppressed;
+      continue;
+    }
+    violations.push_back(LintViolation{std::string(path), static_cast<int>(index) + 1, "L19",
+                                       std::string(trim(raw)), false});
+  }
+  return violations;
+}
+
 [[nodiscard]] auto scan_text(std::string_view path, std::string_view text, std::size_t& suppressed,
                              const LintExemptions& exemptions, std::size_t& manifest_suppressed)
     -> std::vector<LintViolation> {
@@ -827,6 +895,9 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
     violations.push_back(std::move(violation));
   }
   for (auto& violation : check_element_state(lines, path, suppressed)) {
+    violations.push_back(std::move(violation));
+  }
+  for (auto& violation : check_style_vocabulary_fork(lines, path, suppressed)) {
     violations.push_back(std::move(violation));
   }
   return violations;

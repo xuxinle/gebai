@@ -202,6 +202,67 @@ void build_children(UiRoot& root, Element& parent, const st::xml::Node& node,
   }
 }
 
+/// 回读值与写入值是否**真的矛盾**（而非同一值的不同写法）。
+///
+/// ## 为何需要它（2026-11-10 实测）
+///
+/// 第一版直接 `*readback != wrote`，在 `transition="0.35"` 上报了假阳性——
+/// 读回是 `"0.350s"`。两者是同一个时长，只是读回口把它**规范成**
+/// “三位小数 + 单位”。而规范化正是读回口应有的行为，不是缺陷。
+///
+/// 这种假阳性比漏报更贵：它会让人去改本来没问题的 XML，而真正的缺陷
+///（`variant` 读回`primary`）淹没在里面。
+///
+/// ## 判据（三层，逐层放宽）
+///
+/// 1. 完全相同 → 不矛盾；
+/// 2. **两边都能当数字读**（允许尾随单位/空白）→ 比数值，容差 1e-4；
+/// 3. 否则按字符串比（枚举/颜色/标识符）：不等就是真矛盾。
+///
+/// 为何容差不是精确相等：`0.35` → 单精度浮点 → `"0.350000"` 这类往返
+/// 会带来末位噪声，精确比较会把“正确实现”报成缺陷。
+[[nodiscard]] auto readback_contradicts(std::string_view wrote, std::string_view readback) -> bool {
+  if (wrote == readback) return false;
+  // 提取开头的数字部分（允许 `0.350s` / `12 px` 这类尾随内容）。
+  const auto leading_number = [](std::string_view text) -> std::optional<double> {
+    std::size_t index = 0;
+    while (index < text.size() && (text[index] == ' ' || text[index] == '\t')) ++index;
+    const std::size_t begin = index;
+    if (index < text.size() && (text[index] == '-' || text[index] == '+')) ++index;
+    bool digits = false;
+    while (index < text.size() && text[index] >= '0' && text[index] <= '9') {
+      ++index;
+      digits = true;
+    }
+    if (index < text.size() && text[index] == '.') {
+      ++index;
+      while (index < text.size() && text[index] >= '0' && text[index] <= '9') {
+        ++index;
+        digits = true;
+      }
+    }
+    if (!digits) return std::nullopt;
+    // 尾随必须是单位/空白（不能是 `neo` 这类同前缀的不同标识符）。
+    const std::string_view tail = text.substr(index);
+    for (const char ch : tail) {
+      const bool unit_like = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '%' ||
+                             ch == ' ' || ch == '\t';
+      if (!unit_like) return std::nullopt;
+    }
+    try {
+      return std::stod(std::string{text.substr(begin)});
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+  };
+  const auto left = leading_number(wrote);
+  const auto right = leading_number(readback);
+  if (left.has_value() && right.has_value()) {
+    return std::abs(*left - *right) > 1e-4;
+  }
+  return true;   // 非数值：字符串不等就是真矛盾（`ghost` vs `primary`）
+}
+
 void build_node(UiRoot& root, Element& parent, const st::xml::Node& node, XmlBuildReport& report,
                 const XmlBuildOptions& options) {
   bool need_row = false;
@@ -243,6 +304,32 @@ void build_node(UiRoot& root, Element& parent, const st::xml::Node& node, XmlBui
       // 名字认识但这一步没落上：可能是枚举值写错（`align_items="middle"`）。
       report.unknown_attributes.push_back(
           std::format("{}.{} 的值没被接受（第 {} 行）", node.name, name, node.line));
+    } else {
+      // ③ **收下了，但真的生效了吗？**（2026-11-10 新增）
+      //
+      // 前三类（未知名/值被拒/解析警告）都是“输入不合法”。而这一类是“输入合法、
+      // 接口也接受了，但**实际画出来的不是它**”——相期`variant="ghost"` 就是这个：
+      // `apply_appearance` 收下并写了 `style.background`（透明，对），而组件的
+      // `apply_theme` 又把主色渐变锺回去，两层各写一半。报告当时 `clean=true`。
+      //
+      // ## 为什么不能拿“字符串相等”当判据（实测踩到，一轮才想清）
+      //
+      // 第一版直接比 `*readback != wrote`，立刻在 `transition="0.35"` 上报假阳性：
+      // 读回是 `"0.350s"`。两者语义完全一致（就是同一个时长），只是规范成了
+      // “三位小数 + 单位”——而这正是**读回口应有的行为**。
+      //
+      // 所以诿 Peck 字面变成了诿 **归一到数字后仍不等**：能解析成数字的，
+      // 按容差比；不能解析的（枚举/颜色/标识符），才比字符串。这样：
+      //  · `ghost` vs `primary` → 报（真正的失效）；
+      //  · `0.35` vs `0.350s` → 不报（同一值两种写法）；
+      //  · `middle` vs `center` → 报（枚举确实没落上）。
+      if (auto readback = element->get_property(target); readback.has_value()) {
+        if (readback_contradicts(node.attr_or(name, ""), *readback)) {
+          report.ineffective_attributes.push_back(std::format(
+              "{}.{}={}（第 {} 行，读回={}）", node.name, name, node.attr_or(name, ""), node.line,
+              *readback));
+        }
+      }
     }
   }
   build_children(root, *element, node, report, options);
@@ -302,6 +389,13 @@ auto build_from_xml_node(const st::xml::Node& node, XmlBuildReport* report,
     } else if (!applied) {
       out.unknown_attributes.push_back(
           std::format("{}.{} 的值没被接受（第 {} 行）", node.name, name, node.line));
+    } else if (auto readback = element->get_property(target); readback.has_value()) {
+      // 与 `build_node` 同一判据（两处建树入口必须同口径，否则“两路建树两个报告”）。
+      if (readback_contradicts(node.attr_or(name, ""), *readback)) {
+        out.ineffective_attributes.push_back(std::format("{}.{}={}（第 {} 行，读回={}）", node.name,
+                                                         name, node.attr_or(name, ""), node.line,
+                                                         *readback));
+      }
     }
   }
   build_children(scratch, *element, node, out, options);

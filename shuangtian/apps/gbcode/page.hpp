@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -23,6 +24,7 @@
 #include "page_data.hpp"
 #include "session_store.hpp"
 #include "st/core/async.hpp"  // Tasks（慢内容异步排版的调度器）
+#include "st/search/search.hpp"  // 工作区文件枚举/内容搜索基础库
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/completion_popup.hpp"
@@ -277,6 +279,11 @@ struct CodeEditorPage : Component {
   /// 文件在两组各出现一次（IDEA 同款）。
   gbcode::RepoSnapshot git_{};
   bool git_probed_{false};
+  /// 启动首探标记：首次 `refresh_git()` 完成即消费。首探**不写状态栏**，
+  /// 避免盖住“打开文件”的反馈；用户显式动作（刷新/切工作区/暂存）照常写。
+  bool git_first_probe_{true};
+  /// 状态快照正在后台读（防重提交：泵每帧都会跑到，没这个标记会每帧起一个任务）。
+  bool git_snapshot_loading_{false};
   /// “变更视图请求读一次状态”的待办（渲染期置、帧首泵消费——渲染期不能起子进程）。
   bool git_probe_wanted_{false};
   /// 已“访问过”的侧栏视图下标（首次激活后纳入保活集合；见 `build_sidebar`）。
@@ -1464,7 +1471,19 @@ auto shutdown() -> void;
   //
   // 为什么值得接：SCM 面板若只是写死一个 “main” 分支名与 “0 变更”，它就不是信息
   // 而是装饰。真读 `git status --porcelain=v1 -b` 之后，改一个文件、刷新，面板会跟着变。
+  //
+  // **异步**：`git status` 在大仓库上实测 500ms 级（shuangtian 仓 2051 文件：513ms/次），
+  // 同步跑在帧首泵里就是半秒冻结。所以拆成两段：后台只跑 git 子进程拿快照，
+  // 回到主线程（`post_ui`）再写成员与 `State`——与 `ensure_git_log` 同一分工。
+  // 没有调度器（单测/嵌入式）时同步跑，行为与旧版一致。
    void refresh_git();
+
+  /// 后台拿到的快照落地（**主线程**）。`stale` = 期间工作区又换了，直接丢弃。
+   void adopt_git_snapshot(gbcode::RepoSnapshot snapshot, std::string workspace,
+                           bool write_status);
+
+  /// 同步版 `refresh_git`（无调度器时的退路）。
+   void refresh_git_sync();
 
 
   /// 开关切一下：开→下一帧取数；关→清掉装饰（界面立刻回到干净态）。
@@ -1960,6 +1979,15 @@ auto shutdown() -> void;
   /// 快速打开的文件表（Ctrl+P）：有工作区时列真实文件（递归、限量）。
    [[nodiscard]] auto file_commands() const -> std::vector<CommandPalette::Command>;
 
+  /// 当前工作区文件清单（用 `st::search::enumerate` 枚一次并缓存；换工作区/刷新时作废）。
+  ///
+  /// 供 `file_commands`（快速打开）与 `apply_search`（工作区内容搜索）共用——
+  /// 两者都要"工作区里有哪些文件"，以前各写一份递归 `list_dir`，口径与开销都重复。
+  [[nodiscard]] auto workspace_files() const -> const std::vector<st::search::FileEntry>&;
+
+  /// 作废工作区文件清单缓存（换工作区、刷新树、文件增删后调用）。
+  auto invalidate_workspace_files() const -> void;
+
 
   // ————————————————————————————————————————————————————————————————————————
   // `MenuHeader`：长在标题栏 `leading` 槽里的那一小块（菜单栏 + 它的下拉面板）
@@ -2149,6 +2177,17 @@ auto shutdown() -> void;
   /// 刷新按钮（`refresh_tree`）、收起目录（重展开时重扫）、换工作区、
   /// 新建/删除/重命名文件。变更不频繁，缓存命中率极高。
   mutable std::map<std::string, std::vector<DirEntryLite>, std::less<>> dir_cache_{};
+  /// 工作区文件清单缓存（Ctrl+P 快速打开与工作区搜索共用）。
+  ///
+  /// 为何缓存：Ctrl+P 旧实现每次按键都递归 `list_dir`（≤300 条）重扫磁盘，
+  /// 大仓库里是卡顿源。改用 `st::search::enumerate` 一次枚举、按 workspace 缓存，
+  /// 之后按键只在内存清单上做 `filter_paths`（微秒级）。失效时机：换工作区、
+  /// `refresh_tree`、文件增删后（均调用 `invalidate_workspace_files`）。
+  mutable std::vector<st::search::FileEntry> workspace_file_cache_{};
+  /// 缓存对应的工作区根（与 `workspace_` 不等 = 缓存作废）。
+  mutable std::string workspace_file_cache_root_{};
+  /// 缓存枚举时刻（`{}` = 无缓存）：超过 TTL 就重扫，见 `workspace_files()`。
+  mutable std::chrono::steady_clock::time_point workspace_file_cache_at_{};
   std::string loaded_key_{};   ///< 编辑器实例当前装载的是哪个标签（防重复 set_text）
   /// 语言服务（LSP）：懒启动、按扩展名挑 server；无 server 的语言**如实不启用**。
   gbcode::LanguageService lsp_{};

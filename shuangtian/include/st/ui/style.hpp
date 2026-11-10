@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <string>
 
 #include "st/math/color.hpp"
@@ -123,6 +124,41 @@ struct Style {
   std::optional<raster::Gradient> background_gradient{};
   /// 渐变的不透明度（`1.0` = 按渐变自身的颜色合成）。
   float gradient_opacity{1.0f};
+
+  /// **纯色底的唯一写入口**：写 `background` 的同一步清掉渐变。
+  ///
+  /// 为何必须是唯一入口（2026-11-10，相期「全部忽略」蓝底）：
+  /// `paint_box` 的绘制优先级是「**渐变优先于纯色**」（那是正确的绘制语义——
+  /// 设了渐变就该画渐变）。但它隐含一条配套义务：**任何想让纯色可见的写入，
+  /// 都必须把渐变清掉**。这条义务原先靠 156 处写入点各自记得（实测全仓
+  /// `background=` 写入 156 处 / 72 文件，而真正清渐变的只有 Button 的 Primary
+  /// 分支 1 处），于是任何「先铺渐变、后写纯色」的路径都留下残影。
+  ///
+  /// 现象极难查：`style.background` 读回是完全正确的（透明就是透明），
+  /// 但画面上是旧渐变——因为绘制时根本不看 `background`。实测相期 XML 写
+  /// `variant="ghost"`、`get(variant)` 报 ghost、`background.a==0` 全对，
+  /// 屏幕上却是一块主色渐变。
+  ///
+  /// 与 `surface` 那次静默失效**同构**：都是「一个字段两条通道」，
+  /// 都是靠约定保护的不变式，都由历史证据证明守不住。所以把义务提进入口。
+  void set_solid_background(math::Color fill) noexcept {
+    background = fill;
+    background_gradient.reset();
+    gradient_opacity = 1.0f;
+  }
+
+  /// 设渐变底。`fallback` 是**渐变画不出来时的兜底色**（`gradient_opacity=0`、
+/// 色标为空等），语义上它是“这个变体的实底”，而不是“随便一个色”。
+///
+/// 为何兜底色要进参数（2026-11-10 实测踩到）：渐变变体（Primary）的回退色
+/// 就是它的主色。若不写，`background` 会停在元素**上一次**的值上（新元素就是透明）——
+/// 于是 `gradient_opacity=0` 或某个分支跳过渐变时，那个按钮变成**透明底**，
+/// 而所有只查 `background` 的地方（包括单测）都会看到错的东西。
+void set_gradient_background(raster::Gradient fill, math::Color fallback) noexcept {
+  background = fallback;
+  background_gradient = std::move(fill);
+  gradient_opacity = 1.0f;
+}
   float radius{0.0f};
   math::Color border_color{0, 0, 0, 0};
   float border_width{0.0f};

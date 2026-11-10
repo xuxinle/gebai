@@ -237,6 +237,22 @@ auto HotReload::refresh_ui() -> Status {
       return st::unexpected(st::ErrorCode::Parse,
                             std::format("{} 建树失败：{}", impl_->xml_path(), impl_->last_error));
     }
+    // **属性类告警：上屏日志，但不拦换树**（2026-11-10）。
+    //
+    // 为何必须打出来：这三类以前**根本没人读**（`report` 建完就丢），
+    // 于是“属性写了没生效”在应用里完全不可见——相期`variant="ghost"` 的蓝底
+    // 就是这样活了一整轮。热重载路径是**人正在改文件**的地方，告警打在它旁边
+    // 性价比最高：一行日志直接指向 `标签.属性（第 N 行）`。
+    //
+    // 为何不拦：属性丢了不会让树变形（元素还在、其余属性还在），
+    // 而“保存后界面没变”比“保存后报错、界面没变”好查得多。
+    for (const auto& attr : report.unknown_attributes) {
+      ST_LOG_WARN("xml", "{} 认不出的属性: {}", impl_->xml_path(), attr);
+    }
+    // ⚠ “收下了但没生效”比“不认得”更危险：前者看着一切正常。
+    for (const auto& attr : report.ineffective_attributes) {
+      ST_LOG_WARN("xml", "{} 属性未生效: {}", impl_->xml_path(), attr);
+    }
   }
 
   // —— ② 换根（原子段：从这里到结束都没有失败路径）——

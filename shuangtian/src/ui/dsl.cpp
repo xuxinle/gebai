@@ -1521,6 +1521,9 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.width != kAuto) style.width = props.width;
   if (props.height != kAuto) style.height = props.height;
   style.grow = props.grow;
+  // `wrap` 只在 `row` 且父宽有上界时生效（见 `Element::measure`）；
+  // 无条件赋值是安全的：默认 false 与 `Style` 默认值一致，不影响既有声明。
+  style.wrap = props.wrap;
   // 弹性对齐（主轴分布 / 交叉轴对齐 / 单项覆盖 / 文本内部对齐）。
   // 直接写 `Style`：这几个字段不参与主题重算（不像颜色/字号会被 `apply_theme`
   // 盖回），所以不需要像色调那样另记一份“显式覆盖”。

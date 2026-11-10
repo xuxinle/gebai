@@ -241,7 +241,7 @@ namespace gbcode_ui {
             (void)custom<Button>(c, [this, which, item](Button& b) {
               b.set_id(std::format("pick-end-{}", item.value));
               b.set_label(item.label);
-              b.set_variant(Button::Variant::Secondary);
+              b.set_variant(Button::Variant::Neutral);
               b.set_size(Button::Size::Small);
               b.on_click = [this, which, value = std::string(item.value)] {
                 pick_endpoint(which, value);

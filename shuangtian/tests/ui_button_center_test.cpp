@@ -356,7 +356,7 @@ ST_TEST(button_hover_does_not_shift_the_whole_button) {
   make_root(root, theme);
 
   // 用 Secondary（有实心底 + 描边）：框体必须可见，否则量不到它的位移
-  auto owned = std::make_unique<Button>("确定", Button::Variant::Secondary);
+  auto owned = std::make_unique<Button>("确定", Button::Variant::Neutral);
   Button* button = owned.get();
   root.set_content(std::move(owned));
 
@@ -408,7 +408,7 @@ ST_TEST(button_hover_still_has_visual_feedback) {
   UiRoot root;
   make_root(root, theme);
 
-  auto owned = std::make_unique<Button>("确定", Button::Variant::Secondary);
+  auto owned = std::make_unique<Button>("确定", Button::Variant::Neutral);
   Button* button = owned.get();
   root.set_content(std::move(owned));
   const Rect box{20.0f, 20.0f, 120.0f, 40.0f};
@@ -468,7 +468,7 @@ ST_TEST(button_focus_ring_covers_its_own_border) {
     Canvas canvas{kWidth, kHeight, 1.0f};
     canvas.clear(theme.colors().bg);
     root.set_content(nullptr);
-    auto owned = std::make_unique<Button>("确定", Button::Variant::Secondary);
+    auto owned = std::make_unique<Button>("确定", Button::Variant::Neutral);
     Button* button = owned.get();
     root.set_content(std::move(owned));
     const RenderContext context{theme, &port, 0.0};

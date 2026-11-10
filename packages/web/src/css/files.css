@@ -3090,6 +3090,90 @@ button.fw-status-item:hover {
   padding: 12px 16px;
 }
 
+/* 选项对话框（choiceDialog）：每项 = 序号键 + 名称 + 一句话后果说明。
+ * 为什么不用下拉：这些选项的差别（丢不丢改动）必须**同时可见**才能比得出；
+ * 下拉把其余项折叠起来，选错的成本正是这里要防的那件事。 */
+.fw-choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fw-choice-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  cursor: pointer;
+  user-select: none;
+}
+
+.fw-choice-item:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.fw-choice-item.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 危险项选中时走警示色：光标停在哪一项上必须能看出“这一项会丢东西” */
+.fw-choice-item.danger.active {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.fw-choice-key {
+  flex: none;
+  min-width: 17px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+/* 序号只是键盘直选的提示，选中时不该继续抢视觉重心 */
+.fw-choice-item.active .fw-choice-key {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.fw-choice-item.danger.active .fw-choice-key {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+}
+
+.fw-choice-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.fw-choice-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.fw-choice-item.danger .fw-choice-label {
+  color: var(--danger);
+}
+
+.fw-choice-hint {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+
 .fw-kbd-list {
   display: flex;
   flex-direction: column;

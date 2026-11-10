@@ -950,14 +950,17 @@ class Element {
     const Palette& colors = theme.colors();
     switch (extras_->surface) {
       case Surface::None: return;
-      case Surface::Base: style_.background = colors.surface; return;
-      case Surface::Alt: style_.background = colors.surface_alt; return;
-      case Surface::Sunken: style_.background = colors.surface_sunken; return;
+      // 逐档都走 `set_solid_background`：`surface` 声明的语义是“我要**这个纯色底**”，
+      // 而组件可能已经铺了渐变（Button 的 Primary）。只写 `background` 会让
+      // 渐变残影盖住它——与 `apply_appearance` 同一条义务（见 Style::set_solid_background）。
+      case Surface::Base: style_.set_solid_background(colors.surface); return;
+      case Surface::Alt: style_.set_solid_background(colors.surface_alt); return;
+      case Surface::Sunken: style_.set_solid_background(colors.surface_sunken); return;
       // 内容区：两个模式取**不同的层**（理由见枚举处注释）——
       // 这正是“只用一个 `Sunken` 做不到”的那件事。
       case Surface::Content:
-        style_.background = theme.mode() == ThemeMode::Dark ? colors.surface_sunken
-                                                            : colors.surface_raised;
+        style_.set_solid_background(theme.mode() == ThemeMode::Dark ? colors.surface_sunken
+                                                                    : colors.surface_raised);
         return;
     }
   }

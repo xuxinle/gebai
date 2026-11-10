@@ -244,9 +244,17 @@ namespace gbcode_ui {
     const std::array<std::size_t, 4> numbers{1, 2, 4, 5};
     const std::array<const char*, 4> ids{"git-tab-branches", "git-tab-tags", "git-tab-stashes",
                                          "git-tab-remotes"};
-    // 高 30 → **34**、距离 2 → **6**：与编辑器标签条和侧栏头部同高，
-    // 且选中块之间留缝（不留缝的圆角胶囊会粘成一条，IDEA 新 UI 也是分开的）。
-    (void)row(c, {.gap = 6.0f, .height = 34.0f, .id = "git-tabs"}, [&] {
+    // 标签间距 **6**：不留缝的圆角胶囊会粘成一条，IDEA 新 UI 也是分开的。
+    //
+    // ⚠ **必须 wrap，且不能写死行高**：左栏宽度由 SplitView 的 ratio 决定（默认
+    // 20%×1130≈226px），而四个标签实测共需≈259px（中文小号字 + 计数 + 6px 间距）。
+    // 不换行时最后一个「远程」被排到面板右缘之外——面板会裁掉它，而**命中测试
+    // 按未裁的框算**（中心点 x≈271 > 面板右缘 270），点击就穿透到背后的
+    // `git-view-split`。实测症状：点「远程」标签没反应（e2e 卡在
+    // `#remote-force-push` 永远不出现），而用 `invoke` 直接触发回调正常。
+    // 行高交给内容（`.height` 不写）：写死行高的话，换行后第二行会溢出到
+    // `git-refs-body` 上面，变成“标签叠在分支列表上”。
+    (void)row(c, {.gap = 6.0f, .wrap = true, .id = "git-tabs"}, [&] {
       for (std::size_t index = 0; index < labels.size(); ++index) {
         (void)custom<Button>(c, [this, number = numbers[index], label = labels[index],
                                  id = ids[index]](Button& b) {
@@ -287,7 +295,7 @@ namespace gbcode_ui {
           b.set_id(control.id);
           b.set_label(control.label);
           b.set_variant(control.op == gbcode::WriteOp::Abort ? Button::Variant::Danger
-                                                             : Button::Variant::Secondary);
+                                                             : Button::Variant::Neutral);
           b.set_size(Button::Size::Small);
           b.on_click = [this, control] {
             // `ref` 位传“操作种类”（`merge`/`rebase`/…）——`write_args` 据此映射子命令。
@@ -384,7 +392,7 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       (void)custom<Button>(c, [this](Button& b) {
         b.set_id("stash-push");
         b.set_label("暂存当前改动");
-        b.set_variant(Button::Variant::Secondary);
+        b.set_variant(Button::Variant::Neutral);
         b.set_size(Button::Size::Small);
         b.on_click = [this] { (void)run_write({.op = gbcode::WriteOp::StashPush, .message = "st"},
                                               "stash push"); };
@@ -440,7 +448,7 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
         (void)custom<Button>(c, [this, action, upstream = git_upstream_](Button& b) {
           b.set_id(action.id);
           b.set_label(action.label);
-          b.set_variant(Button::Variant::Secondary);
+          b.set_variant(Button::Variant::Neutral);
           b.set_size(Button::Size::Small);
           // 无上游时推送带上当前分支名（`git push -u <branch>`）：否则首推会失败，
           // 而“失败”与“没有可推送的”在界面上长得一样。

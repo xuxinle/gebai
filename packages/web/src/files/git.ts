@@ -13,7 +13,7 @@
  * - 多步操作（merge/rebase/cherry-pick）的「继续 / 跳过 / 中止」在变更面板顶部（冲突属于工作区状态）。
  */
 import type { FsApi, GitBranchInfo, GitCommitInfo, GitFileDiff, GitStatusInfo } from "./api"
-import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, formatSize } from "./ui"
+import { h, icon, showMenu, toast, confirmDialog, promptDialog, choiceDialog, clear, timeAgo, formatTime, formatSize } from "./ui"
 import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
 import { createDiffEditor, type DiffNav } from "./editor"
 import { createPartialPanel, type PartialPanelHandle } from "./partial"
@@ -22,6 +22,7 @@ import { ALL_REFS, buildRefGroups } from "./git-refs"
 import { COL_MIN_COMMIT, COL_MIN_REFS_FLOOR, clampColWidth, toolbarMinWidth } from "./git-cols"
 import { openHistoryEditDialog } from "./history-edit"
 import { fingerprint, listFingerprint, logFingerprint } from "./refresh-guard"
+import { shouldSkipRepaint, type RefsTab } from "./refs-tab"
 
 /** 外部可跳转的引用视图（三栏并排常显，故不含「变更」——工作区改动是左栏工具窗的职责）。 */
 export type GitView = "log" | "branches" | "tags" | "stash" | "remotes"
@@ -211,7 +212,24 @@ let logICase = false
   const colLog = h("div", { class: "fw-git-col-body" })
   const colCommit = h("div", { class: "fw-git-col-body" })
   /** 「分支」栏内部的小切换（分支 / 标签 / 储存 / 远程）。 */
-  let refsTab: "branches" | "tags" | "stash" | "remotes" = "branches"
+  let refsTab: RefsTab = "branches"
+  /** 内容容器 `colRefs` 里**现在画着**哪个视图（null = 尚未画过，或已被「不是仓库 / 状态失败」占位接管）。
+   *  四个视图共用这一个容器：只记指纹不记「谁画的」时，切走再切回会因指纹未变而跳过重绘、
+   *  内容停在别的视图上（见 files/refs-tab.ts）。 */
+  let drawnRefsTab: RefsTab | null = null
+  /** 各视图上次绘制时的数据指纹（切 tab 与自动刷新都据此判断要不要重建 DOM）。 */
+  const refsKeys: Record<RefsTab, string> = { branches: "", tags: "", stash: "", remotes: "" }
+
+  /**
+   * 该视图是否需要重绘（并记账）。
+   * 判据是「容器里画的正是本视图 **且** 数据指纹未变」——只比指纹会在切 tab 后误判为「已画好」。
+   */
+  function refsRepaintNeeded(tab: RefsTab, key: string): boolean {
+    if (shouldSkipRepaint(drawnRefsTab, tab, key, refsKeys[tab])) return false
+    drawnRefsTab = tab
+    refsKeys[tab] = key
+    return true
+  }
   /** 日志当前限定的引用（分支栏/标签栏单击、日志栏范围选择器设置）；ALL_REFS = 全部分支（--all）。 */
   let logBranch: string = ALL_REFS
   /** 提交内容栏正在展示的提交（hash；空 = 无选中）：刷新后校验它是否还在日志里。 */
@@ -1091,15 +1109,25 @@ logDateBtn.onclick = (e) => {
     return h("span", { class: `fw-ref-chip ${kind}`, title: raw, text: kind === "tag" ? `🏷 ${t}` : t })
   }
 
+  /** 重置到某提交：三种模式做成选项（不让人手输 soft/mixed/hard）。
+   *  各选项的差别是“会丢什么”，必须选之前看见——hard 另带二次确认（它不可逆）。 */
   async function resetTo(c: GitCommitInfo): Promise<void> {
-    const mode = await promptDialog({ title: `重置到 ${c.short}`, label: "模式（soft / mixed / hard）", value: "mixed", hint: "hard 会丢弃工作区改动（自动创建 gebai/backup-* 备份分支）；mixed 仅重置索引；soft 保留全部改动。" })
+    const mode = await choiceDialog({
+      title: `重置到 ${c.short}`,
+      message: `${c.subject}`,
+      okText: "重置",
+      options: [
+        { value: "mixed", label: "Mixed（默认）", hint: "重置到该提交并清空索引（暂存区），工作区改动全部保留为未暂存", selected: true },
+        { value: "soft", label: "Soft", hint: "只移动 HEAD：索引与工作区都不动，该提交之后的所有改动留在暂存区" },
+        { value: "hard", label: "Hard", hint: "HEAD / 索引 / 工作区全部回到该提交：之后的提交与工作区改动都会丢弃", danger: true },
+      ],
+      dangerConfirm: { title: "确认硬重置", message: `将丢弃 ${c.short} 之后的所有提交与当前工作区改动。\n歌白会先自动建一个 gebai/backup-* 备份分支，但不替代你自己的确认。` },
+    })
     if (!mode) return
-    if (!["soft", "mixed", "hard"].includes(mode.trim())) {
-      toast("模式必须是 soft / mixed / hard", "error")
-      return
-    }
-    const res = await op("reset", { ref: c.hash, mode: mode.trim(), backup: true }, `已重置（${mode.trim()}）`)
-    if (res?.backupBranch) toast(`已创建备份分支 ${res.backupBranch}`, "info", 6000)
+    const res = await op("reset", { ref: c.hash, mode, backup: true }, `已重置（${mode}）`)
+    // 备份分支名只用于告知用户改动的安全绳在哪，取不到就不提（不拿 unknown 拼进文案）
+    const backupBranch = typeof res?.backupBranch === "string" ? res.backupBranch : ""
+    if (backupBranch) toast(`已创建备份分支 ${backupBranch}`, "info", 6000)
     hooks.onFsChanged()
   }
 
@@ -1291,8 +1319,8 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
   host.scrollTop = top
 }
 
-  /** 上次绘制的引用栏清单指纹（分支 / 标签 / 储存 / 远程四选一，切 tab 时用各自的键）。 */
-  const refsKeys = { branches: "", tags: "", stash: "", remotes: "" }
+  /** 上次绘制的引用栏清单指纹（分支 / 标签 / 储存 / 远程四选一，切 tab 时用各自的键）。
+   *  指纹表与绘制状态在视图状态一节声明（见 refsRepaintNeeded）。 */
 
   function renderBranches(): void {
     const s = hooks.status()
@@ -1308,8 +1336,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
       hooks.writable(),
       hooks.remoteEnabled(),
     ])
-    if (key === refsKeys.branches) return
-    refsKeys.branches = key
+    if (!refsRepaintNeeded("branches", key)) return
     // 检出：当前分支点不出自己（菜单项自己就是 disabled），给出分支选择菜单；
     // 拉取：有上游才可拉（无上游时报错，不如置灰说明白）；推送：无上游时是「发布」语义（服务端 setUpstream）
     const branchNames = branches.filter((b) => !b.remote).map((b) => b.name)
@@ -1483,8 +1510,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
   function renderTags(): void {
     /* 静默判据：标签清单 / 加载态 / 日志范围（行底色）/ 写权限（工具栏动作）。 */
     const key = fingerprint([listFingerprint(localTags, (t) => [t.name, t.hash, t.time ?? 0]), tagsLoading && !localTags.length, tagsError, logBranch, hooks.writable()])
-    if (key === refsKeys.tags) return
-    refsKeys.tags = key
+    if (!refsRepaintNeeded("tags", key)) return
     const toolbar = h("div", { class: "fw-git-subbar" }, [
       h("span", { class: "fw-info", text: tagsError ? "读取失败" : tagsLoading ? "加载中…" : `${localTags.length} 个标签`, title: tagsError || undefined }),
       h("span", { class: "fw-grow" }),
@@ -1546,8 +1572,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
   function renderStash(): void {
     /* 静默判据：储存清单 / 加载态（行上再没有别的可变输入）。 */
     const key = fingerprint([listFingerprint(stashes, (s) => [s.index, s.ref, s.message, s.time ?? 0]), stashLoading && !stashes.length, stashError])
-    if (key === refsKeys.stash) return
-    refsKeys.stash = key
+    if (!refsRepaintNeeded("stash", key)) return
     const toolbar = h("div", { class: "fw-git-subbar" }, [
       h("span", { class: "fw-info", text: stashError ? "读取失败" : stashLoading ? "加载中…" : `${stashes.length} 条储存`, title: stashError || undefined }),
       h("span", { class: "fw-grow" }),
@@ -1623,8 +1648,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
       hooks.writable(),
       hooks.remoteEnabled(),
     ])
-    if (key === refsKeys.remotes) return
-    refsKeys.remotes = key
+    if (!refsRepaintNeeded("remotes", key)) return
     /* 按钮：三个高频动作各占一个图标（与分支栏同一形态），变体与低频管理动作收进「更多」菜单——
        原先这里平铺 7 个带文字的按钮（抓取 / 拉取 / 拉取（仅快进）/ 变基拉取 / 推送 / 强制推送 / 添加远程），
        在 200px 宽的栏里折成 169px 高的一堆，把远程列表挤到看不见；而其中四个是同一动作的变体，
@@ -1728,6 +1752,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     const statusErr = hooks.statusError?.() ?? null
     if (statusErr) {
       colRefs.replaceChildren(renderStatusError(statusErr))
+      drawnRefsTab = null
       currentCommitHash = ""
       resetCommitActions()
       colCommit.replaceChildren(renderCommitPlaceholder("Git 状态不可用：先解决状态读取失败"))
@@ -1739,6 +1764,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     const s = hooks.status()
     if (!s?.isRepo) {
       colRefs.replaceChildren(renderNotRepo())
+      drawnRefsTab = null
       currentCommitHash = ""
       resetCommitActions()
       colCommit.replaceChildren(renderCommitPlaceholder("当前根不是 Git 仓库"))

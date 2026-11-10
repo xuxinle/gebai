@@ -554,6 +554,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L16 | **层方向**：文件在 `src/core/`、`include/st/core/` 下且 `#include "st/ui/…"`（core 不得依赖 ui——BACKLOG P1 根因①的防护栏；`check_layer_includes` 专用检查，方向判定需文件路径，单行正则表达不了） | 无（core→ui 没有合法形态；将来若真需要，走清单豁免并在此登记） |
 | L17 | **禁止 `long` / `long long` 表达数据**（`-Werror` 的 `-Wconversion` 抓不到它——`long` 本身就是合法类型，错在**宽度随平台变**）。排除 `long double`、注释与字符串 | ①	extbf{平台 ABI 边界}：`platform_*` 文件按定义就是对系统类型的如实声明（X11 的 `XEvent` 布局、OpenSSL 函数指针签名、Win32 `LONG`、`FIONBIO` 宏），换了反而错——按文件名豁免；② C 标准库调用点（`ftell`/`fseek`/`sscanf`）用行内 `// lint-allow: L17` 就地说明 |
 | L18 | **禁止绕过日志通道的裸打印**（`printf`/`puts`/`fprintf`/`std::cout`/`std::cerr`）——直接写 stdout/stderr，不经 `st::print`（终端+镜像落盘）也不经 `ST_LOG_*`（分级/过滤/订阅）。合法通道：`st::print`/`st::eprint`（镜像落盘）、`ST_LOG_*`（日志系统） | 打印实现方（`print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*`）与独立工具区（`tools/**`、`tests/**`、`apps/**`——输出各有镜像/分片/捕获通道，迁移到 `ST_LOG` 是增量过程，存量先登记豁免） |
+| L19 | **组件不得自定义与样式系统同名的属性面**——`include/st/ui/components/` 下出现 `enum class Variant/Elevation/RadiusMode/ControlSize/Density` 即失败。合法写法：`using Variant = st::ui::Variant;` | **无**。这条规则没有“合法例外”：两份同名词表共存时的行为不可能正确（相期按钮蓝底事故的根因层，见 DESIGN §4.2.20.2）。真需要扩展词表 → 改 `styling.hpp`、走一处 |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。

@@ -60,7 +60,7 @@ struct Fixture {
 
 /// 造一个固定宽的按钮（工具条溢出测试要可控的宽）。
 auto make_button(float width) -> std::unique_ptr<Button> {
-  auto button = std::make_unique<Button>("x", Button::Variant::Secondary, Button::Size::Small);
+  auto button = std::make_unique<Button>("x", Button::Variant::Neutral, Button::Size::Small);
   button->style().width = width;
   return button;
 }

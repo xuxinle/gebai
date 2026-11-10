@@ -3063,6 +3063,107 @@ A/B 的必要性：阈值只要还挂在「单点标定」上，无论标在哪�
 **不要做的事**：不要因为“接口已经写好了、不用可惜”就去接调用点——
 本轮实测就是这条路径：接上去只得到 +0.5%（噪声内）和掉进短段陷阱的风险。
 
+## 已完成（2026-11-10：样式词表统一 —— 「全部忽略」按钮蓝底事故的四层根治）
+
+**问题**：相期右上角「全部忽略」（`variant="ghost"`）多出一块蓝紫渐变底，
+探针却报 `bg_alpha=0`（透明，对）、建树报告 `clean=true`。
+
+**四层根因**（详见 `DESIGN.md` §4.2.20.2）：
+
+1. **两套同名枚举**：`ui::Variant`（8 档）vs `Button::Variant`（5 档），互不转换，
+   `ui::Variant` 甚至没有任何组件消费。
+2. **两套写入口**：声明式写 `style.background`，组件写自己的 `variant_` + 渐变。
+3. **清场挂在错的层**：`background_gradient.reset()` 只在 `case Primary` 内部，
+   Primary→其它档位永不清（gbcode 侧栏开关同类）。
+4. **值表不同步**：`apply_appearance_field` 漏 `soft`；`get_property("variant")` 读成员不说谎。
+
+**定调**：样式全统一为 **CSS 式、不加前缀**（两份词表并集只差 1 档 `Soft`，
+`Secondary≡Neutral`；加前缀等于把“两份真源”制度化）。
+
+**改动**：
+
+- `style.hpp`：新增 `set_solid_background` / `set_gradient_background`——
+  **底色与渐变原子绑定**，是仅有的写入口。
+- `styling.hpp`：`ui::Variant` 补 `Soft`；新增
+  `VariantColors::background_gradient`（**渐变也是词表的一部分**，不是组件私事）。
+- `button.hpp`：删 `Button::Variant`，改 `using Variant = st::ui::Variant`；141 处调用点迁移。
+- `basic.cpp`：`apply_theme` 经 `Tokens::variant_colors` 取色 + `active_variant`（声明优先）。
+- `actions.cpp`：值表改遍历 `variant_name()` 反查（消除漏项）。
+- `basic.cpp`：`get_property("variant")` 声明优先（不再说谎）。
+
+**新护栏**：
+
+- `tests/ui_variant_pixel_test.cpp`（5 条）：**像素级**逐变体断言。Ghost 判据是
+  “与父容器底色逐位相同”；Primary 是“沿对角轴两端不同色”。
+- `st lint` **L19**：组件不得自定义与样式系统同名的属性面。
+- `XmlBuildReport::ineffective_attributes`：属性**被收下但回读矛盾**时上报，
+  且**计入 `clean()`**；“收下了没生效”比“拼错名字”危险。
+  （判据含数值归一：`0.35` vs `0.350s` 不报，`ghost` vs `primary` 报。）
+
+**逆向验证（均实际执行）**：
+
+| 护栏 | 注入回归 | 结果 |
+|---|---|---|
+| 像素 Ghost | 回退两层为“只写纯色不清渐变” | 像素变 `(44,111,190)` → **FAIL** ✓ |
+| 切档清渐变 | 按钮只写纯色不清渐变 | **FAIL**（前提断言：无渐变）✓ |
+| L19 | 注入 `enum class Variant` | **报 L19** ✓；恢复后不报 |
+
+**过程中暴露的一处真回归（已修）**：统一走词表后**主按钮丢了双色渐变**
+（像素整块 `(74,90,224)`）。原因：词表只描述纯色，渐变留在组件里，而 `apply_appearance`
+回放时又调 `set_solid_background` 把它清掉。修法是把渐变**提进词表**（不是写回按钮）。
+
+**环境性失败（基线同样红，非本轮引入，已用 `git stash` 对比确认）**：
+- `real_asset_*` ×6（真实素材不存在）
+- `terminal_single_line_output_reports_row_band_not_whole_bounds`
+- `independent_project_builds_links_and_runs`（软超时 60s）
+
+## 已完成（2026-11-10：gbcode 三条用户报告 + 新增 `st::search` 基础库）
+
+### 新建模块：`st::search`（框架级快速文件枚举 / 内容搜索）
+
+`include/st/search/{simd_scan,search}.hpp` + `src/search/*.cpp`。
+实测（shuangtian 仓、2051 文件）：枚举 339ms（ripgrep 146ms = 2.3×，差额在 Windows
+逐条 stat 的固有成本）；**内容搜索 155ms，比 rg 374ms 快（0.41×）**；路径模糊过滤 0.046ms。
+SIMD 字节扫描有 AVX2/SSE2/NEON/scalar 四档，标量与向量路径由 `tests/search_simd_test.cpp`
+三路对齐钉住。
+
+字节视图转换（`char*` ↔ `uint8_t*`）收在 `simd::as_bytes`/`as_text` 里——按 CONVENTIONS §10
+的纪律，位级重解释只在单点封装发生，业务侧只见 `string_view`。
+
+### ① 切 tab 后回到开头
+
+`OpenBuffer` 增 `scroll_y`/`cursor_index`；`stash_active_text` 离开时存、`load_active_text`
+载入后恢复。
+
+### ② 快速查找（三处独立缺陷）
+
+- **`refresh_git()` 是同步阻塞**（回答“git 探测是不是异步的”：**不是**）。`git status`
+  实测 **513ms/次**（5 次 2565ms），而调用点全在主线程（帧首泵/切工作区/暂存后刷新）。
+  改成后台线程读 + `post_ui` 回主线程写：`invoke` 往返 **332ms → 6ms**。
+  逆向验证：改回同步指标立即回 300ms 级。
+- **文件清单缓存永不失效**：只在 `refresh_tree`/`switch_workspace` 作废，用户在工作区里
+  新建的文件 Ctrl+P 永远搜不到（实测 `match_count=0`）。加 2s TTL；逆向验证回退 → 必 0。
+- **二进制文件从快速打开里消失**：接 `enumerate` 时用默认 `kByExtension` 过滤。改为
+  `kNone` + 取消 4 MiB 上限——快速打开应能列任意文件，内容搜索自己会用 mmap 判二进制。
+
+### ③ 打开新目录后 git 不刷新
+
+`switch_workspace` 清 `git_probed_`/`git_log_*`/标签/暂存/快照后调 `refresh_git()`；
+状态栏分支去掉硬编码 `main` 兜底（未探测 = “—”、非仓 = “无仓库”）。
+
+### 框架层补齐：`dsl::BoxProps::wrap`（能力存在但用不了）
+
+`Style::wrap` 与布局器的换行实现在 `Element::measure/arrange` 里一直有、有测试也跑过，
+但 `BoxProps` 从未暴露它——声明式写不出来，只能在应用层绕。
+实测代价：git 左栏 226px 装不下 4 个标签（需 259px），第 4 个「远程」被排到面板外；
+**面板会裁掉它，而命中测试按未裁的框算**（中心点 x≈271 > 右缘 270），点击穿透到背后的
+`SplitView`——表现为“点远程没反应”，而 `invoke` 直接触发回调正常。
+回归：`ui_dsl_test.cpp: dsl_row_wrap_keeps_children_inside_container`
+（回退 `apply_box` 里那行赋值 → 立刻变红，已验证）。
+
+⚠ 配套教训：**给了 `wrap` 就别写死行高**。第一版只加 `wrap` 而保留 `.height = 34`，
+折行后的第二行直接溢出到 `git-refs-body` 上面（截图上标签叠在分支列表上）。
+
 ## 已完成（2026-11-06：`Table` 窄栏压缩 + `DiffView` 编辑同帧闭环，原 P2 两条落地）
 
 **一是 `Table` 的窄容器压缩**。原先 `recompute_columns` 对固定列**只拉伸不压缩**，

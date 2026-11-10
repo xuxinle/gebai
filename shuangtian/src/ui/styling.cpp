@@ -23,6 +23,23 @@ namespace {
   return colors.text;
 }
 
+/// 主按钮的“主色 → 强调色”双色渐变；`accent` 与 `primary` 同色（或缺alpha）时返回 `nullopt`。
+///
+/// 为何要判“不同才画”：缺省主题里两者相等，此时铺一个两端同色的渐变
+/// 只是白白多一遍渐变光栅化（零视觉收益、纯耗损）。拉成函数是因为这条规则
+/// 现在**只有一个出处**，后续换角度/加色标只需要改这里。
+[[nodiscard]] auto gradient_primary_accent(const Palette& colors)
+    -> std::optional<raster::Gradient> {
+  if (colors.accent.a == 0U) return std::nullopt;
+  if (colors.accent.r == colors.primary.r && colors.accent.g == colors.primary.g &&
+      colors.accent.b == colors.primary.b) {
+    return std::nullopt;
+  }
+  // 几何是 0~1 归一化（由 `paint_box` 映射到实际 box）——见 `VariantColors` 字段注释。
+  return raster::Gradient::linear(math::Point{0.0f, 0.0f}, math::Point{1.0f, 1.0f},
+                                  {{0.0f, colors.primary}, {1.0f, colors.accent}});
+}
+
 }  // namespace
 
 // —— Tokens ——
@@ -53,11 +70,20 @@ auto Tokens::variant_colors(Variant variant) const -> VariantColors {
     case Variant::Primary:
       // 实底主色：hover/pressed 用主色自身的明暗档（不是中性表面——
       // 主色按钮的交互态必须仍「是主色」，变灰会读成「禁用」）。
+      //
+      // **双色渐变**：仅当主题把 `accent` 定成与 `primary` 不同的颜色时才有
+      //（缺省两者相等 → 不画渐变，零开销回退到纯色）。歌白用 `--user-grad`
+      // 渐变主色正是这个意图；而给所有卡片都上渐变会让界面失去层次
+      //（实测：面板全渐变后，内容区与背景分不开）。
+      //
+      // 为何做在词表里而不是按钮里（2026-11-10）：这是**品牌语义**，
+      // 与“主色用哪个蓝”同层——所有用主色的地方必须一致。
       return {.background = colors.primary,
               .border = colors.primary,
               .text = colors.on_primary,
               .background_hover = colors.primary_hover,
-              .background_pressed = colors.primary_active};
+              .background_pressed = colors.primary_active,
+              .background_gradient = gradient_primary_accent(colors)};
     case Variant::Accent:
       // 描边式强调：底保持中性（实底 accent 在两种主题下都太吵）。
       return {.background = colors.surface,
@@ -91,6 +117,13 @@ auto Tokens::variant_colors(Variant variant) const -> VariantColors {
               .text = colors.text_muted,
               .background_hover = colors.surface_hover,
               .background_pressed = colors.surface_pressed};
+    case Variant::Soft:
+      // 柔和：主色**淡底** + 主色文字。工具栏的选中态用它（实底会与主操作抢眼）。
+      return {.background = colors.primary_soft,
+              .border = math::Color{0, 0, 0, 0},
+              .text = colors.primary,
+              .background_hover = colors.primary_soft,
+              .background_pressed = colors.primary_soft};
   }
   return variant_colors(Variant::Neutral);
 }
@@ -182,14 +215,26 @@ auto apply_appearance(Element& element, const Tokens& tokens, const Appearance& 
 
   if (appearance.variant.has_value()) {
     const Tokens::VariantColors colors = tokens.variant_colors(*appearance.variant);
-    style.background = colors.background;
+    // ⚠ **必须走成对的两个入口**（不是直接写 `style.background`）：
+    // `paint_box` 的优先级是「渐变 > 纯色」，只写纯色会把组件先铺上的渐变
+    // （Button 的 Primary 双色底）留成残影——详见 `Style::set_solid_background`。
+    //
+    // 反过来的情形（本行）同样必须成对：`VariantColors` 带渐变时
+    // **必须铺渐变**，否则“声明回放”会把组件刚画对的渐变清回纯色——
+    // 这正是本期词表统一后暴露的一处回归（实测：Primary 按钮变纯色，
+    // 因为本函数排在 `refresh_theme` 第二步）。
+    if (colors.background_gradient.has_value()) {
+      style.set_gradient_background(*colors.background_gradient, colors.background);
+    } else {
+      style.set_solid_background(colors.background);
+    }
     style.border_color = colors.border;
     style.color = colors.text;
     changed = true;
   }
   if (appearance.elevation.has_value()) {
     const Elevation level = *appearance.elevation;
-    style.background = tokens.elevation_surface(level);
+    style.set_solid_background(tokens.elevation_surface(level));
     style.shadow = tokens.elevation_shadow(level);
     style.top_highlight = tokens.elevation_highlight(level);
     changed = true;

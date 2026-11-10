@@ -528,7 +528,7 @@ void FileDialog::arrange(const RenderContext& context, math::Rect rect) {
 
   // —— 按钮行（子 Button；右对齐：取消在左、确认在右） ——
   if (confirm_button_ == nullptr) {
-    auto cancel = std::make_unique<Button>("取消", Button::Variant::Secondary, Button::Size::Medium);
+    auto cancel = std::make_unique<Button>("取消", Button::Variant::Neutral, Button::Size::Medium);
     cancel->on_click = [this]() {
       if (on_cancel) on_cancel();
     };

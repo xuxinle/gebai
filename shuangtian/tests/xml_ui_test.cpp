@@ -36,6 +36,8 @@ auto describe(const st::ui::XmlBuildReport& report) -> std::string {
   std::string out = std::format("elements={} clean={}", report.elements, report.clean());
   for (const auto& tag : report.unknown_tags) out += std::format(" | tag:<{}>", tag);
   for (const auto& attr : report.unknown_attributes) out += std::format(" | attr:{}", attr);
+  for (const auto& attr : report.ineffective_attributes)
+    out += std::format(" | ineffective:{}", attr);
   if (!report.parse_warning.empty()) out += std::format(" | parse:{}", report.parse_warning);
   return out;
 }

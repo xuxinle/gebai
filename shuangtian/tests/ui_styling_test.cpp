@@ -88,7 +88,15 @@ ST_TEST(styling_apply_appearance_lands_on_style) {
                          Appearance{.variant = Variant::Primary,
                                     .radius = RadiusMode::LG,
                                     .size = ControlSize::Large});
+  // Primary 的底色现在是**渐变**（`VariantColors::background_gradient`）：
+  // `background` 退为回退色（渐变画不出来时的兜底，如 `gradient_opacity=0`）。
+  // 所以断言分两层：渐变存在且端点是 primary→accent，同时回退色仍是 primary。
   ST_CHECK(element.style().background == theme.colors().primary);
+  ST_REQUIRE(element.style().background_gradient.has_value());
+  const auto& stops = element.style().background_gradient->stops();
+  ST_REQUIRE(stops.size() >= 2);
+  ST_CHECK(stops.front().color == theme.colors().primary);
+  ST_CHECK(stops.back().color == theme.colors().accent);
   ST_CHECK(element.style().color == theme.colors().on_primary);
   ST_CHECK(element.style().radius == theme.metrics().radius_lg);
   ST_CHECK(before_radius != element.style().radius || theme.metrics().radius_lg == before_radius);

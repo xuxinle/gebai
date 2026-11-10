@@ -213,6 +213,40 @@ rust-analyzer 均能完成握手并推出诊断（见 `tests/lsp_language_smoke_
   `list_dir` 系统调用。缓存按相对路径存一层条目，在刷新/收起/换工作区/写盘时失效。
   隐藏目录（点开头）不入树。
 
+### 3.1.4 `search/` 层（文件枚举与内容搜索，2026-11-10）
+
+```
+include/st/search/simd_scan.hpp   src/search/simd_scan.cpp   # SIMD 字节扫描（AVX2/SSE2/NEON/scalar）
+include/st/search/search.hpp      src/search/search.cpp      # 枚举 / 路径过滤 / 内容搜索
+```
+
+**职责**：“大仓里找东西”的共用底座。它不依赖 `ui`（库层），所以 gbcode 的 Ctrl+P、
+工作区搜索、以及将来任何需要“扫一堆文件”的地方都接这一份，而不是各写一套递归 `list_dir`。
+
+**三条主能力**：
+
+| 能力 | 入口 | 关键设计 |
+|---|---|---|
+| 文件枚举 | `enumerate(root, opts)` | 多线程 BFS（`ThreadPool`）；二进制筛三档（`kNone`/`kByExtension`默认零 IO/`kByContent`）；gitignore 子集 + 默认忽略产物目录 |
+| 路径模糊匹配 | `filter_paths(entries, query)` | 子序列匹配 + 评分排序（给 Ctrl+P 用，微秒级） |
+| 内容搜索 | `search_paths` / `search_file` / `search_buffer` | mmap + SIMD + 线程池；稳定顺序；`may_contain` 先做快速否定；命中按行给出 |
+
+**实测**（shuangtian 仓、2051 文件，`tools/search_bench.cpp`）：
+枚举 339 ms（ripgrep 146 ms = 2.3×，差额在 Windows 逐条 stat 的固有成本）；
+**内容搜索 155 ms，比 rg 374 ms 快（0.41×）**；路径过滤 0.046 ms。
+
+**两个接口纪律**（都有实测代价）：
+
+1. **字节视图转换只在 `simd::as_bytes`/`as_text` 里发生**。按 §10 的纪律，
+   `reinterpret_cast` 属位级重解释，只能在单点封装（`simd_*.cpp` 是 L6 白名单）；
+   业务侧只见 `string_view`。
+2. **一份清单服务多个消费方时取“并集”，各自再按需筛**。`enumerate` 的默认
+   `kByExtension` 适合内容搜索，但 Ctrl+P 必须能列出二进制文件与大文件——gbcode 因此显式
+   传 `kNone` + 取消大小上限（内容搜索自己会用 mmap 判二进制，零额外成本）。
+
+`tests/search_simd_test.cpp` 钉住“SIMD 与标量逐字节一致”（三路对齐），
+`tests/search_test.cpp` 覆盖枚举/过滤/查找/整词/正则子集/并行稳定序。
+
 ### 3.2 gbcode 的版本管理（2026-10-09，参照歌白文件工作台设计）
 
 双面板分工（对齐 `docs/file-workbench-design.md` §4.7 的 IDEA 风格）：
@@ -661,6 +695,11 @@ ANSI 色是**协议固定语义**（`31` 永远是红、`93` 永远是亮黄，�
 于是 `wrap` 容器会把“宽度未定”误判成“宽度无限”，算出单行高度。
 因此 `ScrollView::arrange` 在宽度确定后用**实际内容宽重测一次**内容。
 两个现象（只显示一行 / 只显示两行）根因不同，先后踩了两次（缺陷表 42、43）。
+
+**声明式入口**：`dsl::BoxProps::wrap`（`row(c, {.wrap = true}, …)`）。
+给了 `wrap` 就**不要写死高度**——折行后的第二行会溢出到容器的兄弟元素上
+（实测：gbcode git 左栏 4 个标签在 226px 里折成两行，写死 `height=34` 时第二行叠在分支列表上）。
+高度交给内容自适应。
 
 ### 4.2.8 绘制剖析（默认关闭，不挂即零开销）
 
@@ -1841,6 +1880,91 @@ void refresh_theme(const Theme& theme) {      // 非虚：唯一调度入口
 **回归**：`tests/xml_ui_test.cpp` 的 `surface_lands_on_components_that_own_their_background`
 必须**走 `UiRoot::layout()` 真实链路**。直接调 `refresh_theme` 会绕过调度点，
 于是“调度点调错函数”测不出来（实测：把调度退回 `apply_theme` 后直调版测试仍全绿）。
+
+### 4.2.20.2 样式词表只能有一份：`Variant` 分叉事故（2026-11-10）
+
+**症状**：相期右上角「全部忽略」按钮（`variant="ghost"`）**多出一块蓝紫渐变底**，
+与旁边的「去授权」主按钮同色。截图逐像素比对：两者的渐变端点落在同一段色。
+
+**探针看到的却是另一回事**：
+
+```
+bg_alpha=0        // style.background 全透明——ghost 语义，正确
+gradient=yes      // style.background_gradient 上有主色渐变——残影
+get(variant)=primary   // 读回来是 primary，而 XML 写的是 ghost
+建树报告 clean=true    // 全绿
+```
+
+四层缺陷叠加，每一层单独都“看起来正常”：
+
+1. **两套同名枚举**：`ui::Variant`（`styling.hpp`，CSS 式 8 档）与
+   `Button::Variant`（`button.hpp`，5 档）互不转换。`ui::Variant` 甚至**没有任何组件消费**。
+2. **两套写入口**：`apply_appearance` 写 `style.background`，`Button::apply_theme`
+   写自己的 `variant_` 成员 + 渐变。两层各写一半，谁也不清另一半。
+3. **清场写在错的分支里**：`background_gradient.reset()` 原先只在 `case Variant::Primary`
+   内部。于是 Primary→其他档位**永不清渐变**（gbcode 侧栏开关 `set_variant(on?Soft:Ghost)`、
+   初值 Primary，全是这个形态）。
+4. **两处值表不同步**：`apply_appearance_field` 的值表漏 `soft`（`variant="soft"` 静默失效）；
+   `get_property("variant")` 只读成员 `variant_`，对着 XML 说谎。
+
+**没有任何单测能拦住它**：每个组件只测自己那套词表，两条通道各自内部自洽。
+缺陷只在**两份词表叠在同一个元素上**时才显形。而 `paint_box` 的规则是
+**渐变优先于纯色**，于是“透明底 + 残留渐变”在屏幕上就是一块实色。
+
+**定调（回答“统一还是加前缀”）**：**统一为 CSS 式，不加前缀**。
+理由：两份词表的并集只差 1 档（`Soft`），`Secondary` 与 `Neutral` 语义全同——
+加前缀等于把“两份真源”制度化，以后每加一个档位都要写两遍。
+
+**四层根治**（逐层对应上面四条）：
+
+| 层 | 动作 | 落点 |
+|---|---|---|
+| 词表层 | 删 `Button::Variant`，改 `using Variant = st::ui::Variant`；`ui::Variant` 补 `Soft` | `button.hpp` / `styling.hpp` |
+| 入口层 | 新增 `Style::set_solid_background()` / `set_gradient_background()`：**底色与渐变原子绑定**，写谁就清对方 | `style.hpp` |
+| 清场层 | `apply_appearance` 的 variant/elevation 分支全走新入口（清场不再挂在某个 case 里）；`apply_surface` 四档同理 | `styling.cpp` / `element.hpp` |
+| 读回层 | `get_property("variant")` **声明优先**；`apply_appearance_field` 改为遍历 `variant_name()` 反查（消除漏项） | `basic.cpp` / `actions.cpp` |
+
+**关键不变式**：`paint_box` 里“渐变优先于纯色”这条规则**没有错**（它表达的是
+“铺了渐变就用渐变”），错的是“能同时存在且互不知情”。所以修法不是改绘制规则，
+而是**让两个字段不可能同时为真**——`set_solid_background` / `set_gradient_background`
+是仅有的写入口。
+
+#### 统一过程中暴露的一处真回归（已修，记录在此以免重蹈）
+
+把按钮取色改成“统一走 `Tokens::variant_colors`”后，**主按钮丢了双色渐变**
+（实测：像素从 `(73,91,223)→(15,131,157)` 变成整块 `(74,90,224)`）。
+
+原因：词表当时只描述**纯色**（`background/border/text/hover/pressed`），
+而“主色→强调色”的渐变原本写在 `Button::apply_theme` 里。一旦改成从词表取色，
+那句话就没人说了。更阴的是 `apply_appearance`（`refresh_theme` 第二步）
+在声明回放时又调一次 `set_solid_background`，把组件侧任何残留渐变也清掉。
+
+**修法（不是“把渐变写回按钮”）**：把渐变提进词表——`VariantColors::background_gradient`。
+理由：它是**品牌语义**（`--user-grad` 的落点），与“主色用哪个蓝”同层，
+必须在所有用主色的地方一致。留在组件里等于把一条样式规则抄进某个控件，
+改词表的人看不到它，也不会有测试拦住“改完两边不同”——**那正是本次事故的同一种病**。
+
+两条教训：
+
+1. **“统一词表”必须连带统一该词表描述的完整外观**。只统一颜色、不统一渐变，
+   等于把一份外观拆成两半，两半各自会漂。
+2. **护栏的判据要沿被测对象的几何轴取**。第一版渐变断言在水平中线上取两点，
+   而渐变是 `(0,0)→(1,1)` 对角的——两点恰好同一条等值线，于是“有渐变”被报成纯色。
+   这种失效最贵：它让人去改本来没问题的代码。改成取**左上/右下两角**才成立。
+
+**护栏（三道，全部做过逆向验证）**：
+
+1. `tests/ui_variant_pixel_test.cpp`——**像素级**逐变体断言。
+   Ghost 判据是“与父容器底色逐位相同”（“没有底”的唯一可验证事实），
+   Primary 判据是“左右两端不同色”（真的有渐变）。任何只查 `style.background`
+   的测试都不可能发现本缺陷——读回完全正确。
+2. `st lint` **L19**：组件头文件里不得出现 `enum class Variant/Elevation/RadiusMode/
+   ControlSize/Density`。注入违规 → 报错；恢复 → 不报。
+3. `XmlBuildReport::ineffective_attributes`：属性**被接受但回读不一致**时报出来，
+   且**计入 `clean()`**——“收下了没生效”比“拼错名字”危险（后者会报 unknown_attributes）。
+
+**教训（写进 CONVENTIONS）**：同一个语义只能有一份词表。不是“两份保持同步”，
+而是“只能有一份”——同步是靠人记的，词表歧义是结构性的。
 
 ### 4.2.21 脚本桥（`st::ui::ScriptBridge`）：JS 调 C++（2026-10-11）
 

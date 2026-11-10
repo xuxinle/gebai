@@ -11,6 +11,7 @@ import { extOfPath } from "@gebai/sdk"
 // （这里 onclick 风格 + 数组子节点；微框架 on:{} 风格）。合流后只有一份实现，
 // 本文件保留同名导出作为**薄适配层**（38 个引用方的签名不变）。
 import { append as fwAppend, clear as fwClear, h as fwH } from "../fw/dom"
+import { initialChoiceIndex, isDangerChoice, type ChoiceLike } from "./choice-core"
 
 /* ------------------------------ DOM ------------------------------ */
 
@@ -309,6 +310,139 @@ export function promptDialog(opts: PromptOpts): Promise<string | null> {
       input.focus()
       if (input instanceof HTMLInputElement) input.select()
     }, 20)
+  })
+}
+
+/** 选项对话框的一项。 */
+export interface ChoiceOption extends ChoiceLike {
+  label: string
+  /** 一句话说明“这个选项到底做什么”（选项式对话框的价值就在这里：说清区别，不靠用户记参数名）。 */
+  hint?: string
+}
+
+interface ChoiceOpts {
+  title: string
+  message?: string
+  options: ChoiceOption[]
+  okText?: string
+  /** 二次确认文案（仅在选中 danger 项且传了它时出现）。 */
+  dangerConfirm?: { title: string; message: string }
+}
+
+/**
+ * 选项对话框（Promise 化；取消返回 null）——**用选项，不让用户手输参数**。
+ *
+ * 与 `promptDialog` 的分工：那里是“让你填一个值”（文件名、URL），这里是“从几个确定的语义里挑一个”
+ * （重置方式 soft / mixed / hard）。后者做成输入框的问题不只是多敲字——用户得先知道合法值是什么
+ * （输错还要被拒一次），而各选项的差别（是否丢改动）恰恰是最该在选之前看清的。
+ *
+ * 键盘：↑/↓（或 j/k）移动、1~9 直选、Enter 提交、Esc 取消；默认焦点在第一项（有 `selected` 则选它）。
+ */
+export function choiceDialog(opts: ChoiceOpts): Promise<string | null> {
+  return new Promise((resolve) => {
+    let cur = initialChoiceIndex(opts.options)
+    const rows: HTMLElement[] = []
+    const okBtn = h("button", { class: "fw-btn primary", text: opts.okText ?? "确定" })
+    const cancelBtn = h("button", { class: "fw-btn", text: "取消" })
+    const list = h("div", { class: "fw-choice-list", role: "radiogroup" })
+
+    const sync = (): void => {
+      rows.forEach((row, i) => {
+        const on = i === cur
+        row.classList.toggle("active", on)
+        row.setAttribute("aria-checked", String(on))
+        row.tabIndex = on ? 0 : -1
+        if (on) row.scrollIntoView({ block: "nearest" })
+      })
+      const danger = isDangerChoice(opts.options, cur)
+      // 危险项的主按钮改成明确动词，避免“确定”这种看不出后果的字
+      okBtn.classList.toggle("danger", danger)
+      okBtn.classList.toggle("primary", !danger)
+      okBtn.textContent = danger ? (opts.okText ?? "重置") : (opts.okText ?? "确定")
+    }
+
+    opts.options.forEach((o, i) => {
+      const row = h(
+        "div",
+        { class: `fw-choice-item${o.danger ? " danger" : ""}`, role: "radio", tabindex: "-1", "aria-checked": "false" },
+        [
+          h("span", { class: "fw-choice-key", text: `${i + 1}` }),
+          h("span", { class: "fw-choice-main" }, [
+            h("span", { class: "fw-choice-label", text: o.label }),
+            o.hint ? h("span", { class: "fw-choice-hint", text: o.hint }) : null,
+          ]),
+        ],
+      )
+      row.onclick = () => {
+        cur = i
+        sync()
+      }
+      // 双击直接提交（单击只选中：这里的选择带后果，不该一碰就执行）
+      row.ondblclick = () => void submit()
+      rows.push(row)
+      list.appendChild(row)
+    })
+
+    const body = h("div", { class: "fw-dialog-body" }, [
+      opts.message ? h("div", { class: "fw-dialog-msg", text: opts.message }) : null,
+      list,
+    ])
+    const dialog = h("div", { class: "fw-dialog" }, [
+      h("div", { class: "fw-dialog-title" }, [icon("info"), h("span", { text: opts.title })]),
+      body,
+      h("div", { class: "fw-dialog-actions" }, [cancelBtn, okBtn]),
+    ])
+    const overlay = h("div", { class: "fw-overlay" }, [dialog])
+    const done = (v: string | null): void => {
+      overlay.remove()
+      popKeyScope(scopeId)
+      resolve(v)
+    }
+    const move = (d: number): void => {
+      const n = opts.options.length
+      if (!n) return
+      cur = (cur + d + n) % n
+      sync()
+    }
+    const submit = async (): Promise<void> => {
+      const pick = opts.options[cur]
+      if (!pick) return
+      if (pick.danger && opts.dangerConfirm) {
+        const ok = await confirmDialog({ title: opts.dangerConfirm.title, message: opts.dangerConfirm.message, okText: opts.okText ?? "确定", danger: true })
+        if (!ok) return
+      }
+      done(pick.value)
+    }
+
+    const scopeId = nextScopeId("wb.choice")
+    pushKeyScope({
+      id: scopeId,
+      bindings: [
+        { id: "wb.choice.esc", keys: "Esc", label: "取消选项对话框", group: "wb.ui", focus: ["other", "editor", "input"], run: () => done(null) },
+        { id: "wb.choice.enter", keys: "Enter", label: "提交选项", group: "wb.ui", focus: ["other", "editor"], run: () => void submit() },
+        { id: "wb.choice.up", keys: ["↑", "k"], label: "上一项", group: "wb.ui", focus: ["other", "editor"], run: () => move(-1) },
+        { id: "wb.choice.down", keys: ["↓", "j"], label: "下一项", group: "wb.ui", focus: ["other", "editor"], run: () => move(1) },
+        ...opts.options.slice(0, 9).map((_, i) => ({
+          id: `wb.choice.pick${i + 1}`,
+          keys: String(i + 1),
+          label: `选第 ${i + 1} 项`,
+          group: "wb.ui" as const,
+          focus: ["other", "editor"] as FocusKind[],
+          run: () => {
+            cur = i
+            sync()
+          },
+        })),
+      ],
+    })
+    okBtn.onclick = () => void submit()
+    cancelBtn.onclick = () => done(null)
+    overlay.onclick = (e) => {
+      if (e.target === overlay) done(null)
+    }
+    document.body.appendChild(overlay)
+    sync()
+    setTimeout(() => rows[cur]?.focus(), 20)
   })
 }
 

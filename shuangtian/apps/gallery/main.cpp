@@ -508,7 +508,7 @@ auto run_app(int argc, char** argv) -> int {
   // 按钮标签与**实际缩放**必须同一份事实：`dpi_label()` 是唯一入口，
   // 初值也由它给出（写死 "DPI 1x" 与后端解析出的 scale 无关，启动即错）。
   auto scale_button =
-      std::make_unique<Button>(dpi_label(app.device_scale()), Button::Variant::Secondary,
+      std::make_unique<Button>(dpi_label(app.device_scale()), Button::Variant::Neutral,
                                Button::Size::Small);
   scale_button->set_id("dpi-toggle");
   scale_button->set_icon("cpu");

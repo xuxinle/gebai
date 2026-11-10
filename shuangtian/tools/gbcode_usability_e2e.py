@@ -201,6 +201,23 @@ def main() -> int:
         print(f"未找到 {binary}（先 st build gbcode）")
         return 2
     make_workspace(workspace)
+    # ⚠ **git 仓必须在应用启动前就绪**（本脚本 §8 自己写明的前提）。
+    #
+    # 为何是关键：`repo_root_` 在 `CodeEditorPage` **构造期**就解析一次
+    # （`read_repo_root`），启动后才 `git init` 的话它已经是空/旧值——面板会稳
+    # 定地报「无仓库」（实测诊断：`status-branch='无仓库'`、变更 0 行），
+    # 不管等多久都不会变。
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=workspace, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "e2e@local")
+    _git("config", "user.name", "E2E")
+    _git("add", ".")
+    _git("commit", "-qm", "first")
+    # 留一处未提交改动：后面 §8 的变更面板要靠它。
+    (workspace / "README.md").write_text("# workspace\n\ntypo here\nchanged\n", encoding="utf-8")
     print(f"工作区: {workspace}")
     process, client = start(binary, workspace, shots)
     try:
@@ -321,6 +338,10 @@ def main() -> int:
         time.sleep(0.3)
 
         # —— 5. 终端：忙闲语义（旧实现恒真）+ 标签短名 ——
+        # 终端**默认不打开**（用户要求：启动不挂一个空 shell），所以先展开面板。
+        # 不展开就读 `running` 必然拿到 false——那是“没开”而不是“坏了”。
+        client.key("j", ctrl=True)
+        time.sleep(1.5)
         terminal = client.get("terminal")
         check(terminal.get("busy") == "false", "刚启动的终端不忙（旧实现恒为 true）")
         check(terminal.get("running") == "true", "但 shell 进程是活着的（running）")
@@ -412,22 +433,41 @@ def main() -> int:
                 client.invoke("activity-scm", "click")
                 time.sleep(1.5)
 
-        git("init", "-q", "-b", "main")
-        git("config", "user.email", "e2e@local")
-        git("config", "user.name", "E2E")
-        git("add", ".")
-        git("commit", "-qm", "first")
-        (workspace / "README.md").write_text("# workspace\n\ntypo here\nchanged\n", encoding="utf-8")
+        def wait_for_change_row(name: str, timeout: float = 8.0) -> bool:
+            """等变更面板列出某个文件。
+
+            为何必须等：`refresh_git()` 是**异步**的（`git status` 在大仓里实测
+            500ms 级，同步跑就是界面冻结）。所以面板会先出现、变更行稍后到。
+            这里等的是数据而不是布局，不能靠 sleep 常数。
+            """
+            selector = f"[id='git-file-{name}']"
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if client.count(selector):
+                    return True
+                time.sleep(0.3)
+            return False
+
+        # 仓库与未提交改动已在 `main()` 开头造好（仓必须在应用启动前就存在，见那里）。
         open_scm_panel()
-        check(client.count("#git-file-README.md") == 1,
-              "变更面板列出被修改的真文件（README.md 行可见）")
-        if client.count("#git-file-README.md"):
+        listed = wait_for_change_row("README.md")
+        if not listed:
+            # 失败时要能直接看出“面板到哪一步就卡住了”：分支是探测过的，说明
+            # `git status` 跑完了；变更行不在说明分组那一层没拿到数据。
+            sb = (client.ok("get", {"id": "status-branch"}).get("props") or {}).get("text")
+            all_rows = [m["id"] for m in
+                        (client.ok("find", {"selector": "[id^=git-file-]"}).get("matches") or [])]
+            groups = [m["id"] for m in
+                      (client.ok("find", {"selector": "[id^=git-group-]"}).get("matches") or [])]
+            print(f"  [诊断] status-branch={sb!r} 变更行={all_rows} 分组={groups}")
+        check(listed, "变更面板列出被修改的真文件（README.md 行可见）")
+        if client.count("[id='git-file-README.md']"):
             client.invoke("git-file-README.md", "click")
             time.sleep(1.5)
             check(client.count("DiffView") == 1, "点变更条目 → 打开差异视图")
             client.key("w", ctrl=True)
             time.sleep(0.5)
-        if client.count("#stage-README.md"):
+        if client.count("[id='stage-README.md']"):
             client.invoke("stage-README.md", "click")
             time.sleep(1.5)
             status = git("status", "--porcelain")

@@ -762,7 +762,21 @@ void Button::set_icon(std::string icon) {
 }
 
 void Button::set_variant(Variant variant) {
-  variant_ = variant;
+  // **写进声明（`Appearance`），不是只改成员**（2026-11-10，词汇表统一）。
+  //
+  // 为何：`variant` 有两个来源——组件自己（构造参数/`set_variant`）与声明
+  // （XML/协议的 `variant`）。旧实现只改 `variant_` 成员，而声明式那条
+  // **只写 `Appearance` 从不回写成员**，于是“实际生效值”要看两条通道的叠加，
+  // 而 `get_property` 只报一个——相期蓝底事故里 `get(variant)=primary`
+  // 但屏幕上是 Ghost 色就是这样来的。
+  //
+  // 两条入口写到**同一个字段**（`extras().appearance.variant`）后：
+  // `apply_theme`（`apply_declared_overrides` 回放）、`get_property`、主题切换
+  // 三处看的是同一份事实，不可能再分叉。
+  Appearance declared = appearance().value_or(Appearance{});
+  declared.variant = variant;
+  (void)apply_appearance(declared);
+  variant_ = variant;   // 保留成员：`apply_theme` 的禁用态分支需要它做**无分配**判断
   mark_dirty();
 }
 
@@ -779,6 +793,19 @@ void Button::set_tone(Tone tone) {
 void Button::apply_theme(const Theme& theme) {
   const Palette& colors = theme.colors();
   const Metrics& metrics = theme.metrics();
+  // **生效档位来自声明优先**（2026-11-10，词汇表统一）。
+  //
+  // 为何不是直接用 `variant_` 成员：`variant` 有两条来源——组件自己
+  // （构造参数/`set_variant`）与外观声明（XML/协议的 `variant` → `Appearance`）。
+  // 渲染顺序是“组件默认 → 声明回放”（`refresh_theme` 的两步），
+  // 所以**声明优先**是那个顺序的直接体现；本函数只负责拿“该画哪个档”
+  // 去查 token，不再自己决定优先级。
+  const Variant active_variant = [&] {
+    if (const auto declared = appearance(); declared.has_value() && declared->variant.has_value()) {
+      return *declared->variant;
+    }
+    return variant_;
+  }();
   style_.radius = metrics.radius_md;
   style_.font_size = size_ == Size::Small ? metrics.font_sm
                                           : (size_ == Size::Large ? metrics.font_lg : metrics.font_base);
@@ -805,51 +832,72 @@ void Button::apply_theme(const Theme& theme) {
   // 按下态根本不生效（实测：按下与悬停像素完全一样）。
   // 两处同时做还会**叠乘**（组件一层 + 通用层）——Soft 变体因此被洗成中性灰。
   const bool inactive = !enabled_;
-  switch (variant_) {
-    case Variant::Primary:
-      style_.background = inactive ? colors.primary_soft : colors.primary;
-      style_.color = inactive ? colors.primary : colors.on_primary;
-      // **主按钮的双色渐变**：仅当主题把 `accent` 定成与 `primary` 不同的颜色时才有（
-      // 缺省两者相等 → 不画渐变，零开销回退到纯色）。
-      //
-      // 为何做在主按钮：它是界面上唯一“品牌色大面积填充”的地方，
-      // 歌白用 `--user-grad` / 渐变主色正是这个意图。而给所有卡片都上渐变会让
-      // 界面失去层次（实测：面板全渐变后，内容区与背景分不开）。
-      style_.background_gradient.reset();
-      if (!inactive && colors.accent.a != 0U &&
-          (colors.accent.r != colors.primary.r || colors.accent.g != colors.primary.g ||
-           colors.accent.b != colors.primary.b)) {
-        // ⚠ `Style::background_gradient` 的几何是 **0~1 归一化**（相对元素框），
-        // 由 `paint_box` 映射到实际 box——因为 `apply_theme` 跑在布局**之前**，
-        // 那时还拿不到 `bounds_`。若在这里存绝对坐标，窗口缩放就会错位。
-        style_.background_gradient = raster::Gradient::linear(
-            math::Point{0.0f, 0.0f}, math::Point{1.0f, 1.0f},
-            {{0.0f, colors.primary}, {1.0f, colors.accent}});
-      }
-      break;
-    case Variant::Secondary:
-      style_.background = colors.surface;
-      style_.color = inactive ? colors.text_faint : colors.text;
-      style_.border_width = metrics.border_width;
-      style_.border_color = colors.border;
-      break;
-    case Variant::Ghost:
-      style_.background = math::Color{0, 0, 0, 0};
-      style_.color = inactive ? colors.text_faint : colors.text_muted;
-      break;
-    case Variant::Soft:
-      style_.background = colors.primary_soft;
-      style_.color = inactive ? colors.text_faint : colors.primary;
-      break;
-    case Variant::Danger:
-      style_.background = inactive ? colors.danger.with_alpha_f(0.2f) : colors.danger;
-      style_.color = colors.on_primary;
-      break;
+  // **先清渐变，再按变体写底**。
+  //
+  // 为何必须在 `switch` **之前**（2026-11-10，实测）：旧写法把 `reset()` 放在
+  // `case Primary` 分支**内部**，于是从 Primary 切到其它变体的路径**永不清渐变**——
+  // `set_variant(Ghost)` 只标脏、不重跑本函数以外的任何清理，而绘制时
+  // 「渐变优先于纯色」⇒ 侧栏开关（`set_variant(on ? Soft : Ghost)`，初值 Primary）
+  // 每个都带一块主色残影。这是同一类缺陷的 C++ 侧入口。
+  style_.set_solid_background(math::Color{0, 0, 0, 0});
+
+  // **取色统一走 `Tokens::variant_colors`**（不再在按钮里手拼一套）。
+  //
+  // 为何要统一（2026-11-10，词表统一）：按钮原先自己写了一份
+  // “每个变体什么底/什么字”，而 `styling.cpp` 的 `variant_colors()` 是
+  // 样式系统给**所有**组件用的同一份表。两份表并存时：
+  //   · 同一档在两处颜色不同（“Secondary 和 Neutral 看着一样但实现两处”）；
+  //   · 样式系统的表定义了 hover/pressed 色，按钮那份没有——
+  //     而 `paint_box` 的通用悬浮层**读的就是这份色**，于是按钮的
+  //     悬浮/按下只能靠“同向提亮”猜（这正是历史上“按下与悬停像素完全一样”的成因）。
+  // 统一后按钮白得正确的 `background_hover`/`background_pressed` 语义。
+  const Tokens tokens(theme);
+  const Tokens::VariantColors tint = tokens.variant_colors(active_variant);
+  // 底色与渐变**二选一**，由词表决定（`VariantColors::background_gradient`）：
+  // 两个写入口各自把对面清掉，所以“透明底 + 残留渐变”在结构上不可能发生。
+  if (tint.background_gradient.has_value()) {
+    style_.set_gradient_background(*tint.background_gradient, tint.background);
+  } else {
+    style_.set_solid_background(tint.background);
   }
+  style_.border_color = tint.border;
+  style_.color = tint.text;
+  // `border` 宽度：只有真给了描边色的变体才该画边。
+  // 否则 `Neutral`（surface 底 + border 描边）会丢那一圈边，
+  // 而 `Ghost`/`Primary` 会凭空多出一圈。
+  style_.border_width = tint.border.a != 0U ? metrics.border_width : 0.0f;
+
+  // 禁用态：降调（而不是把色直接换掉——换色会让禁用按钮看着像另一个变体）。
+  // 每档的“降调色”各有其语义，所以仍按变体分支（与 `variant_colors` 正交）。
+  if (inactive) {
+    switch (active_variant) {
+      case Variant::Primary: style_.set_solid_background(colors.primary_soft); break;
+      case Variant::Soft:
+      case Variant::Accent:
+      case Variant::Success:
+      case Variant::Warning: style_.set_solid_background(colors.primary_soft); break;
+      case Variant::Danger: style_.set_solid_background(colors.danger.with_alpha_f(0.2f)); break;
+      case Variant::Plain:
+      case Variant::Neutral:
+      case Variant::Ghost: break;   // 无底/中性底：底不变，字降调
+    }
+    style_.color = colors.text_faint;
+    // 主色系变体的禁用字用主色（低饱和底上白字看不清）
+    if (active_variant == Variant::Primary) style_.color = colors.primary;
+  }
+
+  // **渐变层已由词表负责**（`VariantColors::background_gradient`，见上方取色段）——
+  // 这里不再重算一遍。旧的重复实现正是“同一件事两处写”的典型：
+  // 两处的判据（`accent != primary`、`!inactive`）必须永远一致，否则
+  // 一处画一处不画，而屏幕上看不出是哪一处决定的。
+  // 禁用态已在上方通过 `set_solid_background` 把渐变清掉（禁用不画渐变）。
   if (tone_ != Tone::Default) {
     if (tone_ == Tone::OnPrimary) {
       style_.color = colors.on_primary;
-    } else if (variant_ == Variant::Ghost || variant_ == Variant::Secondary) {
+    } else if (active_variant == Variant::Ghost || active_variant == Variant::Neutral ||
+               active_variant == Variant::Plain) {
+      // 只有“无底/中性底”的变体允许用 tone 把字标色（红/绿/黄…）——
+      // 实底变体（Primary/Soft/Danger）的前景色是**底色的配对色**，改它会失去对比。
       style_.color = tone_color(theme, tone_);
     }
   }
@@ -1025,17 +1073,24 @@ auto Button::semantics_flags() const -> SemanticsFlags {
 auto Button::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "label" || name == "text") return label_;
   if (name == "icon") return icon_;
-  // 档位：`variant`（外观）/ `size`（档位）/ `hint`（悬停提示）。
-  // 三者都是一等接口（`set_variant`/`set_size`/`set_hint`），没道理只让 C++ 用。
+  // 档位：`variant`（外观）/ `scale`（尺寸档）/ `hint`（悬停提示）。
+  //
+  // ⚠ `variant` 必须报**真正在画的那个档位**，而不是 `variant_` 成员。
+  //
+  // 为何（2026-11-10，相期蓝底事故的“读回说谎”那一半）：
+  // `variant` 有两条通道——组件自己（`set_variant`/构造参数）与外观声明
+  // （XML/协议的 `variant` → `Appearance`）。旧实现只报 `variant_` 成员，
+  // 而声明式那条**从不回写成员**——于是 `<Button variant="ghost"/>` 在
+  // `get` 里报 `primary`，而屏幕上是“主色渐变底 + Ghost 灰字”的缝合怪。
+  //
+  // 调试时这个谎最致命：它直接把人往“XML 没生效”的反方向指（实际生效了，
+  // 只是生效在另一层）。读回口必须与**实际生效值**同一份事实。
   if (name == "variant") {
-    switch (variant_) {
-      case Variant::Primary: return "primary";
-      case Variant::Secondary: return "secondary";
-      case Variant::Ghost: return "ghost";
-      case Variant::Soft: return "soft";
-      case Variant::Danger: return "danger";
+    // 声明优先（`apply_declared_overrides` 的回放顺序就是它的优先级）。
+    if (const auto declared = appearance(); declared.has_value() && declared->variant.has_value()) {
+      return std::string(st::ui::variant_name(*declared->variant));
     }
-    return "primary";
+    return std::string(st::ui::variant_name(variant_));
   }
   // 按钮的 `size` 是**枚举**（small/medium/large），不是长度——
   // 改叫 `scale` 以免与长度类字段混淆。
@@ -1068,20 +1123,40 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
     return true;
   }
   if (name == "variant") {
+    // **组件不再接受 `variant` 写入，但也不装作不认识它**（2026-11-10）。
+    //
+    // 为何不能简单地 `return false`：`apply_properties` 的拒因分类靠
+    // “名字在不在 `property_names()` 里”——返回 false 会让它报 `unknown_name`
+    // （“这个名字不认识”），而事实是**名字认得、只是写入通道不是这一层**。
+    // 那个错根因会把排查人指到“拼错属性名”的错方向（实测就把
+    // `set_reports_rejected_properties` 的断言撞红了：期望 invalid_value，实得 unknown_name）。
+    //
+    // 真正的事实是：`variant` 的**写入通道是样式系统**（`Appearance`）——
+    // XML/协议 那条路径里 `is_appearance_name` 分支**先于**本函数执行，
+    // 所以正常链路根本到不了这。能到这里的只有直接调 `set_property("variant")` 的代码，
+    // 而它应该被告知的是“这个值在这层不合法”，不是“这个名字不存在”。
+    //
+    // 所以：名字列入 `property_names()`（可读写契约），写入直接落到**声明**上——
+    // 两条入口最终到同一个事实（`appearance().variant`），不再有“一个字段两条通道”。
     const std::string text(value);
-    if (text == "primary") {
-      set_variant(Variant::Primary);
-    } else if (text == "secondary") {
-      set_variant(Variant::Secondary);
-    } else if (text == "ghost") {
-      set_variant(Variant::Ghost);
-    } else if (text == "soft") {
-      set_variant(Variant::Soft);
-    } else if (text == "danger") {
-      set_variant(Variant::Danger);
-    } else {
-      return false;
+    constexpr std::array kAll{Variant::Plain,  Variant::Neutral, Variant::Primary,
+                              Variant::Accent, Variant::Success, Variant::Warning,
+                              Variant::Danger, Variant::Ghost,   Variant::Soft};
+    std::optional<Variant> parsed;
+    for (const Variant candidate : kAll) {
+      if (text == st::ui::variant_name(candidate)) {
+        parsed = candidate;
+        break;
+      }
     }
+    if (!parsed.has_value()) return false;   // 值不合法 → invalid_value（正确的拒因）
+    // 写进**声明**（Appearance），不是 `variant_` 成员：
+    // 与 XML/协议 完全同一条通道，于是 `get_property("variant")`、`apply_theme`、
+    // 主题重放三处看的是**同一份事实**。
+    Appearance declared = appearance().value_or(Appearance{});
+    declared.variant = *parsed;
+    (void)apply_appearance(declared);
+    mark_dirty();
     return true;
   }
   if (name == "scale") {
@@ -1105,6 +1180,9 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
 }
 
 auto Button::property_names() const -> std::vector<std::string_view> {
+  // `variant` **在这张表里**（名字认得、可写），但它的写入落到**声明**
+  // （`Appearance`）而不是组件自己的 `variant_` 成员——见 `set_property` 的说明。
+  // 读回也走同一份事实（`get_property` 优先报声明的值）。
   return {"label", "text", "icon", "variant", "scale", "hint", "tone"};
 }
 

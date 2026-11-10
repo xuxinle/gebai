@@ -553,6 +553,13 @@ struct BoxProps {
   float width{kAuto};
   float height{kAuto};
   bool grow{false};
+  /// 主轴换行（仅 `row` 有意义；见 `Style::wrap`）。
+  ///
+  /// 为何要暴露：窄容器里放一排定高标签、且标签���量/宽度随数据变化时，
+  /// 不换行就会被排到容器右缘之外——**面板会裁掉它，而命中测试按未裁的
+  /// 框计算**，于是“看得见的最后一个标签点不动”（实测：git 左栏四个分组
+  /// 标签，点「远程」穿透到了背后的 SplitView）。
+  bool wrap{false};
   // 外观
   float radius{-1.0f};
   // 排版（盖过主题 token；缺省 = 不干预）

@@ -945,6 +945,47 @@ ST_TEST(dsl_spacer_positive_size_is_fixed) {
   ST_CHECK(bar->child_at(1)->bounds().x < bar->bounds().right() - 50.0f);
 }
 
+// ── `wrap`：窄容器里一排定宽内容必须折行（而不是溢出到容器外）─────
+//
+// 回归：`Style::wrap` 与布局器的换行实现（`Element::measure/arrange`）一直存在，
+// 但 `dsl::BoxProps` 从未暴露它——声明式里写不出来，于是只能在应用层绕。
+// 实测代价：gbcode 的 git 左栏四个分组标签在 226px 宽的栏里共需约 259px，
+// 第 4 个被排到右缘外——面板会裁掉它，而**命中测试按未裁的框算**，
+// 于是“看得见的最后一个标签点不动”（点击穿透到背后的 SplitView）。
+// 这条用例钉的正是：折行后每个子元素都落在容器内。
+ST_TEST(dsl_row_wrap_keeps_children_inside_container) {
+  struct WrapPage : Component {
+    void build(Composer& c) override {
+      // 容器固定 200px 宽，四个 60px 的子项 + 间距 → 一行只装得下两个。
+      row(c, {.gap = 10.0f, .wrap = true, .id = "wrapped"}, [&] {
+        for (int i = 0; i < 4; ++i) {
+          (void)spacer(c, 60.0f);
+        }
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({200.0f, 200.0f});
+  auto page = std::make_shared<WrapPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+  Element* wrapped = root.find("wrapped");
+  ST_REQUIRE(wrapped != nullptr);
+  ST_REQUIRE(wrapped->child_count() == 4);
+  const auto box = wrapped->bounds();
+  // ① 每个子元素都在容器内（这是缺陷的直接判据：不折行时后两个会越出右缘）
+  for (std::size_t i = 0; i < wrapped->child_count(); ++i) {
+    const auto child = wrapped->child_at(i)->bounds();
+    ST_CHECK(child.right() <= box.right() + 0.5f);
+    ST_CHECK(child.x >= box.x - 0.5f);
+  }
+  // ② 真的折了行：至少有一个子元素的 y 比第一个大（不折行时全在同一行）
+  ST_CHECK(wrapped->child_at(3)->bounds().y > wrapped->child_at(0)->bounds().y + 1.0f);
+  // ③ 容器高度按行数增长（写死高度会让折行后的行溢出到下方兄弟元素上）
+  ST_CHECK(wrapped->child_at(3)->bounds().bottom() <= box.bottom() + 0.5f);
+}
+
 // ── 状态系统高层原语：memo / effect / ref ─────────────────────────────────
 //
 // 这三个原语在 `docs/declarative.md` §4 里早已写成契约（与 JS 侧 useMemo/useEffect/

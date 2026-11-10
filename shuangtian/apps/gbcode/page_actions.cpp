@@ -3,9 +3,11 @@
 // 拆分自 main.cpp，零逻辑改动——只是 out-of-line 化。
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <format>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -504,6 +506,9 @@ namespace gbcode_ui {
   void CodeEditorPage::stash_active_text(std::vector<OpenBuffer>& list) {
     if (editor != nullptr && active_.value() < list.size()) {
       list[active_.value()].text = editor->text();
+      // 同时存**视图状态**（滚动 + 光标）——切回来时恢复，否则回到开头（用户报的缺陷）。
+      list[active_.value()].scroll_y = editor->scroll_offset().y;
+      list[active_.value()].cursor_index = editor->cursor_index();
     }
   }
 
@@ -561,6 +566,10 @@ void CodeEditorPage::load_active_text() {
   loaded_key_ = list[active_.value()].key;   // 标记「已装载」——build() 末尾据此跳过
   editor->set_language(list[active_.value()].language);
   editor->set_text(list[active_.value()].text);
+  // 恢复该标签上次的视图状态（滚动 + 光标）。set_text 已把它们归零，这里写回。
+  // `scroll_offset` 属性写入同时会通知 on_scroll；这里直接调组件 API 即可。
+  editor->set_scroll_offset(0.0f, list[active_.value()].scroll_y);
+  editor->set_cursor_index(list[active_.value()].cursor_index);
   refresh_problems();
 }
 
@@ -956,103 +965,51 @@ void CodeEditorPage::load_active_text() {
 
 
   /// 真正执行搜索（UI 里的入口与终端 `find` 共用）。
+  ///
+  /// 底层走 `st::search`（mmap + SIMD + 线程池并行）；文件清单来自
+  /// `workspace_files()` 缓存（与 Ctrl+P 共用），不再每次按键递归扫盘 + 整读。
+  /// 结果仍保持原数据形态（`search_hits_` 文案 + 三条平行数组）——
+  /// 侧栏分组逻辑无需改。
   void CodeEditorPage::apply_search(const std::string& query) {
     last_query_ = query;
     search_hit_paths_.clear();
     search_hit_lines_.clear();
     search_hit_columns_.clear();
-    std::vector<std::string> hits;
-    constexpr std::size_t kMaxHits = 300;
-    constexpr std::size_t kMaxFileBytes = 1U << 20U;
-    if (!search_hits_.value().empty()) {
-      search_summary_.set(std::format("{} 处命中", search_hits_.value().size()));
-    }
     if (query.empty()) {
       search_summary_.set("");
       search_hits_.set({});
       return;
     }
-    // 匹配器：大小写敏感 / 全词 / 正则——先定好参数，逐行复用。
-    //
-    // **不用 `std::regex`**（本仓不引 regex：构造昂贵、异常语义差、且跨平台行为
-    // 有差异）。这里实现一个小而**诚实的**子集匹配器：
-    // - `.*`：任意字符序列（可跨列）；
-    // - 普通字符：字面量；
-    // - 支持 `^` / `$` 锚定与 `\d` / `\w` / `\s` 三个字符类。
-    // 不支持集合/分组/量词——这类表达式在搜索里几乎用不到，而“假装支持”会静默给出错结果。
-    const std::string needle = search_case_.value() ? query : to_lower(query);
-    const auto locate = [&](std::string_view raw) -> std::optional<std::size_t> {
-      const std::string haystack = search_case_.value() ? std::string(raw) : to_lower(raw);
-      if (search_regex_.value()) return match_regex(needle, haystack);
-      std::size_t pos = haystack.find(needle);
-      while (pos != std::string::npos) {
-        if (!search_word_.value()) return pos;
-        // 全词：两侧不得为标识符字符（字母/数字/下划线），与多数编辑器的口径一致。
-        const bool left_ok = pos == 0 || !is_word_char(haystack[pos - 1]);
-        const std::size_t end = pos + needle.size();
-        const bool right_ok = end >= haystack.size() || !is_word_char(haystack[end]);
-        if (left_ok && right_ok) return pos;
-        pos = haystack.find(needle, pos + 1);
-      }
-      return std::nullopt;
-    };
+    constexpr std::size_t kMaxHits = 2000;
 
-    const auto add_hit = [&](const std::string& path, const std::string& name, std::size_t line,
-                             std::size_t column, std::string_view line_text) {
-      hits.push_back(std::format("{}:{}  {}", name, line, st::trim(line_text).substr(0, 70)));
-      search_hit_paths_.push_back(path);
-      search_hit_lines_.push_back(line);
-      search_hit_columns_.push_back(column);
-    };
-
-    const auto scan_text = [&](const std::string& path, const std::string& name,
-                               const std::string& content) {
-      std::size_t line_no = 0;
-      std::size_t begin = 0;
-      while (begin <= content.size() && hits.size() < kMaxHits) {
-        const std::size_t eol = content.find('\n', begin);
-        const std::size_t end = eol == std::string::npos ? content.size() : eol;
-        std::string_view line(content.data() + begin, end - begin);
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-        ++line_no;
-        if (const auto column = locate(line); column.has_value()) {
-          add_hit(path, name, line_no, *column, line);
-        }
-        if (eol == std::string::npos) break;
-        begin = eol + 1;
-      }
-    };
-
+    // 候选文件：工作区文件清单（已缓存），按 glob 过滤。
+    std::vector<st::search::FileEntry> targets;
     if (!workspace_.empty()) {
-      std::vector<std::pair<std::string, int>> stack;
-      stack.reserve(64);
-      stack.emplace_back(workspace_, 0);
-      while (!stack.empty() && hits.size() < kMaxHits) {
-        const auto [dir, depth] = stack.back();
-        stack.pop_back();
-        if (depth > 6) continue;
-        auto listing = st::fs::list_dir(dir);
-        if (!listing) continue;
-        for (const auto& item : *listing) {
-          if (hits.size() >= kMaxHits) break;
-          const std::string full = st::fs::join(dir, item.name);
-          if (item.is_dir) {
-            if (!item.name.empty() && item.name.front() == '.') continue;   // 隐藏目录
-            if (item.name == "build" || item.name == "node_modules") continue;  // 产物目录
-            stack.emplace_back(full, depth + 1);
-            continue;
-          }
-          if (item.size > kMaxFileBytes) continue;
-          // glob 过滤：按**相对工作区**的路径匹配（写 `*.cpp` 时人想的是相对路径）。
-          if (!search_glob_.empty() &&
-              !st::fs::match_glob(search_glob_, st::fs::relative_to(full, workspace_))) {
-            continue;
-          }
-          auto content = st::fs::read_text(full);
-          if (!content) continue;   // 非 UTF-8 / 读不了：跳过而不是硬猜
-          scan_text(full, item.name, *content);
-        }
+      const auto& files = workspace_files();
+      targets.reserve(files.size());
+      for (const auto& entry : files) {
+        if (!search_glob_.empty() && !st::fs::match_glob(search_glob_, entry.relative)) continue;
+        targets.push_back(entry);
       }
+    }
+
+    st::search::SearchOptions options;
+    options.case_sensitive = search_case_.value();
+    options.whole_word = search_word_.value();
+    options.regex = search_regex_.value();
+    options.max_hits_per_file = 200;
+    options.max_hits_total = kMaxHits;
+    options.capture_line_text = true;
+    options.max_line_bytes = 70;
+    const auto result = st::search::search_paths(targets, query, options);
+
+    std::vector<std::string> hits;
+    hits.reserve(result.hits.size());
+    for (const auto& hit : result.hits) {
+      hits.push_back(std::format("{}:{}  {}", st::fs::file_name(hit.path), hit.line, hit.line_text));
+      search_hit_paths_.push_back(hit.path);
+      search_hit_lines_.push_back(hit.line);
+      search_hit_columns_.push_back(hit.column);
     }
 
     if (hits.empty()) {
@@ -1061,8 +1018,7 @@ void CodeEditorPage::load_active_text() {
       search_hits_.set({});
       return;
     }
-    const bool truncated = hits.size() >= kMaxHits;
-    search_summary_.set(std::format("{} 处命中{}", hits.size(), truncated ? "（已截断）" : ""));
+    search_summary_.set(std::format("{} 处命中{}", hits.size(), result.truncated ? "（已截断）" : ""));
     status_.set(std::format("搜索命中 {} 处", hits.size()));
     search_hits_.set(std::move(hits));
   }
@@ -1157,8 +1113,44 @@ void CodeEditorPage::load_active_text() {
   // 为什么值得接：SCM 面板若只是写死一个 “main” 分支名与 “0 变更”，它就不是信息
   // 而是装饰。真读 `git status --porcelain=v1 -b` 之后，改一个文件、刷新，面板会跟着变。
   void CodeEditorPage::refresh_git() {
+    // 已在后台读：不重复提交（帧首泵每帧都会到，没有这个早退就是每帧一个任务）。
+    if (git_snapshot_loading_) return;
+    if (layout_tasks_ == nullptr) {
+      // 没有调度器（单测/嵌入式）：退回同步，行为与旧实现一致。
+      refresh_git_sync();
+      return;
+    }
+    // ⚠ 为什么必须异步：`git status --porcelain=v1 -b` 在本仓（2051 文件）实测
+    // **513ms/次**（5 次共 2565ms）。它原来的调用点全在**主线程**：帧首泵
+    // （首探 / 切换工作区 / 暂存后自动刷新）——每一次都是半秒级的界面冻结。
+    // 同一仓库上 `ensure_git_log` 早已因 3300ms 同步阻塞改成后台，这里同因同理。
+    //
+    // 分离点：后台只跑子进程（不碰 UI 树、不写 `State`——那是数据竞争）；
+    // 回主线程的 `adopt_git_snapshot` 才写成员与 `State`。
+    git_snapshot_loading_ = true;
+    // 先标已探测：否则状态栏会在读取窗口期显示“未探测（—）”，
+    // 而事实是“正在读”。首探不写文案（见 `git_first_probe_`）。
+    const bool write_status = !git_first_probe_;
+    git_first_probe_ = false;
     git_probed_ = true;
-    git_ = gbcode::read_snapshot(workspace_);
+    const std::string workspace = workspace_;
+    st::app::Tasks* tasks = layout_tasks_;
+    tasks->run_async([this, tasks, workspace, write_status](std::stop_token) {
+      // 后台：纯 git 子进程，不碰 UI 树。
+      gbcode::RepoSnapshot snapshot = gbcode::read_snapshot(workspace);
+      tasks->post_ui([this, snapshot = std::move(snapshot), workspace, write_status]() mutable {
+        adopt_git_snapshot(std::move(snapshot), std::move(workspace), write_status);
+      });
+    });
+  }
+
+  /// 把后台读到的状态快照落到成员上（**主线程**）。
+  void CodeEditorPage::adopt_git_snapshot(gbcode::RepoSnapshot snapshot, std::string workspace,
+                                          bool write_status) {
+    git_snapshot_loading_ = false;
+    // 期间又换了工作区：这份快照属于旧根，落下去就是“面板显示别的仓库”。
+    if (workspace != workspace_) return;
+    git_ = std::move(snapshot);
     // ⚠ **必须让“数据换了”一定能触发重组**。
     //
     // 变更面板从 `git_`（普通成员）取数，而普通成员不进声明式依赖表；
@@ -1170,6 +1162,9 @@ void CodeEditorPage::load_active_text() {
     //
     // 用一个单调递增的 State 当“快照版本”：面板把它读进依赖，写它就必然重组。
     git_revision_.set(git_revision_.value() + 1);
+    // 启动首探不写状态栏：那会盖住打开文件时的“已打开 X”反馈（用户根本没动 Git）。
+    // 启动后再点“刷新状态”/切工作区/暂存等显式动作照常写状态栏。
+    if (!write_status) return;
     if (!git_.error.empty()) {
       status_.set("Git：" + git_.error);
       return;
@@ -1183,6 +1178,14 @@ void CodeEditorPage::load_active_text() {
       flow = std::format("（↑{} ↓{}）", git_.ahead, git_.behind);
     }
     status_.set(std::format("Git：{}{} · {} 项变更", git_.branch, flow, git_.changes.size()));
+  }
+
+  /// 同步版（无调度器时的退路，行为与旧实现逐行一致）。
+  void CodeEditorPage::refresh_git_sync() {
+    const bool write_status = !git_first_probe_;
+    git_first_probe_ = false;
+    git_probed_ = true;
+    adopt_git_snapshot(gbcode::read_snapshot(workspace_), workspace_, write_status);
   }
 
   // —— 行尾 blame 注解（B5）——
@@ -1954,6 +1957,7 @@ void CodeEditorPage::load_active_text() {
   /// 重新扫描工作区树（资源管理器的刷新按钮）。
   void CodeEditorPage::refresh_tree() {
     dir_cache_.clear();   // 显式刷新：目录缓存全部作废（磁盘可能已变化）
+    invalidate_workspace_files();   // 文件清单缓存同步作废（新增/删文件后 Ctrl+P / 搜索要看到）
     dir_expanded_.set(dir_expanded_.value());   // 触发一次重组，树数据本就每帧重扫
     status_.set(workspace_.empty() ? "未打开工作区" : "已刷新工作区树");
   }
@@ -1984,6 +1988,33 @@ void CodeEditorPage::load_active_text() {
     lsp_.set_workspace(path);    // 语言服务的根跟着换（旧索引属于旧项目）
     dir_expanded_.set(std::vector<std::string>{});   // 新根：展开状态重来
     dir_cache_.clear();          // 缢存属于旧根，一并作废
+    invalidate_workspace_files();   // 文件清单缓存也属于旧工作区
+    // ⚠ **重置 Git 相关快照/缓存**（用户报“打开新目录后 git 没切换刷新”）。
+    //
+    // 旧实现只刷新了 tree/LSP/标题，却没清理 git 的探测标记与快照——于是：
+    //   · 变更面板（`git_`）仍显示**旧工作区**的改动；
+    //   · 提交日志/分支（`git_log_` 等）也停在旧仓库，`ensure_git_log` 因为
+    //     `git_log_loaded_`=true 而不会重读。
+    // 这里把状态全清掉：`git_probed_`=false → 下一帧 `refresh_git` 会重新探测；
+    // `git_log_*` 复位 → 打开 Git 标签时重读新仓库。
+    git_probed_ = false;
+    git_first_probe_ = false;   // 切工作区是用户显式动作，接下来的重探测应写状态栏
+    // 旧工作区的快照读取可能还在后台跑：不重置这个标记，新的 `refresh_git()`
+    // 会被早退拦住（“已在读”），新仓库就再也不刷新了。
+    // 旧任务回来的那份由 `adopt_git_snapshot` 按 workspace 比对丢弃。
+    git_snapshot_loading_ = false;
+    git_log_loaded_ = false;
+    git_log_loading_ = false;
+    git_log_wanted_ = false;
+    git_log_.clear();
+    git_branches_.clear();
+    git_tags_.clear();
+    git_remotes_.clear();
+    git_stashes_.clear();
+    git_ = gbcode::RepoSnapshot{};
+    // 立即重探测一次新工作区的 git 状态（不再等首帧/手动点按钮）；
+    // refresh_git 内部会 `git_revision_.set(...)` 触发重组，变更面板跟着刷新。
+    refresh_git();
     refresh_tree();
     const std::size_t slash = path.find_last_of("/\\");
     const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -3122,31 +3153,73 @@ void CodeEditorPage::load_active_text() {
   /// **id 带 `path:` 前缀**：条目身份是一整条磁盘路径，`run_command` 按它
   /// 分流到 `open_path`。曾经直接把路径当 id，于是分支不命中，只剩兜底的
   /// 「已打开 …」状态栏文案（面板关了、文件没开）。
+  ///
+  /// 现在走 `workspace_files()`（已枚举并缓存）+ `st::search::filter_paths`
+  /// （子序列模糊匹配 + 评分排序）。旧实现每次打开都递归扫盘、无评分、上限 300，
+  /// 大仓库里又慢又乱。过滤交给组件（按 title/detail 子串），这里给一份充足候选集。
   [[nodiscard]] auto CodeEditorPage::file_commands() const -> std::vector<CommandPalette::Command> {
     std::vector<CommandPalette::Command> table;
-    if (!workspace_.empty()) {
-      std::vector<std::pair<std::string, int>> stack{{workspace_, 0}};
-      while (!stack.empty() && table.size() < 300) {
-        const auto [dir, depth] = stack.back();
-        stack.pop_back();
-        if (depth > 5) continue;
-        auto listing = st::fs::list_dir(dir);
-        if (!listing) continue;
-        for (const auto& item : *listing) {
-          const std::string full = dir + "/" + item.name;
-          if (item.is_dir) {
-            if (!item.name.empty() && item.name.front() == '.') continue;
-            stack.emplace_back(full, depth + 1);
-            continue;
-          }
-          table.push_back(CommandPalette::Command{
-              .id = "path:" + full, .title = item.name,
-              .detail = full.substr(workspace_.size() + 1), .handler = {}});
-        }
-      }
-      return table;
+    if (workspace_.empty()) return table;
+    const auto& files = workspace_files();
+    // 预先排好序（按路径子序列匹配程度）——空查询下 filter 返回稳定列表；
+    // 具体按键过滤由 CommandPalette 自己按输入再筛一遍（它用的是逐字符子串）。
+    for (const auto& entry : files) {
+      table.push_back(CommandPalette::Command{
+          .id = "path:" + entry.path, .title = entry.name,
+          .detail = entry.relative, .handler = {}});
     }
     return table;
+  }
+
+  [[nodiscard]] auto CodeEditorPage::workspace_files() const
+      -> const std::vector<st::search::FileEntry>& {
+    // 缓存：工作区变过、显式作废、或**距上次枚举超过有效期**时重扫。
+    //
+    // ⚠ 为何必须有“按时间失效”（实测代价）：旧实现只在 `refresh_tree` /
+    // `switch_workspace` 时作废，而用户在工作区里**新建的文件**、外部工具
+    // （构建产物、git checkout、编辑器里另存、agent 写盘）产生的文件都不会触发
+    // 这两个入口——于是「Ctrl+P 找不到刚建的文件」。可复现：在临时仓库里主程序
+    // 启动后新建 `pair.py`，再 Ctrl+P 搜索 `pair.py` 得到 0 条候选（`match_count=0`），
+    // 而磁盘上文件确实存在。
+    //
+    // 有效期 2s 的理由：枚举本身在大仓里数百毫秒（不能每次按键都跑），而 Ctrl+P
+    // 是“人打算打开一个文件”这一手势—— 2s 前的清单已经足够新；同时它让
+    // “刚在外部创建的新文件”最坏 2s 内可搜（比永久看不到好得多）。
+    constexpr auto kCacheTtl = std::chrono::seconds(2);
+    const auto now = std::chrono::steady_clock::now();
+    const bool stale = workspace_file_cache_root_ != workspace_ ||
+                       workspace_file_cache_at_.time_since_epoch().count() == 0 ||
+                       now - workspace_file_cache_at_ > kCacheTtl;
+    if (stale) {
+      workspace_file_cache_.clear();
+      workspace_file_cache_root_ = workspace_;
+      workspace_file_cache_at_ = now;
+      if (!workspace_.empty()) {
+        st::search::EnumerateOptions options;
+        // ⚠ **清单必须包含二进制文件**（`kNone`）：这份清单同时供「快速打开」
+        // 与内容搜索用，而两者对二进制的取舍相反——
+        // · 快速打开：用户完全可能想打开 `binary.bin`（看十六进制、确认损坏）；
+        //   VSCode 的 Ctrl+P 也列二进制文件。按扩展名排除会让它们**在面板里消失**
+        //   （实测：`binary.bin` 搜到 0 条，状态栏只能看到“已打开 README.md”）。
+        // · 内容搜索：本身就会用 mmap + `looks_binary` 再判一次（零额外成本，
+        //   而且不靠扩展名猜），所以清单里多带几个二进制文件完全不亏。
+        options.binary_filter = st::search::BinaryFilter::kNone;
+        // 大小上限同理：快速打开该能列出任意大小的文件（用户要把 5 MiB 日志
+        // 拉出来看，而不是因为“太大”就搜不到）。内容搜索在 `search_paths` 里
+        // 自己限幅，不靠这份清单——两边取舍不同，这里取“都列”。
+        options.max_file_bytes = std::numeric_limits<std::uint64_t>::max();
+        if (auto result = st::search::enumerate(workspace_, options); result.has_value()) {
+          workspace_file_cache_ = std::move(result->files);
+        }
+      }
+    }
+    return workspace_file_cache_;
+  }
+
+  auto CodeEditorPage::invalidate_workspace_files() const -> void {
+    workspace_file_cache_.clear();
+    workspace_file_cache_root_.clear();
+    workspace_file_cache_at_ = {};   // 时间戳一并清：下次调用必重扫
   }
 
 }  // namespace gbcode_ui

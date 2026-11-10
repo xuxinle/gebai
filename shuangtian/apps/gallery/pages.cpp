@@ -547,7 +547,7 @@ namespace {
   auto button_row = make_row(8.0f, /*wrap=*/true);
   for (const auto& [label, variant] : std::vector<std::pair<std::string, Button::Variant>>{
            {"主要操作", Button::Variant::Primary},
-           {"次要", Button::Variant::Secondary},
+           {"次要", Button::Variant::Neutral},
            {"轻量", Button::Variant::Ghost},
            {"柔和", Button::Variant::Soft},
            {"危险", Button::Variant::Danger}}) {
@@ -564,8 +564,8 @@ namespace {
   auto icon_button_row = make_row(8.0f, /*wrap=*/true);
   icon_button_row->set_id("icon-button-row");
   for (const auto& [icon_name, variant] : std::vector<std::pair<std::string, Button::Variant>>{
-           {"refresh", Button::Variant::Secondary},
-           {"settings", Button::Variant::Secondary},
+           {"refresh", Button::Variant::Neutral},
+           {"settings", Button::Variant::Neutral},
            {"search", Button::Variant::Ghost},
            {"edit", Button::Variant::Ghost},
            {"trash", Button::Variant::Ghost},
@@ -584,8 +584,8 @@ namespace {
   icon_text_row->set_id("icon-text-row");
   for (const auto& [icon_name, label, variant] : std::vector<std::tuple<std::string, std::string, Button::Variant>>{
            {"plus", "新建", Button::Variant::Primary},
-           {"upload", "上传", Button::Variant::Secondary},
-           {"download", "导出", Button::Variant::Secondary},
+           {"upload", "上传", Button::Variant::Neutral},
+           {"download", "导出", Button::Variant::Neutral},
            {"refresh", "刷新", Button::Variant::Ghost},
            {"trash", "删除", Button::Variant::Danger}}) {
     auto icon_text = std::make_unique<Button>(label, variant);
@@ -1007,7 +1007,7 @@ namespace {
   auto split_actions = make_row(8.0f, /*wrap=*/true);
   const auto make_split_button = [&](const char* id, const char* label,
                                      const char* argument) {
-    auto button = std::make_unique<Button>(label, Button::Variant::Secondary,
+    auto button = std::make_unique<Button>(label, Button::Variant::Neutral,
                                            Button::Size::Small);
     button->set_id(id);
     button->on_click = [split_demo_ptr, argument]() {
@@ -1362,7 +1362,7 @@ namespace {
   const char* toolbar_labels[] = {"新建", "打开", "保存", "撤销", "重做", "查找", "替换"};
   int toolbar_index = 0;
   for (const char* label : toolbar_labels) {
-    auto button = std::make_unique<Button>(label, Button::Variant::Secondary, Button::Size::Small);
+    auto button = std::make_unique<Button>(label, Button::Variant::Neutral, Button::Size::Small);
     button->set_id(std::format("demo-toolbar-{}", toolbar_index++));
     // 第一项固定：窄宽时也不该折。
     toolbar_demo->add_item(std::move(button), /*pinned=*/toolbar_index == 1);
@@ -1510,7 +1510,7 @@ namespace {
   auto* dialog_button_ptr = dialog_button.get();
   overlay_actions->add_child(std::move(dialog_button));
   // —— Toast 触发（两种色调 + 自动消失） ——
-  auto toast_ok_button = std::make_unique<Button>("成功 Toast", Button::Variant::Secondary,
+  auto toast_ok_button = std::make_unique<Button>("成功 Toast", Button::Variant::Neutral,
                                                   Button::Size::Small);
   toast_ok_button->set_id("btn-toast-ok");
   auto toast_warn_button = std::make_unique<Button>("警告 Toast", Button::Variant::Soft,
@@ -1593,7 +1593,7 @@ namespace {
       "空间不足翻到下方），set_active 控制显隐——UiRoot 悬停 450ms 的 hint-bubble 走的是"
       "同一张组件（Element::set_hint，见右侧按钮，无头验证控制面可用）"));
   auto tooltip_actions = make_row(8.0f, /*wrap=*/true);
-  auto tooltip_button = std::make_unique<Button>("显示气泡", Button::Variant::Secondary,
+  auto tooltip_button = std::make_unique<Button>("显示气泡", Button::Variant::Neutral,
                                                  Button::Size::Small);
   tooltip_button->set_id("btn-tooltip");
   auto tooltip_hide_button = std::make_unique<Button>("隐藏", Button::Variant::Ghost,
@@ -1685,7 +1685,7 @@ namespace {
   auto* editor_ptr = editor_demo.get();
   editor_card->add_child(std::move(editor_demo));
   auto editor_actions = make_row(8.0f, /*wrap=*/true);
-  auto editor_ro_button = std::make_unique<Button>("切只读", Button::Variant::Secondary,
+  auto editor_ro_button = std::make_unique<Button>("切只读", Button::Variant::Neutral,
                                                    Button::Size::Small);
   editor_ro_button->set_id("btn-editor-readonly");
   auto* editor_ro_button_ptr = editor_ro_button.get();
@@ -1719,7 +1719,7 @@ namespace {
   auto* diff_ptr = diff_demo.get();
   diff_card->add_child(std::move(diff_demo));
   auto diff_actions = make_row(8.0f, /*wrap=*/true);
-  auto diff_next_button = std::make_unique<Button>("下一处差异", Button::Variant::Secondary,
+  auto diff_next_button = std::make_unique<Button>("下一处差异", Button::Variant::Neutral,
                                                    Button::Size::Small);
   diff_next_button->set_id("btn-diff-next");
   diff_next_button->set_hint("DiffView::next_hunk（环绕）");
@@ -1747,7 +1747,7 @@ namespace {
   completion_card->add_child(make_caption(
       "按钮唤起：候选列表（徽标+类型）贴锚点下方、空间不足翻上方；↑↓ 导航、Enter/Tab 接受、Esc 关闭；"
       "控制通道：get items·visible_items·selected，invoke next·prev·select·accept"));
-  auto completion_open_button = std::make_unique<Button>("唤起补全弹层", Button::Variant::Secondary,
+  auto completion_open_button = std::make_unique<Button>("唤起补全弹层", Button::Variant::Neutral,
                                                          Button::Size::Small);
   completion_open_button->set_id("btn-completion-open");
   completion_open_button->set_hint("锚点 = 本按钮实时 bounds（点击时已排布）");
@@ -1842,11 +1842,11 @@ namespace {
   auto* merge_ptr = merge_demo.get();
   merge_card->add_child(std::move(merge_demo));
   auto merge_actions = make_row(8.0f, /*wrap=*/true);
-  auto merge_ours_button = std::make_unique<Button>("当前段取我方", Button::Variant::Secondary,
+  auto merge_ours_button = std::make_unique<Button>("当前段取我方", Button::Variant::Neutral,
                                                     Button::Size::Small);
   merge_ours_button->set_id("btn-merge-ours");
   merge_ours_button->set_hint("take_ours：作用于当前聚焦段");
-  auto merge_theirs_button = std::make_unique<Button>("当前段取他方", Button::Variant::Secondary,
+  auto merge_theirs_button = std::make_unique<Button>("当前段取他方", Button::Variant::Neutral,
                                                       Button::Size::Small);
   merge_theirs_button->set_id("btn-merge-theirs");
   merge_theirs_button->set_hint("take_theirs：作用于当前聚焦段");
@@ -1913,7 +1913,7 @@ namespace {
       "按钮唤起（锚点=按钮实时 bounds；真实场景是右键，gbcode 编辑器右键同款）："
       "面板外不拦截命中，点击面板外或 Esc 触发 on_close；"
       "控制通道：面板 get anchor，invoke activate_item（参数=条目 id）"));
-  auto context_open_button = std::make_unique<Button>("唤起右键菜单", Button::Variant::Secondary,
+  auto context_open_button = std::make_unique<Button>("唤起右键菜单", Button::Variant::Neutral,
                                                        Button::Size::Small);
   context_open_button->set_id("btn-context-open");
   context_open_button->set_hint("锚点 = 本按钮实时 bounds（点击时已排布）");
@@ -1933,7 +1933,7 @@ namespace {
       "打开模式：左侧常用位置/盘符 + 面包屑 + 目录列表（双击进入）+ 文件名行 +"
       "确认/取消；Esc/遮罩/取消三路关闭；控制通道：get directory·filename，"
       "invoke select·activate·confirm·up·goto_place"));
-  auto filedialog_open_button = std::make_unique<Button>("打开文件对话框", Button::Variant::Secondary,
+  auto filedialog_open_button = std::make_unique<Button>("打开文件对话框", Button::Variant::Neutral,
                                                           Button::Size::Small);
   filedialog_open_button->set_id("btn-filedialog-open");
   filedialog_open_button->set_hint("起始目录 = 进程 CWD（失败兑底主目录）");
@@ -1959,7 +1959,7 @@ namespace {
   auto* terminal_ptr = terminal_demo.get();
   terminal_card->add_child(std::move(terminal_demo));
   auto terminal_actions = make_row(8.0f, /*wrap=*/true);
-  auto terminal_send_button = std::make_unique<Button>("注入一条命令回显", Button::Variant::Secondary,
+  auto terminal_send_button = std::make_unique<Button>("注入一条命令回显", Button::Variant::Neutral,
                                                         Button::Size::Small);
   terminal_send_button->set_id("btn-terminal-send");
   terminal_send_button->set_hint("append()：行模式宿主写入输出");

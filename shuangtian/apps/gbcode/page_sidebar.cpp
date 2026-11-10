@@ -980,7 +980,7 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
       (void)custom<Button>(c, [this](Button& b) {
         b.set_id("commit-and-push");
         b.set_label("提交并推送");
-        b.set_variant(Button::Variant::Secondary);
+        b.set_variant(Button::Variant::Neutral);
         b.set_size(Button::Size::Small);
         b.on_click = [this] { commit_and_push(); };
       }, {.height = 22.0f, .key = "commit-and-push"});

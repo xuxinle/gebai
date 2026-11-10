@@ -17,9 +17,26 @@
 namespace st::ui {
 
 /// 按钮（含变体与尺寸；支持前导图标与点击回调）。
+///
+/// ## 为何用 `ui::Variant` 而不是自己一套（2026-11-10，词表统一）
+///
+/// 曾经这里有一个 `Button::Variant`（Primary/Secondary/Ghost/Soft/Danger），
+/// 与 `st::ui::Variant`（Plain/Neutral/Primary/Accent/Success/Warning/Danger/Ghost）
+/// **同名不同表**。两份词表并存的直接后果（实测相期「全部忽略」蓝底）：
+///
+/// XML 写 `variant="ghost"` → 走样式系统落进 `style.background`（透明，对）
+/// 同时 `variant_` 成员**仍是构造默认的 Primary** → `apply_theme` 把主色渐变
+/// 又铺了一遍 → `paint_box`「渐变优先于纯色」→ 屏幕上是一块主色底，
+/// 而 `get_property("variant")` 报 `primary`（它读的是成员，不是声明）。
+///
+/// 两份词表还各自残缺：`Soft` 只有 Button 有、`Plain/Neutral/Accent/Success/Warning`
+/// 只有样式系统有。**任一侧都不可能完整**——这就是缺陷的宿主。
+/// 词表只能有一份。统一到 `ui::Variant` 后，`Soft` 补进词表、
+/// `Secondary` 合并为 `Neutral`（两者语义等价：surface 底 + border 描边）。
 class Button : public Element {
  public:
-  enum class Variant : std::uint8_t { Primary, Secondary, Ghost, Soft, Danger };
+  /// 视觉语气（**就是 `st::ui::Variant`**，不是按钮私有的一套）。
+  using Variant = st::ui::Variant;
   /// 内容横向对齐（与布局侧的 `st::ui::Align` 同名同义，但作为按钮自己的接口
   /// 暴露：调用方写 `Button::Align::Start` 才读得出“这是按钮的内容对齐”）。
   ///

@@ -51,6 +51,13 @@ enum class Variant : std::uint8_t {
   Warning,    ///< 警告语义（谨慎操作提示）
   Danger,     ///< 危险语义（删除/不可逆操作的确认按钮）
   Ghost,      ///< 幽灵（透明底 + hover 才显色；工具栏/行内动作）
+  /// 柔和（主色淡底 + 主色文字）：工具栏的**选中态**。
+  ///
+  /// 为什么它必须在这里（2026-11-10，词表统一）：它原是 `Button::Variant::Soft`
+  /// 独有的第 5 档，而样式系统的 8 档里没有它——于是 XML 写 `variant="soft"`
+  /// 报错、写 `variant="ghost"` 却被 Button 自己那份词表盖成 Primary。
+  /// 两份词表并存时，**任一侧都不可能完整**，这就是缺陷宿主。
+  Soft,
 };
 
 /// 抬升档位（阴影 + 表面 + 高光联动）。
@@ -94,14 +101,25 @@ class Tokens {
   explicit Tokens(const Theme& theme);
 
   // —— 变体 → 颜色组 ——
-  struct VariantColors {
-    math::Color background{};
-    math::Color border{};
-    math::Color text{};
-    /// hover/pressed 态的背景（无态交互的组件忽略）。
-    math::Color background_hover{};
-    math::Color background_pressed{};
-  };
+struct VariantColors {
+  math::Color background{};
+  math::Color border{};
+  math::Color text{};
+  /// hover/pressed 态的背景（无态交互的组件忽略）。
+  math::Color background_hover{};
+  math::Color background_pressed{};
+  /// 该变体的**渐变底**（`std::nullopt` = 纯色，不是渐变）。
+  ///
+  /// 为何渐变属于词表而不属于组件（2026-11-10，词表统一）：
+  /// 主按钮的“主色→强调色”双色渐变是一句**品牌语义**（`--user-grad` 的落点），
+  /// 与“主色用哪个蓝”同层——它必须在**所有用主色的地方一致**（按钮、将来的徽标…）。
+  /// 留在 `Button::apply_theme` 里写一遍，等于把一条样式规则抄进某个组件：
+  /// 改词表的人看不到它，也不会有任何测试拦住“改完两边不同”。
+  ///
+  /// 几何一律 **0~1 归一化**（相对元素框）：`apply_theme` 跑在布局**之前**，
+  /// 那时拿不到 `bounds_`；存绝对坐标会在窗口缩放时错位。
+  std::optional<raster::Gradient> background_gradient{};
+};
   [[nodiscard]] auto variant_colors(Variant variant) const -> VariantColors;
 
   // —— 抬升 → 表面/阴影 ——
@@ -152,6 +170,7 @@ class Tokens {
     case Variant::Warning: return "warning";
     case Variant::Danger: return "danger";
     case Variant::Ghost: return "ghost";
+    case Variant::Soft: return "soft";
   }
   return "neutral";
 }

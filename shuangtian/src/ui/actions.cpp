@@ -38,15 +38,22 @@ namespace {
                                           const st::Json& value) -> bool {
   const std::string text = st::json_as_string(value, "");
   if (name == "variant") {
-    if (text == "plain") appearance.variant = Variant::Plain;
-    else if (text == "neutral") appearance.variant = Variant::Neutral;
-    else if (text == "primary") appearance.variant = Variant::Primary;
-    else if (text == "accent") appearance.variant = Variant::Accent;
-    else if (text == "success") appearance.variant = Variant::Success;
-    else if (text == "warning") appearance.variant = Variant::Warning;
-    else if (text == "danger") appearance.variant = Variant::Danger;
-    else if (text == "ghost") appearance.variant = Variant::Ghost;
-    else return false;
+    // **遍历 `variant_name` 反查，不手写值表**（2026-11-10，词表统一）。
+    //
+    // 为何：手写的值表漏了 `soft`——而 `Soft` 正是按钮的**选中态**（工具栏开关
+    // 全用它）。漏掉的后果不是“报错”，而是 `XML 写 variant="soft"` 报“值没被接受”
+    // 然后**静默不落位**：相期的「知道了」按钮因此长得像普通按钮。
+    // 读写两侧接同一份词表（写在这里、读在 `variant_name`）就不存在漏项。
+    constexpr std::array kAll{Variant::Plain,  Variant::Neutral, Variant::Primary,
+                              Variant::Accent, Variant::Success, Variant::Warning,
+                              Variant::Danger, Variant::Ghost,   Variant::Soft};
+    for (const Variant candidate : kAll) {
+      if (text == variant_name(candidate)) {
+        appearance.variant = candidate;
+        break;
+      }
+    }
+    if (!appearance.variant.has_value()) return false;
   } else if (name == "elevation") {
     if (text == "flat") appearance.elevation = Elevation::Flat;
     else if (text == "raised") appearance.elevation = Elevation::Raised;

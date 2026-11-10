@@ -112,6 +112,10 @@ namespace gbcode_ui {
       git_probe_wanted_ = false;
       if (!workspace_.empty() && !git_probed_) refresh_git();
     }
+    // 启动首探：SCM 视图未激活时 `git_probe_wanted_` 不会置位，于是状态栏分支
+    // 永远停在“未探测（—）”——工作区明明是 Git 仓库却看不出分支。这里在首帧
+    // 主动探一次（`refresh_git` 会消费 `git_first_probe_`，不写状态栏盖掉打开反馈）。
+    if (git_first_probe_ && !workspace_.empty() && !git_probed_) refresh_git();
     ensure_git_log();
     // `--open`：首帧之后打开（见 `set_pending_open_path` 的说明）。
     flush_pending_open();
@@ -1543,7 +1547,11 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
           row(c, {.gap = 10.0f, .padding_x = 12.0f, .height = 28.0f,
               .surface = Element::Surface::Alt, .id = "statusbar"}, [&] {
       status_item(c, "status-branch", "git-branch", [this] {
-        return git_.branch.empty() ? std::string("main") : git_.branch;
+        // 不在 Git 仓库里就**如实说**，不要回退成 "main"——那是“看着像已探测”的假事实：
+        // 切到非仓库工作区后状态栏仍写 main，用户会以为 git 没跟着切换（实测）。
+        if (!git_probed_) return std::string("—");
+        if (!git_.is_repo) return std::string("无仓库");
+        return git_.branch.empty() ? std::string("（无分支）") : git_.branch;
       }, [this] {
         // 点分支 → 切到 Git 工具窗（分支/日志在那里；左侧「变更」看的是改动，
         // 两者分工见 build_git_view 的注释）。**只设状态**——日志读取在帧首泵

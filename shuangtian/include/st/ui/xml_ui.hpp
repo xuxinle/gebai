@@ -54,10 +54,26 @@ struct XmlBuildReport {
   std::string parse_warning{};
   /// 成功建出的元素数（含容器）。
   std::size_t elements{0};
+  /// **属性写着但没真正生效**（`标签.属性=值` 形式）。
+  ///
+  /// 为何需要第四类（2026-11-10，相期「全部忽略」蓝底）：
+  /// 前三类都是“名字/值不认得”。而那个缺陷属于**第三类之外**的情形：
+  /// 属性收下了、值也合法、`get` 也许还报对了，但**实际渲染的是另一层**——
+  /// 于是 `clean()` 返回 true，报告一片祥和，隐患已经上屏。
+  ///
+  /// 典型形态：同一个字段的两条通道各写一半（样式系统写 `style`、
+  /// 组件私有成员谁也不写谁），或声明被组件的主题默认盖回。
+  /// 这类无法靠“名字表/值表”发现，只能建完树后**回读比对**。
+  std::vector<std::string> ineffective_attributes{};
 
   /// 是否一切都在预期内（供"严格模式"判断，以及测试断言）。
+  ///
+  /// ⚠ `ineffective_attributes` **也算不干净**：一个“收下了但没生效”的属性
+  /// 比“拼错了名字”更危险——拼错会报 `unknown_attributes`、人会去改；
+  /// 而“收下了没生效”看起来一切正常，只能靠肉眼发现。
   [[nodiscard]] auto clean() const noexcept -> bool {
-    return unknown_tags.empty() && unknown_attributes.empty() && parse_warning.empty();
+    return unknown_tags.empty() && unknown_attributes.empty() && parse_warning.empty() &&
+           ineffective_attributes.empty();
   }
 };
 

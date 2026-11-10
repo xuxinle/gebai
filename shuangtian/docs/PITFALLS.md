@@ -263,6 +263,8 @@
 | **给 `RenderContext` 加字段只能追加在末尾**〔结构体初始化〕 | 它是**聚合体**：全仓大量调用点写 `RenderContext{theme, port, time, &count}`。把新字段插在中间会**静默**改变既有初始化的字段对应关系——实测把 `bool reduced_motion` 插在 `painted_elements` 前，`nullptr` 被解作 `bool`，报 `converting to bool from nullptr_t`（且只在三个测试单元里露出来，主库照常编过） | `element.hpp` 的 `RenderContext`；本轮实测 |
 | **动画值不要写回 `style_`**〔动画〕 | 写入真样式后，主题切换/控制通道读回/`apply_appearance` 全看到假值，而“结束复位”漏一处就永久错位。正解：`paint_style()` 无动画时返回 `style_`（零开销）、有时返回快照。另：**动画/过渡触发的样式变化必须 `mark_dirty()`**——否则 `paint_frame` 的“空帧闸门”（损坏区空+无续帧）会让这一帧根本不进 `paint`，过渡永远开不了头（测试里直接摸 `style()` 时踩到） | `src/ui/element.cpp` 的 `paint_style` / `advance_animation` |
 | **`draw_canvas` 的 `opacity` 只能乘一次**〔两条腿一致性〕 | 软体侧曾“先 `scale_premul(blended, opacity)`、再把缩放后的 α 当 coverage 传”（后者内部再乘一次），于是 `0.5` 实际得 `0.25`：实测不透明黑贴白底 **191** 而非 127，而 GPU 腿只乘一次——**两条腿本来就不一致**。三维特性矩阵拦不住它（那是图像合成路径） | `src/raster/canvas.cpp` 的 `draw_canvas`；本轮实测 |
+| **一排定宽子项在窄容器里会溢出，而溢出部分仍然“可见但不能点”**〔命中区 vs 裁剪〕 | 容器会裁掉溢出的内容，但**命中测试是按未裁的框算的**。实测：gbcode git 左栏 226px 装 4 个标签（需 259px），第 4 个「远程」被排到面板外；它的**中心点落在面板右缘之外**（x≈271 > 270），面板又不接收点击 → 穿透到背后的 `SplitView`。现象是“**看得见点不动**”，而 `invoke` 直接触发回调正常（所以只看自动化回放会误判成“功能坏了”）。修法：`row` 加 `.wrap = true`；**但给了 `wrap` 就必须去掉写死的 `.height`**（否则折行后的第二行溢出到下面的兄弟元素上，截图上就是“标签叠在分支列表上”） | `apps/gbcode/page_bottom.cpp` 的 `build_git_tabs`；`tests/ui_dsl_test.cpp` 的 `dsl_row_wrap_keeps_children_inside_container`（回退 `apply_box` 里那行赋值即红） |
+| **框架有能力但 DSL 没暴露 = 用不了**〔能力面 vs 声明面〕 | `Style::wrap` 与布局器的换行实现在 `Element::measure/arrange` 里一直有、也有测试覆盖，但 `BoxProps` 从未暴露它——声明式里写不出来，只能在应用层绕（改变信息结构 / 写魔数偏移）。遇到这类“明明应该有”的字段，先 `grep include/st/ui/dsl.hpp` 确认是否真没有，再按 §6.5 补齐（加字段 + `apply_box` 赋值 + 回归用例 + 回退验证） | 本轮实测（`dsl.hpp` 的 `BoxProps::wrap`） |
 
 ## 场景 8：画自绘组件 / 写光栅管线
 
@@ -333,6 +335,10 @@
 | **强运动段要「长」不是「快」** | 0.4s 快闪峰值只有 4.8，1.6s 长横掠有 48.8（10 倍）；一帧内飞出画面 = 观众只看到东西消失 | 同上 |
 | **「最后一帧」口径的指标，不核对帧号前进就完全不可信**〔量具〕 | `metrics.paint_ms` / `last_frame_ms` 报的是**最后一帧**。应用空闲（帧循环已收敛）时它会把同一个旧值**一直重复报**——实测读四次都是 `43.505ms`、`frames` 一直停在 4，于是被当成“每帧 43ms 的稳态”，据此推出“默认路径比显式 `--renderer gpu` 慢 8 倍、靶子是文字混合”，整条归因链的前提都是假的（真实稳态 **2.6~3.0ms**，两条路径一致）。**判据：读这类值必须先记下 `frames`，触发一次真改像素的操作，**等 `frames` 真的增大**再读**；否则你量的是“它没在动” | `src/control/server.cpp` 的 `handle_metrics`；`tmp/gbcode_renderer_ab.py` 的 `next_frame()`；实测 2026-11-08（同一帧被读四次；变帧后 auto 43.9→3.0 / gpu 6.0→2.7） |
 | **采样间隔比现象还慢 = 没异议的“没测到”**〔量具〕 | 用屏幕 `BitBlt` 查一段 100~133ms 的黑屏，实测**单次 `BitBlt` 阻塞 262ms**（DWM 合成内部同步）、采样间隔 130~350ms——比待测现象还长，于是“没采到黑”完全可以只是没抽中。而同样条件下 `DwmFlush()` 加不加都一样（阻塞不在那里）。**先在空转里量一次单次采集成本**，确认它远小于现象时宽，否则换通道（应用内 `capture`/日志埋点）而不是加压采样 | `tmp/gbcode_startup_black_probe2.py` 与 `gbcode_black_fast.py` 的实测；本次代价：前面几版“0ms 结论”全部作废 |
+| **“这个子进程调用快不快”不能凭印象回答**〔量工具身〕 | 被问到“git 探测是不是异步的”时，先分清**接口形态**（同步 `process::run` vs 后台线程 + `post_ui`）与**实际代价**——两者都要给数。实测 `git status --porcelain=v1 -b` 在本仓（2051 文件）**513ms/次**（5 次 2565ms），而调用点全在主线程 ⇒ 每一次都是半秒级冻结。**量法**：`invoke` 往返时长量主线程是否被占住（同步 **332ms** vs 异步 **6ms**），不要只读代码下结论 | 本轮实测；`apps/gbcode/page_actions.cpp` 的 `refresh_git` / `adopt_git_snapshot` |
+| **同一种“主线程跑子进程”的坑会反复出现**（每次都像新问题） | 这个仓已有两份同样的实录：`ensure_git_log` 一次跑 9 条 git 子进程 **3300ms**（首帧后第一帧冻住）、`refresh_git` 一次 `git status` **513ms**（每次暂存/切工作区都冻）。它们的**修法同构**：后台只跑子进程、`post_ui` 回主线程写 `State`。新接任何子进程类读取时，先问一句“它在主线程上吗、最坏多久”，不要等用户报卡顶 | `page_actions.cpp` 的 `ensure_git_log`（含 3300ms 实测）与 `refresh_git` |
+| **缓存失效条件要覆盖“用户真正的写入路径”**〔缓存〕 | 只在“显式刷新/换工作区”作废的清单缓存，会漏掉最常见的路径：用户在工作区里**新建文件**、外部工具/git/agent 写盘。实测症状是“Ctrl+P 永远找不到刚建的文件”（`match_count=0`），而磁盘上文件确实在。先穷举**谁会让数据变**（人、编辑器、外部进程），再决定是挂事件还是给 TTL（本仓选 2s TTL：枚举在大仓数百毫秒，不能每次按键都跑）。回退验证：去掉 TTL ⇒ 必 0 | `page_actions.cpp` 的 `workspace_files` |
+| **“统一改用快库”要逐档看它的默认取舍是否与各调用方相合**〔接入〕 | 把 Ctrl+P 与内容搜索改到同一个 `enumerate` 之后，默认 `BinaryFilter::kByExtension` 把 `binary.bin` 从快速打开里弄没了（`match_count=0`），而内容搜索自己会用 mmap 判二进制、根本不需要这层预筛。**一份清单服务两个消费方时，取“并集”，各自再按需筛**——上限同理（4 MiB 上限对大日志是错取舍） | 同上；`include/st/search/search.hpp` 的 `BinaryFilter` 注释 |
 
 ## 场景 10：写文档 / 提交
 
