@@ -1926,6 +1926,30 @@ void refresh_theme(const Theme& theme) {      // 非虚：唯一调度入口
 所以 `kUniversalPropertyNames` 当前是**空的**：没有哪个通用名能同时满足两条。
 空表不会颁假契约，比收错名静默失效好。
 
+#### 第三个面：“能读但不能写、也看不见”
+
+上面那张表把 `color` / `font_size` / `weight` 定为“**不下发但可写**”——而这句话在
+实现上曾经不成立，因为**三处各持一份名单**：
+
+| 面 | 修前 | 后果 |
+|---|---|---|
+| `get_property` | 回退基类 → 能读 | ——（所以看着“好像支持”） |
+| `apply_properties` 名字识别 | 只看 `property_names()` | `set color` **不生效**（`known=false`，根本不调 `set_property`） |
+| `element_snapshot` | 只遍历两张名字表 | 快照里**没有** `color` 这个键 |
+
+实测（探针）：`set color=#ff0000` 返回失败、读回还是旧值、快照里连键都没有。
+调用方（尤其自动化）靠快照判断“改成了什么”，缺一个名就是一次静默失明。
+
+收口：`Element::is_base_writable_property` 是**唯一名单**，三处共用：
+
+1. `Element::set_property` 的 `base_accepts`
+2. `apply_properties` 的 `known` 判定
+3. `element_snapshot` 补一轮（名字表里已有时跳过，不重复）
+
+护栏：`base_writable_properties_are_readable_writable_and_snapshotted`
+（三个面逐个断言 + 负面断言“非法值仍要拒绝”）。逆向验证两面各能变红：
+名字识别去掉 → `changed.size() > 0` 红；快照那轮去掉 → `color != nullptr` 红。
+
 #### 一个显式例外：`IconView`
 
 图标的“大小”是**直径**（`diameter`）不是字号。它刻意不包 `with_universal`，

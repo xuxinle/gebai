@@ -415,10 +415,10 @@ auto Element::set_property(std::string_view name, std::string_view value) -> boo
   const auto accepts = [&declared](std::string_view candidate) {
     return std::ranges::find(declared, candidate) != declared.end();
   };
-  // 基类支持的可写名：用**静态表**而非 `Element::property_names()`——后者是虚函数，
-  // 写 “`Element::property_names()`” 在成员函数里仍会走虚派（递归回到本组件）。
+  // 基类支持的可写名：收口到 `is_base_writable_property`（与 `apply_properties`
+  // 的名字识别用**同一份名单**——两处分散就会回到“认了但落不上”）。
   const auto base_accepts = [](std::string_view candidate) {
-    return candidate == "color" || candidate == "font_size" || candidate == "weight";
+    return is_base_writable_property(candidate);
   };
   // ⚠ **名字必须与读侧一致**。实测不一致（2026-11-10）：读侧叫 `color`、
   // 协议侧叫 `text_color`——两个名字写同一状态，读又只认一个，很难查。

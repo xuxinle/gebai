@@ -11,7 +11,9 @@
 /// 为什么不用“逐个组件审查”的写法：这是**新增组件时必漏**的约定。
 /// 护栏测试让漏掉的那一刻就变红，而不是等某个自动化脚本拿到空值去猜。
 
+#include "st/core/json.hpp"
 #include "st/core/log.hpp"
+#include "st/ui/actions.hpp"
 #include "st/test/test.hpp"
 #include "st/ui/component_registry.hpp"
 #include "st/ui/components/all.hpp"
@@ -117,6 +119,60 @@ ST_TEST(universal_properties_writable_on_every_component) {
   const auto read_back = sample.get_property("color");
   ST_REQUIRE(read_back.has_value());
   ST_CHECK_EQ(*read_back, std::string("#ff0000"));
+}
+
+/// **基类可写项的三个面必须同时成立**：能读 / 能写 / 快照可见。
+///
+/// 缺陷回归（2026-11-10）：`color` / `font_size` / `weight` 刻意不随
+/// `with_universal` 下发（值必须合法，而“声明可写”意味着“填任意串必生效”）——
+/// 于是它们变成最隐蔽的一类：`get` 能读（回退基类）、而 `set` **不生效**
+/// （`apply_properties` 认名字只看 `property_names`）、快照**看不见**
+/// （只遍历名字表）。
+///
+/// 三个面各由一处修：
+/// 1. `Element::is_base_writable_property`（与 `set_property` 的 `base_accepts`
+///    同一份名单，两处分散就会回到“认了但落不上”）；
+/// 2. `apply_properties` 的名字识别把它算进 `known`；
+/// 3. `element_snapshot` 单独补一轮。
+ST_TEST(base_writable_properties_are_readable_writable_and_snapshotted) {
+  using st::ui::Element;
+  st::ui::UiRoot root;
+  root.set_theme(st::ui::Theme::light());
+  root.set_viewport({400.0f, 300.0f});
+  auto page = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
+  auto button = std::make_unique<st::ui::Button>("x");
+  button->set_id("btn");
+  Element* btn = button.get();
+  page->add_child(std::move(button));
+  root.set_content(std::move(page));
+  root.layout(true);
+
+  for (const std::string_view name : {"color", "font_size", "weight"}) {
+    ST_CHECK(Element::is_base_writable_property(name));
+    // ① 能读
+    ST_CHECK(btn->get_property(name).has_value());
+  }
+
+  // ② 能写（`apply_properties` 那条路，不是直接调 `set_property`——
+  //    后者会绕过名字识别，测不出“协议不认”这个面）
+  st::Json patch = st::Json::object();
+  patch["color"] = "#ff0000";
+  const st::Json changed = st::ui::apply_properties(root, *btn, patch);
+  ST_CHECK(changed.size() > 0);
+  ST_CHECK_EQ(btn->get_property("color").value_or(""), std::string("#ff0000"));
+
+  // ③ 快照可见（这是调用方真正看到的那一份）
+  const st::Json snap = st::ui::element_snapshot(*btn);
+  const st::Json* props = st::json_find(snap, "props");
+  ST_REQUIRE(props != nullptr);
+  const st::Json* color = st::json_find(*props, "color");
+  ST_REQUIRE(color != nullptr);
+  ST_CHECK_EQ(color->get<std::string>(), std::string("#ff0000"));
+
+  // 负面：非法值仍要拒绝（这不是“什么都收”）
+  st::Json bad = st::Json::object();
+  bad["color"] = "not-a-colour";
+  ST_CHECK(st::ui::apply_properties(root, *btn, bad).empty());
 }
 
 }  // namespace

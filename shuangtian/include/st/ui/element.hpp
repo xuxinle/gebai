@@ -1159,22 +1159,31 @@ class Element {
 
   // —— 通用属性面（控制通道 get/set 用；组件按需覆写）——
   //
-  // ## 写法约定（三个方法各有各的坑）
+  // ## 写法约定（四个方法各有各的坑）
   //
   // | 方法 | 覆写时 |
   // |---|---|
   // | `get_property` | 自己的分支 returns，**末尾 `return Element::get_property(name);`** |
   // | `set_property` | 同上，末尾 `return Element::set_property(name, value);` |
   // | `property_names` | 只列自己的名字，**末尾包一层 `with_universal(...)`** |
-  // | `readonly_property_names` | 同上（也包 `with_universal`） |
+  // | `readonly_property_names` | 同上（包 `with_universal_readonly`） |
   //
   // 实测代价（2026-11-10）：58 个组件覆写 `get_property`，只有 13 个回退基类；
-  // 66 个覆写 `property_names`，**一个都没并上基类名**——于是动画五项 /
-  // hovered / color / font_size / weight 在它们上全部消失（75 个组件缺 462 项）。
-  // 现象是 `get animation` 返回空，而元素明明在播动画。
+  // 66 个覆写 `property_names`，**一个都没并上基类名**——合计 75 个组件缺 462 项。
   //
-  // 为何 `property_names` 给了一个**辅助函数**而不是靠“记得并上”：后者是纯人工约定
-  //（现有 66 处全要改、且新增组件必漏）。`with_universal` 只需末尾包一句。
+  // ## 第三个面：基类无条件支持的写入口
+  //
+  // `color` / `font_size` / `weight` **故意不下发给组件**（值必须合法，而“声明可写”
+  // 意味着“填任意字符串必生效”，两者矛盾）。但它们在任何会画字的元素上都应该能写
+  // ——所以单独给一份名单（`is_base_writable_property`），让 `apply_properties` 能认出。
+  //
+  // ⚠ 这份名单与 `Element::set_property` 里的 `base_accepts` **必须同一份**
+  //（两处分散就会回到“认了但落不上”或“能写但协议不认”）。已收口到本函数。
+  [[nodiscard]] static constexpr auto is_base_writable_property(std::string_view name) noexcept
+      -> bool {
+    return name == "color" || name == "font_size" || name == "weight";
+  }
+
   [[nodiscard]] virtual auto get_property(std::string_view name) const
   -> std::optional<std::string>;
   /// 写入自定义属性；返回是否生效。

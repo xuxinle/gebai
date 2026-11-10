@@ -186,13 +186,30 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   Json snapshot = element_to_json(element);
   Json properties = Json::object();
   // 可读写属性 + 只读属性都进快照（`get` 应能读到只读值，如 `selection`）。
-  for (const auto name : element.property_names()) {
+  const auto writable = element.property_names();
+  const auto readonly = element.readonly_property_names();
+  for (const auto name : writable) {
     if (auto value = element.get_property(name); value.has_value()) {
       // 属性值统一按字符串承载（组件属性面本就是文本协议），但布尔语义要保真
       properties[std::string(name)] = *value;
     }
   }
-  for (const auto name : element.readonly_property_names()) {
+  for (const auto name : readonly) {
+    if (auto value = element.get_property(name); value.has_value()) {
+      properties[std::string(name)] = *value;
+    }
+  }
+  // **基类可写但没有名字表声明的项**（`color`/`font_size`/`weight`）。
+  //
+  // 为何必须在快照里：快照是调用方真正看到的东西（`get` 单发一个名当然能读到，
+  // 但快照只遍历名字表）。不补这一轮就是“能读但看不见”——实测确认过：
+  // `set color` 成功、`get color` 拿到新值，而快照里完全没有 `color` 这个键。
+  // 调用方（尤其自动化）靠快照判断“改成了什么”，缺一个名就是一次静默失明。
+  for (const std::string_view name : {"color", "font_size", "weight"}) {
+    if (std::ranges::find(writable, name) != writable.end() ||
+        std::ranges::find(readonly, name) != readonly.end()) {
+      continue;   // 已在名字表里：上面两轮已收，不要重复
+    }
     if (auto value = element.get_property(name); value.has_value()) {
       properties[std::string(name)] = *value;
     }
@@ -464,10 +481,20 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
       } else {
         // 元素自己声明的属性面优先；未声明时回退到一份通用名（见函数注释）。
         const auto declared = element.property_names();
+        // **也要认基类无条件支持的写入口**（`color`/`font_size`/`weight`）。
+        //
+        // 为何不能只看 `property_names()`（2026-11-10 实测）：这三项刻意**不随
+        // `with_universal` 下发**（否则违反“声明必须可写且填任意值都生效”的契约），
+        // 但它们在任何会画字的元素上都应该能 `set`。只看名字表就会变成：
+        //   `get color` 能读（回退基类）、快照里没有（名字表不含）、`set` 不生效
+        // ——— “能读不能写也不能发现”的第三类分裂（实测确认过）。
+        //
+        // `is_base_writable` 与 `Element::set_property` 的 `base_accepts`
+        // 是**同一份名单**（两处必须同步，否则又回到“认了但落不上”）。
         const bool known =
             std::ranges::find(declared, name) != declared.end() ||
-            std::ranges::find(kGenericSettable, std::string_view(name)) != kGenericSettable.end();
-        if (known) {
+            std::ranges::find(kGenericSettable, std::string_view(name)) != kGenericSettable.end() ||
+            Element::is_base_writable_property(name);        if (known) {
           known_name = true;   // 名字认得：若拒绝则是值不合法（元素/枚举/颜色解析拒了）
           const std::string text =
               value.is_string() ? st::json_as_string(value) : st::json_dump(value);
