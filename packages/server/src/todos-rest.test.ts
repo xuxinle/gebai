@@ -55,6 +55,10 @@ describe("todos REST（用户级待办管理面）", () => {
     expect(String(created.idleTaskId)).toMatch(/^[a-f0-9]{32}$/)
     const bound = (await (await fetch(`${base()}/api/v1/tasks?kind=idle`)).json()) as Array<{ id: string; todoId?: string; enabled: boolean; prompt?: string }>
     const mine = bound.find((t) => t.id === created.idleTaskId)
+    // 只断言**绑定关系**（todoId 反向关联 + 内容 + 启用）：不断言整份任务对象的其余字段——
+    // 子集匹配以外的字段（runCount/state/lastStatus 等）取决于闲时调度器是否已把它跑过，
+    // 而那是**另一个异步子系统**的时序（并行满载下实例待办清单空闲即会被拉起）。
+    expect(mine).toBeDefined()
     expect(mine).toMatchObject({ todoId: created.id, enabled: true, prompt: "写周报" })
 
     const patched = (await (

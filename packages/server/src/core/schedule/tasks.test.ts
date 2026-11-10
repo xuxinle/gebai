@@ -58,7 +58,7 @@ interface Harness {
   deps: TaskManagerDeps
 }
 
-function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean; maxConcurrent?: number; defaultNotify?: TaskNotifyChannel[] } = {}): Harness {
+function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean; maxConcurrent?: number; defaultNotify?: TaskNotifyChannel[]; schedulerActive?: () => boolean } = {}): Harness {
   const home = mkdtempSync(join(tmpdir(), "gebai-tasks-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const store = new SessionStore({ home })
@@ -187,7 +187,13 @@ function internal(h: Harness, id: string): Task {
   return h.tasks["entries"].get(id)!
 }
 
-async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+/** 收尾等待的超时：并行跑测试时同一台机器上其他文件在吃 CPU，调度延迟会把正常路径拉长数倍。
+ *  这里等的是**事件收敛**（条件一旦满足立刻返回），加大上限不影响正常耗时，只避免把「慢」
+ *  误判成「不会发生」——即并行负载下的假失败。 */
+const SETTLE_TIMEOUT_MS = 20_000
+
+/** 条件等待：默认上限与 `SETTLE_TIMEOUT_MS` 同口径（并行满载下调度延迟可达数秒，5s 不够）。 */
+async function waitFor(cond: () => boolean, timeoutMs = SETTLE_TIMEOUT_MS): Promise<void> {
   const start = Date.now()
   while (!cond()) {
     if (Date.now() - start > timeoutMs) throw new Error("等待条件超时")
@@ -195,19 +201,54 @@ async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
   }
 }
 
-/** 等待任务收尾**整条链**走完（可指定已运行次数）。
- *  单看 `state`/`runCount` 不够：两者在 finishRun **开头**就更新（此时落盘与结果事件尚未发生），
- *  紧随其后的断言会读到未完成的 runs/事件/落盘状态。故在两者之外再等一条**本次**收尾事件。
- *  调用时任务已收尾（本用例前面已等到）则直接返回，不再等新事件。 */
-async function waitDone(h: Harness, id: string, runCount?: number): Promise<Task> {
-  const done = (): boolean => {
+/** 等待任务收尾**整条链**走完。
+ *
+ *  两种目标任选（都幂等，不依赖调用时机——`add`/`update(enabled)/run` 触发的 drain 是异步的，
+ *  任务可能在调用前就已收尾并发过事件；拿“调用时的基准再多一条”当条件会卡到用例超时）：
+ *  - `{ runs: N }`：该任务**收尾结果事件**累计 N 条（缺省 1）。事件是收尾链的最后一步，
+ *    等到它意味着 runs/落盘/队列推进都已完成。
+ *  - `{ runCount: N }`：条目 `runCount >= N`（迁移/历史用例：计数含迁移前已累积的轮次，
+ *    与本次会话内发过多少事件无关）。仍要求 state 已离开 running——`runCount` 在 finishRun
+ *    **开头**自增，光看它会在中间态上误匹配。
+ */
+async function waitDone(h: Harness, id: string, target: number | { runs?: number; runCount?: number } = 1): Promise<Task> {
+  const spec = typeof target === "number" ? { runs: target } : target
+  const settled = (): boolean => {
     const e = h.tasks["entries"].get(id)
-    return !!e && e.state !== "running" && (runCount === undefined || e.runCount >= runCount)
+    if (!e || e.state === "running") return false
+    if (spec.runCount !== undefined && e.runCount < spec.runCount) return false
+    const want = spec.runs ?? (spec.runCount === undefined ? 1 : 0)
+    return h.results.filter((x) => x === id).length >= want
   }
-  if (done()) return internal(h, id)
-  const base = h.results.filter((x) => x === id).length
-  await waitFor(() => done() && h.results.filter((x) => x === id).length > base)
+  await waitFor(settled, SETTLE_TIMEOUT_MS)
   return internal(h, id)
+}
+
+/** 再手动执行一次并等它收尾（第 `round` 轮）。
+ *
+ *  不能直接 `run()` 后 `waitDone`：`run` 在条目 `state === "queued"` 时**直接短路返回**
+ *  （产品语义：已在队列中就不重复排队），而队列推进（drain）是异步的——上一轮的高并发
+ *  调度延迟下，调用时它可能还挂着 `queued`，此时本次 `run` 什么也不做，目标轮次的收尾事件
+ *  永远不会来（表现为用例卡到超时）。先等它离开可入队态再发起。
+ */
+/** 再手动执行一次并等它收尾（目标为第 `round` 轮）。
+ *
+ *  `run()` 在条目 `state === "queued"` / `"running"` 时**直接短路返回**（产品语义：已在队列/运行中
+ *  就不重复排队），而队列推进（drain）是异步的——高并发调度延迟下上一轮可能还挂着这两个态，
+ *  此时 `run` 什么也不做，目标轮次的收尾事件永远不会来（表现为用例卡到 20s 超时，实测可复现）。
+ *
+ *  所以先等真正处于可入队态（`idle`）再发起，并核实入队真的发生了；`run` 报了原因（停用等）时
+ *  直接抛出真实原因，而不是坐等到超时。
+ */
+async function runAgain(h: Harness, id: string, round: number): Promise<void> {
+  // 先等它不在队列/运行中（此时 run 才会真的入队）。`idle` 是入队前的前置态。
+  await waitFor(() => {
+    const s = internal(h, id).state
+    return s !== "queued" && s !== "running"
+  })
+  const r = await h.tasks.run("default", id)
+  if (r && r.queued === false) throw new Error(`run() 未能入队（目标第 ${round} 轮）：${r.reason ?? "未知原因"}`)
+  await waitDone(h, id, round)
 }
 
 async function createSession(h: Harness, name = "t", user = "default"): Promise<string> {
@@ -807,8 +848,8 @@ describe("定时调度", () => {
       const task = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo hist", runNow: false })
       const total = TASK_RUNS_HISTORY + 2
       for (let i = 1; i <= total; i++) {
-        await h.tasks.run("default", task.id)
-        await waitDone(h, task.id, i)
+        // 循环内多轮：同上，先等上一轮离开可入队态（否则 run 在仍排队时短路，轮次永远不推进）
+        await runAgain(h, task.id, i)
       }
       // 定义文件不再内联记录；记录以「时间为名」存于 task-runs/{taskId}/
       const dir = join(h.home, "users", "default", "task-runs", task.id)
@@ -1143,8 +1184,7 @@ describe("prompt 型执行目标与会话解析", () => {
       await waitDone(h, task.id, 1)
       const stickyId = internal(h, task.id).stickySessionId!
       expect(stickyId).toMatch(/^[0-9a-f]{32}$/)
-      await h.tasks.run("default", task.id)
-      await waitDone(h, task.id, 2)
+      await runAgain(h, task.id, 2)
       expect(internal(h, task.id).stickySessionId).toBe(stickyId)
       expect(h.runCalls.map((c) => c.sid)).toEqual([stickyId, stickyId])
       // sticky 同为无人值守形态（专用会话不面向人）
@@ -1194,8 +1234,7 @@ describe("prompt 型执行目标与会话解析", () => {
       expect(h.runCalls[0].prompt).not.toContain("无人值守执行")
       // 绑定会话被删除：下一次执行自愈降级为新建会话
       await h.store.delete(sid, "default")
-      await h.tasks.run("default", task.id)
-      await waitDone(h, task.id, 2)
+      await runAgain(h, task.id, 2)
       expect(h.runCalls[1].sid).not.toBe(sid)
       expect(h.runCalls[1].interactionMode).toBe("none")
       expect(internal(h, task.id).target).toBe("ephemeral")
@@ -1303,7 +1342,7 @@ describe("持久化、重启恢复与旧数据迁移", () => {
         return { stdout: "ok", stderr: "", code: 0 }
       }) as unknown as Sandbox["exec"]
       await h.tasks.run("default", legacyId)
-      await waitDone(h, legacyId, 4)
+      await waitDone(h, legacyId, { runCount: 4 })
       expect(h.execCalls[0].cwd).toBe(join(h.home, "users", "default", "tasks", legacyId))
     } finally {
       await cleanup(h)
@@ -1445,7 +1484,7 @@ describe("通知投递", () => {
         notify: [{ type: "webhook", target: "https://example.com/hook", secret: "s3cret", at: [{ id: "ou_abc", name: "张三" }] }],
       })
       await waitDone(h, task.id, 1)
-      await waitFor(() => h.notifyPosts.length === 1)
+      await waitFor(() => h.notifyPosts.length >= 1)
       const post = h.notifyPosts[0]
       expect(post.url).toBe("https://example.com/hook")
       expect(post.body.event).toBe("task.result")
@@ -1489,15 +1528,16 @@ describe("通知投递", () => {
         notify: [{ type: "webhook", target: "https://example.com/hook" }],
       })
       await waitDone(h, task.id, 1)
-      await waitFor(() => h.notifyPosts.length === 1)
+      await waitFor(() => h.notifyPosts.length >= 1)
       expect(h.notifyPosts[0].body.ok).toBe(true)
       // 失败同样自动投递（不再有「仅失败」这一档）
       h.sandbox.exec = (async () => ({ stdout: "", stderr: "boom", code: 1 })) as unknown as Sandbox["exec"]
-      await h.tasks.run("default", task.id)
-      await waitDone(h, task.id, 2)
-      await waitFor(() => h.notifyPosts.length === 2)
-      expect(h.notifyPosts[1].body.ok).toBe(false)
-      expect(h.notifyPosts[1].body.error).toBe("exit 1")
+      await runAgain(h, task.id, 2)
+      // 等**第二条**通知（而不是只等“至少 2 条数量”）：投递在收尾之后异步发生，
+      // 上一轮的通知可能迟到，抢在它之前断言索引 1 会拿到错的那条（高并发下可复现）
+      await waitFor(() => h.notifyPosts.length >= 2 && h.notifyPosts.some((p) => p.body.ok === false))
+      const failPost = h.notifyPosts.find((p) => p.body.ok === false)!
+      expect(failPost.body.error).toBe("exit 1")
       // 非法/陈构值不入库（读取归一为缺省 auto）
       const bogus = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo x", notifyOn: "error" as never, runNow: false })
       expect(bogus.notifyOn).toBeUndefined()
@@ -1511,11 +1551,11 @@ describe("通知投递", () => {
     try {
       const a = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo a" })
       await waitDone(h, a.id, 1)
-      await waitFor(() => h.notifyPosts.length === 1)
+      await waitFor(() => h.notifyPosts.length >= 1)
       expect(h.notifyPosts[0].url).toBe("https://default.example.com/hook")
       const b = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo b", notify: [{ type: "webhook", target: "https://own.example.com/hook" }] })
       await waitDone(h, b.id, 1)
-      await waitFor(() => h.notifyPosts.length === 2)
+      await waitFor(() => h.notifyPosts.length >= 2)
       expect(h.notifyPosts[1].url).toBe("https://own.example.com/hook")
     } finally {
       await cleanup(h)
@@ -1529,14 +1569,16 @@ describe("通知投递", () => {
       h.webhookRegistry.set(wid, { url: "https://registered.example.com/hook", secret: "reg-secret" })
       const task = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo ref", notify: [{ type: "webhook", webhookId: wid }] })
       await waitDone(h, task.id, 1)
-      await waitFor(() => h.notifyPosts.length === 1)
+      // 通知投递在收尾**之后**异步发生：先等它真的投出去，再推进下一轮——
+      // 否则下一轮会把 lastNotifyError 覆盖掉，随后的断言看到的是被清空的值（高并发下可复现）。
+      await waitFor(() => h.notifyPosts.length >= 1)
       expect(h.notifyPosts[0].url).toBe("https://registered.example.com/hook")
       expect(h.notifyPosts[0].headers?.["X-Gebai-Signature"]).toMatch(/^sha256=/)
       // 引用失效（被删除）：任务仍成功，记通知错误
       h.webhookRegistry.delete(wid)
-      await h.tasks.run("default", task.id)
-      await waitDone(h, task.id, 2)
+      await runAgain(h, task.id, 2)
       expect(internal(h, task.id).lastStatus).toBe("success")
+      // 同上：等第二轮的通知错误真实落位（而不是抢在它发生前断言）
       await waitFor(() => String(internal(h, task.id).lastNotifyError ?? "").includes("webhook 引用不可用"))
     } finally {
       await cleanup(h)
@@ -1590,7 +1632,7 @@ describe("主动通知（task_notify）", () => {
 
       const res = await h.tasks.notify("default", undefined, { text: "磁盘占用 92%", title: "巡检告警" }, { sessionId: sid })
       expect(res).toEqual({ taskId: task.id, delivered: 1, errors: [] })
-      await waitFor(() => h.notifyPosts.length === 1)
+      await waitFor(() => h.notifyPosts.length >= 1)
       expect(h.notifyPosts[0].body.event).toBe("task.message")
       expect(h.notifyPosts[0].body.text).toBe("磁盘占用 92%")
       expect(h.notifyPosts[0].body.title).toBe("巡检告警")

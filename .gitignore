@@ -61,6 +61,10 @@ packages/desktop/gebai
 # coverage
 coverage/
 
+# 测试耗时采样（packages/server/scripts/test-parallel.ts 生成：实测每文件耗时，
+# 供下次运行按耗时排序；与本机性能相关，不入库）
+.test-timings.json
+
 # logs
 *.log
 gebai.log

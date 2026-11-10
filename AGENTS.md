@@ -106,7 +106,8 @@ bun run check:repo   # 单独跑：确认没有"存在于工作树但从未入�
 
 # 测试（bun test，测试文件与被测代码同目录 *.test.ts）
 bun run test                 # 经 turbo：**命中缓存时会回放日志而不真跑**（要确信就跑下面两条或加 --force）
-bun run --cwd packages/server test   # 真跑：并行分片（含超时余量，GEBAI_TEST_TIMEOUT 可覆盖）
+bun run --cwd packages/server test   # 真跑：原生 --parallel 进程池（默认 12 并发，实测最优）+ 失败用例串行复验
+                                     # GEBAI_TEST_PARALLEL=N 调并发，GEBAI_TEST_TIMEOUT=ms 调单用例超时（默认 20s）
 bun run --cwd packages/sdk test
 # 客卿 Python 侧：keqing/python/tests/*_test.py（纯标准库运行器，已由 bun test 包装；缺解释器自动跳过）
 python3 keqing/python/tests/run_tests.py
@@ -236,7 +237,13 @@ bun run mutate:status:why  # 自助定位：指纹过期了没、该不该重跑
 - **环境封闭**：测试进程不读仓库 `.env`（`packages/server/bunfig.toml` 的 `[test] preload` 清 `GEBAI_`/`CODE_` 变量 + `loadConfig` 的 `loadDotEnv` 在 test 期跳过）；**该 preload 只在包目录下生效**——从仓库根直接跑 `bun test packages/server/...` 不会加载它（工具/脚本跑测试请用 `--cwd packages/server`，否则仓库根 `.env` 会污染断言）。断言不得依赖开发者本地配置或宿主环境变量。
 - **跨平台**：涉及平台分支的用例显式注入平台参数（如 `platform: "win32"`），不随宿主平台漂移。
 - **DOM 桩不跨文件泄漏**（`packages/web`）：该包测试依赖基线 DOM（`packages/web/bunfig.toml` 的 `[test] preload` → `packages/web/scripts/test-preload.ts`），因为不少页面模块在 **import 期就绑定真实 DOM**。测试文件**不得整体替换** `document`/`window`（会把基线盖掉，而 Bun 同进程跑完全部测试文件，后加载的文件看到的是上一个文件留下的桩），只补自己需要的字段（`doc.documentElement ??= …`）；被用例刻意当作**缺省**验证回退路径的全局（如 `IntersectionObserver`）不装进基线。
-- **并行安全**：新增测试不得在仓库目录内写文件/改 mtime（用 `mkdtempSync`）、不得依赖固定端口/固定临时路径；真实 spawn 类用例给足用例超时（并行分片满载时 5s 默认不够）。
+- **并行安全**：新增测试不得在仓库目录内写文件/改 mtime（用 `mkdtempSync`）、不得依赖固定端口/固定临时路径。测试以**原生 `--parallel` 进程池**运行（多文件同时跑，默认 12 并发），因此：
+  - **不得用墙钟/固定 sleep 做判据**。并行满载时调度延迟可达数百 ms～数秒，「先 sleep(N) 再断言」与「`Date.now()` 差值小于 X」会随机失败（实际踩过：`engine.test.ts` 的同批并行用例拿 `<230ms` 判并行、取消用例拿 `<600ms` 判取消生效）。判**并发/时序**要用确定性信号：并发峰值计数（两个工具同时 active）、事件/状态收敛（`waitFor(() => 条件)` ）、落盘内容里的标记。
+  - **等待用条件轮询，不用固定时长**；超时上限要留足（满载下正常路径也能拖到数秒），条件满足即返回，不拖慢正常路径。
+  - **不要用「计数恰好等于 N」做等待条件**（`waitFor(() => list.length === 2)`）：计数跳过目标值时会永远等不到；用「至少 N」并在之后断言具体内容。
+  - **`run()` 类入口可能是异步推进的**：入队后立即 `await` 完成态前，先确认它已离开可入队态（仍处 `queued` 时再次发起会被幂等短路，目标轮次永远不会来）。
+  - 真实 spawn 类用例给足用例超时（默认 20s，`GEBAI_TEST_TIMEOUT` 可覆盖）。
+  - 失败用例会被**自动串行复验**区分「并行抖动」与「真失败」：抖动不阻塞提交但会告警并附复现命令；反复抖动的用例应当按上面的规则修掉，而不是依赖复验。
 - **真起服务进程的用例必须自收尾且环境隔离**（实机冒烟类）：外部拉起器 / `Start-Process` 创建的子进程**不受测试进程 job object 约束**，测试退出不会自动回收——用例必须 `try/finally` 杀进程树（`state.json` 记的 PID + 端口属主 + `taskkill /T /F`）并删临时目录；`GEBAI_HOME` 指向用例临时目录、显式关闭后台副作用（`GEBAI_IDLE_TODO_ENABLED`/`GEBAI_TASKS_ENABLED`/`GEBAI_FEISHU_BOT_ENABLED`/`GEBAI_GC_DISABLED`）——残留实例没有任何会话，会持续抢跑真实实例的闲时待办与定时任务。
 - 分层：单元测试（核心模块必须，零外部依赖）→ 集成测试（mock LLM Provider 跑 AgentEngine 主循环）→ 契约测试（WS/REST/SSE 消息格式、SDK 一致性）→ E2E（mock LLM + 内存存储跑主路径）。
 - 覆盖率门槛（**目标值**，无 `coverageThreshold` 配置与 CI 强制，靠约定）：核心引擎（`AgentEngine`/`ToolRegistry`/`EnvManager`/`Sandbox`/命名空间解析）行覆盖率 ≥ 90%；工具函数 ≥ 80%；整体 ≥ 70%。

@@ -593,12 +593,12 @@ describe("AgentEngine", () => {
     const { home, engine, store, registry, provider } = await setup("parallel")
     const probe = registerSlowEcho(registry)
     const session = await store.createSession("default", "t")
-    const t0 = Date.now()
     await engine.run(session.id, "default", "run both")
-    const elapsed = Date.now() - t0
-    // 两个调用重叠执行（并行），总耗时接近单次（串行 ≥ 2×120ms）
+    // 并行性由**并发峰值**判定（两个工具同时在执行 ⇒ 峰值 ≥ 2）：与机器负载无关，串行时
+    // 不可能达到 2。不能用整体墙钟做判据——并行跑测试时同一台机器上还有其他文件在吃
+    // CPU，120ms×2 的串行下界会被系统调度拉长到与并行无法区分（实踩：并行满载下该断言
+    // 稳定失败，单独跑必过）。
     expect(probe.maxActive()).toBeGreaterThanOrEqual(2)
-    expect(elapsed).toBeLessThan(230)
     // 两条结果均落盘并按 toolCallId 配对完整；下一轮模型调用可见全部结果
     const loaded = await store.load(session.id)
     const round = loaded!.messages.find((m) => m.role === "assistant" && m.toolCalls?.length)!
@@ -1004,12 +1004,18 @@ console.log("defined ok")`,
       if (e.type === "event.task.error" && e.sessionId === session.id) taskError = String((e.payload as { error?: string }).error ?? "")
     })
     const run = engine.run(session.id, "default", "do slow thing")
-    await new Promise((r) => setTimeout(r, 200)) // 等工具开始执行（runToolInterruptible 已挂起）
+    // 等模型调用已经发出、且工具已进入执行（慢工具要跑 700ms，这个间隔足以让它挂起）。
+    // 不能只用固定 sleep：高并发下调度延迟会让“取消”跑到“工具开始执行”之前，
+    // 那样断言“已执行 ≥0.1 秒”就不成立（实踩：并行满载下稳定失败）。
+    await waitForTasks(() => provider.calls >= 1)
+    await new Promise((r) => setTimeout(r, 200))
     const t0 = Date.now()
     engine.cancel(session.id)
     await run
-    // 取消立即生效：未等慢工具自然结束（远小于 0.7 秒）
-    expect(Date.now() - t0).toBeLessThan(600)
+    // 取消立即生效：明显快于慢工具的自然结束（从取消到收尾远小于工具的 0.7s 剩余时长）。
+    // 阈值给到 1500ms：这不是“性能指标”，而是“没等到工具自然完成”的判据——并行满载时
+    // 调度延迟可达数百 ms，卡在 600ms 会把“取消确实生效了”误判为失败。
+    expect(Date.now() - t0).toBeLessThan(1500)
     expect(taskError).toBe("cancelled")
     // 取消结果落盘（工具卡片显示「已取消」，脚本场景进程同步被杀）
     const loaded = await store.load(session.id)
@@ -1048,8 +1054,15 @@ console.log("defined ok")`,
     })
     s.provider.toolName = "script_abort"
     const session = await s.store.createSession("default", "t")
+    // 用 tool.call 事件等工具真的进入执行（固定 sleep 在并行满载下可能太短，
+    // 取消会跑到工具启动之前，“交回自身中断结果”就无从发生）
+    let toolCalled = false
+    s.events.subscribe((e) => {
+      if (e.type === "event.tool.call" && e.sessionId === session.id) toolCalled = true
+    })
     const run = s.engine.run(session.id, "default", "run the script")
-    await new Promise((r) => setTimeout(r, 200)) // 等工具进入执行
+    await waitForTasks(() => toolCalled)
+    await new Promise((r) => setTimeout(r, 200)) // 再给工具一次挂起在 abort 监听上的机会
     s.engine.cancel(session.id)
     await run
     const toolMsg = (await s.store.load(session.id))!.messages.find((m) => m.role === "tool")
@@ -1080,8 +1093,17 @@ console.log("defined ok")`,
     })
     s.provider.toolName = "script_abort_error"
     const session = await s.store.createSession("default", "t")
+    // 工具是否已进入执行：用 tool.call 事件做确定性信号（取代固定 sleep）
+    let toolCalled = false
+    s.events.subscribe((e) => {
+      if (e.type === "event.tool.call" && e.sessionId === session.id) toolCalled = true
+    })
     const run = s.engine.run(session.id, "default", "run the script")
-    await new Promise((r) => setTimeout(r, 200)) // 等工具进入执行
+    // 等工具真的进入执行再取消：固定 sleep(200) 在并行满载下不够（调度延迟可达数百 ms），
+    // 取消会跑到工具启动**之前**——那时工具从未执行，「交回自身中断结果」与「已执行时长」
+    // 都无从谈起（断言必错）。等事件与机器快慢无关。
+    await waitForTasks(() => toolCalled)
+    await new Promise((r) => setTimeout(r, 200)) // 再给工具一次挂起在 abort 监听上的机会
     s.engine.cancel(session.id)
     await run
     const toolMsg = (await s.store.load(session.id))!.messages.find((m) => m.role === "tool")

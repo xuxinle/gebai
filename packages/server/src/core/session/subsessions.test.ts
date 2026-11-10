@@ -27,6 +27,17 @@ import { SubSessionRegistry, normalizeSubSessionSpecs, SUBSESSION_FINISH_GRACE_M
 
 const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms))
 
+/** 条件等待（用来取代固定 sleep）：并行跑测试时调度延迟不可预测，
+ *  “等一个固定时长再断言”会时而跑在事件之前；等条件则与机器快慢无关。
+ *  超时上限只防真的卡死，正常路径条件一满足立即返回。 */
+async function waitFor(cond: () => boolean, timeoutMs = 20_000): Promise<void> {
+  const start = Date.now()
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("等待条件超时")
+    await sleep(5)
+  }
+}
+
 /** 规格规范化：两形态互斥、缺省值、缺省命名、批内唯一、上限。 */
 describe("normalizeSubSessionSpecs", () => {
   test("单任务形态：input 必填，agents 缺省空（不加载子Agent），缺省值与开关默认", () => {
@@ -658,7 +669,10 @@ describe("subsession_run 集成（继承上下文 fork）", () => {
     try {
       const session = await h.store.createSession("default", "t")
       const running = h.engine.run(session.id, "default", "启动慢子会话")
-      await sleep(100) // 子会话进入挂起 chat
+      // 等子会话**真的进入挂起 chat** 再取消：固定 sleep(100) 在并行满载下不够长，
+      // 可能子会话还没跑到挂起点就被取消——那样“终止的子会话不合入”与取消传播断言都没被
+      // 真正验证过（实踩：并行下 provider.calls 为 0）。改为等条件（与机器快慢无关）。
+      await waitFor(() => h.provider.calls >= 2) // 父轮 1 次 + 子会话进入挂起 1 次
       h.engine.cancel(session.id)
       await running
       await sleep(100)
