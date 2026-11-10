@@ -160,6 +160,7 @@
 
 ### 服务端
 - 服务端通过 WebSocket 与客户端通信，Agent 能力（Chat、工具调用、审批等）均在服务端内部实现
+- **路由表护栏**（`core/base/route-guard.ts`，`createApp` 末尾断言）：禁止路由路径里出现跨斜杠正则参数（`:key{.+}` 形态）。原因是 Hono 的 `SmartRouter` 会**静默降级**——`RegExpRouter` 拒收「同方法下静态段与参数段同层」（本服务里 `GET /tasks/queue` 与 `GET /tasks/:id`、`POST /sessions/import` 与 `use("/sessions/:id")` 就是这种组合），于是整站落到 `TrieRouter`；而 `TrieRouter` 不认 `{...}`（`getPattern` 把它解析成永不匹配的正则），这类路由会**永久 404** 且没有任何报错。实际生效的路由器名经 `/api/health` 的 `router` 字段透出（排查「某端点为何 404」的第一线索）。带斜杠的参数用两种写法等价表达：客户端 `encodeURIComponent` 成单段，或拆成多条普通参数段路由（如 `persona.ts` 的 `/schedules/:key/:action` 与 `/schedules/:personaId/:driverId/:scheduleId/:action` 同处理器）
 - **单端口暴露**：静态 Web UI、WebSocket（`/ws`）、REST API（`/api/*`）全部由同一端口承载，无多端口部署需求
 - 对外提供双通道 API：**WebSocket**（实时双向流式）与 **REST HTTP**（同步请求，业务系统集成）
 - 服务端内置 Web UI，通过浏览器可直接访问使用

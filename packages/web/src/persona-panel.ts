@@ -107,11 +107,33 @@ export async function fetchPersonaState(): Promise<PersonaStateView | null> {
   return (await res.json()) as PersonaStateView
 }
 
+/**
+ * 从失败响应里取出**能看的原因**。
+ *
+ * 为何不能只 `res.json().catch(() => ({}))` 然后 `body.error ?? "未知错误"`：
+ * 服务端并非所有失败都回 JSON——Hono 自带 404/405 回 `text/plain`，代理层回 HTML，
+ * 网络层失败连响应都没有。旧写法这三种情况全部归零成 `undefined`，界面只好说“未知错误”，
+ * 而真正的原因（比如路由根本没注册 → 404）就完全看不出来了。
+ * 所以：JSON 里取 error，非 JSON 时给出**状态码 + 响应片段**。
+ */
+async function readFailure(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "")
+  try {
+    const body = JSON.parse(text) as { error?: unknown }
+    if (typeof body?.error === "string" && body.error.trim()) return body.error
+  } catch {
+    /* 非 JSON：继续走下方文本分支 */
+  }
+  const snippet = text.trim().replace(/\s+/g, " ").slice(0, 120)
+  return snippet ? `HTTP ${res.status}：${snippet}` : `HTTP ${res.status} ${res.statusText}`.trim()
+}
+
 /** 手动启停一个事件源（诊断用）。 */
 export async function controlPersonaSource(name: string, action: "start" | "stop"): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(`/api/v1/persona/sources/${encodeURIComponent(name)}/${action}`, { method: "POST" })
+  if (!res.ok) return { ok: false, error: await readFailure(res) }
   const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
-  return { ok: res.ok && body.ok !== false, ...(body.error ? { error: body.error } : {}) }
+  return { ok: body.ok !== false, ...(body.error ? { error: body.error } : {}) }
 }
 
 /** 一条定时任务的控制面形状（含**已停用**的：界面要能把它们重新打开）。 */
@@ -127,12 +149,16 @@ export interface ScheduleControlRow {
   lastRunAt?: number
 }
 
-/** 列全部定时任务（含已停用）。404（未启用/未装配）返回空数组而不是抛错。 */
+/** 列全部定时任务（含已停用）。未装配/不可用时 `ok:false` + 原因（不抛错，面板照常渲染其余部分）。 */
 export async function fetchPersonaSchedules(): Promise<{ ok: boolean; rows: ScheduleControlRow[]; error?: string }> {
   const res = await fetch("/api/v1/persona/schedules")
-  if (res.status === 404) return { ok: false, rows: [], error: "定时任务控制面未装配" }
+  if (!res.ok) {
+    // 404 的两种成因必须区分开：一是控制面真的未装配（服务端 JSON 会说明），
+    // 二是这条端点根本不存在（路由/代理层回的 text/plain 404）——后者是部署或路由缺陷，
+    // 当成“未装配”会把一个真 bug 包装成正常状态。readFailure 两者都能说出真相。
+    return { ok: false, rows: [], error: await readFailure(res) }
+  }
   const body = (await res.json().catch(() => ({}))) as { schedules?: ScheduleControlRow[]; error?: string }
-  if (!res.ok) return { ok: false, rows: [], ...(body.error ? { error: body.error } : {}) }
   return { ok: true, rows: Array.isArray(body.schedules) ? body.schedules : [] }
 }
 
@@ -144,16 +170,18 @@ export async function setPersonaScheduleEnabled(
   const res = await fetch(`/api/v1/persona/schedules/${encodeURIComponent(key)}/${enabled ? "enable" : "disable"}`, {
     method: "POST",
   })
+  if (!res.ok) return { ok: false, error: await readFailure(res) }
   const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
-  return { ok: res.ok && body.ok !== false, ...(body.error ? { error: body.error } : {}) }
+  return { ok: body.ok !== false, ...(body.error ? { error: body.error } : {}) }
 }
 
 /** 立即跑一次（不改变开关状态；停用状态下也可跑，用于验证配置）。 */
 export async function runPersonaSchedule(key: string): Promise<{ ok: boolean; error?: string; eventId?: string }> {
   const res = await fetch(`/api/v1/persona/schedules/${encodeURIComponent(key)}/run`, { method: "POST" })
+  if (!res.ok) return { ok: false, error: await readFailure(res) }
   const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; eventId?: string }
   return {
-    ok: res.ok && body.ok !== false,
+    ok: body.ok !== false,
     ...(body.error ? { error: body.error } : {}),
     ...(body.eventId ? { eventId: body.eventId } : {}),
   }
@@ -249,6 +277,8 @@ export function renderPersonaPanel(
   snapshot: PersonaStateView,
   onChanged?: () => void,
   schedules?: ScheduleControlRow[],
+  /** 拉取定时控制面失败的原因（有值时面板顶部如实说出来，而不是默默少一排开关）。 */
+  scheduleError?: string,
 ): void {
   // 定时任务的启停状态（含**已停用项**）：不在 ssr 快照里（那里只列声明），
   // 由调用方一并拉好传进来。
@@ -431,6 +461,12 @@ export function renderPersonaPanel(
       // 启停状态与声明是两份数据：声明在 snapshot（只含启用的），开关在 /schedules
       // （含停用的）。所以在这里对一次 key，单位对不上的就不渲染开关（宁可不给按钮，
       // 也不给一个点了没用的按钮）。
+      //
+      // 拉不到控制面时把原因写在人群标题下：少一排开关本身很容易被当成「本来就没有」，
+      // 而那通常是端点在 404（见 route-guard.ts 的「静默失效」）——不说出来就没人会查。
+      if (scheduleError && (d.schedules?.length ?? 0) > 0) {
+        info.appendChild(el("div", "persona-pop-error", `定时开关不可用：${scheduleError}`))
+      }
       for (const s of d.schedules ?? []) {
         const tz = s.timezone ? `（${s.timezone}）` : ""
         const key = `${p.id}/${d.id}/${s.id}`
@@ -453,7 +489,9 @@ export function renderPersonaPanel(
             const r = await setPersonaScheduleEnabled(key, !on)
             if (!r.ok) {
               toggle.disabled = false
-              // 失败得说出来：静默不动会让人以为已经改好了
+              // 失败得说出来：静默不动会让人以为已经改好了。
+              // r.ok=false 时 r.error 恒有值（setPersonaScheduleEnabled 已保证：
+              // 非 2xx 一律经 readFailure 取出状态码/服务端原因），``未知错误`` 只是兵底。
               alert(`定时任务${on ? "停用" : "启用"}失败：${r.error ?? "未知错误"}`)
               return
             }

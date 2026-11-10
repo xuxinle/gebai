@@ -10,6 +10,7 @@
  */
 import { describe, expect, test } from "bun:test"
 import { Hono } from "hono"
+import { TrieRouter } from "hono/router/trie-router"
 import type { Context } from "hono"
 import type { AppEnv } from "../app"
 import type { PersonaStateSnapshot } from "../core/session/persona-status"
@@ -464,5 +465,50 @@ describe("定时任务控制面 /api/v1/persona/schedules", () => {
     expect(
       (await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/disable", { method: "POST" })).status,
     ).toBe(200)
+  })
+
+  /**
+   * 路由器兼容性：线上跑的是 **TrieRouter**，不是 RegExpRouter。
+   *
+   * 背景（真实事故）：这条路由曾写 `:key{.+}`，而 `TrieRouter.getPattern()` 把
+   * `:key{.+}` 解析成 `[label, "key", /(?:)/]`，`matcher.exec()` 永远 null → 该路由
+   * 在线上**永久不可达**，但单测用默认 RegExpRouter 全绿。下列用例就是钉住这件事：
+   * 同一处理器在 TrieRouter 下必须照常工作。
+   */
+  describe("TrieRouter（线上实际生效的路由器）下启用可用", () => {
+    const trieApp = (deps: Record<string, unknown>) => {
+      const app = new Hono<AppEnv>({ router: new TrieRouter() as never })
+      registerPersonaRoutes(app, deps as never)
+      return app
+    }
+
+    test("URL 编码成单段的 key 能命中（前端 encodeURIComponent 形态）", async () => {
+      const c = control()
+      const app = trieApp({ credentials: {}, publish: () => {}, publicBase: () => "http://x", scheduleControl: c.api })
+      const res = await app.request("/api/v1/persona/schedules/xiaoshuang%2Freport%2Fmorning/disable", {
+        method: "POST",
+      })
+      expect(res.status).toBe(200)
+      expect(c.log).toEqual(["set:xiaoshuang/report/morning:false"])
+    })
+
+    test("未编码的三段 key 也能命中（curl / 终端手敲形态）", async () => {
+      const c = control()
+      const app = trieApp({ credentials: {}, publish: () => {}, publicBase: () => "http://x", scheduleControl: c.api })
+      const res = await app.request("/api/v1/persona/schedules/xiaoshuang/report/morning/enable", { method: "POST" })
+      expect(res.status).toBe(200)
+      // 三段拼回的 key 必须**逐字等于** scheduleKey() 的形态，否则查表永远落空
+      expect(c.log).toEqual(["set:xiaoshuang/report/morning:true"])
+    })
+
+    test("key 含 % 不因二次解码而 500（param 已解码一次）", async () => {
+      // `a%2525%2Fb%2Fm` 解码一次 = `a%25/b/m`（`%25` 是字面的 “%”）。
+      // 旧实现又 decodeURIComponent 一次 → `%/b` 是非法转义 → URIError → 500。
+      const c = control({ rows: [row({ key: "a%25/b/m" })] })
+      const app = trieApp({ credentials: {}, publish: () => {}, publicBase: () => "http://x", scheduleControl: c.api })
+      const res = await app.request("/api/v1/persona/schedules/a%2525%2Fb%2Fm/disable", { method: "POST" })
+      expect(res.status).toBe(200)
+      expect(c.log).toEqual(["set:a%25/b/m:false"])
+    })
   })
 })

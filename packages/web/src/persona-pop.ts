@@ -181,7 +181,9 @@ async function refresh(force = false): Promise<void> {
   // 定时开关与声明是两份数据（快照只带声明、开关在 /schedules）：这里一并取全再画，
   // 免得面板自己为了补开关而重画（那会变成一个自反馈的刷新环）。
   // 取不到就给空数组：少几个开关按钮，换整块面板不等它。
-  const schedRes = await fetchPersonaSchedules().catch(() => ({ ok: false, rows: [] as ScheduleControlRow[] }))
+  const schedRes = await fetchPersonaSchedules().catch(
+    (): { ok: boolean; rows: ScheduleControlRow[]; error?: string } => ({ ok: false, rows: [], error: "请求失败" }),
+  )
   renderPersonaPanel(
     refs.body,
     snapshot,
@@ -190,6 +192,7 @@ async function refresh(force = false): Promise<void> {
       onPersonaStateChanged()
     },
     schedRes.rows,
+    schedRes.error,
   )
 }
 

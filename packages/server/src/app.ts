@@ -15,6 +15,7 @@ import type { SubAgentManager } from "./core/agents/subagents"
 import type { WebhookManager } from "./webhooks"
 import type { ServerConfig } from "./core/base/config"
 import { BOOT_ID } from "./core/base/boot-id"
+import { assertRouteTable, describeRouter } from "./core/base/route-guard"
 import type { RouteCtx } from "./routes/context"
 import { registerAuthRoutes } from "./routes/auth"
 import { registerPersonaRoutes } from "./routes/persona"
@@ -209,7 +210,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   const rc: RouteCtx = { app, d, userOf, requireAdmin }
 
   // Health（boot=进程启动标识：Web 页面据此在服务重启后自动重新加载，见 core/base/boot-id.ts）
-  app.get("/api/health", (c) => c.json({ ok: true, ts: Date.now(), boot: BOOT_ID }))
+  // router=实际生效的 Hono 路由器（排查「某端点为何 404」的第一线索：SmartRouter 会静默降级，
+  // 而不同路由器支持的路由写法不同：见 core/base/route-guard.ts）
+  app.get("/api/health", (c) => c.json({ ok: true, ts: Date.now(), boot: BOOT_ID, ...describeRouter(app) }))
 
   // 各域路由（装配顺序：sessions 的 :id 白名单中间件须先于 session-files 注册）
   registerAuthRoutes(rc)
@@ -253,6 +256,11 @@ registerTtsRoutes(rc)
 registerTriageRoutes(rc)
   registerDocsRoutes(rc)
   registerStaticRoutes(rc)
+
+  // 路由表自检（装配末尾，全部路由已注册）：把「注册成功但永远匹配不上」的路由
+  // 在启动期就变成一条明确错误，而不是等用户点按钮得到一句「未知错误」。
+  // 断言失败 = 启动失败（宁可起不来，也不要带着一个静默 404 的端点对外服务）。
+  assertRouteTable(app)
 
   return app
 }

@@ -363,16 +363,39 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
    * 人格定时任务：启用 / 停用 / 立即运行一次。
    *
    * key 形态 `{personaId}/{driverId}/{scheduleId}`（与 `scheduleKey()` 逐字一致）。
-   * 含斜杠，终端里用时记得 URL 编码；前端 `encodeURIComponent` 即可。
-   * 这里用 `:key{.+}` 匹配整段（Hono 默认不跨斜杠），避免让使用者自己拼三段。
+   * 含斜杠 → 客户端必须 `encodeURIComponent` 成单段（前端就是这么发的）。
+   *
+   * ## 为什么不用 `:key{.+}` 匹配整段（踩过的坑）
+   *
+   * `:key{.+}` 是**跨斜杠正则参数**，只有 `RegExpRouter` 支持；而本服务的路由表里存在
+   * 「同方法静态段与参数段同层」（如 `GET /tasks/queue` 与 `GET /tasks/:id`），
+   * `RegExpRouter` 对这类组合直接抛 `UnsupportedPathError`，`Hono` 的 `SmartRouter` 于是
+   * **静默降级到 `TrieRouter`**——而 `TrieRouter` 既不支持 `{.+}`，`getPattern` 也认不出
+   * 带花括号的段，于是这条路由**永远匹配不上**：请求直接 404（`text/plain`，不是我们的
+   * JSON 错误体），前端 `res.json()` 解析失败 → 用户只看见「未知错误」。
+   *
+   * 所以这里用**普通参数段**：两种路由器都支持，语义由「客户端把 key 编码成单段」保证。
+   * 未编码的多段形态（`/a/b/c/disable`）也有对应路由兜住（见下），二者都落到同一个处理器。
+   *
+   * ## 为什么 param 不再 decodeURIComponent
+   *
+   * Hono 的 `c.req.param()` **已经解码过一次**（内部 `tryDecodeURIComponent`）。再解一次是
+   * 二次解码：key 里原本就有 `%` 时（`a%25b` → 一次解码 `a%b` → 二次解码抛 URIError）
+   * 会变成 500。原实现多写的那一次是多余的。
    */
-  app.post("/api/v1/persona/schedules/:key{.+}/:action", async (c) => {
+  const personaScheduleAction = async (c: Context<AppEnv>) => {
     if (deps.requireAdmin) {
       const denied = deps.requireAdmin(c)
       if (denied) return denied
     }
     if (!deps.scheduleControl) return notSchedulesEnabled(c)
-    const key = decodeURIComponent(c.req.param("key") ?? "").trim()
+    // 单段形态取 `:key`；三段形态拼回同一个 key（`scheduleKey()` 的 `${personaId}/${driverId}/${scheduleId}`）。
+    // 两者都不会为空——但空 key 仍单独报 400（不把“没取到参数”当成“查无此定时”）。
+    const single = c.req.param("key")
+    const key = (
+      single ??
+      [c.req.param("personaId"), c.req.param("driverId"), c.req.param("scheduleId")].filter((s) => s !== undefined).join("/")
+    ).trim()
     const action = c.req.param("action")
     if (!key) return c.json({ error: "缺少定时任务 key" }, 400)
     if (action !== "enable" && action !== "disable" && action !== "run") {
@@ -404,5 +427,12 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
     if (!r.ok) return c.json({ ok: false, key, action, error: r.error }, 400)
     deps.publish("event.persona.schedule", { key, action, enabled: wantEnabled })
     return c.json({ ok: true, key, action, enabled: wantEnabled })
-  })
+  }
+
+  // 两条路由写到同一个处理器，覆盖两种客户端写法：
+  // - `:key`：key 已 URL 编码成单段（前端 `encodeURIComponent`，推荐形态）
+  // - `:personaId/:driverId/:scheduleId`：key 原样拼三段（终端/curl 手敲时最自然，不必先编码）
+  // 都不支持跨斜杠正则（见上方注释：那会把路由降级成永不匹配）。
+  app.post("/api/v1/persona/schedules/:key/:action", personaScheduleAction)
+  app.post("/api/v1/persona/schedules/:personaId/:driverId/:scheduleId/:action", personaScheduleAction)
 }
