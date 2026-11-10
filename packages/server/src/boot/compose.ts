@@ -9,6 +9,7 @@ import type { ServerWebSocket } from "bun"
 import type { ScheduleControlPersistence, ScheduleControlState } from "@gebai/persona"
 import { isolationConfigConflict, loadConfig } from "../core/base/config"
 import { SessionStore } from "../core/session/store"
+import { SessionInputQueue } from "../core/session/input-queue"
 import { reportInterruptedRuns } from "../core/session/run-marker"
 import { ToolRegistry } from "../core/base/registry"
 import { createGlobalTools } from "../core/tools"
@@ -405,7 +406,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 用户环境变量零留存（只存浏览器本地）：启动时清理历史用户级 env.json（旧版三层结构遗留）
   await cleanupLegacyUserEnv(config.gebaiHome)
   const env = new EnvManager(store)
-  const events = new EventBus()
+const events = new EventBus()
+/** 会话输入队列（服务端权威：任务运行期间的输入在此排队，收尾后自动按序执行）。 */
+const inputQueue = new SessionInputQueue()
   const subAgents = new SubAgentManager({ registry, preloadOverride: config.preloadSubAgents })
 
   // ── 拟人模式的飞书用户凭据（进程级，跨会话常驻）──
@@ -862,6 +865,32 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
     resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
     personaOutboundDeps,
+    // 任务收尾后派发下一条排队输入（会话输入队列）：在 tasks 已删、运行态已释放之后回调
+    onTaskSettled: ({ sessionId }) => inputQueue.drain(sessionId),
+  })
+  // 会话输入队列（服务端权威）：任务运行期间提交的输入在此排队，当前任务收尾后自动按序执行。
+  // 派发 = 走同一引擎入口（与直接发送零差异），事件照常经事件总线回流给所有连接。
+  inputQueue.attach({
+    isRunning: (sessionId) => engine.isRunning(sessionId),
+    runner: async (item) => {
+      // 执行即上屏：本页（及其他已连页面）据此实时渲染这条用户消息（与其后任务流的时机一致）；
+      // 未连页面由历史回放兜底。再走引擎——与直接发送零差异。
+      events.publish({
+        type: "event.queue.dequeued",
+        sessionId: item.sessionId,
+        payload: { sessionId: item.sessionId, id: item.id, messageId: item.messageId, text: item.text, attachments: item.attachments, createdAt: item.createdAt },
+        timestamp: Date.now(),
+      })
+      await engine.run(item.sessionId, item.userId, item.text, {
+        attachments: item.attachments.map((a) => ({ name: a.name, mime: a.mime, path: a.path })),
+        messageId: item.messageId,
+        envOverride: item.env,
+        role: item.role ?? "user",
+      })
+    },
+    notify: (sessionId) => {
+      events.publish({ type: "event.queue.update", sessionId, payload: { sessionId, items: inputQueue.listPublic(sessionId) }, timestamp: Date.now() })
+    },
   })
   // 拟人模式装配（GEBAI_PERSONA=true）：**开关关闭时以下代码一行不执行**。
   //
@@ -1772,6 +1801,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     events,
     subAgents,
     webhooks,
+    inputQueue,
     externalAuth,
     credentialSources,
     tasks,

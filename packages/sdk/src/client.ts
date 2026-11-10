@@ -23,6 +23,7 @@ import type {
   WebhookInfo,
   WsSnapshot,
   RuntimeSessionInfo,
+  QueuedPrompt,
 } from "./types"
 import type { IdleWindow, Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskRunRecord, TaskUpdateInput } from "./task-types"
 import type { UserPrefs } from "./prefs-types"
@@ -45,6 +46,17 @@ function parseRuntime(raw: unknown): Record<string, RuntimeSessionInfo> {
   for (const [id, v] of Object.entries(raw as Record<string, unknown>)) {
     if (!v || typeof v !== "object") continue
     out[id] = v as RuntimeSessionInfo
+  }
+  return out
+}
+
+/** 快照排队输入归一（会话 id → 条目）：未携带即空（与 runtime 同理，不残留上一份）。 */
+function parseQueues(raw: unknown): Record<string, QueuedPrompt[]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  const out: Record<string, QueuedPrompt[]> = {}
+  for (const [id, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(v)) continue
+    out[id] = v.filter((x): x is QueuedPrompt => !!x && typeof x === "object") as QueuedPrompt[]
   }
   return out
 }
@@ -629,6 +641,8 @@ export class GebaiClient {
       currentSessionId: payload.currentSessionId != null ? String(payload.currentSessionId) : null,
       sessions,
       running,
+      // 各会话排队输入（真值在服务端）：未携带即「没在排队」，不残留上一份
+      queues: parseQueues(payload.queues),
       // 快照基线不倒退：事件可能先于快照到达（lastSeq 只增不减）
       lastSeq: Math.max(Number.isFinite(lastSeq) ? lastSeq : 0, this.lastSeq),
       // 模型上下文窗口（0=未知）：标题栏上下文占比显示用，重建快照时不得丢弃
@@ -926,6 +940,44 @@ export class GebaiClient {
   cancelTask(sessionId: string): Promise<void> {
     return this.request<void>("session.cancel", { id: sessionId })
   }
+  /** 会话排队输入清单（断线重连/进入会话时对齐；快照 state.snapshot.queues 已带全量）。 */
+  listQueuedPrompts(sessionId: string): Promise<QueuedPrompt[]> {
+    return this.request<{ items: QueuedPrompt[] }>("session.queue.list", { id: sessionId }).then((r) => r.items ?? [])
+  }
+  /**
+   * 把一条输入**入队**（当前任务仍在跑时排队等它结束，收尾后自动按序执行）。
+   * 与 `sendPrompt` 的区别：这里不做事流——入队不产生事件，本条真正执行时另起一次任务流
+   * （`event.task.start` / 快照 `running`），所以只返回入队结果。
+   * queueFront：中断插入（插队首并取消当前任务，其收尾后立即执行）。
+   */
+  enqueuePrompt(
+    sessionId: string,
+    prompt: string,
+    opts: { attachments?: Array<{ name: string; mime: string; path: string; size?: number }>; messageId?: string; queueFront?: boolean } = {},
+  ): Promise<{ item?: QueuedPrompt; position?: number }> {
+    // 入队不做事流：答复里的 item/position 即队列视图；正文与附件在这条真正执行时经
+    // event.queue.dequeued + 任务流呈现
+    return this.request<{ item?: QueuedPrompt; position?: number }>("session.prompt", {
+      id: sessionId,
+      prompt,
+      attachments: opts.attachments,
+      messageId: opts.messageId,
+      queue: true,
+      ...(opts.queueFront ? { queueFront: true } : {}),
+    })
+  }
+  /** 编辑未执行的排队输入（返回编辑后的队列）。 */
+  editQueuedPrompt(sessionId: string, itemId: string, text: string): Promise<QueuedPrompt[]> {
+    return this.request<{ items: QueuedPrompt[] }>("session.queue.edit", { id: sessionId, itemId, text }).then((r) => r.items ?? [])
+  }
+  /** 撤回（移除）未执行的排队输入（返回移除后的队列）。 */
+  removeQueuedPrompt(sessionId: string, itemId: string): Promise<QueuedPrompt[]> {
+    return this.request<{ items: QueuedPrompt[] }>("session.queue.remove", { id: sessionId, itemId }).then((r) => r.items ?? [])
+  }
+  /** 立即执行（排队条 ⚡）：条目置队首并中断当前任务，其收尾后立即执行该条。 */
+  runQueuedPrompt(sessionId: string, itemId: string): Promise<QueuedPrompt[]> {
+    return this.request<{ items: QueuedPrompt[] }>("session.queue.run", { id: sessionId, itemId }).then((r) => r.items ?? [])
+  }
   decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<void> {
     return this.request<void>("approval.decide", { id: sessionId, toolCallId, approve })
   }
@@ -1217,6 +1269,10 @@ export class GebaiClient {
    * env：浏览器本地环境变量，随请求临时注入，服务端不持久化。
    * messageId：客户端生成的消息 id（撤回/反馈定位用）；不传由服务端生成。
    * signal：中止时结束迭代（调用方应同时 cancelTask 停止服务端任务）。
+   * queue：会话正在运行时的姿态（默认 true = 排队等当前任务结束，与 Web UI 排队发送同语义）；
+   *   `queue: false` 时拒绝并报 `already_running`（调用方自行处理）；`queueFront: true` = 中断插入
+   *   （插队首并取消当前任务，其收尾后立即执行）。排队受理时迭代立即以 "done" 结束（本条尚未产生事件），
+   *   真正的执行经新一次任务流（event.task.start）/ 快照呈现。
    *
    * 断线恢复（状态一致性）：WS 断开时迭代**挂起**（不抛错），等待自动重连后按
    * 事件 seq 向服务端请求重放离线期间错过的日志事件（sync.request），事件流无缝
@@ -1226,7 +1282,7 @@ export class GebaiClient {
   async *sendPrompt(
     sessionId: string,
     prompt: string,
-    opts?: { attachments?: AttachmentInput[]; env?: Record<string, string>; messageId?: string; signal?: AbortSignal; interactionMode?: "none" | "multi_turn" | "realtime"; stream?: boolean },
+    opts?: { attachments?: AttachmentInput[]; env?: Record<string, string>; messageId?: string; signal?: AbortSignal; interactionMode?: "none" | "multi_turn" | "realtime"; stream?: boolean; queue?: boolean; queueFront?: boolean },
   ): AsyncIterable<ChatChunk> {
     const queue: ChatChunk[] = []
     const waiters: Array<() => void> = []
@@ -1288,7 +1344,7 @@ export class GebaiClient {
     const sendPromptReq = async (resend = false): Promise<void> => {
       promptSent = true
       try {
-        await this.request("session.prompt", {
+        const reply = await this.request<{ queued?: boolean; item?: QueuedPrompt; position?: number } | undefined>("session.prompt", {
           id: sessionId,
           prompt,
           attachments: opts?.attachments?.map((a) => ({ ...a, data: a.data ? Array.from(a.data) : undefined })),
@@ -1296,7 +1352,21 @@ export class GebaiClient {
           messageId: opts?.messageId,
           interactionMode: opts?.interactionMode,
           stream: opts?.stream,
+          ...(opts?.queue === false ? { queue: false } : {}),
+          ...(opts?.queueFront ? { queue: true, queueFront: true } : {}),
         })
+        // 排队受理：本条不发起任务（当前任务仍在跑），事件属于“先前那一轮”，不得记到本迭代上——
+        // 以 queued + done 收尾：调用方据此知道「已排队、不是马上跑」，而队列条目由
+        // event.queue.update / 快照展示；执行时另起一条任务流
+        if (reply?.queued === true) {
+          accepted = true
+          acceptedAt = Date.now()
+          push({ kind: "queued", queueItem: reply.item })
+          push({ kind: "done" })
+          finished = true
+          wake()
+          return
+        }
         accepted = true
         acceptedAt = Date.now()
         markRunning()

@@ -180,8 +180,11 @@ export interface LegacySubAgentRunArchive {
 }
 
 export interface ChatChunk {
-  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "resume" | "subsession_start" | "subsession_done" | "model_error"
+  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "resume" | "subsession_start" | "subsession_done" | "model_error" | "queued"
   messageId?: string
+  /** queued：本条已进入服务端排队队列（当前任务仍在跑）——本轮不产生输出，也不上屏气泡，
+   *  真正执行时另起一次任务流（`event.queue.dequeued` 携用户消息上屏）。 */
+  queueItem?: QueuedPrompt
   /** 事件来自子会话运行过程（subsession_run 派生子会话；主回复/主工具不带此标记）。 */
   subSession?: boolean
   /** 子会话运行标识：同一次子会话运行的过程事件共享（前端按此分组渲染）。 */
@@ -212,11 +215,27 @@ export interface AgentEvent {
   seq?: number
 }
 
+/** 会话排队输入（服务端队列的对外形态：`event.queue.*`、`state.snapshot.queues`
+ *  与 `session.queue.*` 应答共用）。任务运行期间提交的输入在服务端排队，
+ *  当前任务收尾（完成/取消/出错）后按序自动执行；**前端只读展示**，不改写队列真相。 */
+export interface QueuedPrompt {
+  id: string
+  sessionId: string
+  text: string
+  /** 入队时已上传会话 tmp/ 的附件引用（执行时直接使用）。 */
+  attachments: AttachmentRef[]
+  /** 入队时预生成的用户消息 id：执行时按同一 id 落盘，撤回/反馈定位因此可用。 */
+  messageId: string
+  createdAt: number
+}
+
 /** WS 状态快照（state.snapshot payload）：重连/登录后客户端模型收敛基线。 */
 export interface WsSnapshot {
   currentSessionId: string | null
   sessions: SessionInfo[]
   running: string[]
+  /** 各会话排队输入（会话 id → 条目，按执行顺序）；无排队会话不出现在这里。 */
+  queues?: Record<string, QueuedPrompt[]>
   lastSeq: number
   /** 模型上下文窗口（token）：0=未知/未配置，标题栏上下文占比显示用。 */
   maxContextTokens?: number

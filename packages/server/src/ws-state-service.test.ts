@@ -19,9 +19,11 @@ function makeDeps(owners: Record<string, string>) {
     ownerOf: (id: string) => owners[id] ?? null,
     load: async (id: string) => (owners[id] ? { id, userId: owners[id], messages: [], todos: [], createdAt: 0, updatedAt: 0 } : null),
     listSessions: async () => [],
+    listSessionInfos: async () => [],
   }
-  const engine = { runningIds: async () => [] as string[], contextWindow: () => 0 }
-  const d = { store, engine, events, config: {}, auth: {}, env: {}, sandbox: {}, registry: {}, subAgents: {}, webhooks: {}, externalAuth: null } as never
+  const engine = { runningIds: async () => [] as string[], runtimeOf: async () => ({}), contextWindow: () => 0 }
+  const inputQueue = { snapshotPublic: () => ({}) }
+  const d = { store, engine, events, inputQueue, config: {}, auth: {}, env: {}, sandbox: {}, registry: {}, subAgents: {}, webhooks: {}, externalAuth: null } as never
   return { events, d }
 }
 

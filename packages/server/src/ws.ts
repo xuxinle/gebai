@@ -7,6 +7,7 @@ import type { WsHandler } from "./ws-handlers/context"
 import { authHandlers } from "./ws-handlers/auth"
 import { sessionHandlers } from "./ws-handlers/session"
 import { promptHandlers } from "./ws-handlers/prompt"
+import { queueHandlers } from "./ws-handlers/queue"
 import { interactionHandlers } from "./ws-handlers/interaction"
 import { userHandlers, feedbackHandlers, subAgentHandlers } from "./ws-handlers/admin"
 import { terminalHandlers } from "./ws-handlers/terminal"
@@ -17,6 +18,7 @@ const handlers: Record<string, WsHandler> = {
   ...authHandlers,
   ...sessionHandlers,
   ...promptHandlers,
+  ...queueHandlers,
   ...interactionHandlers,
   ...userHandlers,
   ...feedbackHandlers,
@@ -29,6 +31,7 @@ const handlers: Record<string, WsHandler> = {
 const SESSION_ID_MSGS = new Set([
   "session.get", "session.delete", "session.rename", "session.pin", "session.model_config.set", "session.switch", "session.compact",
   "session.prompt", "session.attachment.upload", "session.todo.get", "session.env.get", "session.env.set",
+  "session.queue.list", "session.queue.edit", "session.queue.remove", "session.queue.run",
   "session.files.list", "session.files.get", "session.cancel", "session.restore", "session.attach",
   "approval.decide", "choice.decide", "env.decide", "draw.result", "capture.result",
 ])

@@ -50,6 +50,8 @@ export interface AppDeps {
   events: EventBus
   subAgents: SubAgentManager
   webhooks: WebhookManager
+  /** 会话输入队列（服务端权威：任务运行期间的输入在此排队，收尾后自动按序执行）。 */
+  inputQueue: import("./core/session/input-queue").SessionInputQueue
   /** 统一任务调度器（GEBAI_TASKS_ENABLED=false 时不启动，为 null——REST 返回能力未启用）。 */
   tasks?: import("./core/schedule/tasks").TaskManager | null
   /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时不启动，为 null——REST 返回 503）。 */

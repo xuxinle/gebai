@@ -13,6 +13,7 @@ import type { DevReloadManager } from "./dev-reload"
 import type { FeishuBot } from "./feishu-bot/bot"
 import type { loadConfig } from "./core/base/config"
 import type { AppDeps, createApp } from "./app"
+import type { SessionInputQueue } from "./core/session/input-queue"
 import { composeServer } from "./boot/compose"
 import { serveComposed } from "./boot/serve"
 import { runMain } from "./boot/cli"
@@ -27,6 +28,8 @@ export interface ServerHandle {
   subAgents: SubAgentManager
   auth: AuthService
   events: EventBus
+  /** 会话输入队列（服务端权威；任务运行期间的输入在此排队）。 */
+  inputQueue: SessionInputQueue
   config: ReturnType<typeof loadConfig>
   deps: AppDeps
   /** 数据生命周期 GC 清理任务句柄（GEBAI_GC_DISABLED=1 时为 null）。 */
@@ -67,7 +70,7 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
       },
     }).catch((err) => console.error(`[restart] 续跑消费异常: ${String((err as Error).message || err)}`))
   }
-  return { server, app: c.app, engine: c.engine, store: c.store, registry: c.registry, subAgents: c.subAgents, auth: c.auth, events: c.events, config: c.config, deps: c.deps, gc: c.gc, tasks: c.tasks, todos: c.todos, devReload: c.devReload, feishuBot: c.feishuBot }
+  return { server, app: c.app, engine: c.engine, store: c.store, registry: c.registry, subAgents: c.subAgents, auth: c.auth, events: c.events, inputQueue: c.deps.inputQueue, config: c.config, deps: c.deps, gc: c.gc, tasks: c.tasks, todos: c.todos, devReload: c.devReload, feishuBot: c.feishuBot }
 }
 
 if (import.meta.main) {

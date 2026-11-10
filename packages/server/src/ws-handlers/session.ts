@@ -31,6 +31,8 @@ export const sessionHandlers: Record<string, WsHandler> = {
   "session.delete": async ({ d, user, p, conn, reply }) => {
     await d.store.delete(String(p.id), user.id)
     d.engine.forgetSession(String(p.id))
+    // 排队输入随会话一并释放（会话没了，队列里的条目再无执行者）
+    d.inputQueue.forget(String(p.id))
     // 删除的恰为当前会话：清空每用户持久化状态
     if (conn.getCurrent() === String(p.id)) conn.setCurrent(undefined)
     return reply(true)

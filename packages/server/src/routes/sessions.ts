@@ -65,6 +65,7 @@ export function registerSessionRoutes(rc: RouteCtx): void {
     const user = await userOf(c)
     await d.store.delete(c.req.param("id"), user.id)
     d.engine.forgetSession(c.req.param("id"))
+    d.inputQueue.forget(c.req.param("id"))
     return c.json({ ok: true })
   })
   // 从 GC 归档（trash/，保留期 7 天）恢复会话：归属用户或 admin 可操作；

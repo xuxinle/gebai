@@ -5,13 +5,13 @@ import { syncSendButton } from "./composer"
 import { refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionEntry, withPane } from "./messages"
 import { blockText, markdownBlock } from "./markdown"
+import { toast } from "./ui"
 import { createModelErrorNotice, modelErrorText } from "./model-error"
 import { createStreamRenderer } from "./stream-render"
 import { clearApprovals, hasPendingInteraction } from "./approvals"
 import { clearPendingTools, focusInput } from "./state"
 import { loadMessages, markSessionRunning, maybeAutoTitle } from "./sessions"
 import { resyncPendingInteractions } from "./pending-interactions"
-import { drainQueue } from "./queue"
 import { scrollReasoningSticky } from "./reasoning-scroll"
 import { client, el, getCurrentSession, runs, syncConnThinking, type RunState, type SubSessionState } from "./state"
 import { finishRun, noteRound, startRun } from "./subsessions"
@@ -74,6 +74,14 @@ function applyStreamChunkIn(run: RunState, sessionId: string, chunk: ChatChunk):
     const created: SubSessionState = { runId, agents: [], input: "", body: rec.body, acc: "", el: null, messageId: "", reasoningAcc: "", reasoningEl: null }
     run.subSessions.set(runId, created)
     return created
+  }
+  if (chunk.kind === "queued") {
+    // 已排队（当前任务仍在跑，本条尚未执行）：仅提示——消息在真正执行时才上屏
+    // （event.queue.dequeued），排队条由 event.queue.update 刷新。
+    // 标 queued：本次“流”并未启动任务，收尾时不得抹掉会话真实运行态（那一轮还在跑）。
+    run.queuedOnly = true
+    toast("已排队：当前回答结束后自动按序发送（等待中可在排队条里编辑或撤回）")
+    return
   }
   if (chunk.kind === "resume") {
     // 断线重连后的全量重同步：重置本轮回累积并重建消息元素，防止内容重复渲染
@@ -293,6 +301,9 @@ function appendFinalNotice(sessionId: string, text: string): void {
  */
 export async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) => AsyncIterable<ChatChunk>, opts?: { startedAt?: number }): Promise<void> {
   const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), startedAt: opts?.startedAt ?? Date.now(), abort: new AbortController() }
+  // 本页已接管该会话的在途运行态：先存住——若本次“流”最终只是排队受理（queuedOnly），
+  // 收尾时要把原本那条接回去（否则在跑任务的渲染引用被排队占位顶掉）
+  const prevRun = runs.get(sessionId)
   runs.set(sessionId, run)
   // 为运行中的会话确保自己的容器并标记运行态：后台期间也照常建 DOM（工具卡/正文/子容器），
   // 切回只是显隐切换（不用等网络往返与全量重建）
@@ -402,6 +413,12 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
       renderStreamText(run)
     }
     runs.delete(sessionId)
+    // 排队受理的“流”（本迭代没启动任务）：不动运行态/容器/输入焦点——那一轮还在跑，
+    // 抹掉就是谎报空闲（信号灯/停止按钮消失，而下一条还在执行）；已接管的在途渲染态接回去
+    if (run.queuedOnly) {
+      if (prevRun) runs.set(sessionId, prevRun)
+      return
+    }
     // 运行结束：容器降为可回收（已切走则下一次回收时释放，仍在看则保留到切走）
     setPaneRunning(sessionId, false)
   // 会话列表角标：本页任务的结束同样要收敛（与服务端 task.done 一致）
@@ -412,8 +429,7 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
     syncConnThinking() // 运行结束：信号灯恢复常亮
     syncSendButton()
     void maybeAutoTitle(sessionId) // 兜底重试：发送时点自动命名失败（未标记 autoNamed）时补一次，已命名空转
-    // 队列继续：任务收尾（完成/取消/出错）后自动发送下一条排队输入（运行中为空转）
-    drainQueue(sessionId)
+    // 队列继续由服务端驱动（任务收尾回调派发下一条排队输入）：本页不持队列，也不自行发送
     // 焦点守卫：仅当用户仍在发起会话（未切走）时恢复输入焦点，避免后台流结束抢走当前会话光标
     if (getCurrentSession()?.id === sessionId) focusInput()
   }

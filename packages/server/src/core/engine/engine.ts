@@ -332,6 +332,9 @@ export interface AgentEngineOptions {
   /** 认证模式（"server"=服务模式多用户隔离）。无交互通道（REST）的审批策略按此分级：本地模式保持「自动通过」，
    * 服务模式下需审批工具一律拒绝执行（防普通用户经 REST 免审批执行 sh/py 等敏感工具）。 */
   authMode?: "local" | "server"
+  /** 任务收尾回调（完成/取消/出错都会调，在运行态释放之后）：供会话输入队列在任务结束后派发下一条排队输入。
+   *  必须晚于 `tasks.delete`——否则回调里判定的「会话空闲」还是假（队列 drain 会空转）。 */
+  onTaskSettled?: (ev: { sessionId: string; user: string; outcome: "done" | "error" | "cancelled" }) => void
 }
 
 /** 单个运行中会话的运行态概要（WS 快照 runtime 值）：待决交互的形状与 session.attach 的 pending 一致
@@ -1106,6 +1109,8 @@ private activeSchemas(sessionId: string) {
     } = {},
   ): Promise<void> {
     if (this.tasks.has(sessionId)) throw new Error(`会话 ${sessionId} 已有任务在运行`)
+    /** 任务收尾结局（供 onTaskSettled 告知：完成/取消/出错）。 */
+    let outcome: "done" | "error" | "cancelled" = "done"
     // 同步占位（TOCTOU 防护）：检查与注册之间存在多个 await，并发请求（WS 重复帧/REST 与 WS 双通道）
     // 会双双通过检查导致同会话双任务——消息交错持久化、tasks 注册互相覆盖、先结束任务的 finally
     // 删掉后者的注册（isRunning 归假而任务仍在跑）。先注册再异步校验，准备失败同步回滚。
@@ -1165,6 +1170,13 @@ private activeSchemas(sessionId: string) {
     } catch (err) {
       this.publish(sessionId, "event.task.error", { error: String((err as Error).message || err) })
       this.tasks.delete(sessionId)
+      this.taskMods.delete(sessionId)
+      // 准备失败同样是「任务已结束」：通知排队输入继续（否则队列永等一个不会收尾的任务）
+      try {
+        this.opts.onTaskSettled?.({ sessionId, user, outcome: "error" })
+      } catch {
+        /* 回调异常不得影响任务收尾 */
+      }
       return
     }
 
@@ -1365,6 +1377,7 @@ private activeSchemas(sessionId: string) {
       this.publish(sessionId, "event.task.error", {
         error: aborted ? "cancelled" : String((err as Error).message || err),
       })
+      outcome = aborted ? "cancelled" : "error"
     } finally {
       clearRunMarker(this.opts.store.getSessionDir(sessionId, user))
       for (const a of task.approvals.values()) clearTimeout(a.timer)
@@ -1374,6 +1387,13 @@ private activeSchemas(sessionId: string) {
       // 父会话合并队列冲刷（仅落盘；上下文随任务结束，下次 run 经 loadHistory 进上下文）：置于 tasks.delete
       // 之后——其后完成的子会话经 mergeToParent 判定无任务直接落盘，无入队/漏排空竞态
       await this.drainParentMerges(sessionId, user).catch(() => {})
+      // 任务收尾通知：会话输入队列据此派发下一条排队输入（服务模式/定时任务/飞书桥接同样受益——
+      // 入队者不必是发起任务的那个连接）。必须在此处（tasks 已删、运行态已释放）调用。
+      try {
+        this.opts.onTaskSettled?.({ sessionId, user, outcome })
+      } catch {
+        /* 回调异常不得影响任务收尾 */
+      }
     }
   }
 

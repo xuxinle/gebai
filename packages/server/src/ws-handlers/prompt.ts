@@ -1,4 +1,4 @@
-/** WS 任务与状态域消息：session.prompt（发起任务）、state.snapshot、sync.request（断线补偿）。 */
+/** WS 任务与状态域消息：session.prompt（发起任务 / 运行中入队）、state.snapshot、sync.request（断线补偿）。 */
 import type { WsHandler } from "./context"
 import { filterEnvInjection } from "../core/session/env"
 import { TokenBucket } from "../core/security/ratelimit"
@@ -15,7 +15,6 @@ export const promptHandlers: Record<string, WsHandler> = {
     if (!prompt) return reply(false, { code: "prompt_required" }, "prompt required")
     // 每用户消息速率限制（防高频 prompt 消耗 LLM 配额/资源，与 REST 同规则）
     if (!promptRateLimit.allow(user.id)) return reply(false, { code: "rate_limited" }, "rate limited: too many requests")
-    if (d.engine.isRunning(sessionId)) return reply(false, { code: "already_running" }, "task already running")
     // 应答语义如实：会话不存在/任务冲突等启动期失败在 reply 中返回错误码（客户端据此判定，
     // 不再依赖错误文案正则）；任务运行期错误仍经 event.task.error 推送
     const existing = await d.store.load(sessionId, user.id)
@@ -30,11 +29,38 @@ export const promptHandlers: Record<string, WsHandler> = {
     const envOverride: Record<string, string> | undefined = p.env
       ? filterEnvInjection(p.env as Record<string, string | null>)
       : undefined
-    const attachments = (Array.isArray(p.attachments) ? p.attachments : []) as Array<{ name: string; mime?: string; path?: string; data?: number[] }>
+    const attachments = (Array.isArray(p.attachments) ? p.attachments : []) as Array<{ name: string; mime?: string; path?: string; size?: number; data?: number[] }>
+    // 消息 id（撤回/反馈定位用）：入队与直接发起共用——入队时预生成，执行时按同一 id 落盘
+    const messageId = p.messageId != null ? String(p.messageId) : undefined
+    const queueMode = p.queue === true
+      // 中断插入（Ctrl+Enter）：插队首，并取消当前任务循环，其收尾后立即执行该条
+      ? (p.queueFront === true ? "front" as const : "back" as const)
+      : null
+    // 运行中：任务不入队列直接发起会被拒（already_running）。默认姿态是把本条**排在队尾**
+    // 等当前任务结束（与 Web UI 排队发送同语义，其他客户端不必自己实现排队）；
+    // `queue: false` 时保留原语义（拒绝并返回结构化错误码，调用方自行处理）。
+    if (d.engine.isRunning(sessionId) && p.queue !== false) {
+      const enq = d.inputQueue.enqueue({
+        id: crypto.randomUUID(),
+        sessionId,
+        userId: user.id,
+        text: prompt,
+        attachments: attachments.map((a) => ({ name: a.name, mime: a.mime ?? "application/octet-stream", path: a.path ?? "", size: Number(a.size ?? 0) })),
+        messageId: messageId ?? crypto.randomUUID(),
+        createdAt: Date.now(),
+        env: envOverride,
+        role: user.role,
+      }, { front: queueMode === "front" })
+      if (!enq.ok) return reply(false, { code: "queue_full" }, enq.error)
+      // 中断插入：插到队首后取消当前任务，其收尾（onTaskSettled）后队列立即派发队首
+      if (queueMode === "front") d.engine.cancel(sessionId)
+      return reply(true, { queued: true, item: d.inputQueue.listPublic(sessionId, user.id).find((x) => x.id === enq.item.id), position: enq.position })
+    }
+    if (d.engine.isRunning(sessionId)) return reply(false, { code: "already_running" }, "task already running")
     void d.engine
       .run(sessionId, user.id, prompt, {
         attachments: attachments.map((a) => ({ name: a.name, mime: a.mime, path: a.path, data: a.data ? new Uint8Array(a.data) : undefined })),
-        messageId: p.messageId != null ? String(p.messageId) : undefined,
+        messageId,
         envOverride,
         interactionMode: interactionMode as "none" | "multi_turn" | "realtime" | undefined,
         outputMode: outputMode as "final_only" | "streaming" | undefined,

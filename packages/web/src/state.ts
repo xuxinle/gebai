@@ -173,6 +173,9 @@ export interface RunState {
   reloading?: boolean
   /** 空闲超时兜底已触发（150s 无数据主动中止）：收尾时据此给出显式提示而非静默结束。 */
   idleTimedOut?: boolean
+  /** 本次“流”只是排队受理（本轮未发起任务）：收尾时不收敛运行态/不抹容器，也在会话列表里
+   *  不当作任务结束（那一轮仍在跑）。 */
+  queuedOnly?: boolean
   /** 流中断控制器：空闲超时兜底中断挂起的 SSE（防止运行态/信号灯残留）。 */
   abort: AbortController
   /** 低性能模式流式渲染节流定时器（跨 chunk 合并渲染，未排期时为 undefined）。 */

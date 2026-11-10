@@ -441,7 +441,11 @@ WebSocket 消息格式（JSON）：
 | `session.cancel` | 取消当前任务 |
 | `session.attach` | **运行中会话附加快照**（页面刷新/切换恢复用）：返回 `{ running, startedAt, stream, pending, lastSeq }`——在途流式累积（未持久化部分文本/推理 + messageId/session 标记）、待决交互清单（审批/选择/填值/画图/捕获，含重渲染所需全部载荷）、任务开始时刻与该用户事件日志基线 seq；`running=false` 表示未运行（前端放弃附加）；归属校验同其余会话操作 |
 | `session.compact` | 主动压缩会话上下文（支持范围参数，返回压缩条数与摘要） |
-| `session.prompt` | 发送对话消息（WS 通道发起任务，流式事件经 `event.*` 推送回流，reply 仅确认；payload 支持 `messageId` 可选字段，语义同 REST prompt） |
+| `session.prompt` | 发送对话消息（WS 通道发起任务，流式事件经 `event.*` 推送回流，reply 仅确认；payload 支持 `messageId` 可选字段，语义同 REST prompt）。**会话正在运行时的姿态**：默认自动入服务端输入队列（reply `{queued:true, item, position}`，不必调用方自己实现排队）；`queue:false` 时拒绝并回 `already_running`（调用方自行处理，Web UI 直接发送路径用这个以保留「幻影消息撕掉 + 内容回输入框」）：`queueFront:true` = 中断插入（插队首 + 取消当前任务） |
+| `session.queue.list` | 单会话排队输入清单（`{items}`；快照 `state.snapshot.queues` 已带全量，此接口供单点刷新） |
+| `session.queue.edit` | 编辑未执行的排队输入（`itemId` + `text`，空内容拒绝；应答返回最新队列） |
+| `session.queue.remove` | 撤回（移除）未执行的排队输入（`itemId`；应答返回最新队列） |
+| `session.queue.run` | 立即执行排队项（⚡）：`itemId` 置队首并中断当前任务，其收尾后立即执行该条（应答返回最新队列） |
 | `session.attachment.upload` | 上传附件（WS 通道，base64 整体传输，返回会话内引用路径） |
 | `choice.decide` | 提交用户选择（ask 选项询问分支阻塞等待的回应；`option` 单选 / `options` 数组多选 / `refuse: true` 或 option、options 均缺失表示拒绝回答） |
 | `env.decide` | 提交用户填写的环境变量值（ask 填值分支阻塞等待的回应，envId + value；value 缺失表示拒绝提供） |
@@ -451,7 +455,7 @@ WebSocket 消息格式（JSON）：
 | `user.list` / `user.create` / `user.update` / `user.delete` | 用户管理（服务模式，仅管理员；`user.list` 应答为 `{ users: […] }` 包裹，SDK `listUsers()` 解包后直接返回数组——解包缺失时前端 `for…of` 包裹对象抛错，用户管理/审批列表静默空白） |
 | `approval.decide` | 审批决策（通过/拒绝，对应待审批的工具调用）；**决策已失效时返回错误码 `expired`**（等待超时/已在其他地方处理/任务已结束；同规则适用于 `choice.decide`/`env.decide`/`draw.result`/`capture.result`，前端据此提示并撕掉失效卡片，不再假报成功） |
 | `feedback.submit` | 提交反馈（点赞/点踩/文字，关联会话与消息；服务端自动补 model/subAgent 关联，见「用户反馈」） |
-| `state.snapshot` | 获取状态快照（主动请求，幂等；与自动推送 payload 一致） |
+| `state.snapshot` | 获取状态快照（主动请求，幂等；与自动推送 payload 一致，含 `queues`（各会话排队输入）） |
 | `sync.request` | 断线补偿：按 `lastSeq` 请求重放离线期间错过的日志事件；`sync.replay`（`{events, lastSeq}`，seq 严格递增、payload 含 sessionId）或 `overrun`（`{events:null, overrun:true, lastSeq}`，缺口→客户端全量重同步） |
 | `auth.login` | 登录支持两种形式：`{username, password}`（密码）与 `{token}`（已有令牌，SDK 重连自动重新认证用）；成功后连接级事件订阅自动重绑到新用户并推送状态快照 |
 
@@ -479,6 +483,8 @@ WebSocket 消息格式（JSON）：
 | `event.task.result` | 任务执行结果（成功/失败/跳过/超时与输出摘要、自动停用标记；prompt 型过程经消息流呈现） |
 | `event.task.queue` | 任务队列变化（额度/排队数/运行中数） |
 | `event.task.done` | 本轮任务完成 |
+| `event.queue.update` | 会话输入队列变化（入队/出队/编辑/撤回/置顶/任务收尾后派发）：payload `{sessionId, items}`（条目带 id/text/attachments/messageId/createdAt，不含 env/角色等内部字段）；前端据此重渲染排队条，不自己维护队列 |
+| `event.queue.dequeued` | 排队项开始执行（已出队并发起任务）：payload `{id, messageId, text, attachments, createdAt}`——前端据此把用户消息上屏（与直接发送同形态）；未连页面由历史回放兜底 |
 | `event.task.start` | 本轮任务开始（前端据此切换运行态/信号灯） |
 | `event.choice.request` | ask 选项询问请求（前端弹选择卡片，经 `choice.decide` 回传） |
 | `event.tool.result.start` | 工具结果输出开始（长结果分段落屏前的信号） |

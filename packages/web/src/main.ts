@@ -1,6 +1,6 @@
 import { uuid } from "./uuid"
 import { blockNativeContextMenu } from "./native-menu"
-import type { ContentBlock, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
+import type { ContentBlock, QueuedPrompt, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 // 微框架基础件样式（在 base 之后、面板样式之前：面板可覆盖控件外观）
 import "./css/fw.css"
@@ -42,7 +42,7 @@ import { loadToolCardMeta } from "./tool-cards"
 import { noteMerge } from "./subsessions"
 import { lockToBottom, refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { bindMsgNav } from "./msg-nav"
-import { enqueueFront, enqueueInput, setQueueExecutor, type QueuedInput } from "./queue"
+import { applyQueued, applyQueuedUpdate } from "./queue"
 import { client, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames } from "./state"
 import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
 import { consumeTaskStream } from "./stream"
@@ -74,17 +74,7 @@ exportBtn.onclick = async () => {
   }
 }
 
-/** 排队输入执行器（队列消化入口，init 注册）：渲染用户消息（同直接发送）并走同一 sendPrompt 任务流。 */
-setQueueExecutor(async (sessionId, item: QueuedInput) => {  if (getCurrentSession()?.id === sessionId) {
-    lockToBottom() // 发送即锁定粘底（与直接发送一致）
-    appendMsg({ id: item.messageId, role: "user", content: item.text, attachments: item.files as Array<{ path: string; mime: string; name: string; size: number }>, createdAt: item.createdAt })
-    lockToBottom() // 消息上屏后再落底一次：新消息立即可见（与直接发送一致）
-    refreshJumpBottom()
-    recordInput(sessionId, item.text)
-  }
-  // env：发送时点取浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
-  await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, item.text, { attachments: item.files, env: loadLocalEnv(), messageId: item.messageId, signal: run.abort.signal }))
-})
+/** 排队输入的排队条展示（服务端队列镜像）：快照与 event.queue.update 都走同一入口。 */
 
 composer.addEventListener("submit", async (e) => {
   e.preventDefault()
@@ -125,17 +115,26 @@ composer.addEventListener("submit", async (e) => {
   const msgId = uuid()
   /** 本条用户消息的 DOM（发送被拒时撤回幻影消息用；仅文本消息有元素）。 */
   let userMsgEl: HTMLElement | null = null
-  // 运行中：输入不进消息流，入本地会话输入队列（排队条呈现）——当前任务结束后自动按序发送；
-  // Ctrl+Enter（interrupt）插队首并取消当前循环，其收尾后立即执行
+  // 运行中：本条不进消息流，交服务端队列排队（排队条呈现）——当前任务结束后服务端自动按序执行；
+  // Ctrl+Enter（interrupt）插队首并取消当前循环，其收尾后立即执行。附件仍在此刻上传（入队时
+  // 就落会话 tmp/，执行时直用引用）
   if (runs.has(sessionId)) {
     const attachments = await sendPending(sessionId)
     // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
     const prompt = text || (attachments.length ? DEFAULT_ATTACH_PROMPT : "")
     if (!prompt) return
-    const item: QueuedInput = { id: uuid(), text: prompt, files: attachments, messageId: msgId, createdAt: Date.now() }
-    if (interrupt) enqueueFront(sessionId, item)
-    else enqueueInput(sessionId, item)
-    recordInput(sessionId, prompt)
+    try {
+      await client.enqueuePrompt(sessionId, prompt, { attachments, messageId: msgId, ...(interrupt ? { queueFront: true } : {}) })
+      recordInput(sessionId, prompt)
+    } catch (err) {
+      // 入队失败（会话已删/队列已满/连接不可用）：内容放回输入框——静默丢弃等于撤掉用户写的话
+      if (!input.value.trim()) {
+        input.value = prompt
+        autosize()
+        syncSendButton()
+      }
+      toast(`排队失败：${(err as Error).message}（内容已放回输入框）`, "error")
+    }
     return
   }
   // 用户消息立刻上屏（含本地上传前的附件原文件预览）：等上传结果回流再渲染会让附图消息“先发后消失”，
@@ -171,8 +170,10 @@ composer.addEventListener("submit", async (e) => {
   // 发送即自动命名（不等首答完成）：长任务运行期间侧栏/标题栏即可见会话标题
   void maybeAutoTitle(sessionId)
   // env：浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
+  // 直接发送：`queue: false` 保留「幻影消息撤回 + 内容回输入框」的既有语义（本页已自行判定空闲，
+  // 服务端却说在跑 = 本页漏了运行态，下面的 already_running 分支会补齐；静默代性入队会与该分支打架）
   try {
-    await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal }))
+    await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal, queue: false }))
   } catch (err) {
     // 本页不知情的并行任务（其他标签页/飞书桥接/定时任务）在跑：本条输入服务端未受理——
     // 撤回幻影消息（已上屏但从未进存储/模型）、把内容放回输入框，并附加该会话的运行态（页面此前不知道它在跑）
@@ -209,7 +210,7 @@ function hideSplash(): void {
 
 /**
  * 发送外部链接携带的提示词（URL 参数 gb_prompt 自动运行的发送端）：与输入框发送同一条链路
- * （用户消息上屏 → 自动命名 → sendPrompt 任务流），只是文本不来自输入框；失败仅提示。
+ * （用户消息上屏 → 自动命名 → sendPrompt 任务流），只是文本不来自输入框；任务已在跑时排队。
  */
 async function sendUrlPrompt(sessionId: string, text: string): Promise<void> {
   const msgId = uuid()
@@ -385,6 +386,24 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     } else if (ev.type === "event.task.done" || ev.type === "event.task.error") {
       // 任务结束（完成/取消/失败）：列表角标即时收敛，不必等下一次快照
       markSessionRunning(ev.sessionId, false)
+    } else if (ev.type === "event.queue.update") {
+      // 排队输入变化（入队/出队/编辑/撤回/置顶）：服务端权威，本页只重渲染排队条
+      applyQueuedUpdate(ev.sessionId, (ev.payload.items as QueuedPrompt[]) ?? [])
+    } else if (ev.type === "event.queue.dequeued") {
+      // 排队项开始执行：用户消息上屏（与直接发送同形态，含附件引用）——执行时点而非入队时点，
+      // 与任务流的先后一致；未连页面由历史回放兜底
+      recordInput(ev.sessionId, String(ev.payload.text ?? ""))
+      if (getCurrentSession()?.id !== ev.sessionId) return
+      lockToBottom()
+      appendMsg({
+        id: String(ev.payload.messageId ?? uuid()),
+        role: "user",
+        content: String(ev.payload.text ?? ""),
+        attachments: (ev.payload.attachments as Array<{ path: string; mime: string; name: string; size: number }>) ?? undefined,
+        createdAt: Number(ev.payload.createdAt ?? Date.now()),
+      })
+      lockToBottom()
+      refreshJumpBottom()
     }
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流
@@ -433,6 +452,8 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     setMaxCtxTokens(snap.maxContextTokens ?? 0)
     // 运行态明细基线（会话列表角标 + 待决交互可见性）：以服务端为准收敛本页的本地标记
     setRuntimeInfo(snap.runtime ?? {})
+    // 排队输入（服务端权威）：刷新/重连后排队条从快照直接恢复，不必等 event.queue.update
+    applyQueued(snap.queues)
     if (getCurrentSession() || isDraftView()) void refreshSessions(snap.sessions)
   })
   // connect 与 listSubAgents 并行（SDK 内共享同一连接尝试，listSubAgents 复用该连接）

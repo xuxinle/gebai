@@ -183,6 +183,8 @@ export interface WsSnapshot {
   currentSessionId: string | null
   sessions: SessionInfo[]
   running: string[]
+  /** 各会话排队输入（会话 id → 条目，按执行顺序）：刷新/重连后界面从快照直接恢复排队条。 */
+  queues?: Record<string, import("@gebai/sdk").QueuedPrompt[]>
   lastSeq: number
   /** 模型上下文窗口（token）：0=未知/未配置，标题栏上下文占比显示用。 */
   maxContextTokens?: number
@@ -326,7 +328,7 @@ export class WsStateService {
     }
   }
 
-  /** 构建状态快照（连接级当前会话 + 会话列表 + 运行中会话 + 日志基线 seq）。 */
+  /** 构建状态快照（连接级当前会话 + 会话列表 + 运行中会话 + 排队输入 + 日志基线 seq）。 */
   async buildSnapshot(conn: WsConn): Promise<WsSnapshot> {
     const user = conn.get()
     // 运行态明细一次取全（running 即其键集）：避免两次遍历运行中会话
@@ -336,6 +338,8 @@ export class WsStateService {
       sessions,
       running: Object.keys(runtime),
       runtime,
+      // 各会话排队输入（真值在服务端：刷新/换设备后界面从快照直接恢复排队条）
+      queues: this.d.inputQueue.snapshotPublic(user.id),
       lastSeq: this.journal(user.id).lastSeq(),
       maxContextTokens: this.d.engine.contextWindow(),
     }

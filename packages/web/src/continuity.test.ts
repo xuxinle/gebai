@@ -209,11 +209,14 @@ describe("附图消息发送即上屏（不等上传回流）", () => {
     expect(s).toContain("releaseMsgAttachments") // 幻影消息撕掉前回收对象 URL
   })
 
-  test("队列消化（背景会话）的用户消息同样带附件引用渲染", () => {
+  test("排队输入执行时的用户消息同样带附件引用渲染（服务端 dequeued 事件）", () => {
     const s = src("main.ts")
-    const at = s.lastIndexOf("setQueueExecutor(") // 模块尾部才是注册点（顶部是同名 import）
-    const fn = s.slice(at, at + 900)
-    expect(fn).toContain("attachments: item.files")
+    const at = s.indexOf('ev.type === "event.queue.dequeued"')
+    expect(at).toBeGreaterThan(-1)
+    const branch = s.slice(at, at + 900)
+    // 执行即上屏：排队项真正开始执行时与直接发送同一形态渲染（含附件引用）
+    expect(branch).toContain("attachments: (ev.payload.attachments")
+    expect(branch).toContain("recordInput(")
   })
 })
 
