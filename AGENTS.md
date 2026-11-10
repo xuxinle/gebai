@@ -100,6 +100,9 @@ bun run dev          # 或 turbo run dev
 # 构建（内含仓库自检：存在被 gitignore 误伤的源码则直接失败）
 bun run build
 bun run check:repo   # 单独跑：确认没有"存在于工作树但从未入库"的源文件
+# 判定表与豁免在 scripts/check-repo-core.ts（主：源码扩展名 / 产物段名 / EXEMPT_PREFIXES）；
+# 报错而该路径确实由生成器产出或资产清单托管时，**在那里加一条精确路径 + 理由**（写清谁生成/重建入口），
+# 不要放宽 IGNORED_SEGMENTS（全局段名会盖住真实漏项）。判定核有单测（scripts/check-repo-core.test.ts）。
 
 # 测试（bun test，测试文件与被测代码同目录 *.test.ts）
 bun run test                 # 经 turbo：**命中缓存时会回放日志而不真跑**（要确信就跑下面两条或加 --force）

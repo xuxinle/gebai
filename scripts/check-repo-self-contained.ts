@@ -9,74 +9,18 @@
  *
  * 这条检查只在"克隆下来能用"这个语义上给出回答：**要么源文件全都在库里，要么报错**。
  * 判定方式：`git ls-files --others --ignored --exclude-standard` 列出被忽略的未跟踪文件，
- * 过滤出源码类扩展名，再排除已知的产物/外部依赖目录。
+ * 交给判定核 check-repo-core.ts（源码扩展名 → 显式豁免 → 产物目录段；判定表与豁免理由都在那里）。
+ *
+ * 本文件只做 I/O：跑 git、打印、退出码。
  *
  * 用法：`bun run check:repo`（已接进 `bun run build` 前置）。
  * 退出码：0 = 自包含；1 = 发现被忽略的源码（逐条打印，附排查提示）。
  */
 import { spawnSync } from "node:child_process"
 import { join } from "node:path"
+import { EXEMPT_PREFIXES, findOffenders } from "./check-repo-core"
 
 const root = join(import.meta.dirname, "..")
-
-/** 源码类扩展名：这些文件**必须**入库（生成物不走这些扩展名，故不会误报）。 */
-const SOURCE_EXTENSIONS = new Set([
-  ".ts",
-  ".tsx",
-  ".mts",
-  ".cts",
-  ".js",
-  ".mjs",
-  ".cjs",
-  ".jsx",
-  ".py",
-  ".cpp",
-  ".cc",
-  ".cxx",
-  ".hpp",
-  ".hh",
-  ".h",
-  ".c",
-  ".rs",
-  ".go",
-  ".java",
-  ".kt",
-  ".swift",
-  ".rb",
-  ".lua",
-])
-
-/**
- * 路径中出现这些**目录段**即跳过：构建产物、依赖缓存、外部依赖源码（由各自的下载/固化流程管理）。
- * 采用"段名"判定而非具体路径，是因为这些目录会出现在各处的层级里（<pkg>/build、<pkg>/dist…）。
- */
-const IGNORED_SEGMENTS = new Set([
-  "node_modules",
-  "dist",
-  "build",
-  "out",
-  "target",
-  ".turbo",
-  ".git",
-  ".cache",
-  "cache",
-  "coverage",
-  ".venv",
-  "venv",
-  "__pycache__",
-  "vendor",
-  ".next",
-  ".pnpm-store",
-  "tmp",
-  "temp",
-])
-
-/**
- * 文件名含 `.generated.` 的跳过：构建期生成物的仓库内约定
- * （`.gitignore` 里逐条列出，如 `subagents.bundle.generated.ts` / `web.bundle.generated.ts`），
- * 由 `scripts/build-*.ts` 在构建时重建，本来就不该入库。
- */
-const GENERATED_MARKER = ".generated."
 
 const run = spawnSync("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], {
   cwd: root,
@@ -89,17 +33,7 @@ if (run.status !== 0) {
 }
 
 const ignored = run.stdout.toString("utf8").split("\0").filter((entry) => entry.length > 0)
-const offenders: string[] = []
-for (const relative of ignored) {
-  const segments = relative.split("/")
-  const fileName = segments.at(-1) ?? ""
-  if (fileName.includes(GENERATED_MARKER)) continue
-  const dot = fileName.lastIndexOf(".")
-  if (dot < 0 || !SOURCE_EXTENSIONS.has(fileName.slice(dot).toLowerCase())) continue
-  // 目录段判定：末段（文件名）不参与，只看它所在的目录链
-  if (segments.slice(0, -1).some((segment) => IGNORED_SEGMENTS.has(segment))) continue
-  offenders.push(relative)
-}
+const offenders = findOffenders(ignored)
 
 if (offenders.length > 0) {
   console.error(`[check:repo] 发现 ${offenders.length} 个**被 gitignore 忽略的源文件**——仓库不自包含：\n`)
@@ -110,7 +44,15 @@ if (offenders.length > 0) {
       "\n排查：多半是 .gitignore 里某条**过宽的模式**（例如为转储写的裸 `core` 会连 `src/core/` 一起忽略）——" +
       "\n用 `git check-ignore -v <路径>` 看是哪条规则命中的，再把该规则收紧到具体形态。",
   )
+  console.error(
+    "\n若该路径确实**由生成器产出或由资产清单托管**（源码可重建，不该入库），" +
+      "\n在 scripts/check-repo-core.ts 的 EXEMPT_PREFIXES 加一条**精确路径前缀 + 理由**" +
+      "（写清谁生成/谁托管、重建入口在哪）。不要放宽 IGNORED_SEGMENTS——那是全局段名，会盖住真实漏项。",
+  )
   process.exit(1)
 }
 
-console.log(`[check:repo] 通过：仓库自包含（被忽略的源码文件 0 个；扫描忽略项 ${ignored.length} 条）`)
+console.log(
+  `[check:repo] 通过：仓库自包含（被忽略的源码文件 0 个；扫描忽略项 ${ignored.length} 条；` +
+    `显式豁免 ${EXEMPT_PREFIXES.length} 条）`,
+)
