@@ -375,7 +375,7 @@ describe("写类工具", () => {
     expect(tools.type.requiresApproval).toBe(true)
     expect(tools.key.requiresApproval).toBe(true)
       // 只读类免审批
-  for (const name of ["tree", "find", "get", "visual", "metrics", "capture", "capture_hash", "visual_diff", "wait", "apps"] as const) {
+  for (const name of ["tree", "find", "get", "visual", "metrics", "capture", "capture_hash", "visual_diff", "wait", "apps", "doc"] as const) {
     expect(tools[name].requiresApproval ?? false).toBe(false)
   }
   })

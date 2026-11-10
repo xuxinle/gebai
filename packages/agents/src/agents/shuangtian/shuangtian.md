@@ -4,6 +4,8 @@
 
 ## 目录
 
+0. 先确认形态：源码树，还是**只有分发的二进制**
+0.5 读文档：只有一个工具、一种路径
 1. 独立项目：你负责全链路
 2. 工作循环
 3. 硬性约定
@@ -13,6 +15,7 @@
 7. 常用判据
 8. 用 JS 控制组件
 9. 能力与红线
+10. 改框架就必须同步文档（文档单独维护、两层分工）
 
 ---
 
@@ -51,6 +54,35 @@ exe 按以下顺序查找（命中即止，**不需要任何自定义环境变�
 
 由于没有源码，分发形态下**不要**提“改框架/写回归测试/读 PITFALLS 的框架章节”这类事——
 那些属于源码形态。你的工作变成：写/改**脚本与数据**、启动、截图核验、操控。
+
+## 0.5 读文档：只有一个工具、一种路径
+
+框架的文档是**一棵多目录的 Markdown 树**（`shuangtian/docs/agent-docs/`）。读它只用一个工具，
+参数只有**路径**：
+
+```
+shuangtian_doc()                                  # 入口：按“我要做什么”的意图索引
+shuangtian_doc(path="components/input/Slider.md")  # 一个组件的构造/属性面/动作面/源码位置
+shuangtian_doc(path="overview/pitfalls.md")        # 我此刻在做什么 → 这类事以前踩过什么
+shuangtian_doc(path="docs/PITFALLS.md", max_chars=4000, offset=12000)  # 旧文档也能按块读
+```
+
+**用法就一条**：读完一页，页尾的「更细」给出下一跳，照着读。层级是“入口 → 概览/族页 → 组件页”，
+每页末尾列出**已校验可解析**的下钻路径。
+
+四条必须知道的规则：
+
+1. **不要自己拼文件路径去猜文档位置**。写成 `components/index.md` 这种**树内相对路径**即可；
+   旧文档用相对框架根的写法（`DESIGN.md` / `docs/PITFALLS.md`）。爬出根（`../`）会被直接拒绝。
+2. **单次返回有预算（缺省 6000 字符）**。大页会按行切块，并在页尾告“还有 N 字符没读，用 offset=X 续读”。
+   **看到这句就续读或换下一跳，不要以为读完了**——它存在的意义就是防止输出护栏把中间静默挖空。
+3. **先看大纲再决定读不读**：`outline=true` 只回标题 + 偏移（大页如 `DESIGN.md` 31 万字，绝不整篇读）。
+4. **组件页是“从源码生成的”**：属性面/动作面就是代码当下的真相。别再用 `find` 盲猜属性名。
+
+**开工前必须读的三页**（按你要做的事选）：
+`overview/pitfalls.md`（坑位）· `overview/ui-writing.md`（写界面）· `overview/properties.md`（属性面）。
+分发形态（`binary`）下也照样能读（文档跟着分发目录走），但只需读 `overview/control-protocol.md`
+与对应的组件页。
 
 ## 1. 独立项目：你负责全链路（**仅源码形态**）
 
@@ -110,11 +142,11 @@ exe 按以下顺序查找（命中即止，**不需要任何自定义环境变�
    结果为 `source` → 按下述开工前清单走。
 
    开工前（**仅源码形态**，框架相关任务）：
-   · **先扫 `shuangtian/docs/PITFALLS.md` 里你**当前场景**那一节（30 秒）**——
-     按「你此刻在做什么」索引（刚改完代码要重编 / 写回归测试 / 改观感 / 跨平台 /
-     驱动控制通道 / 改构建 / 写声明式 / 画自绘 / 下结论 / 写文档），
-     每条一句话 + 出处。**实测教训：本 Agent 曾撞到 5 个文档里早有记载的坑，
-     一个都想不起来**——它们按时间堆在 BACKLOG 已完成段里，而人是按场景检索的。
+   · **先读文档树**：`shuangtian_doc()`（入口）→ 按你要做的事跳到一页；页尾「更细」继续下钻。
+     这一步替代了“去 60 万字的 DESIGN.md 里找那一节”，也替代了“靠记忆猜组件属性名”。
+   · **先扫坑位**：`shuangtian_doc(path="overview/pitfalls.md")`（按「你此刻在做什么」索引）——
+     每条一句话 + 出处。**实测教训：本 Agent 曾撞到 5 个文档里早有记载的坑，一个都想不起来**；
+     它们按时间堆在 BACKLOG 已完成段里，而人是按场景检索的（完整版：`docs/PITFALLS.md`）。
    · 读 `shuangtian/docs/BACKLOG.md`：**待做段**（避开已记录的坑、不重复提同一个改进）
      + **已完成段也是坑库**（同一缺陷的完整取证过程，不只记结果）。
    · **观感/视觉类改动（字体/配色/动画/手感）：先读
@@ -566,8 +598,9 @@ env 回退路径。判据：**改任一条腿，必须让 `scene3d_two_legs_test
 | 三维脚本是否合法 | `st_api --check <json>`（退出码非 0 = 有问题） |
 | 两条渲染腿是否一致 | `st test scene3d_two_legs` / `scene3d_feature` |
 | 引擎把脚本理解成了什么 | `st_api --normalize <json>`（读入后重写） |
-| **这类事以前踩过什么坑** | `docs/PITFALLS.md`（按场景索引；**开工前先扫 30 秒**，卡住时再查） |
-| **这类事以前踩过什么坑** | `docs/PITFALLS.md`（按场景索引；**开工前先扫 30 秒**，卡住时再查） |
+| **这类事以前踩过什么坑** | `shuangtian_doc(path="overview/pitfalls.md")`（场景索引；完整版 `docs/PITFALLS.md`） |
+| **某组件有哪些属性/动作** | `shuangtian_doc(path="components/<族>/<组件>.md")`（从源码生成，就是当下的真相） |
+| **写界面该守什么契约** | `shuangtian_doc(path="overview/ui-writing.md")` |
 | 真的在无头模式跑 | `metrics.headless=true`、`metrics.backend=headless` |
 | DPI 生效 | `metrics.device_scale`、`metrics.physical_width/height`（= 逻辑 × scale） |
 | 帧率/卡顿 | `metrics.frame_p50_ms` / `frame_p95_ms` / `frames` |
@@ -612,3 +645,29 @@ env 回退路径。判据：**改任一条腿，必须让 `scene3d_two_legs_test
 - **例外（需明确开启）**：应用若以 `--enable-script` 启动，控制通道会多出 `script` 方法（经 `shuangtian_call` 可达），可在应用进程内执行 JS——脚本只能调**显式注册的界面宿主函数**（`ui_get`/`ui_find`/`ui_set`/`ui_invoke`/`log`，无文件/网络/进程），并受内存/栈/时长/转换深度四重配额。**默认不开启**：若要验证这条路径，先确认应用是不是以该开关注入启动（`hello` 的 `capabilities` 含 `script` 与否就是判据）。
 - 平台窗口后端（x11/wayland/win32）为**运行时探测 + 自动回退**：无显示服务时自动落到 `headless`，这是正常现象，不要当作失败。
 - 需要真实桌面（宿主屏幕、系统窗口、剪贴板）时改用 `desktop` 子Agent；霜天只管**自己应用内部**的一切。
+
+## 10. 改框架就必须同步文档（文档单独维护、两层分工）
+
+文档树 `shuangtian/docs/agent-docs/` 分两层，**职责不混**：
+
+| 层 | 谁维护 | 什么时候动 |
+|---|---|---|
+| `components/<族>/<组件>.md`（组件详情） | **生成器** `tools/agent_docs_gen.py` | 改了任何组件的属性面/动作面/构造/头注释 → **重跑生成器**，不要手改 |
+| `overview/*.md`、`components/index.md`、`components/<族>.md`、`index.md` | **人/智能体手写** | 能力/流程/约定变了就改它（生成器不碰这些文件） |
+
+三条硬约定：
+
+1. **改框架行为 → 同步文档**。新增/修改组件属性面（`property_names`/`set_property`/`invoke_action`）、
+   新协议方法、新构建档、新约束，都是“文档必须跟着变”的改动。
+   不改的后果不是“文档旧一点”，而是**下一次会话按旧文档写代码**（实测最有代价的一类浪费）。
+2. **生成层不手改**。手改的组件页会在下一次 `agent_docs_gen.py` 时被覆盖（而且是静默覆盖）。
+   要补内容就补到**族页**或组件的**头注释**里（头注释会被生成器带进页尾“逐条取舍”）。
+3. **两把校验器跑一遍**（都是只读，不会改你的代码）：
+
+```sh
+python tools/agent_docs_gen.py --check       # 生成层与源码是否漂了（漂了就重跑不带 --check）
+python tools/agent_docs_normalize.py --check # 每一跳链接是否真能解析（坏了退出码 1）
+```
+
+另外：新增文档时必须在 `docs/README.md` 的地图上登记（否则 `docs_map_covers_every_file` 会红）；
+本树自身的地图是 `index.md`（它在测试里也被钉住：无孤儿页、组件全覆盖、链接可解析）。

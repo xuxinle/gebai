@@ -86,6 +86,8 @@
 | `terminal_cursor_reverse_verify.py` | **逆向验证（光标）**：去掉 `request_animation`（闪烁冻住）/ 默认形状回退 `Block` / 宿主无条覆盖 —— 逐条回退期望红后恢复。**开跑前会先验基线全绿**（脏二进制会让结论反过来）。⚠ 与任何构建**不能并行**（见 CONVENTIONS §9.0③） |
 | `st_shot_region.py` | 指定区域截图 |
 | `check_docs.py` | **文档引用一致性检查**：扫全部文档/源码里的 `DESIGN.md §X` / `CONVENTIONS.md §X` 引用，确认目标章节真的存在；并核对若干“旧值已清零”与“新内容已到位”。改了章节号或文档结构后跑一下 |
+| `agent_docs_gen.py` | **智能体文档树生成器**：从组件头/实现抽取构造签名、属性面（`property_names`）、动作面（`invoke_action`）、头注释小节与源码位置，生成 `docs/agent-docs/components/<族>/<组件>.md`。**只写生成层**（族页与 overview 是手写，本脚本不碰）。`--check` 只核对不写入（漂移则退出码 1；`tests/docs_agent_tree_test.cpp` 同时钉住组件全覆盖与页结构） |
+| `agent_docs_normalize.py` | **文档树链接归一化 + 可解析性核对**：把 `../../x.md`、`basic/Text.md` 这类写法归一到“`shuangtian_doc` 真能解析”的形态（树内相对路径 / 相对框架根），并报告仍解析不了的引用（退出码 1）。归一化本身由解析器判定，不靠维护映射表 |
 | `check_selfcontained.py` | **自包含体检（不消费 PCH）**：逐个编译头文件（§6.1）与翻译单元（§6.6）。`st build`/`st check`/`st test` 都自动 `-include st/pch.hpp`，PCH 里含整套常用标准库头——**这两条约定在日常构建里根本不被检查**，只在首次自举才炸（实测：`channel.hpp` 缺 `<functional>`/`<cstdint>`，三个命令全绿，`bootstrap.ps1` 报错）。包含根按组补齐（头/框架/stpm/测试/每个示例），避免假失败。前身是只做 IWYU 差集体检的脚本（只查 `.cpp`、包含根写死为无、从未被真跑——528 处全假阳），2026-10-16 已删（处置见 `docs/BACKLOG.md` 已完成段） |
 | `font_cache_probe.cpp` | **字体缓存计数器的判别力验证**：热调用必须零新增读盘/解析，且命中数在涨（防假绿）。用来确认 `font_cache_stats()` 真能抓到“缓存没生效” |
 | `font_stack_cost_probe.cpp` | **字体栈热调用成本分解**：平台层候选链枚举 / 文件存在性探测 / 完整 `system_default()` 各一段，取**最小值**（均值会被一次杀毒扫描带偏）。曾用来把“热调用 44 ms”定位到 `load_face` |

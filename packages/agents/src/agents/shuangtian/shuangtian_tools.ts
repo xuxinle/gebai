@@ -20,6 +20,7 @@ import {
   type ControlResult,
   type ControlTarget,
 } from "./shuangtian_client"
+import { docTool } from "./shuangtian_docs"
 
 /** 框架默认根（`SHUANGTIAN_PROJECT` 未配置时）：歌白仓库根下的 `shuangtian/`。 */
 const DEFAULT_FRAMEWORK_DIR = "shuangtian"
@@ -1616,6 +1617,7 @@ const callTool: Tool = {
 
 /** 工具表（合并型只读工具免审批；写与输入类需审批见 def.requiresApproval）。 */
 export const tools = {
+  doc: docTool,
   run: runTool,
   apps: appsTool,
   tree: treeTool,

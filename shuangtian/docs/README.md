@@ -224,6 +224,7 @@
 
 | 文档 | 回答的问题 |
 |---|---|
+| [`agent-docs/index.md`](agent-docs/index.md) | **智能体入口文档树**（单一工具 + 单一参数：路径）。入口 → `overview/`（横向能力逐主题一页）→ `components/`（按用途分组 → 族页 → 每组件一页）；页尾「更细」给下一跳。组件页由 [`../tools/agent_docs_gen.py`](../tools/agent_docs_gen.py) 从源码生成，两层分工与校验命令见 `agent-docs/index.md` 末节 |
 | [`../tools/README.md`](../tools/README.md) | 探针/脚本怎么用、依赖放哪（代码进仓库 / 二进制走资源管理） |
 | [`../third_party/SOURCES.md`](../third_party/SOURCES.md) | 随仓库分发的第三方源码、版本/来源/许可、动了哪些上游代码 |
 | [`../third_party/sqlite/PROVENANCE.md`](../third_party/sqlite/PROVENANCE.md) | SQLite 的取数路径、改动面、裁剪结果 |

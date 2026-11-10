@@ -5,7 +5,7 @@ import { requiresApproval as toolApprovals, tools as toolSet } from "./shuangtia
 
 export const name = "shuangtian"
 export const description =
-  "构建、运行与操控霜天（Shuangtian）原生桌面应用：先 shuangtian_run(action=shape) 探形态（源码树 / 只有分发的二进制 exe）、无头模式开发闭环（构建/启动/停止/测试/禁令扫描）、组件树与选择器查询（tree/find）、属性读写与动作触发（get/set/invoke）、真实鼠标键盘注入（click/type/key）、截图 PNG（无头唯一视觉通道）、视觉树、条件等待、运行指标（后端/无头/DPI/帧耗时）。坐标一律逻辑像素；无任意代码执行入口。**支持无源码运行**：只有构建好的应用 exe 时也能启动/操控/截图（仅 build/test/lint 不可用）。适用于用智能体开发与验证原生界面；真实宿主桌面操作用 desktop 子Agent。内含 code 子代理（`code_*`）负责源码探索与定点修改。"
+  "构建、运行与操控霜天（Shuangtian）原生桌面应用：先 shuangtian_run(action=shape) 探形态（源码树 / 只有分发的二进制 exe）、无头模式开发闭环（构建/启动/停止/测试/禁令扫描）、组件树与选择器查询（tree/find）、属性读写与动作触发（get/set/invoke）、真实鼠标键盘注入（click/type/key）、截图 PNG（无头唯一视觉通道）、视觉树、条件等待、运行指标（后端/无头/DPI/帧耗时）。**另有 shuangtian_doc 按路径读开发文档树**（入口 → 概览/组件族页 → 组件页逐层下钻，单次有字符预算并按行切块，不会被输出护标静默截断）。坐标一律逻辑像素；无任意代码执行入口。**支持无源码运行**：只有构建好的应用 exe 时也能启动/操控/截图（仅 build/test/lint 不可用）。适用于用智能体开发与验证原生界面；真实宿主桌面操作用 desktop 子Agent。内含 code 子代理（`code_*`）负责源码探索与定点修改。"
 export const systemPrompt = systemPromptBase
 
 export const tools = toolSet
