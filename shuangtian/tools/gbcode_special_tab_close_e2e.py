@@ -25,6 +25,12 @@ import sys
 import tempfile
 import time
 
+# 控制通道握手标识（与服务端 st::control::kAgentOnlyNotice 同一句）：
+# 本脚本在 hello 里原样带上，服务端据此认出“这是霜天子侧客户端”。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -43,7 +49,7 @@ class Client:
         self.sock.settimeout(60.0)
         self.rid = 0
         self.token = token
-        self.call("hello", {"token": token})
+        self.call("hello", {"token": token, "agent": AGENT_HANDSHAKE})
 
     def call(self, method, params=None):
         self.rid += 1

@@ -15,6 +15,14 @@ import json
 import socket
 import struct
 
+# 控制通道的「只许霜天子Agent 连接」固定标识句（与服务端 `st::control::kAgentOnlyNotice` 同一句）。
+# 本库在 `hello` 里原样带上：服务端据此知道连接来自框架/子Agent 工具链，
+# 而不是手写 TCP 客户端。手搓的客户端拿不到这句，服务端拒绝时会把这句话原样丢回给它们。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具"
+    "（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 
 def load_control(ctl_path):
     """读控制文件（port/pid/token/...）；不存在或损坏返回 {}。"""
@@ -34,13 +42,15 @@ def call_with_token(port, method, params=None, token="", timeout=60, host="127.0
     try:
         frames = []
         if method not in ("hello", "ping"):
-            hello_params = {}
+            hello_params = {"agent": AGENT_HANDSHAKE}
             if token:
                 hello_params["token"] = token
             frames.append((0, "hello", hello_params))
         merged = dict(params or {})
-        if method == "hello" and token and "token" not in merged:
-            merged["token"] = token
+        if method == "hello":
+            if token and "token" not in merged:
+                merged["token"] = token
+            merged.setdefault("agent", AGENT_HANDSHAKE)
         frames.append((1, method, merged))
         for mid, name, payload in frames:
             body = json.dumps({"id": mid, "method": name, "params": payload}).encode()

@@ -2,6 +2,12 @@
 """册府 e2e：启动 → 控制通道 → 断言界面与数据 → 截图 → 交互验证。"""
 import json, os, pathlib, shutil, socket, struct, subprocess, sys, time
 
+# 控制通道握手标识（与服务端 st::control::kAgentOnlyNotice 同一句）：
+# 本脚本在 hello 里原样带上，服务端据此认出“这是霜天子侧客户端”。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 ROOT = pathlib.Path("C:/Users/Administrator/code/gebai/shuangtian/apps/cefu")
 BIN = ROOT / "build" / "dev" / "bin" / "cefu.exe"
 SHOTS = ROOT / "tmp" / "e2e"
@@ -27,6 +33,7 @@ class Client:
         self.rid += 1
         if method == "hello":
             params = dict(params or {}, token=self.token)
+            params["agent"] = AGENT_HANDSHAKE
         body = json.dumps({"id": self.rid, "method": method, "params": params or {}}).encode()
         self.sock.sendall(struct.pack(">I", len(body)) + body)
         n = struct.unpack(">I", read_exact(self.sock, 4))[0]

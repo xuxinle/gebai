@@ -51,6 +51,20 @@ export interface ControlResult {
 const MAX_FRAME = 64 * 1024 * 1024  // 与服务端 ServerOptions::max_frame 对齐（避免两端不一致）
 
 /**
+ * 控制通道的「只许霜天子Agent 连接」固定提示句。
+ *
+ * 它不是给程序用的凭据（token 才是），而是**给模型看的**：手拼 TCP 客户端的智能体
+ * 在拒绝文案里看到它，就知道应该改用霜天子工具而不是继续逆着协议凑帧。
+ * 本子Agent 自己的每个 `hello` 都在 `params.agent` 里原样带上它（服务端日志与回执会复述）。
+ *
+ * 字符串值与服务端 `st::control::kAgentOnlyNotice`、Python `st_client_lib.AGENT_HANDSHAKE`
+ * 必须逐字一致——回归用例 `shuangtian_client.test.ts` 守着这一致性。
+ */
+export const AGENT_HANDSHAKE =
+  "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具" +
+  "（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+
+/**
  * 控制文件主名：`<app>-control.json` → `<app>`。
  * 非控制文件返回空串（调用方据此判断“这个文件算不算一个应用实例”）。
  */
@@ -145,7 +159,7 @@ export async function call_control(
     requests.length > 0 && requests[0].method !== "hello" && requests[0].method !== "ping"
   const frames: Array<{ id: number; method: string; params: Record<string, unknown> }> = []
   if (prepend_hello) {
-    const hello_params: Record<string, unknown> = { client: "shuangtian-agent" }
+    const hello_params: Record<string, unknown> = { client: "shuangtian-agent", agent: AGENT_HANDSHAKE }
     if (target.token) hello_params.token = target.token
     if (options.subscribe) hello_params.subscribe = true
     frames.push({ id: 0, method: "hello", params: hello_params })
@@ -153,9 +167,12 @@ export async function call_control(
   requests.forEach((request, index) => {
     const params = { ...(request.params ?? {}) }
     if (!prepend_hello && index === 0 && options.subscribe) params.subscribe = true
-    // 调用方自己的 hello：补上 token（控制文件读出）——缺 token 会被服务端拒。
-    if (request.method === "hello" && target.token !== undefined && params.token === undefined) {
-      params.token = target.token
+    // 调用方自己的 hello：补上 token（控制文件读出）——缺 token 会被服务端拒；同时补 agent 标识。
+    if (request.method === "hello") {
+      if (target.token !== undefined && params.token === undefined) {
+        params.token = target.token
+      }
+      if (params.agent === undefined) params.agent = AGENT_HANDSHAKE
     }
     frames.push({ id: index + 1, method: request.method, params })
   })
@@ -331,7 +348,11 @@ export async function wait_for_event(
       resolve()
     }
     socket.on("connect", () => {
-      const hello: Record<string, unknown> = { client: "shuangtian-agent", subscribe: true }
+      const hello: Record<string, unknown> = {
+        client: "shuangtian-agent",
+        subscribe: true,
+        agent: AGENT_HANDSHAKE,
+      }
       if (target.token) hello.token = target.token
       if (kinds.length > 0) hello.kinds = kinds
       socket.write(encode_frame({ id: 0, method: "hello", params: hello }))

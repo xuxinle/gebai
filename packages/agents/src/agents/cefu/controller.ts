@@ -21,7 +21,7 @@
  * ## 控制协议（与霜天 e2e `tools/cefu_e2e.py` 同一份）
  *
  * - 帧格式：4 字节大端长度 + UTF-8 JSON `{id, method, params}`
- * - 首个请求必须是 `hello`（params 带 control-file 里的 token）
+ * - 首个请求必须是 `hello`（params 带 control-file 里的 token，并带 `agent` 标识句）
  * - 桥函数调用走 `script` 方法的 `code` 分支：eval 表达式 `app.cefu.<fn>(args...)`
  *   （桥函数挂 JS 全局 `app` 对象下，`script {function}` 只能调全局函数名，
  *   含点号的名字解析不到——实测用 code 走 eval 是唯一通路）
@@ -32,6 +32,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { resolveDataPath } from "@gebai/sdk/node"
 import { takeoverProcess } from "../../core/process-takeover"
+import { AGENT_HANDSHAKE } from "../shuangtian/shuangtian_client"
 
 /** 册府数据目录名（`{GEBAI_HOME}/data/cefu`）。 */
 export const CEFU_HOME_DIRNAME = "cefu"
@@ -156,7 +157,7 @@ export class CefuConnection {
     token: string,
   ): Promise<CefuConnection> {
     const conn = new CefuConnection(socket, readChunk)
-    await conn.call("hello", { token }, 10_000)
+    await conn.call("hello", { token, agent: AGENT_HANDSHAKE }, 10_000)
     return conn
   }
 

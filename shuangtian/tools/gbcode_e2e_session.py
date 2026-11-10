@@ -16,6 +16,12 @@ import tempfile
 import time
 from pathlib import Path
 
+# 控制通道握手标识（与服务端 st::control::kAgentOnlyNotice 同一句）：
+# 本脚本在 hello 里原样带上，服务端据此认出“这是霜天子侧客户端”。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 # 非 UTF-8 控制台自愈：GBK 代码页下 print 中文/符号（如 '⇄'）会 UnicodeEncodeError 崩整跑；
 # 已是 UTF-8 则不动，残余不可编字符以 '?' 兜底（宁可错印不崩）。
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -38,6 +44,7 @@ class Client:
         self.rid += 1
         if method == "hello":
             params = dict(params or {}, token=self.token)
+            params["agent"] = AGENT_HANDSHAKE
         body = json.dumps({"id": self.rid, "method": method, "params": params or {}}).encode()
         self.sock.sendall(struct.pack(">I", len(body)) + body)
         header = b""

@@ -33,6 +33,12 @@ import tempfile
 import time
 from pathlib import Path
 
+# 控制通道握手标识（与服务端 st::control::kAgentOnlyNotice 同一句）：
+# 本脚本在 hello 里原样带上，服务端据此认出“这是霜天子侧客户端”。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = ROOT / "build" / "dev" / "bin" / "cefu.exe"
 
@@ -76,7 +82,7 @@ class Control:
         # 一分多钟（冷启动的驱动初始化），而 socket 默认超时会把它误判为挂死。
         self.sock.settimeout(300)
         self._next = 1
-        hello = self.call("hello", {"token": data["token"]})
+        hello = self.call("hello", {"token": data["token"], "agent": AGENT_HANDSHAKE})
         # 控制通道的响应是 `{id, ok, result}` / `{id, ok:false, error}` —— `ok` 在**顶层**，
         # 不在 `result` 里（第一版写成 `result.ok`，于是每次握手都被误判为失败）。
         if not hello.get("ok", False):

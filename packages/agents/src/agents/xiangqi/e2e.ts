@@ -18,6 +18,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { createController } from "./controller"
+import { AGENT_HANDSHAKE } from "../shuangtian/shuangtian_client"
 
 const exe = process.argv[2]
 if (exe === undefined) {
@@ -75,7 +76,7 @@ class ControlClient {
       },
     })
     client = new ControlClient(socket)
-    await client.call("hello", { token })
+    await client.call("hello", { token, agent: AGENT_HANDSHAKE })
     return client
   }
 

@@ -22,6 +22,12 @@ import subprocess
 import sys
 import time
 
+# 控制通道握手标识（与服务端 st::control::kAgentOnlyNotice 同一句）：
+# 本脚本在 hello 里原样带上，服务端据此认出“这是霜天子侧客户端”。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GBCODE = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
 
@@ -121,7 +127,7 @@ def main():
         client = Client(port, token)
         # **必须先 hello**（服务端强制）：不带 token 的调用一律回
         # `{"error":{"code":"invalid","message":"必须先 hello（携带 token）"}}`。
-        hello = client.call("hello", {"token": token} if token else {})
+        hello = client.call("hello", {"token": token, "agent": AGENT_HANDSHAKE} if token else {"agent": AGENT_HANDSHAKE})
         if isinstance(hello, dict) and hello.get("error"):
             print("hello 失败:", hello["error"], file=sys.stderr)
             return 1

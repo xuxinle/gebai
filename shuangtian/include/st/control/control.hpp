@@ -25,6 +25,20 @@
 
 namespace st::control {
 
+/// 控制通道的「只许经霜天子Agent 连接」固定提示句。
+///
+/// 服务端与客户端**共用同一份字面量**：服务端在①未握手就调方法、②`hello` 缺 `agent` 标识、
+/// ③token 校验失败 三种拒绝里原样带回；`hello` 的成功回执里也带一份（客户端据此自检
+/// 自己是不是按约定送的）。客户端（框架内探针、歌白子Agent）在 `hello` 的 `params.agent`
+/// 里送的就是它。
+///
+/// 为什么要有这句：手搓 TCP 客户端（自拼长度前缀、漏 token、漏 `hello`）会把协议细节
+/// 重新踩一遍，而报错原文看上去像“选择器不对/方法不存在”。这句是**面向模型的行为提示**：
+/// 见到它就应改用霜天子Agent 的工具，而不是继续手工拼帧。
+inline constexpr std::string_view kAgentOnlyNotice =
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具"
+    "（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）";
+
 struct ServerOptions {
   std::string bind{"127.0.0.1"};
   std::uint16_t port{0};              ///< 0 = 由内核分配

@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
-import { ControlError, call_control, call_once, request, resolve_target, unwrap } from "./shuangtian_client"
+import { ControlError, AGENT_HANDSHAKE, call_control, call_once, request, resolve_target, unwrap } from "./shuangtian_client"
 
 type Handler = (message: { id: number; method: string; params: Record<string, unknown> }) =>
   | { ok: true; result: unknown }
@@ -201,6 +201,9 @@ describe("call_control", () => {
     expect(response.method).toBe("tree")
     expect(server.calls.map((call) => call.method)).toEqual(["hello", "tree"])
     expect(server.calls[0].params.token).toBe("tk-1")
+    // 握手带固定 agent 标识句：服务端据此把这条连接认作霜天子 Agent 客户端
+    // （而不是手揉 TCP 的脚本），它也是服务端拒绝文案里原样带回的那一句。
+    expect(server.calls[0].params.agent).toBe(AGENT_HANDSHAKE)
   })
 
   test("显式 hello 请求自动补 token（调用方无需手拼）", async () => {
@@ -212,6 +215,8 @@ describe("call_control", () => {
     expect(response.method).toBe("hello")
     expect(server.calls).toHaveLength(1)
     expect(server.calls[0].params.token).toBe("tk-2")
+    // 调用方自己的 hello 也要带上固定 agent 标识句（不能只靠合成 hello 那条路径）。
+    expect(server.calls[0].params.agent).toBe(AGENT_HANDSHAKE)
   })
 
   test("ping 不前置 hello（协议门允许探测）", async () => {

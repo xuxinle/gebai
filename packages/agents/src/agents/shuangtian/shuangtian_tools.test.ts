@@ -1062,6 +1062,17 @@ describe("框架与提示词装配", () => {
   expect(prompt).toContain("visual_diff")
 })
 
+  test("系统提示词写清控制通道只许子Agent 连接（禁止手揉 TCP）", async () => {
+    const mod = await import("./shuangtian")
+    const prompt = mod.def.systemPrompt
+    // 协议里那句固定文本必须被提示词引用：它是模型在手拼帧撞墙时唯一能看到的指路。
+    expect(prompt).toContain("kAgentOnlyNotice")
+    expect(prompt).toContain("仅霜天子Agent 可连接本控制通道")
+    // “见到就停下”与替代手段（工具 / 专用库）必须同时给出——只喊“别手搓”而
+    // 不给替代手段，模型会读成“这条路被封了”而放弃任务。
+    expect(prompt).toContain("st_client_lib.py")
+  })
+
   test("系统提示词含观感类改动的入口（手册必被引用，而非内联复述）", async () => {
     const mod = await import("./shuangtian")
     const prompt = mod.def.systemPrompt

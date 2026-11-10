@@ -30,6 +30,12 @@ import sys
 import time
 from pathlib import Path
 
+# 控制通道握手标识（与服务端 st::control::kAgentOnlyNotice 同一句）：
+# 本脚本在 hello 里原样带上，服务端据此认出“这是霜天子侧客户端”。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 if os.name != "nt":
     print("跳过：本脚本只在 Windows 上运行（需要在真机抓窗口像素）")
@@ -59,7 +65,7 @@ class Client:
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=60.0)
         self.sock.settimeout(60.0)
         self.counter = 0
-        hello = self.call("hello", {"token": token})
+        hello = self.call("hello", {"token": token, "agent": AGENT_HANDSHAKE})
         if not hello.get("ok"):
             raise RuntimeError(f"hello 失败: {hello.get('error')}")
 

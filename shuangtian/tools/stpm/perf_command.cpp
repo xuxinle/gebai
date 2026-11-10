@@ -39,6 +39,7 @@
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "st/control/control.hpp"
 #include "st/perf/report.hpp"
 #include "st/pkg/build.hpp"
 #include "st/pkg/manifest.hpp"
@@ -90,6 +91,9 @@ namespace {
   hello["method"] = "hello";
   Json hello_params = Json::object();
   if (!token.empty()) hello_params["token"] = token;
+  // 固定的“只许霜天子Agent 连接”标识（与服务端 `kAgentOnlyNotice` 同值）：
+  // 这是本仓的客户端，应当被服务端日志认定为 agent 而非手揉脚本。
+  hello_params["agent"] = std::string(st::control::kAgentOnlyNotice);
   hello["params"] = std::move(hello_params);
   if (auto sent = send(hello); !sent) return sent;
   Json request = Json::object();

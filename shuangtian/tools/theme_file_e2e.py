@@ -15,6 +15,12 @@ import subprocess
 import sys
 import time
 
+# 控制通道握手标识（与服务端 st::control::kAgentOnlyNotice 同一句）：
+# 本脚本在 hello 里原样带上，服务端据此认出“这是霜天子侧客户端”。
+AGENT_HANDSHAKE = (
+    "仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）"
+)
+
 GALLERY = "build/dev/bin/gallery"
 CTL_DIR = "/tmp/theme-file-e2e"
 
@@ -22,7 +28,8 @@ CTL_DIR = "/tmp/theme-file-e2e"
 def call(port: int, token: str, method: str, params: dict) -> dict:
     sock = socket.create_connection(("127.0.0.1", port), timeout=10)
     try:
-        hello = json.dumps({"id": 1, "method": "hello", "params": {"token": token}}).encode()
+        hello = json.dumps({"id": 1, "method": "hello",
+                            "params": {"token": token, "agent": AGENT_HANDSHAKE}}).encode()
         sock.sendall(struct.pack(">I", len(hello)) + hello)
         sock.recv(65536)
         body = json.dumps({"id": 2, "method": method, "params": params}).encode()

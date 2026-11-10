@@ -142,6 +142,9 @@ struct Server::Impl {
     std::size_t consumed{0};           ///< 已消费游标（避免头部 erase 的 O(n) 搬移）
     bool subscribed{false};
     bool greeted{false};               ///< 鉴权门：hello（且 token 校验通过）前拒绝一切其他方法
+    /// `hello.params.agent` 原文（空 = 调用方未声明为霜天子Agent 客户端）。
+    /// 不参与鉴权，只用于“这条连接是谁”的可观测性：服务端日志与 `hello` 回执都会带上它。
+    std::string agent{};
     /// 本连接上刚提交了一个挂起的 `wait`：之后的请求一律**如实拒绝**。
     /// 静默挂起是最坏的形态——调用方以为“先 wait、再改状态”在做两件事，
     /// 实际第二件事永远不会被处理（本会话实测白等 6 秒），而错误里一个字都没提。
@@ -522,7 +525,9 @@ struct Server::Impl {
       error["ok"] = false;
       Json detail = Json::object();
       detail["code"] = "bad_request";
-      detail["message"] = message.error().message;
+      // 帧都解不开 = 手揉协议的典型症状（漏了 4 字节长度前缀、长度算错、把文本当帧发），
+      // 因此错误信息里先给出解析错误，再带上固定句指明该改用工具。
+      detail["message"] = std::format("{}——{}", message.error().message, kAgentOnlyNotice);
       error["error"] = std::move(detail);
       (void)send(client, error);
       return;
@@ -533,13 +538,16 @@ struct Server::Impl {
     const std::string method = json_get_string(*message, "method");
     const Json& params = json_at(*message, "params");
     if (method.empty()) {
-      fail(client, id, ErrorCode::Invalid, "缺少 method");
+      fail(client, id, ErrorCode::Invalid, std::format("缺少 method——{}", kAgentOnlyNotice));
       return;
     }
     // 鉴权门：hello 之前只允许 ping（便于探活）与 hello 本身。token 不匹配直接断连——
     // 未握手的连接没有资格调用任何方法（旧实现任何本地进程连上就能读屏/注入键鼠）。
+    // 拒绝文案统一带上「只许霜天子Agent 连接」固定句：手揉协议的调用方拿到的第一句话
+    // 就是“改用工具”，而不是像“选择器不对/方法不存在”那样把人引向错误方向。
     if (!client.greeted && method != "hello" && method != "ping") {
-      fail(client, id, ErrorCode::Invalid, "必须先 hello（携带 token）");
+      fail(client, id, ErrorCode::Invalid,
+           std::format("必须先 hello（携带 token）——{}", kAgentOnlyNotice));
       drop_client(client);
       return;
     }
@@ -550,10 +558,15 @@ struct Server::Impl {
       if (auth_required && provided != *options.token) {
         // token 错误：回错误帧后立即断连——未鉴权连接不允许逗留（探活用 ping 即可）。
         fail(client, id, ErrorCode::Invalid,
-             "token 校验失败：请从控制文件读取 token 并在 hello 参数携带");
+             std::format("token 校验失败：请从控制文件读取 token 并在 hello 参数携带——{}",
+                         kAgentOnlyNotice));
         drop_client(client);
         return;
       }
+      // `agent` 标识：霜天子Agent 的每个客户端都会在 `hello.params.agent` 里送同一句固定文本。
+      // 缺失不阻断（自研脚本/旧客户端仍可用），但**如实写回**在响应里：调用方与日志都能
+      // 看出“这条连接是手揉的”，而不是靠 token 漏送之类的事后症状去猜。
+      client.agent = json_get_string(params, "agent");
       client.greeted = true;
     }
     ++requests;
@@ -590,8 +603,11 @@ struct Server::Impl {
       fail(client, id, result.error().code, result.error().message);
     }
     if (options.log_calls) {
-      const std::string line = std::format("{} [{}] {} {}us", time::iso8601_now(), client.peer,
-                                           method, (time::now_ns() - start_ns) / 1000);
+      // 未声明 agent 的连接在日志里显式标记：本框架自己的客户端都会带那句固定文本，
+      // 留空就说明是手拼的 TCP 客户端（排查“谁在乱连”时不必再去差异帧）。
+      const std::string actor = client.agent.empty() ? "agent=<未声明>" : "agent=霜天子Agent";
+      const std::string line = std::format("{} [{}] {} {} {}us", time::iso8601_now(), client.peer,
+                                           actor, method, (time::now_ns() - start_ns) / 1000);
       ST_LOG_INFO("control {}", line);
       log_ring.push_back(line);
       if (log_ring.size() > kKeepAliveLogLines) log_ring.erase(log_ring.begin());
@@ -663,6 +679,13 @@ struct Server::Impl {
         if (length == 0 || length > options.max_frame) {
           ST_LOG_WARN("控制通道：帧长度非法（{} 字节，上限 {}）来自 {}", length, options.max_frame,
                     client.peer);
+          // **不能只断连**：这一支正是手揉协议的典型现场（漏写 4 字节长度前缀 / 长度算错），
+          // 而旧行为是写一条日志就关连接——调用方在 recv 上只能看到 EOF，会去猜
+          // “应用崩了 / 被拒”。改为先回一帧带固定提示句的错误，再断开（尽力而为：
+          // 发不出去也不影响断连）。
+          fail(client, 0, ErrorCode::Invalid,
+               std::format("帧长度非法（{} 字节，上限 {}）：每帧必须是 4 字节大端长度 + UTF-8 JSON 体——{}",
+                           length, options.max_frame, kAgentOnlyNotice));
           closed = true;
           break;
         }
@@ -841,6 +864,10 @@ if (json_get_bool(params, "subscribe", false)) {
   client.subscribed = true;
   for (const auto& kind : json_get_string_array(params, "kinds")) client.event_kinds.push_back(kind);
 }
+// 固定提示句原样回给客户端：能对着它自检“我是不是按约定送来 handshake 的”，
+// 也是手拼客户端唯一的“应该改用工具”提示。
+result["notice"] = std::string(kAgentOnlyNotice);
+result["agent"] = client.agent;
 return result;
   
 }
@@ -2033,6 +2060,9 @@ auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
     if (impl_->options.token.has_value() && !impl_->options.token->empty()) {
       info["token"] = *impl_->options.token;
     }
+    // 固定提示句也写进控制文件：读文件发现端口的一方还没建连就先看到“只许霜天子Agent 连接”，
+    // 不必先用一次错误请求去撞出这句话。
+    info["notice"] = std::string(kAgentOnlyNotice);
     if (auto status = json_write_file(options.control_file, info, true); !status) {
       return forward_error(status.error());
     }

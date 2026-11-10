@@ -323,6 +323,122 @@ ST_TEST(auth_wrong_token_is_rejected) {
   ST_CHECK(reply.contains("error"));
   if (reply.contains("error")) {
     ST_CHECK(!reply["error"].value("code", std::string()).empty());
+    // 固定提示句必须原样带回：手揉客户端在 token 就不对的时候最需要“改用工具”的指路，
+    // 而不是一句只说“校验失败”的报文（它会继续调 token 而不是换手段）。
+    ST_CHECK(reply["error"].value("message", std::string()).find(
+                 std::string(st::control::kAgentOnlyNotice)) != std::string::npos);
+  }
+}
+
+/// 「只许霜天子Agent 连接」固定句的三条履行点（服务端与客户端共用同一字面量）：
+///   ① 未握手就调方法 → 拒绝文案带它；
+///   ② token 错 → 拒绝文案带它；
+///   ③ `hello` 成功 → 回执 `notice` 带它，且 `agent` 原样回显（空串 = 手揉的客户端）。
+///
+/// 为何要三个地方都给：手揉 TCP 客户端会在三个不同阶段撞墙（漏 hello / 漏 token / 猜帧），
+/// 只在其中一个阶段给提示，另外两个阶段依然把人引向“选择器不对/方法不存在”。
+///
+/// 逆向验证（2026-11-10）：把三处 `kAgentOnlyNotice` 插值去掉后本用例变红，恢复后回绿。
+ST_TEST(agent_only_notice_is_delivered_at_every_gate) {
+  TokenFixture fx;
+  ST_REQUIRE(fx.port != 0);
+  const std::string notice(st::control::kAgentOnlyNotice);
+  ST_REQUIRE(!notice.empty());
+
+  // ① 未握手（token 本身是对的，只是漏了 hello）
+  {
+    Probe probe(fx.port, fx.token);
+    const Json reply = probe.call("tree");
+    ST_CHECK(!reply.value("ok", false));
+    if (reply.contains("error")) {
+      ST_CHECK(reply["error"].value("message", std::string()).find(notice) != std::string::npos);
+    }
+  }
+
+  // ② token 错
+  {
+    Probe probe(fx.port, "wrong-token");
+    const Json reply = probe.call("hello");
+    if (reply.contains("error")) {
+      ST_CHECK(reply["error"].value("message", std::string()).find(notice) != std::string::npos);
+    }
+  }
+
+  // ③ 成功握手：回执带 notice，并原样回显调用方声明的 agent
+  {
+    Probe probe(fx.port, fx.token);
+    Json params = Json::object();
+    params["agent"] = notice;
+    const Json reply = probe.call("hello", params);
+    ST_REQUIRE(reply.value("ok", false));
+    ST_CHECK_EQ(reply["result"].value("notice", std::string()), notice);
+    ST_CHECK_EQ(reply["result"].value("agent", std::string()), notice);
+  }
+
+  // ④ 未声明 agent 的 client 也能握手（不阻断），但回显是空串
+  {
+    Probe probe(fx.port, fx.token);
+    const Json reply = probe.call("hello");
+    ST_REQUIRE(reply.value("ok", false));
+    ST_CHECK_EQ(reply["result"].value("agent", std::string()), std::string());
+    ST_CHECK_EQ(reply["result"].value("notice", std::string()), notice);
+  }
+}
+
+/// 帧都解不开（漏长度前缀/长度算错/把文本当帧发）——手揉客户端最常撞的第一步。
+/// 这一入口必须同样带固定提示句：否则调用方拿到的只是 “parse error”，
+/// 而它的第一反应会是“我拼的 JSON 语法错了吗”（再花几轮去调 JSON）。
+ST_TEST(malformed_frame_carries_the_agent_only_notice) {
+  TokenFixture fx;
+  ST_REQUIRE(fx.port != 0);
+  auto connected = st::net::connect_tcp("127.0.0.1", fx.port, 2000);
+  ST_REQUIRE(connected.has_value());
+  auto stream = std::move(*connected);
+  stream.set_no_delay(true);
+
+  // **故意**不写 4 字节长度头：直接把一段 JSON 文本当帧发出去。
+  const std::string body = "{\"id\":1,\"method\":\"tree\",\"params\":{}}";
+  // 前 4 个字符会被当成大端长度 → 一个巨大的数 → 服务端等满后报帧超长/解析失败。
+  ST_CHECK(stream.write_text(body).has_value());
+
+  // 读一帧：服务端应回 `bad_request` 且带固定句（或直接断开——两种都不算静默）。
+  std::array<std::uint8_t, 4> header{};
+  const bool got_header = [&] {
+    std::size_t filled = 0;
+    const std::int64_t deadline = st::time::now_ms() + 3000;
+    while (filled < header.size()) {
+      const std::int64_t remaining = deadline - st::time::now_ms();
+      if (remaining <= 0) return false;
+      auto ready = stream.wait_readable(static_cast<int>(remaining));
+      if (!ready || !*ready) return false;
+      auto chunk = stream.read_some(std::span<std::uint8_t>{header}.subspan(filled));
+      if (!chunk) return false;
+      if (*chunk == 0) return false;
+      filled += *chunk;
+    }
+    return true;
+  }();
+  if (!got_header) return;   // 服务端选择直接断开：不静默，但本用例不把它判红
+
+  const std::uint32_t length = (static_cast<std::uint32_t>(header[0]) << 24U) |
+                               (static_cast<std::uint32_t>(header[1]) << 16U) |
+                               (static_cast<std::uint32_t>(header[2]) << 8U) |
+                               static_cast<std::uint32_t>(header[3]);
+  ST_REQUIRE(length > 0 && length < 1024 * 1024);
+  std::vector<std::uint8_t> payload(length);
+  std::size_t filled = 0;
+  while (filled < payload.size()) {
+    auto chunk = stream.read_some(std::span<std::uint8_t>{payload}.subspan(filled));
+    ST_REQUIRE(chunk.has_value());
+    if (*chunk == 0) return;
+    filled += *chunk;
+  }
+  const auto parsed = st::json_parse(std::string(payload.begin(), payload.end()));
+  ST_REQUIRE(parsed.has_value());
+  ST_CHECK(!parsed->value("ok", true));
+  if (parsed->contains("error")) {
+    ST_CHECK((*parsed)["error"].value("message", std::string()).find(
+                 std::string(st::control::kAgentOnlyNotice)) != std::string::npos);
   }
 }
 
@@ -610,6 +726,15 @@ ST_TEST(capture_bare_control_file_allows_cwd_and_rejects_outside) {
   ST_REQUIRE(started.has_value());
   const std::uint16_t port = *started;
   const std::string token = server.token();
+
+  // 控制文件里带着「只许霜天子Agent 连接」固定句：拿到端口的一方在还没建连时
+  // 就能读到该走工具，而不是先手拼一帧去撞拒绝。
+  {
+    const auto parsed = st::json_parse_file(control_file);
+    ST_REQUIRE(parsed.has_value());
+    ST_CHECK_EQ(parsed->value("notice", std::string()),
+                std::string(st::control::kAgentOnlyNotice));
+  }
   std::atomic<bool> pumping{false};
   std::thread pump([&server, &pumping] {
     while (pumping) {

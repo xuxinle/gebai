@@ -4042,10 +4042,11 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 };
 }
 ```
-组件库（`include/st/ui/components/*.hpp`）——**已实现 75 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `SplitView` `TitleBar` `WindowFrame` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog` `Breadcrumb` `Pagination` `Steps` `SegmentedControl` `HtmlView` `KeyValueRow` `Heading` `ColorPicker` `CommandPalette` `CompletionPopup` `DiffView` `MergeView` `ThemePicker` `TimelineView` `Terminal` `Viewport` `ListItem` `SelectPanel` `SlowContent` `Spacer` `EmptyState` `Banner` `Skeleton` `StatusDot` `AvatarGroup` `NumberInput` `SearchBox` `FormRow` `RadioGroup` `TagInput` `DividerLabel` `Accordion` `Toolbar` `StatusBar` `Sparkline` `ProgressRing` `Rating` `Kbd` `Link`。
+组件库（`include/st/ui/components/*.hpp`）——**已实现 76 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `SplitView` `TitleBar` `WindowFrame` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog` `Breadcrumb` `Pagination` `Steps` `SegmentedControl` `HtmlView` `KeyValueRow` `Heading` `ColorPicker` `CommandPalette` `CompletionPopup` `DiffView` `MergeView` `ThemePicker` `TimelineView` `Terminal` `Viewport` `ListItem` `SelectPanel` `SlowContent` `Spacer` `EmptyState` `Banner` `Skeleton` `StatusDot` `AvatarGroup` `NumberInput` `SearchBox` `FormRow` `RadioGroup` `TagInput` `DividerLabel` `Accordion` `Toolbar` `StatusBar` `Sparkline` `ProgressRing` `Rating` `Kbd` `Link` `Connector`。
 
 （2026-11-08 组件补全：五个包共 22 个组件 + `HtmlView`（含 `st/html` 解析/样式两层），
-交付台账见 `docs/COMPONENT_PACKS_20261108.md`。）
+交付台账见 `docs/COMPONENT_PACKS_20261108.md`。2026-11-10 新增 `Connector`：任意两点/元素的连线，
+支持直线/正交折线/三次贝塞尔三种路由 + 箭头/虚线/中点标注，命中为**沿线窄带**而非矩形。）
 **规划中 2 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Dropdown`。
 - 布局：自研 flex 子集（`direction`/`gap`/`padding`/`margin`/`grow`/`shrink`/`align`/`justify`/`wrap`/百分比/固定尺寸/自适应内容）。
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
@@ -5924,6 +5925,46 @@ raster 层的缺省是 `butt/miter`（与 SVG/CSS 默认一致），但图标不
 
 **传输**：TCP。帧 = `uint32` 大端长度 + UTF-8 JSON 体（单帧默认上限 64 MiB，截图可调）。
 **连接**：`hello` 握手 → 请求/响应（`id` 回显）→ 服务端可随时推送事件帧。
+
+### 6.0 「只许霜天子Agent 连接」固定提示句
+
+控制通道的调用方应是**霜天子子Agent 及其工具**（`shuangtian_run` / `shuangtian_tree` /
+`shuangtian_capture` / `shuangtian_call` …）。手拼 TCP 客户端（自搞长度前缀、漏 `hello`、
+漏 token）会把协议细节重新踩一遍，而报错原文看上去像“选择器不对/方法不存在”，
+于是模型会继续在错的方向上绕。
+
+因此协议里带一句**固定文本**（不是凭据，token 才是；它的作用是**给模型看的提示**）：
+
+```
+仅霜天子Agent 可连接本控制通道：请勿手工拼装 TCP 协议，改用霜天子工具
+（shuangtian_run / shuangtian_tree / shuangtian_capture / shuangtian_call …）
+```
+
+唯一字面量：`st::control::kAgentOnlyNotice`（`include/st/control/control.hpp`）。
+交付点（一字不差、原样带回）：
+
+| 位置 | 字段 | 说明 |
+|---|---|---|
+| 未握手就调方法（非 hello/ping） | `error.message` 尾部 | 拒绝文案 = `必须先 hello（携带 token）——<固定句>` |
+| `hello` 的 token 校验失败 | `error.message` 尾部 | 拒绝文案 = `token 校验失败：…——<固定句>` |
+| `hello` 成功回执 | `result.notice` | 客户端可对着它自检 |
+| 控制文件（`--control-file`） | `notice` | 还没建连就能读到 |
+
+### 6.0.1 `hello.params.agent`：连接身份的可观测性
+
+所有霜天子侧客户端（歌白子Agent 的 TS 客户端、`tools/st_client_lib.py`、`tools/st*.py`
+与各 e2e、`st perf`）都在 `hello.params.agent` 里原样送上面那句。
+
+- **不阻断**：缺失也允许握手（自研脚本/旧客户端仍可用）；**鉴权只看 token**。
+- **不静默**：`hello` 回执的 `result.agent` 原样回显（空串 = 手拼的客户端），
+  服务端调用日志里标为 `agent=霜天子Agent` / `agent=<未声明>`。
+
+为什么这么做：控制通道里所有“为什么我的请求失败”类问题，第一步都是“这条连接是
+谁”。把身份做成协议字段，就不必再从“token 对不上/帧乱码”这类事后症状去反推。
+
+一致性由两端测试守住：`tests/control_protocol_test.cpp` 的
+`agent_only_notice_is_delivered_at_every_gate`（四个交付点逐个断言）、
+`packages/agents/.../shuangtian_client.test.ts`（合成 hello 与显式 hello 都带 `agent`）。
 
 ### 6.1 消息形态
 ```json
