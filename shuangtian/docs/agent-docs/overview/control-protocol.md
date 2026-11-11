@@ -47,7 +47,7 @@ summary: 协议 st-control/1（TCP + uint32 长度前缀 JSON 帧）；握手 he
 | `find` | 选择器查询；返回 `count`（本次条数）**与** `total`（命中总数） | **两个数分开看**，只读 `count` 会把"命中 20+"读成"命中 20" |
 | `get` / `set` | 读/写属性面 | `set` 回 `changed` 与 `rejected`（`unknown_name`/`invalid_value`/`unfocusable`）——**读 `rejected`** 才能发现拼错属性名被静默跳过 |
 | `invoke` | 触发动作 | `ok=true` 只表示元素在；**`handled` 才是权威答复**，`handled=false` 时动作没发生 |
-| `input.mouse` / `input.key` / `input.text` | 真实输入注入 | 走命中测试与焦点路由；要验证"点击路径本身"才用它 |
+| `input.mouse` / `input.key` / `input.text` | 真实输入注入 | 走命中测试与焦点路由；要验证"点击路径本身"才用它。**`button` 是后端口径原始值：1=左 / 2=右 / 3=中**，`0` 不是左键（那是图形 API 惯例，X11 的 Button1=0）——`click`/`drag` 传 0 会被**明确拒绝**并提示正确值 |
 | `capture` / `capture.hash` | 截图 / 像素哈希 | `encode=file` 落盘；`pixel_size` 是**导出后的实际尺寸**（`region` 会被画布夹取） |
 | `visual` / `visual.diff` | 视觉元素树 / 与基线逐像素比对 | `threshold` 不计入差异像素、`tolerance` 允许差异占比；尺寸必须一致 |
 | `wait` | 条件等待（`element`/`gone`/`text`/`stable`/`frames`） | 比 sleep 可靠：等的是状态，不是时间 |

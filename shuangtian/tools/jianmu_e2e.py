@@ -43,6 +43,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "jianmu.exe")
 SHOTS = os.path.join(ROOT, "build", "e2e-jianmu")
 
+# 鼠标按钮号是**后端口径的原始值**（`platform_win32.cpp` 的 `push_mouse(..., 1/2/3)`、
+# `platform_x11.cpp` 的 1/2/3 映射），`input.mouse` 原样写进 `Event::button`。
+#
+# ⚠ 本脚本曾写 `button: 0`（图形 API 的惯例，X11 的 Button1=0）——而 `0` 在真实
+# 事件里只出现在**不带按钮号**的 `MouseMove` 上。后果是三条断言长期报红：
+# 拖拽不改 yaw、`click_events` 不增、`selected_name` 恒空，看上去像拾取/轨道相机
+# 坏了，真因只是按钮号写错。现在控制通道对 click/drag 的非法 button 直接拒绝，
+# 写错会**当场报错**而不是静默失效。
+BUTTON_LEFT = 1
+BUTTON_RIGHT = 2
+BUTTON_MIDDLE = 3
+
 
 class Client:
     def __init__(self, port, token):
@@ -347,7 +359,7 @@ def main():
         cx, cy, _ = viewport_center(client)
         client.ok("input.mouse", {"kind": "drag", "x": cx, "y": cy,
                                   "to_x": cx + vbox.get("width", 600) * 0.25,
-                                  "to_y": cy, "button": 0})
+                                  "to_y": cy, "button": BUTTON_LEFT})
         time.sleep(0.25)
         yaw_after = float(prop_of(client, "viewport", "yaw") or "0")
         check("拖拽改变相机偏航", abs(yaw_after - yaw_before) > 0.1,
@@ -389,7 +401,7 @@ def main():
         client.ok("input.mouse", {"kind": "move", "x": hit_point[0], "y": hit_point[1]})
         time.sleep(0.1)
         client.ok("input.mouse", {"kind": "click", "x": hit_point[0], "y": hit_point[1],
-                                  "button": 0})
+                                  "button": BUTTON_LEFT})
         time.sleep(0.3)
         click_after = int(prop_of(client, "viewport", "click_events") or "0")
         selected = prop_of(client, "viewport", "selected_name")

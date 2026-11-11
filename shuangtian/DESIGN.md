@@ -6037,7 +6037,7 @@ raster 层的缺省是 `butt/miter`（与 SVG/CSS 默认一致），但图标不
 | `ui.create` | `{type, props?, parent?, index?, key?, id?}` | `{id, type}` | **在线建元素**（与声明式共用工厂注册表；缺省 parent 挂 root 内容，指定则挂为子元素） |
 | `ui.remove` | `{id}` | `{removed, id}` | **在线删元素**（根元素时清空内容） |
 | `invoke` | `{id, action, args?}` | `{ok, handled, state?, error?}` | 动作：`click` `dblclick` `focus` `blur` `toggle` `select` `scroll_to` `submit` `open` `close`；**`handled` 是权威答复**（元素存在即 `ok=true`，但动作未被元素处理时 `handled=false` 且带顶层 `error` 说明——调用方必须读它，否则会把「没发生」当「发生了」） |
-| `input.mouse` | `{kind, x, y, button?, buttons?, modifiers?, delta?, to?}` | `{handled, hit}` | kind: `move` `down` `up` `click` `dblclick` `triple` `scroll` `drag` |
+| `input.mouse` | `{kind, x, y, button?, buttons?, modifiers?, delta?, to?}` | `{handled, hit}` | kind: `move` `down` `up` `click` `dblclick` `triple` `scroll` `drag`。**`button` 是后端口径原始值，只接受 1=左 / 2=右 / 3=中**（缺省 1）：携带按钮的消息（`down`/`up`/`click`/`dblclick`/`triple`/`drag`）传 `0` 或越界值 → **明确拒绝**（`invalid`，错误文案给出正确值）。**不做 0→1 映射**：那会让“0 = 左键”（图形 API 惯例）这个错误观念继续扩散。`move`/`wheel`/`leave` 不携带按钮，不校验 |
 | `input.key` | `{kind, key?, code?, text?, modifiers?, repeat?}` | `{handled, focused}` | kind: `press` `down` `up` `text` |
 | `input.text` | `{text, id?}` | `{handled, inserted}` | 便捷输入（聚焦或指定输入框追加文本） |
 | `capture` | `{id?, region?, scale?, format?, encode?}` | `{path?, base64?, bytes?, format, region, pixel_size:{width,height,device_scale}}` | 截图（元素区域或全屏；`encode=file` 直接落盘） |

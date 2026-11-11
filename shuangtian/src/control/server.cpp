@@ -1222,6 +1222,35 @@ if (const std::string target = json_get_string(params, "id"); !target.empty()) {
 event.button = static_cast<int>(json_get_i64(params, "button", 1));
 event.click_count = static_cast<int>(json_get_i64(params, "click_count", 1));
 event.wheel_delta = static_cast<float>(json_get_double(params, "delta", 0.0));
+// ## `button` 只接受 1/2/3（后端口径），其余**如实拒绝**
+//
+// 为什么不是“顺手把 0 映射成左键”：`button` 是**后端口径的原始值**
+// （`platform_win32.cpp` 的 `push_mouse(..., 1/2/3, ...)`、`platform_x11.cpp`
+// 的 1/2/3 映射）。`0` 在真实事件里只出现在不带按钮号的 `MouseMove` 上，
+// 于是“按住左键拖拽”这类手势在组件侧什么都不会发生。
+//
+// 旧行为是**静默接受**：写 `button: 0` 的调用方拿到 `ok=true, handled=true`，
+// 而组件里一次 `MouseDown` 分支都没走到。实测代价：`jianmu_e2e.py` 的三条
+// 断言（拖拽旋转 / 点击计数 / 点击选中）长期报红，看起来像拾取坏了，
+// 真因在脚本把 0 当成了左键。
+//
+// 也不映射成 1：那会让“0 = 左键”这个错误观念（图形 API 的惯例，如 X11 的
+// Button1=0）继续扩散，而下一个写 0 的人依然需要被提醒。拒绝 + 写清正确值，
+// 才不会在下一次换成另一个组件再踩一遭。
+//
+// `move` / `leave` / `wheel` 不查：它们本来就不携带按钮（真实后端也是如此）。
+const int kMouseButtonMax = 3;
+const bool carries_button = kind == "down" || kind == "up" || kind == "click" ||
+                            kind == "dblclick" || kind == "triple" || kind == "drag";
+if (carries_button && (event.button < 1 || event.button > kMouseButtonMax)) {
+  return unexpected(
+      ErrorCode::Invalid,
+      std::format("input.mouse 的 button={} 无效：只接受 1=左 / 2=右 / 3=中"
+                  "（后端口径，与真实鼠标事件一致）。注意 0 **不是**左键——"
+                  "它只是不带按钮号的 move 事件的取值，"
+                  "按住鼠标的 click/drag 请传 button=1。",
+                  event.button));
+}
 const std::array<bool, 4> modifiers = parse_modifiers(params);
 event.ctrl = modifiers[0];
 event.shift = modifiers[1];

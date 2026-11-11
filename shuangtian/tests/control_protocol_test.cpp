@@ -543,8 +543,81 @@ ST_TEST(drag_is_dispatched_as_full_sequence) {
   }
 }
 
-ST_TEST(wait_frames_condition_is_supported) {
+ST_TEST(mouse_button_outside_backend_range_is_rejected) {
+  // ## `button: 0` 必须被**拒绝**，而不是静默当成“什么都没发生”
+  //
+  // `Event::button` 是**后端口径的原始值**：`platform_win32.cpp` 只发 1/2/3，
+  // `0` 仅出现在不带按钮号的 `MouseMove` 上。而“0 = 左键”是图形 API 的惯例
+  // （X11 的 Button1=0），所以写错极其自然。
+  //
+  // 实测代价：`jianmu_e2e.py` 写 `button: 0`，拿到 `ok=true, handled=true`，
+  // 而组件里一次 `MouseDown` 分支都没走到——于是“拖拽不改 yaw”“点击不选中”
+  // 三条断言被当成拾取/轨道相机缺陷排查了一轮。
+  //
+  // 这里的断言就是“下次再写 0 会当场被拦住”：
   TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  const auto try_kind = [&](const char* kind, int button) {
+    Json params = Json::object();
+    params["kind"] = kind;
+    params["x"] = 20.0;
+    params["y"] = 20.0;
+    params["button"] = button;
+    return probe.call("input.mouse", params);
+  };
+
+  // ① 每一条“携带按钮”的消息 + button=0 → 失败，且错误文案要指出正确值
+  for (const char* kind : {"down", "up", "click", "dblclick", "triple", "drag"}) {
+    const Json reply = try_kind(kind, 0);
+    ST_CHECK(!reply.value("ok", false));
+    // `error` 是对象 `{code, message}`，不是字符串
+    ST_REQUIRE(reply.contains("error") && reply["error"].is_object());
+    const std::string error = reply["error"].value("message", std::string{});
+    ST_CHECK(reply["error"].value("code", std::string{}) == "invalid");
+    ST_CHECK(error.find("button=0") != std::string::npos);
+    // 只说“无效”不够——必须告诉调用方该写几（否则下一个人还是猜）
+    ST_CHECK(error.find("button=1") != std::string::npos);
+  }
+
+  // ② 越界值同样拒（4 在 Win32 里根本不是按钮）
+  ST_CHECK(!try_kind("click", 4).value("ok", false));
+  ST_CHECK(!try_kind("click", -1).value("ok", false));
+
+  // ③ 合法的 1/2/3 必须真的过——否则“拒绝”就变成了“全拒”
+  for (const int button : {1, 2, 3}) {
+    ST_CHECK(try_kind("down", button).value("ok", false));
+    ST_CHECK(try_kind("up", button).value("ok", false));
+    ST_CHECK(try_kind("click", button).value("ok", false));
+  }
+  ST_CHECK(try_kind("drag", 1).value("ok", false));
+
+  // ④ `move` / `wheel` 不带按钮，传什么都无所谓（真实后端就是这样发的）——
+  //    这条是为了钉住“校验范围不能无限扩大”：它们给 0 是正常的。
+  ST_CHECK(try_kind("move", 0).value("ok", false));
+  {
+    Json wheel = Json::object();
+    wheel["kind"] = "wheel";
+    wheel["x"] = 20.0;
+    wheel["y"] = 20.0;
+    wheel["delta"] = 120.0;
+    wheel["button"] = 0;
+    ST_CHECK(probe.call("input.mouse", wheel).value("ok", false));
+  }
+
+  // ⑤ 不传 `button` 时默认是左键（老客户端零感知）。
+  //    `click` 缺省时必须真的走到 Click 分支，而不是“缺值→报警”。
+  {
+    Json params = Json::object();
+    params["kind"] = "click";
+    params["x"] = 20.0;
+    params["y"] = 20.0;
+    ST_CHECK(probe.call("input.mouse", params).value("ok", false));
+  }
+}
+
+ST_TEST(wait_frames_condition_is_supported) {  TokenFixture fx;
   Probe probe(fx.port, fx.token);
   ST_CHECK(probe.call("hello").value("ok", false));
   Json params = Json::object();
