@@ -49,7 +49,6 @@
 /// | `cefu.importText(text, category)` | 从 Markdown/文本按标题层级切词条草稿 |
 
 #include <algorithm>
-#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <optional>
@@ -61,7 +60,6 @@
 #include "cefu_index.hpp"
 #include "../../app_icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
-#include "st/codec/png.hpp"
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
@@ -645,82 +643,6 @@ struct Options {
   std::string renderer{};
 };
 
-/// 册府图标（窗口/托盘共用）：深色圆角底 + 白色书页轮廓。
-///
-/// 小尺寸（16px 托盘）走极简式（两页白 + 书脊），大尺寸（窗口）加书页折线。
-/// 用程序化绘制而不是嵌入式资源：与相期图标同一套做法，无外部素材依赖。
-static auto make_cefu_icon_png(std::uint32_t size) -> std::vector<std::uint8_t> {
-  st::codec::PngImage image;
-  image.width = size;
-  image.height = size;
-  image.rgba.assign(static_cast<std::size_t>(size) * size * 4U, 0U);
-
-  const auto to_byte = [](double v) -> std::uint8_t {
-    const double clamped = v < 0.0 ? 0.0 : (v > 255.0 ? 255.0 : v);
-    return static_cast<std::uint8_t>(clamped + 0.5);
-  };
-
-  // 配色：暖棕底 + 白书页 + 深书脊
-  constexpr double kBgR = 0x8F / 255.0, kBgG = 0x7A / 255.0, kBgB = 0x66 / 255.0;
-  constexpr double kPageR = 0xFF / 255.0, kPageG = 0xFB / 255.0, kPageB = 0xF2 / 255.0;
-  constexpr double kSpineR = 0x5A / 255.0, kSpineG = 0x4B / 255.0, kSpineB = 0x3D / 255.0;
-
-  // 圆角方形 SDF（半径 = 0.22 边长）
-  constexpr double kRadius = 0.22;
-  const auto sd_round_rect = [](double u, double v, double r) {
-    const double qx = std::abs(u - 0.5) - (0.5 - r);
-    const double qy = std::abs(v - 0.5) - (0.5 - r);
-    const double ax = qx > 0.0 ? qx : 0.0, ay = qy > 0.0 ? qy : 0.0;
-    const double outside = std::sqrt(ax * ax + ay * ay);
-    const double inside = qx > qy ? qx : qy;
-    return outside + (inside < 0.0 ? inside : 0.0) - r;
-  };
-
-  // 书页：左侧页 + 右侧页（中央书脊），上下留页边
-  constexpr double kTop = 0.26, kBot = 0.74;
-  constexpr double kLeft = 0.16, kRight = 0.84;      // 左右页外缘
-  constexpr double kSpine = 0.50;                    // 书脊中线
-  constexpr double kSpineW = 0.045;                  // 书脊半宽
-  constexpr int kSub = 4;
-
-  for (std::uint32_t y = 0; y < size; ++y) {
-    for (std::uint32_t x = 0; x < size; ++x) {
-      int cover = 0;
-      for (int sy = 0; sy < kSub; ++sy) {
-        for (int sx = 0; sx < kSub; ++sx) {
-          const double uu = (static_cast<double>(x) + (sx + 0.5) / kSub) / size;
-          const double vv = (static_cast<double>(y) + (sy + 0.5) / kSub) / size;
-          if (sd_round_rect(uu, vv, kRadius) <= 0.0) ++cover;
-        }
-      }
-      if (cover == 0) continue;
-      const double ratio = static_cast<double>(cover) / (kSub * kSub);
-      const double u = (static_cast<double>(x) + 0.5) / size;
-      const double v = (static_cast<double>(y) + 0.5) / size;
-      // 底色：中央微亮（书页反光）
-      double r = kBgR, g = kBgG, b = kBgB;
-      if (u >= kLeft && u <= kRight && v >= kTop && v <= kBot) {
-        if (u >= kSpine - kSpineW && u <= kSpine + kSpineW) {
-          r = kSpineR; g = kSpineG; b = kSpineB;
-        } else {
-          const double page_edge = std::min(std::min(u - kLeft, kRight - u),
-                                            std::min(v - kTop, kBot - v));
-          const double shade = page_edge < 0.12 ? 0.88 + 0.12 * (page_edge / 0.12) : 1.0;
-          r = kPageR * shade; g = kPageG * shade; b = kPageB * shade;
-        }
-      }
-      const std::size_t i = (static_cast<std::size_t>(y) * size + x) * 4U;
-      image.rgba[i + 0U] = to_byte(r * 255.0);
-      image.rgba[i + 1U] = to_byte(g * 255.0);
-      image.rgba[i + 2U] = to_byte(b * 255.0);
-      image.rgba[i + 3U] = to_byte(255.0 * ratio);
-    }
-  }
-  auto encoded = st::codec::png_encode(image);
-  if (!encoded) return {};
-  return *encoded;
-}
-
 auto parse_options(int argc, char** argv) -> Options {
   Options o;
   for (int i = 1; i < argc; ++i) {
@@ -796,23 +718,37 @@ auto run_app(int argc, char** argv) -> int {
   app_options.screenshot_dir = options.shots;
   // 脚本宿主只在需要时创建：本示例的界面逻辑全在 JS 里，必须打开
   app_options.enable_script = true;
+  // —— 图标：**三处显示，同一份图** ——
+  //
+  // | 出现在哪 | 来源 | 要求 |
+  // |---|---|---|
+  // | 资源管理器/快捷方式 | `.ico`（`st.pkg` 的 `"icon"`）→ **PE 资源** | 编译期进 exe |
+  // | 窗口/任务栏 | `window_icon_png` → `WM_SETICON` | 运行期位图 |
+  // | 通知区（托盘） | `tray_icon_png` → `Shell_NotifyIcon` | 运行期位图 |
+  //
+  // 三条链路互不连通，各自的素材**必须是同一个记号**，否则同一个应用在两处
+  // 显示两个图标（用户一眼就看出来）。所以这里让窗口/托盘直接用**exe 图标的那份
+  // 源图**（`cefu-icon.png` 就是 `cefu.ico` 的 256 档，见 `tools/make_icons.py`），
+  // 而不是再拿代码现画一套。
+  //
+  // 尺寸不用自己操持：后端 `set_window_icon` / `set_tray_icon` 都按目标尺寸
+  // （32 / 16）做面积平均重采样（`shell/icon_scale.hpp`）。
+  // 托盘那份**不单独设**：`tray_icon_png` 空着时框架回退到 `window_icon_png`
+  // （app.cpp 的 `set_tray_icon` 分支），两处再存一份只会多一处可能漂移的状态。
+  st::app::icon::attach_png(app_options.window_icon_png,
+                            b::embed<"apps/cefu/assets/cefu-icon.png">());
+  app_options.tray_tooltip = "册府 · 知识库";
+
+  // 标题栏品牌标记：矢量（任意 DPI 下重新光栅化才清晰）——与上面那份位图同记号。
+  st::app::icon::register_svg("cefu-logo",
+                              b::embed<"apps/cefu/assets/cefu-logo.svg">());
+
   // 托盘常驻：窗口可关但进程不退出，从托盘图标恢复/退出
   if (!options.headless) {
     app_options.tray_enabled = true;
-    app_options.window_icon_png = make_cefu_icon_png(128);
-    app_options.tray_icon_png = make_cefu_icon_png(16);
-    app_options.tray_tooltip = "册府 · 知识库";
     // 关窗→托盘常驻：点 × 只隐藏窗口，退出走托盘右键菜单（「退出」）
     app_options.tray_minimize_on_close = true;
   }
-
-  // 品牌标记：标题栏用矢量（任意 DPI 下重新光栅化才清晰）。
-
-  // 窗口/任务栏图标仍走下面代码现画的那一份（PNG，给系统 API）。
-
-  st::app::icon::register_svg("cefu-logo",
-
-                              b::embed<"apps/cefu/assets/cefu-logo.svg">());
 
 
   st::app::Application app("cefu", "0.1.0", app_options);

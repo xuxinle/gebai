@@ -46,8 +46,6 @@ def sets_window_icon(app: str) -> tuple[bool, str]:
     # 两种写法都认：`window_icon_png = ...` 与 `window_icon_png.assign(...)`
     if "window_icon_png =" in text or "window_icon_png.assign" in text:
         return True, "window_icon_png"
-    if "make_cefu_icon_png" in text or "make_xiangqi_icon_png" in text:
-        return True, "代码现画"
     return False, ""
 
 
