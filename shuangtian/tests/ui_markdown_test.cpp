@@ -888,6 +888,113 @@ ST_TEST(md_view_link_hit_and_click_callback) {
   ST_CHECK(!false_positive);
 }
 
+/// `open_links`：声明式/脚本宿主（XML / JS）拿不到 `on_link_click`，
+/// 所以需要一个属性开关让“点链接就打开”。
+///
+/// 本用例钉的是**两个不变式**（回退任一条都会红）：
+/// ① 开关打开 + 无回调 → 点击不抛异常且 `handled` 为真（说明走了打开分支）；
+/// ② 回调在场时**回调优先**（开关开也不重复打开）。
+///
+/// ⚠ 不断言“浏览器真的被叫起来”：那需要桌面环境，且 `open_external` 的
+/// 副作用不可观察/不可撤销（会在 CI 里弹出真窗口）。这里只验证**分支选择**。
+ST_TEST(md_view_open_links_switch) {
+  const st::ui::Theme theme = st::ui::Theme::light();
+  constexpr std::string_view kDoc = "看 [霜天文档](https://example.com/docs) 了解。\n";
+  st::ui::MarkdownView view{std::string(kDoc)};
+  ST_CHECK(!view.open_links());   // 默认关（保持“只上报、不动作”）
+  view.set_open_links(true);
+  ST_CHECK(view.open_links());
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+
+  // ⚠ 找链接位置**必须用回调当判据**，不能用 `handled`：
+  // `selectable_` 默认开，点任何字都会走“开拖选”分支并置 `handled=true`——
+  // 拿 handled 当“命中链接”会扫到第一个普通字（实测踩到：
+  // 回调用空回调，得到的坐标落在“看”字上，断言自然红）。
+  std::string located;
+  view.on_link_click = [&located](std::string_view url) { located = std::string(url); };
+  st::ui::Event probe;
+  probe.kind = st::ui::EventKind::MouseDown;
+  probe.button = 1;
+  float link_x = -1.0f;
+  float link_y = -1.0f;
+  for (float y = view.bounds().y; y < view.bounds().y + 60.0f && link_x < 0.0f; y += 2.0f) {
+    for (float x = 0.0f; x < 400.0f; x += 2.0f) {
+      located.clear();
+      probe.position = st::math::Point{view.bounds().x + x, y};
+      if (view.on_event(context, probe) && !located.empty()) {
+        link_x = x;
+        link_y = y;
+        break;
+      }
+    }
+  }
+  ST_CHECK(link_x >= 0.0f);
+  ST_CHECK_EQ(located, std::string("https://example.com/docs"));
+
+  // ① 开关打开、**无回调** → 应该走打开分支，且打开的是**这个** URL。
+  //
+  // 注入记录器而非真开浏览器：`open_external` 的副作用（弹窗）无法断言、
+  // 在 CI 里也撤不回来。这一行是**本用例唯一的有效判据**——
+  // 只断言 `handled` 的话，“把打开那行拿掉”也不会红（实测过）。
+  view.on_link_click = nullptr;
+  std::vector<std::string> opened;
+  view.link_opener = [&opened](std::string_view url) { opened.emplace_back(url); };
+  st::ui::Event no_cb;
+  no_cb.kind = st::ui::EventKind::MouseDown;
+  no_cb.button = 1;
+  no_cb.position = st::math::Point{view.bounds().x + link_x, link_y};
+  ST_CHECK(view.on_event(context, no_cb));
+  ST_CHECK(no_cb.handled);
+  ST_CHECK_EQ(opened.size(), std::size_t{1});
+  // ⚠ 不用 `opened.at(0)`（CONVENTIONS L12：`at()` 越界会 terminate）；
+  // 上面已经断言 size==1，这里用 `front()`。
+  ST_CHECK_EQ(opened.front(), std::string("https://example.com/docs"));
+
+  // ② 非 http(s) 的 scheme 一律不打开（只在 `link_at` 里能拿到，拿不到时也能保证安全）。
+  {
+    st::ui::MarkdownView local{"看 [本地](file:///C:/Windows/System32/calc.exe) 了解。\n"};
+    std::vector<std::string> local_opened;
+    local.set_open_links(true);
+    local.link_opener = [&local_opened](std::string_view url) { local_opened.emplace_back(url); };
+    (void)render(local, theme, kCanvasWidth, kCanvasHeight);
+    st::ui::Event click;
+    click.kind = st::ui::EventKind::MouseDown;
+    click.button = 1;
+    // 扫到链接位置：用 `link_at` 直接探，避开字体差异。
+    const st::math::Point found = [&] {
+      for (float y = local.bounds().y; y < local.bounds().y + 60.0f; y += 2.0f) {
+        for (float x = 0.0f; x < 400.0f; x += 2.0f) {
+          click.position = st::math::Point{local.bounds().x + x, y};
+          if (local.on_event(context, click)) return st::math::Point{x, y};
+        }
+      }
+      return st::math::Point{-1.0f, -1.0f};
+    }();
+    ST_CHECK(found.x >= 0.0f);
+    // file:// 不该被当成可打开链接——绝不能启动任意程序。
+    ST_CHECK(local_opened.empty());
+  }
+
+  // ② 回调在场 → 回调优先（开关开着也不影响它拿到 URL）。
+  std::string clicked;
+  view.on_link_click = [&clicked](std::string_view url) { clicked = std::string(url); };
+  st::ui::Event again;
+  again.kind = st::ui::EventKind::MouseDown;
+  again.button = 1;
+  again.position = st::math::Point{view.bounds().x + link_x, link_y};
+  ST_CHECK(view.on_event(context, again));
+  ST_CHECK_EQ(clicked, std::string("https://example.com/docs"));
+
+  // 属性面可读写（XML / JS / 控制通道走这条路径）。
+  ST_CHECK(view.set_property("open_links", "false"));
+  ST_CHECK(!view.open_links());
+  ST_CHECK(view.set_property("open_links", "true"));
+  ST_CHECK(view.open_links());
+  const auto names = view.property_names();
+  ST_CHECK(std::find(names.begin(), names.end(), "open_links") != names.end());
+}
+
 ST_TEST(md_view_code_block_hit) {
   // 代码块命中（用于宿主挂复制按钮）：返回该块的首行下标，非代码区域返回 -1。
   const st::ui::Theme theme = st::ui::Theme::light();

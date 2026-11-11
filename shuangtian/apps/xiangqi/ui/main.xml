@@ -99,34 +99,6 @@
             hint="把所有提示清掉（选择类与待办类不会被忽略——那两类必须给出结果）"/>
   </Row>
 
-  <!-- 轻提示形态（compact）：只显示最新一条，输入区与底部都隐藏。
-       为何要这个形态：notice 类不该把整个主界面拉出来——
-       人只是被通知一声，给他一整个工作面板是打扰。
-       窗口本身会同步缩到小尺寸贴角（挨 application.set_window_size）。 -->
-  <Column id="compact" gap="10" padding="16" grow="true" visible="false">
-    <Row id="compact-head" gap="8" align_items="center">
-      <Badge id="compact-kind" text="有事告诉你" tone="warning"/>
-      <Spacer grow="true"/>
-      <Text id="compact-more" font_size="11" tone="faint"/>
-    </Row>
-    <Text id="compact-title" font_size="15" font_weight="semibold"></Text>
-    <!-- 正文用 markdown：大模型给的内容天然是 markdown，
-         当纯文本画会把 `**粗**`、`- 项`、代码块原样露出来。 -->
-    <MarkdownView id="compact-body" max_height="120"></MarkdownView>
-    <Row id="compact-act" gap="8" padding_y="4">
-      <Button id="compact-expand" label="展开" variant="ghost" scale="small"
-              hint="打开完整面板（处理选择与待办）"/>
-      <Button id="compact-ok" label="知道了" variant="soft" scale="small"/>
-      <Spacer grow="true"/>
-      <!-- 连接状态：轻提示形态下**也必须有**。
-           为何不能省：这一形态把主界面底部栏整体隐了，若这里再不显示，
-           断线时整个窗口里没有任何“已断开”的痕迹——用户以为 agent 还在盯着，
-           而提醒根本没送到。那是比“不弹窗”更糟的状态。 -->
-      <Icon id="compact-link-icon" icon="warning" diameter="12" tone="danger"/>
-      <Text id="compact-link" font_size="11" visible="false">已连接</Text>
-    </Row>
-  </Column>
-
   <!-- ✗ 不再有底部栏：连接状态与「全部忽略」都上提到真标题栏了（见 main.cpp）。
        理由同上——它们都是“说明状态/轻操作”，没必要占一整条栏。 -->
 </Column>

@@ -248,6 +248,38 @@ ScriptBridge::ScriptBridge(ScriptHost& script, UiRoot* root) : impl_(std::make_u
   expose_internal("__bridgeBuild", build_fn);
   expose_internal("__bridgeAppend", append_fn);
   expose_internal("__bridgeClear", clear_fn);
+
+  // 剪贴板：脚本侧 `app.clipboard.get()` / `app.clipboard.set(text)`。
+  //
+  // ## 为何该在框架而不该每个应用自己 expose
+  //
+  // 剪贴板是**平台能力**，与 `platform.open_url` 同类：每个脚本应用都要"把一段
+  // 文本给用户拷走"（表格里的号码、错误里的命令、卡片里的链接），而它们自己
+  // 又拿不到 `UiRoot` 的剪贴板 provider（那由 `Application` 装配）。
+  // 于是每个应用都会写一份一模一样的桥——实测相期就是这么干的，
+  // 而它连 `st::platform` 都没有剪贴板入口（只有 `open_external`）。
+  //
+  // ## 为何走 `UiRoot` 的 provider 而不是直接调后端
+  //
+  // `UiRoot` 已经有 `host_clipboard_text` / `host_set_clipboard_text`（组件用的
+  // 就是这两个），并且平台实现/无头模拟/测试桩都挂在 provider 上。
+  // 走它 = 与 `MarkdownView` 的 Ctrl+C、`CodeEditor` 的复制**同一条链路**，
+  // 不会出现"Ctrl+C 能拷、按钮拷不了"这种两份语义。
+  //
+  // 失败语义：provider 未装配（纯脚本测试环境）时 `set` 返回错误而不是静默成功——
+  // 用户看不到任何效果而日志一片安静，是最难排查的那类。
+  expose("clipboard.get", [root](const std::vector<st::Json>&) -> Result<st::Json> {
+    return st::Json(root->host_clipboard_text());
+  });
+  expose("clipboard.set", [root](const std::vector<st::Json>& args) -> Result<st::Json> {
+    if (args.empty()) return st::unexpected(st::ErrorCode::Invalid, "clipboard.set 需要文本");
+    const std::string text = st::json_as_string(args[0]);
+    if (!root->host_set_clipboard_text(text)) {
+      return st::unexpected(st::ErrorCode::Unsupported,
+                            "剪贴板写入不可用（宿主未装配 clipboard provider）");
+    }
+    return st::Json(true);
+  });
 }
 
 ScriptBridge::~ScriptBridge() = default;

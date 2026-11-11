@@ -189,6 +189,48 @@ ST_TEST(script_bridge_ui_helpers_wrap_the_same_implementation) {
   ST_CHECK_EQ(found.get<int>(), 1);
 }
 
+/// 剪贴板是**框架能力**（`app.clipboard.get/set`），不是每个应用自己 expose。
+///
+/// 钉两个不变式：
+/// ① `set` 的内容真的落到 **宿主 provider**（与 MarkdownView 的 Ctrl+C 同一条链路）；
+/// ② provider 未装配时**抛 JS 异常**而不是静默成功——
+///    静默成功会让用户以为“拷到了”，黏出来却是上一次的内容。
+ST_TEST(script_bridge_clipboard_round_trip) {
+  st::ui::UiRoot root;
+  st::ui::ScriptHost script(root);
+  ST_REQUIRE(script.valid());
+
+  // 装配一个记录型 provider（模拟平台剪贴板）。
+  std::string clip;
+  int writes = 0;
+  root.set_clipboard_write_provider([&clip, &writes](std::string_view text) {
+    clip = std::string(text);
+    ++writes;
+    return true;
+  });
+  root.set_clipboard_provider([&clip] { return clip; });
+
+  st::ui::ScriptBridge bridge(script, &root);
+
+  // ① 写入 → 落在宿主 provider 上（不是进程内副本）。
+  ST_CHECK_EQ(eval_ok(script, "app.clipboard.set('已复制的一段文字')").get<bool>(), true);
+  ST_CHECK_EQ(clip, std::string("已复制的一段文字"));
+  ST_CHECK_EQ(writes, 1);
+
+  // 读回同一个值（与 `MarkdownView` 的 Ctrl+C 走同一份 provider）。
+  ST_CHECK_EQ(eval_ok(script, "app.clipboard.get()").get<std::string>(), clip);
+
+  // ② provider 回报失败 → JS 异常（可 catch），而不是静默返回 true。
+  root.set_clipboard_write_provider([](std::string_view) { return false; });
+  const Json caught = eval_ok(script, R"(
+    (function () {
+      try { app.clipboard.set('x'); return 'no-throw'; }
+      catch (e) { return 'threw'; }
+    })()
+  )");
+  ST_CHECK_EQ(caught.get<std::string>(), std::string("threw"));
+}
+
 ST_TEST(script_bridge_run_inline_source) {
   st::ui::UiRoot root;
   st::ui::ScriptHost script(root);

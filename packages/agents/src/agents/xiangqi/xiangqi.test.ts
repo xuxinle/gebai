@@ -728,7 +728,16 @@ describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
   it("设了 GEBAI_HOME 时，箱件落在 {GEBAI_HOME}/data/xiangqi", async () => {
     const home = mkdtempSync(join(tmpdir(), "xq-gh-"))
     const prev = process.env.GEBAI_HOME
+    /**
+     * 必须同时摘掉 `XIANGQI_HOME`：它的优先级高于 `GEBAI_HOME`，
+     * 而它现在会被宿主在启动期注入到进程环境里（compose 统一数据根真源）。
+     * 不摘的话，本用例量到的就是 shell 里那个真实数据根，而不是临时 `home`
+     * ——实测症状：在开发机上跑这条会红（宿主机设了 XIANGQI_HOME），而在干净 CI 里绿。
+     * 这正是「测试没隔离环境」的典型形态，要当前提条件显式声明。
+     */
+    const prevXiangqiHome = process.env.XIANGQI_HOME
     process.env.GEBAI_HOME = home
+    delete process.env.XIANGQI_HOME
     try {
       // 不给 homeDir：走环境的缺省解析
       const ctl = createController({ port: 0 })
@@ -749,6 +758,8 @@ describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
     } finally {
       if (prev === undefined) delete process.env.GEBAI_HOME
       else process.env.GEBAI_HOME = prev
+      if (prevXiangqiHome === undefined) delete process.env.XIANGQI_HOME
+      else process.env.XIANGQI_HOME = prevXiangqiHome
       rmSync(home, { recursive: true, force: true })
     }
   })
@@ -877,6 +888,58 @@ describe("宿主注入形态：主服务把 /xiangqi 升级后的连接交给控
       ctl.push({ kind: "notice", title: `心跳 ${i}` })
       expect(ctl.isConnected()).toBe(true)
     }
+    ctl.close()
+  })
+
+  /**
+   * 心跳续命：宿主把 WS ping/pong 告诉控制器（`peerActivity`）。
+   *
+   * 为何单独测：窗口空闲时不发应用消息，活跃时刻**只能**由 ping/pong 刷新。
+   * 没有这条路径，窗口侧每 30 秒发一次的 ping 服务端就当没看见，90 秒后
+   * 把活连接判死——而窗口因为收到 pong 仍显示绿色，两边认知分裂。
+   */
+  it("peerActivity 能续命：静默 90 秒的连接收到心跳仍算活着", async () => {
+    let clock = 1_000_000
+    const ctl = createController({
+      port: 0,
+      homeDir: mkdtempSync(join(tmpdir(), "xq-beat-")),
+      now: () => clock,
+    })
+    const peer = { sent: [] as string[], send(s: string) { this.sent.push(s) }, close() {} }
+    ctl.acceptPeer(peer)
+
+    // 模拟窗口每 30 秒一次的 ping，持续 5 分钟：全程都必须算活着
+    for (let i = 0; i < 10; i += 1) {
+      clock += 30_000
+      ctl.peerActivity()
+      expect(ctl.isConnected()).toBe(true)
+    }
+    ctl.close()
+  })
+
+  /**
+   * **永久判死的回归测试**（本次故障的根因）。
+   *
+   * 旧实现：`push` 是 `if (isConnected()) sendCards() else writeInbox()`。
+   * 一旦时间戳过期就再也不发一帧 → 活动时间永不刷新 → 永久卡死。
+   * 新语义：只要还持着 peer 就**试一次发送**，死不死由 `send()` 抛不抛决定。
+   */
+  it("时间戳过期但连接其实活着：push 仍尝试发送并自愈（不能永久卡死）", async () => {
+    let clock = 1_000_000
+    const home = mkdtempSync(join(tmpdir(), "xq-revive-"))
+    const ctl = createController({ port: 0, homeDir: home, now: () => clock })
+    const peer = { sent: [] as string[], send(s: string) { this.sent.push(s) }, close() {} }
+    ctl.acceptPeer(peer)
+
+    // 静默超阈：按旧判据已“死”（窗口侧其实一直活着，只是没发应用消息）
+    clock += 200_000
+    expect(ctl.isConnected()).toBe(false)
+
+    // 关键：仍然要尝试送达，而且送出去就该自愈
+    const result = ctl.push({ kind: "notice", title: "判死后重推" })
+    expect(result.delivered).toBe(true)
+    expect(ctl.isConnected()).toBe(true)   // 发送成功 = 最硬的存活证迹
+    expect(peer.sent.length).toBeGreaterThan(0)
     ctl.close()
   })
 

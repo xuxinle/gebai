@@ -18,7 +18,11 @@
 ///   二次绘制近似（`draw_text_weighted`），斜体不倾斜（强调只体现在语义上）；
 /// - **代码用等宽字体**（`FontStack` 的等宽库，探测不到时回退正文字体）：
 ///   代码块与行内码都走等宽——比例字体下 `i` 与 `M` 宽不同，缩进与列对齐会失真；
-/// - `set_selectable` 本期只记录状态（选择/复制未实现，控制通道可读写该属性）；
+/// - 链接是一等交互：默认只上报（`on_link_click`，供宿主决定怎么处理）；
+///   声明式/脚本宿主拿不到这个回调，用 `set_open_links(true)` 让点击直接交给
+///   系统浏览器（只放行 http/https）；
+/// - `set_selectable` 选择/复制已实现（2026-10-13）：拖选行级高亮 + Ctrl+C 复制
+///   选中文本，无选择时复制全文；`open_links` 属性面可读写；
 /// - `HtmlBlock` 按 `md` 层约定原样保留、不渲染（也不进入语义文本）。
 
 #include <array>
@@ -63,7 +67,6 @@ class MarkdownView : public Element {
   void set_selectable(bool value);
   /// 当前选中的纯文本（无选择返回空；控制通道属性 `selection` 可读）。
   [[nodiscard]] auto selected_text() const -> std::string;
-
   /// **链接点击回调**（链接渲染为一等交互）。
   ///
   /// 框架只上报「用户点了哪个 URL」——打开浏览器是**宿主**的事
@@ -73,6 +76,37 @@ class MarkdownView : public Element {
   std::function<void(std::string_view url)> on_link_click{};
   /// 链接悬停态回调（进入/离开链接时各一次；参数为空 = 离开）。
   std::function<void(std::string_view url)> on_link_hover{};
+  /// 点击链接时是否直接交给系统浏览器打开（默认 **false**：保持“只上报、不动作”）。
+  ///
+  /// ## 为何需要这个开关（而不只是 `on_link_click`）
+  ///
+  /// `on_link_click` 是 C++ 回调——但**声明式界面（XML）与脚本（JS）建出来的
+  /// 视图拿不到它**：XML 只能写属性，JS 侧也无法把函数挂进 `std::function`。
+  /// 于是同一个需求（“让链接可点”）在声明式应用里只能二选一：
+  /// 要么绕开 MarkdownView 自己排版，要么让用户看到链接却点不动。
+  ///
+  /// 开关打开后，点击走 `st::platform::open_external`（不经 shell，URL 作为
+  /// 单个参数传给系统 API）。这条路径**只对 http/https 生效**：其它 scheme
+  /// （`file:`/`javascript:`/自定义）一律不启动——那是任意程序启动面。
+  ///
+  /// 与 `on_link_click` 共存：两者都设时**先调回调**（宿主可以拦截/记录），
+  /// 回调不存在的分支才打开。要求“只上报不要打开”的宿主不打开本开关即可。
+  void set_open_links(bool value);
+  [[nodiscard]] auto open_links() const noexcept -> bool { return open_links_; }
+
+  /// 实际打开链接的函数（默认 `st::platform::open_external`）。
+  ///
+  /// ## 为何做成可替换的接缝
+  ///
+  /// `open_external` 的副作用是**启动外部程序**：无法断言、在 CI 里会弹出真窗口、
+  /// 测完也撤不回来。若测试只能断言“点击被消费（`handled`）”，那么
+  /// “把打开那行拿掉”也不会变红——那就是一条**恒绿的假护栏**
+  ///（本能力首版实测就是如此：逆向验证（拿掉打开分支）仍全绿）。
+  /// 把它做成 `std::function` 后，测试可以注入一个记录器，
+  /// 直接断言“打开的正是这个 URL、且只一次”。
+  ///
+  /// 置空 = 关掉实际打开（只保留 `on_link_click` 上报）。
+  std::function<void(std::string_view url)> link_opener{};
   /// 当前悬停的链接 URL（空 = 无）。悬停时链接会加下划线强调。
   [[nodiscard]] auto hovered_link() const -> const std::string& { return hovered_link_; }
   /// 排版宽度上限（`<= 0` 表示不限制，取容器给的最大宽度）。
@@ -360,6 +394,8 @@ class MarkdownView : public Element {
   bool want_bottom_{false};          ///< 追加时贴底，等排版完成后再落到实测高度
   bool stick_to_bottom_{true};
   bool selectable_{true};
+  /// 点击链接是否直接交给系统浏览器（`set_open_links`；默认关，保持“只上报”）。
+  bool open_links_{false};
   /// 当前悬停的链接（空 = 无）；悬停时链接额外加粗下划线强调。
   std::string hovered_link_{};
 

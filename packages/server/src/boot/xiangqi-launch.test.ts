@@ -256,6 +256,47 @@ describe("拉起决策 planXiangqiLaunch", () => {
     expect(xiangqiHomeFor("/h", { XIANGQI_HOME: "  " })).toBe(join("/h", "data", "xiangqi"))
   })
 
+  /**
+   * **数据根错位的回归测试**（本机真实故障：相期开着却什么都收不到）。
+   *
+   * 上面那条「--home 与 homeFromEnv() 同一个目录」的用例有个盲区：它把
+   * `gebaiHome` 传成 `process.cwd()`（都未设时）——两边**恰好**算出同一位置，
+   * 于是 bug 隐身。而生产形态是：`gebaiHome` 由 `resolveGebaiHome()` 给出
+   * （仓库根），`process.cwd()` 却是 `packages/server`（`bun run --cwd` 起的），
+   * 两边从此算出**不同**目录：窗口读 `{仓库根}/data/xiangqi`，控制器写
+   * `packages/server/xiangqi`。WS 一通看不出异常，一走文件降级就全丢。
+   *
+   * 修法是 compose 在启动期把 `XIANGQI_HOME` 注入成与 `--home` 同一个值。
+   * 这里钉死：「两者不同根时必须显式注入，否则必然错位」。
+   */
+  test("gebaiHome 与 cwd 不同根时：不注入 XIANGQI_HOME 就会错位（故 compose 必须注入）", () => {
+    const repo = makeRepo("skew")
+    const cwd = join(repo, "packages", "server")
+    mkdirSync(cwd, { recursive: true })
+    const savedHome = process.env.XIANGQI_HOME
+    const savedCwd = process.cwd()
+    try {
+      // 生产形态的最小复原：GEBAI_HOME 未设、cwd = packages/server
+      delete process.env.XIANGQI_HOME
+      delete process.env.GEBAI_HOME
+      process.chdir(cwd)
+
+      // 宿主（窗口 --home）用的公式：以仓库根为基准
+      const hostHome = xiangqiHomeFor(repo, {})
+      // 控制器（homeFromEnv）的公式：GEBAI_HOME 缺失 → 回落到 cwd
+      const ctlHome = xiangqiHomeFromEnv()
+      expect(ctlHome).not.toBe(hostHome) // ← 错位本身就在这两行里
+
+      // 注入 XIANGQI_HOME 后，两边必须收敛到同一位置
+      process.env.XIANGQI_HOME = hostHome
+      expect(xiangqiHomeFromEnv()).toBe(hostHome)
+    } finally {
+      process.chdir(savedCwd)
+      if (savedHome === undefined) delete process.env.XIANGQI_HOME
+      else process.env.XIANGQI_HOME = savedHome
+    }
+  })
+
   test("数据根目录名是纯 ASCII（中文目录名会作为 --home 命令行参数传出去）", () => {
     const home = xiangqiHomeFor("/h", {})
     const leaf = home.split(/[\\/]/).pop() ?? ""

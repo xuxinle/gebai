@@ -155,6 +155,20 @@ class TcpStreamAdapter : public st::net::ws::WsSession::Stream {
   /// 放在流上才能保证多个连接互不干扰。
   void preload(std::string bytes) { pending_ = std::move(bytes); }
 
+  /// **回灌一个字节**（EOF 探测的必备配套）。
+  ///
+  /// ## 为何必须有这个方法（它对应一个“卡片永不出现”的真缺陷）
+  ///
+  /// `check_eof()` 必须从 socket 真读一次才能区分「有序关闭（0 字节）」与
+  /// 「有数据」。但读出来的那个字节**不能丢**：它是 WS 帧的第一个字节，
+  /// 丢了之后解码器的流就从帧中间开始，长度字段/掩码全错位，
+  /// 从此再也解析不出任何一条消息（帧缓冲区一直等不到“凑齐”）。
+  ///
+  /// 实测症状极具欺骗性：窗口显示「已连接」，心跳里 `可读=` 在涨，
+  /// 而 `处理=` 永远是 0、`卡片=` 永远是 0——数据确实到了，只是全成了碎片。
+  /// 而它**只在“一次 poll 读不到消息”之后触发**，所以时好时坏。
+  void unread_one(std::uint8_t byte) { pending_.insert(pending_.begin(), static_cast<char>(byte)); }
+
   auto write_all(std::span<const std::uint8_t> data) -> bool override {
     return static_cast<bool>(tcp_.write_all(data));
   }
@@ -460,6 +474,18 @@ class AgentLink {
   /// 可读却读到 0 字节 = 对端已关闭，断开并如实报告。
   ///
   /// 返回 true 表示“仍然健康”；false 表示已断开（内部已调 disconnect）。
+  ///
+  /// ## ── 为何探测到的字节必须回灌（本函数以前就这么丢了一个字节）
+  ///
+  /// 本函数靠“可读却读到 0 字节”判定 FIN。但**只要可读，就必须真的读一次**，
+  /// 而只要读了，就可能把 WS 帧的**头一个字节**吞掉。旧实现读完就丢 → 
+  /// 解码器从帧中间开始解 → 长度/掩码全错位 → 此后**永远解析不出消息**。
+  /// 用户看到的就是「相期是绿的，但一张卡也不弹」。
+  ///
+  /// 修法是探测到有效字节时把它**回灌**进适配器的预置区，
+  /// 让下一次 `read_some` 原样还给解码器（数据一个字节不少）。
+  /// 它只在 `poll()` 返回空之后被调，那时 socket 里没有待解析的完整消息，
+  /// 但**仍可能有半帧**——回灌后不会丢。
   [[nodiscard]] bool check_eof() {
     if (!session_ || !tcp_) return false;
     const auto ready = tcp_->wait_readable(0);
@@ -486,6 +512,8 @@ class AgentLink {
       disconnect();
       return false;
     }
+    // 探到了真数据：**必须回灌**，否则 WS 帧流从此少一个字节（详见上面的说明）。
+    if (n.has_value() && *n == 1 && adapter_ != nullptr) adapter_->unread_one(probe[0]);
     return true;
   }
 
@@ -1403,12 +1431,29 @@ auto run_app(int argc, char** argv) -> int {
       if (!name.empty()) theme_choice = name;
     }
   }
-  app_options.width = 460;
-  app_options.height = 620;
-  // **不铺开到工作区**：相期是常驻轻提示/提醒面板，尺寸本身就是语义
-  // （“一张 460×620 的卡片”）。框架默认会把窗口铺满工作区（那是主窗口类应用的形态，
-  // 如 IDEA/VSCode）——对相期而言那会把卡片撑成整屏：实测在 2355×1280 下启动，
-  // 用户看到的是“窗口没有圆角”（实际是窗口比屏幕还大，圆角在屏外）。
+  // 默认窗口尺寸：**固定 560×720（逻辑像素），运行期永不改变**。
+  //
+  // ⚠ 为什么是 560×720 这两个“奇怪”的数：用户要的是**物理** 700×900。
+  // 框架的 `width/height` 是**逻辑像素**，实际物理尺寸 = 逻辑 × `device_scale`
+  // （本机 1.25）→ 560×1.25=700、720×1.25=900。改这两个值前先确认目标屏的
+  // `device_scale`（控制通道 `metrics.device_scale`），否则窗口会大一圈或小一圈。
+  //
+  // 为什么固定而不自适应：相期的正文是飞书授权说明、工具参数预览、带 URL 的卡片。
+  // 曾按内容把窗口缩成“轻提示”形态（420×200 贴角），结果是**同一块面板两种尺寸**——
+  // 尺寸一变，MarkdownView 的折行、卡片高度、滚动位置全部重排，用户正在读的那一屏
+  // 会被抽走。屏幕空间在这里不是稀缺资源，**阅读位置稳定**才是。
+  //
+  // ⚠ 应用层**没有**任何 `set_size` 调用（`ui/app.js` 里删掉了）：
+  // 窗口尺寸是启动参数，不是运行期状态。框架仍保留 `app.window.set_size` 能力，
+  // 但相期不用它——曾因“轻提示自动缩窗 + 展开自动还原”两处尺寸各写一份，
+  // 出现“同一块面板两种尺寸”且在日志里表现为画布反复 resize。
+  app_options.width = 560;
+  app_options.height = 720;
+  // **不铺开到工作区**：框架默认会把窗口铺满工作区（那是主窗口类应用的形态，
+  // 如 IDEA/VSCode）。相期要的是**固定尺寸的面板**，铺满则尺寸随显示器变，
+  // 折行与卡片高度也跟着变——那就又回到“每次换屏幕都长得不一样”。
+  // 实测铺满的旧行为在 2355×1280 下启动时，用户看到的是“窗口没有圆角”
+  // （实际是窗口比屏幕还大，圆角在屏外）。
   app_options.fill_work_area = false;
   app_options.title = "相期";
   if (app_options.backend.empty() && app_options.headless) app_options.backend = "headless";

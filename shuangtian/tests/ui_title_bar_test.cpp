@@ -283,10 +283,48 @@ ST_TEST(title_bar_control_release_outside_cancels) {
 
 ST_TEST(title_bar_caption_press_starts_move) {
   BarFixture fixture;
-  ST_CHECK(fixture.send(EventKind::MouseDown, Point{300.0f, 20.0f}));
+  // 按下标题条带：**先不启动系统拖动**（`window_begin_move` 在 Win32 上会同步进入
+  // 系统拖动模态循环，把双击的第二次按下吃掉——实测真实双击不产生 `DoubleClick`），
+  // 但按下**必须被消费**：不消费就穿透到下层界面（点标题栏把下面的按钮点了）。
+  const Point caption{300.0f, 20.0f};
+  ST_CHECK(fixture.send(EventKind::MouseDown, caption));
+  ST_CHECK_EQ(fixture.control.move_calls, 0);
+  // 指针原地不动（没超过阈值）→ 仍然不拖动。手抖不算拖窗口。
+  (void)fixture.send(EventKind::MouseMove, Point{caption.x + 2.0f, caption.y});
+  ST_CHECK_EQ(fixture.control.move_calls, 0);
+  // 指针真正移开（超过阈值）→ 此刻才启动系统拖动。
+  (void)fixture.send(EventKind::MouseMove, Point{caption.x + 40.0f, caption.y + 10.0f});
   ST_CHECK_EQ(fixture.control.move_calls, 1);
-  // 标题栏上的按下**必须被消费**：不消费就穿透到下层界面（点标题栏把下面的按钮点了）。
-  ST_CHECK(fixture.send(EventKind::MouseDown, Point{300.0f, 20.0f}));
+  // 拖动已启动后继续移动**不重复调用**：一次手势只启动一次模态循环。
+  (void)fixture.send(EventKind::MouseMove, Point{caption.x + 80.0f, caption.y + 20.0f});
+  ST_CHECK_EQ(fixture.control.move_calls, 1);
+  (void)fixture.send(EventKind::MouseUp, Point{caption.x + 80.0f, caption.y + 20.0f});
+}
+
+/// 真实手势序列的双击：`Down → Up → Down(count=2) → Up + DoubleClick`。
+///
+/// 这条是**缺陷回归**：旧实现把 `window_begin_move()` 放在标题条带的 `MouseDown`
+/// 里，而它在 Win32 上是 `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`——系统**同步**
+/// 进入拖动模态循环，把紧随其后的第二次按下吃掉。真窗口实测：真实双击标题栏
+/// 后端只推出一条 `MouseMove`，`DoubleClick` 一次都没产出（成功率约 50%，时好时坏）。
+///
+/// 判据用「窗口动作调用次数」而非像素：要钉的是“双击有没有被识别成双击”。
+ST_TEST(title_bar_real_gesture_double_click_toggles_maximize) {
+  BarFixture fixture;
+  const Point caption{300.0f, 20.0f};
+  // 第一击：按下 + 抬起 + 单击（后端在 UP 里补的那一条）。
+  ST_CHECK(fixture.send(EventKind::MouseDown, caption, 1));
+  ST_CHECK(fixture.send(EventKind::MouseUp, caption, 1));
+  ST_CHECK(fixture.send(EventKind::Click, caption, 1));
+  ST_CHECK_EQ(fixture.control.maximize_calls, 0);
+  // 第二击：系统用 `LBUTTONDBLCLK` 代替了第二次按下，连击数=2。
+  ST_CHECK(fixture.send(EventKind::MouseDown, caption, 2));
+  ST_CHECK(fixture.send(EventKind::MouseUp, caption, 2));
+  ST_CHECK(fixture.send(EventKind::DoubleClick, caption, 2));
+  ST_CHECK_EQ(fixture.control.maximize_calls, 1);
+  ST_CHECK(fixture.control.maximized_state);
+  // 整串手势里**不得**有任何系统拖动调用：一指没动，就不是拖窗口。
+  ST_CHECK_EQ(fixture.control.move_calls, 0);
 }
 
 ST_TEST(title_bar_double_click_toggles_maximize) {
@@ -317,9 +355,11 @@ ST_TEST(title_bar_edge_falls_back_to_move_when_resize_unsupported) {
   BarFixture fixture;
   // Win32 的缩放由窗口层 `WM_NCHITTEST` 接管，组件这条路返回 false——
   // 此时**必须落回拖动**而不是就此吞掉：吞掉的话边缘成了"死区"，窗口反而更难拖。
+  // 缩放带按下仍先记起点（同标题条带：不当场进模态循环），移动后才退到拖动。
   fixture.control.resize_accepted = false;
   ST_CHECK(fixture.send(EventKind::MouseDown, Point{2.0f, 20.0f}));
   ST_CHECK_EQ(fixture.control.resize_calls, 1);
+  (void)fixture.send(EventKind::MouseMove, Point{40.0f, 30.0f});
   ST_CHECK_EQ(fixture.control.move_calls, 1);
 }
 
@@ -497,7 +537,11 @@ ST_TEST(title_bar_accessory_slots_do_not_trigger_window_actions) {
   ST_CHECK(fixture.bar->hits_caption(caption.center()));
   const std::size_t moves_before = static_cast<std::size_t>(fixture.control.move_calls);
   (void)fixture.send(EventKind::MouseDown, caption.center());
+  // 按下不当场进拖动（模态循环会吃掉双击），移动后才真正拖。
+  ST_CHECK_EQ(static_cast<std::size_t>(fixture.control.move_calls), moves_before);
+  (void)fixture.send(EventKind::MouseMove, Point{caption.center().x + 40.0f, caption.center().y});
   ST_CHECK_EQ(static_cast<std::size_t>(fixture.control.move_calls), moves_before + 1U);
+  (void)fixture.send(EventKind::MouseUp, Point{caption.center().x + 40.0f, caption.center().y});
   (void)fixture.send(EventKind::DoubleClick, caption.center(), 2);
   ST_CHECK_EQ(fixture.control.maximize_calls, 1);
 }

@@ -194,6 +194,22 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
           () => sinkOf(ws).send(JSON.stringify({ type: msg.type, id: msg.id, ok: false, error: "queue_full: 该通道消息积压过多，请稍后重试" })),
         )
       },
+      // 心跳钩子：相期窗口空闲时不发应用消息，只靠每 30 秒一次的 WS ping 保活。
+      //
+      // ## 为何必须接这两个回调（缺了就是一次真实故障）
+      //
+      // 控制器的存活判据是「90 秒内有过往来」。窗口侧每 30 秒发 ping、Bun 自动回 pong，
+      // 但若不把这两个事件告诉控制器，服务端看到的就是**一片死寂**：
+      // 90 秒后把活连接判死 → 卡片全走文件降级 → 用户窗口上一张卡也不弹。
+      // 而窗口那边因为收到了 pong，图标一直是绿的——两边认知分裂，用户无从判断。
+      //
+      // 只对相期连接生效：其他通道（/ws、热刷新）各有自己的活性语义，不共用这套判据。
+      ping(ws) {
+        if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) xiangqiController().peerActivity()
+      },
+      pong(ws) {
+        if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) xiangqiController().peerActivity()
+      },
       close(ws) {
         // 相期窗口断开：通知控制器（清 peer，卡片仍在 live，重连后重推）
         if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) {

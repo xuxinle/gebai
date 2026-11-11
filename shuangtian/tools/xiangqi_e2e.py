@@ -349,25 +349,22 @@ def main():
         except Exception as exc:  # noqa: BLE001
             log(f"  截图失败（不影响结论）：{exc}")
 
-        # ③b 轻提示形态：只有 notice 时不拉出主界面
+        # ③b notice 与其他类型**同一个面板**（曾经的“轻提示形态”已删除）
         #
-        # 这是"不必每次弹出主界面"的验收：agent 只是通知一声，
-        # 就不该把整个工作面板摊到用户面前。
+        # 历史：只有 notice 时会缩窗成 420×200 轻提示、只显示第一条。
+        # 但窗口现在固定 1600×900，再“缩成小块只显示一条”就只是把同一件事
+        # 做得更差（其余卡片被藏起来，而窗口并不会真的变小）。
         server.send_text(json.dumps({"type": "cards", "cards": [
             {"id": "n2", "kind": "notice", "title": "夜间批处理完成",
              "body": "128 个文件全部成功。", "from": "小霜"},
         ]}))
-        entered = wait_for(lambda: visible("compact"), 6.0)
-        check(entered, "只剩 notice 时进入轻提示形态")
-        if entered:
-            # 标题栏**不隐藏**——徽标/连接状态/全部忽略都住在那里。
-            # 以前隐的是 XML 自带的两条冗余带，现在它们已并入标题栏。
-            check(visible("badge"), "轻提示形态下徽标仍可见（常驻标题栏）")
-            check(visible("dismiss-all"), "轻提示形态下「全部忽略」仍可见")
-            title = text_of("#compact-title")
-            check(title == "夜间批处理完成", f"轻提示显示最新一条（{title!r}）")
+        shown = wait_for(lambda: len(find("#card-0")) > 0, 6.0)
+        check(shown, "只有 notice 时仍渲染在主面板（无轻提示形态）")
+        if shown:
+            check(visible("card-0-act-ok"), "notice 卡直接给出「知道了」")
+            check(not visible("compact"), "不存在轻提示区（已删除）")
 
-        # ③c 出现 choice → 自动展开（那类必须给足界面做决策）
+        # ③c choice 与 notice 同时在场：两张都看得见（不再有形态切换）
         server.send_text(json.dumps({"type": "cards", "cards": [
             {"id": "n2", "kind": "notice", "title": "夜间批处理完成",
              "body": "128 个文件全部成功。", "from": "小霜"},
@@ -375,11 +372,10 @@ def main():
              "body": "等你定。", "from": "小霜",
              "options": [{"label": "继续", "value": "go"}, {"label": "停下", "value": "stop"}]},
         ]}))
-        expanded = wait_for(lambda: not visible("compact"), 6.0)
-        check(expanded, "出现选择卡后自动展开主界面")
-        if expanded:
-            check(visible("card-0") or visible("compact") is False,
-                  "展开后回到主界面（compact 已收起）")
+        both = wait_for(lambda: len(find("#card-0")) > 0 and len(find("#card-1")) > 0, 6.0)
+        check(both, "notice 与 choice 同时在场时两张都渲染（同一块面板）")
+        if both:
+            check(visible("card-0") and visible("card-1"), "两张卡片均可见（无卡被藏起）")
 
         # ③d 轻提示形态下**也必须**能看见连接状态
         #
@@ -387,24 +383,21 @@ def main():
         # 断线时整个窗口里没有任何"已断开"的痕迹——用户以为 agent 还在盯着，
         # 而提醒根本没送到。那是比"不弹窗"更糟的状态。
         #
-        # 先回到"只有一条 notice"的轻提示形态
+        # 先发一条 notice（不切形态）
         server.send_text(json.dumps({"type": "cards", "cards": [
             {"id": "n3", "kind": "notice", "title": "测试连接状态", "from": "小霜"},
         ]}))
-        if wait_for(lambda: visible("compact"), 6.0):
-            ci = (client.ok("get", {"id": "compact-link-icon"}).get("props") or {})
+        if wait_for(lambda: len(find("#card-0")) > 0, 6.0):
+            ci = (client.ok("get", {"id": "link-icon"}).get("props") or {})
             check(ci.get("icon") in ("link", "warning"),
-                  f"轻提示形态下显示连接状态图标（{ci.get('icon')!r}）")
+                  f"显示连接状态图标（{ci.get('icon')!r}）")
 
         # ④ 断线如实显示：关掉控制器后界面应转成未连接
         server.stop()
         # 等两个轮询周期（500ms × 2）+ 余量，让 tick 感知到断开并重绘
         time.sleep(2.0)
-        # 当前形态决定"哪个连接状态可见"：
-        # 轻提示形态下 `#footer` 被隐藏，可见的是 `#compact-link`；
-        # 主界面形态下才是 `#link-text`。读错那一个会拿到上一次的旧文本。
-        icon_id = "compact-link-icon" if visible("compact") else "link-icon"
-        icon_props = (client.ok("get", {"id": icon_id}).get("props") or {})
+        # 只有一个连接状态元素（轻提示形态已删除，不再有两份）
+        icon_props = (client.ok("get", {"id": "link-icon"}).get("props") or {})
         # 判据：图标从 link 变成 warning（"不再假装连着"这个不变式）
         check(icon_props.get("icon") == "warning",
               f"控制器断开后图标变为 warning（{icon_props.get('icon')!r}）")
