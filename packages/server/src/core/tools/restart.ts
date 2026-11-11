@@ -3,22 +3,23 @@
  * 可靠性设计——「自杀后谁拉起」：重启的最大风险是旧进程死了新进程起不来（进程树连坐）。
  * 方案是外部拉起器彻底脱离服务进程树（Windows/Linux 双平台）：
  * 1. 工具执行时把拉起器脚本落盘到固定路径（`{tmpdir}/gebai-restart/`）并部署为独立进程：
- *    - Windows：PowerShell 脚本，二段式启动：先 `powershell Start-Process powershell -File …` 起一个
- *      独立窗口进程（与当前服务零亲缘），由它再执行拉起器脚本——服务退出/被杀不影响拉起器运行
- *      （WMIC 已废弃：Win11 24H2+ 默认移除，不可再用）；
+ *    - Windows：**自包含 JS 脚本**（`launcher.mjs`，由本进程自己的运行时执行——不依赖 PowerShell、
+ *      cmd、WMIC 等外部程序：这些程序在受限机器上可能不存在、执行策略被拦或无权限，`Bun.spawn`
+ *      只会得到 `uv_spawn` 类失败）。二段式启动：先起一个短命中间进程（同一脚本的 `--deploy` 模式），
+ *      由它 detached 起真正的拉起器后立即退出——中间进程一退出，父子链断开，服务随后
+ *      退出/被 `taskkill /T` 连坐时都追不到拉起器；
  *    - Linux/macOS：bash 脚本，经 `setsid` 启动（新会话新进程组，防 kill -PGID 整杀连坐），
  *      标准流重定向 /dev/null——服务退出后拉起器被 init 收养，继续运行；
  * 2. 拉起器：等旧进程退出（60s）→ 等端口释放（30s；被第三方占用直接失败，不动无辜进程）→
- *    同端口/同 cwd/同关键环境变量启动新服务（输出重定向日志）→ 就绪探测（45s；端口属主 ≠ 旧 PID
+ *    同端口/同 cwd/同关键环境变量启动新服务（输出重定向日志）→ 就绪探测（90s；端口属主 ≠ 旧 PID
  *    且 HTTP 200 双条件——单看 200 会在旧服务未死时误判）→ 写状态文件（成功=新 PID；失败=原因+日志尾部）；
  * 3. 工具先布置拉起器，再延迟退出当前进程（延迟内工具结果送达调用方——飞书/WS 回复先行，自杀在后）；
  *    结果带 `endsTask` 声明：本轮任务就此结束，引擎不再把结果回灌模型（后续工作靠 `prompt` 续跑接续）；
  * 4. 失败兜底：状态文件与日志都在 `{tmpdir}/gebai-restart/` 下，`status` 动作读取（不重启）。
  *
- * 平台差异：PowerShell 脚本必须带 UTF-8 BOM（Windows PowerShell 5.1 对无 BOM 文件按 ANSI 解析，
- * 中文注释/字符串会撕裂语法）；bash 脚本用 UTF-8 无 BOM。端口属主探测 Windows 用 Get-NetTCPConnection，
- * Linux 用 ss -ltnp（iproute2 基础组件，各发行版标配）。状态文件一律 UTF-8 无 BOM：PS5.1 的
- * Set-Content -Encoding UTF8 会写入 BOM，读方（status 动作）与消费方均按无 BOM 预期解析。
+ * 平台差异：Windows 拉起器是 JS（UTF-8 无 BOM，注释与字符串里的中文不受代码页影响）；端口属主探测用
+ * `netstat -ano -p TCP`（系统自带、无需 PowerShell 的 CIM 查询，也不受执行策略限制）。Linux 用
+ * ss -ltnp（iproute2 基础组件，各发行版标配）。状态文件一律 UTF-8 无 BOM（node:fs 写入天然无 BOM）。
  */
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises"
 import { statSync } from "node:fs"
@@ -180,7 +181,7 @@ export interface RestartDeps {
   tmpDir: string
   /** 关键环境变量（新进程须继承：端口/家目录/监听地址等启动级配置）。 */
   env: Record<string, string>
-  /** 平台（win32=PowerShell 拉起器；其余=bash 拉起器）。 */
+  	  /** 平台（win32=自包含 JS 拉起器；其余=bash 拉起器）。 */
   platform: NodeJS.Platform
   /** 自杀延迟（工具结果送达窗口，毫秒）。 */
   exitDelayMs: number
@@ -190,8 +191,8 @@ export interface RestartDeps {
   devReload: boolean
   /** 进程退出（默认 process.exit；测试注入）。 */
   exit: (code: number) => void
-  /** 拉起器部署（默认按平台 Start-Process / setsid；测试注入）。 */
-  spawnLauncher: (scriptPath: string, platform: NodeJS.Platform) => Promise<{ ok: boolean; error?: string }>
+  	  /** 拉起器部署（默认按平台：win32=自有运行时二段式 / 其余=setsid；测试注入）。 */
+	  spawnLauncher: (scriptPath: string, platform: NodeJS.Platform, deps?: RestartDeps) => Promise<{ ok: boolean; error?: string }>
   /** 重启前的在运行会话快照（引擎注入；缺省/返回空 = 不登记）。
    *  新进程启动时据此恢复这些会话的**会话内存态 env**（至少含审批跳过）——不只是本会话，
    *  定时任务/飞书桥接/其他标签页在跑的会话同样要恢复。 */
@@ -209,114 +210,287 @@ export function pickRestartEnv(env: Record<string, string | undefined> = process
   return out
 }
 
-// ---- Windows：PowerShell 拉起器 ----
+// ---- Windows：自包含 JS 拉起器 ----
 
-/** PowerShell 单引号字符串内转义：' → ''。 */
-function psq(s: string): string {
-  return s.replace(/'/g, "''")
+/** Windows 拉起器自描述配置（以 `const CFG = {...}` 内联进脚本——不靠命令行传参，无引号/代码页构造面）。 */
+export interface WinLauncherConfig {
+  port: number
+  oldPid: number
+  /** 二进制形态：新进程直接是 `exePath`；源形态：`exePath run <entry>`。 */
+  binary: boolean
+  exePath: string
+  args: string[]
+  cwd: string
+  env: Record<string, string>
+  stateFile: string
+  logOut: string
+  logErr: string
+  stepLog: string
+  /** 本脚本自身路径（中间进程据此重新执行自己派生真正的拉起器）。 */
+  launcherFile: string
+  probePath: string
 }
 
-/** Windows 拉起器脚本：等旧进程退出 → 等端口释放 → 启动新服务 → 就绪探测 → 写状态文件。 */
-export function buildLauncherScriptWin(deps: RestartDeps): string {
+/** 由重启依赖算出拉起器配置（纯函数，可断言）。 */
+export function winLauncherConfig(deps: RestartDeps): WinLauncherConfig {
   const dir = restartDir(deps.tmpDir)
-  const statePs = psq(join(dir, "state.json"))
-  const logPs = psq(join(dir, "server.log"))
-  const probe = "/api/v1/sub-agents"
+  return {
+    port: deps.port,
+    oldPid: deps.oldPid,
+    binary: deps.binary,
+    exePath: process.execPath,
+    args: deps.binary ? [] : ["run", deps.entry!],
+    cwd: deps.cwd,
+    env: { ...deps.env, GEBAI_PORT: String(deps.port) },
+    stateFile: join(dir, "state.json"),
+    logOut: join(dir, "server.log.out"),
+    logErr: join(dir, "server.log.err"),
+    stepLog: join(dir, "launcher.log"),
+    launcherFile: join(dir, "launcher.mjs"),
+    probePath: "/api/v1/sub-agents",
+  }
+}
+
+/** 拉起器脚本主体（`bun <file>` / 二进制 `exec <file>` 两种形态均可执行）。
+ *
+ * 写成模板字符串（无 `${` 与反引号）以保留真实代码形态：拉起器一旦失效，服务自杀后无人拉起，
+ * 因此这段代码必须能直接被读懂、被审查。
+ */
+const WIN_LAUNCHER_BODY = `
+// ---- 二段式中间进程：派生真正的拉起器后立即退出 ----
+// 为何必需：Windows 上直接 Bun.spawn 起的拉起器仍是服务的子进程，服务退出时 job object 连坐、
+// 用户 taskkill /T 也按父子链整树杀。中间进程 detached 起拉起器后立即退出 —— 父子链断开，
+// 服务随后退出/被杀都追不到拉起器。
+// 用户 taskkill /T 也按父子链整树杀。中间进程 detached 起拉起器后立即退出 —— 父子链断开，
+// 服务随后退出/被杀都追不到拉起器。
+if (process.argv.includes("--mid")) {
+  try {
+    if (readFileSync(CFG.stepLog)) renameSync(CFG.stepLog, CFG.stepLog + ".prev")
+  } catch {}
+  const step = (msg) => { try { appendFileSync(CFG.stepLog, new Date().toISOString() + " " + msg + "\\n") } catch {} }
+  const launchArgs = CFG.binary ? [CFG.exePath, "exec", CFG.launcherFile] : [CFG.exePath, CFG.launcherFile]
+  try {
+    const child = spawn(launchArgs[0], launchArgs.slice(1), {
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "ignore"],
+      env: process.env,
+    })
+    child.unref()
+    step("中间进程 pid=" + process.pid + " 已派生拉起器 pid=" + child.pid)
+    // 窄探测「启动即崩」：拉起器要等旧进程退出（最长 60s），200ms 内仍存活即认为已进入运行态
+    await new Promise((r) => setTimeout(r, 200))
+    let alive = true
+    try { process.kill(child.pid, 0) } catch (err) { alive = !!err && err.code === "EPERM" }
+    if (!alive) {
+      step("拉起器启动即崩 pid=" + child.pid)
+      process.exit(1)
+    }
+    process.exit(0)
+  } catch (err) {
+    step("派生拉起器失败: " + String(err && err.message || err))
+    process.exit(1)
+  }
+}
+
+// ---- 拉起器主体：等旧进程退出 → 等端口释放 → 重启新服务 → 就绪探测 → 写状态文件 ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const step = (msg) => { try { appendFileSync(CFG.stepLog, new Date().toISOString() + " " + msg + "\\n") } catch {} }
+const writeState = (obj) => { try { writeFileSync(CFG.stateFile, JSON.stringify(obj), "utf8") } catch (err) { step("state.json 写入失败: " + String(err && err.message || err)) } }
+const tail = () => {
+  try { return readFileSync(CFG.logErr, "utf8").split(/\\r?\\n/).slice(-20).join("\\n") } catch { return "" }
+}
+/** 中止即还原轮转掉的日志：文件在脚本开头已被轮转为 .prev，不先还原就读会拿到空值，使 logTail 恒为空。 */
+const restoreLogs = () => {
+  for (const base of [CFG.logOut, CFG.logErr]) {
+    try { renameSync(base + ".prev", base) } catch {}
+  }
+}
+/** 中止路径的日志尾部：先还原再读（与成功路径相反——成功时新服务日志当前正在写）。 */
+const abortTail = () => { restoreLogs(); return tail() }
+/** 进程存活：kill(pid,0) 抛 ESRCH=不存在，EPERM=存在但不可操作（仍算存活）。 */
+const alive = (pid) => {
+  if (!pid || pid <= 0) return false
+  try { process.kill(pid, 0); return true } catch (err) { return !!err && err.code === "EPERM" }
+}
+/** 端口监听者 PID（netstat 系统自带，不依赖 PowerShell/CIM；无监听返回 0）。 */
+const listenOwner = (port) => {
+  const exe = netstatExe()
+  if (!exe) return 0
+  let out = ""
+  try { out = execFileSync(exe, ["-ano", "-p", "TCP"], { encoding: "utf8", windowsHide: true, timeout: 15000 }) } catch { return 0 }
+  let fallback = 0
+  for (const line of out.split(/\\r?\\n/)) {
+    const f = line.trim().split(/\\s+/)
+    if (f.length < 5 || !/^TCP$/i.test(f[0])) continue
+    if (!f[1].endsWith(":" + port)) continue
+    const pid = Number(f[f.length - 1])
+    if (!Number.isInteger(pid) || pid <= 0) continue
+    if (/LISTEN/i.test(f[3])) return pid
+    if (!fallback) fallback = pid // 本地该端口上还有非 LISTEN 记录（ESTABLISHED/TIME_WAIT）：也视为被占
+  }
+  return fallback
+}
+/** netstat 可执行文件定位（PATH 缺失的受限环境下也能用：直接取 System32 下系统自带的那份）。 */
+function netstatExe() {
+  const candidates = []
+  if (process.env.SystemRoot) candidates.push(process.env.SystemRoot + "\\\\System32\\\\netstat.exe")
+  if (process.env.windir) candidates.push(process.env.windir + "\\\\System32\\\\netstat.exe")
+  candidates.push("netstat", "netstat.exe")
+  for (const c of candidates) {
+    try { if (c.includes("\\\\") && !existsSync(c)) continue } catch { continue }
+    return c
+  }
+  return null
+}
+/** 端口是否真的可绑定（僵尸套接字的监听队列仍会接受 connect，故不能只看 TCP 连通；bind 才是准绳）。 */
+const canBind = (port) => new Promise((resolve) => {
+  const srv = createServer()
+  srv.once("error", () => resolve(false))
+  srv.listen({ port, host: "127.0.0.1", exclusive: true }, () => srv.close(() => resolve(true)))
+})
+
+step("拉起器启动 pid=" + process.pid + " port=" + CFG.port + " oldPid=" + CFG.oldPid)
+// 日志轮转：新服务标准输出为覆盖写，连续重启会吞掉上一次的诊断日志
+for (const base of [CFG.logOut, CFG.logErr]) {
+  try { if (readFileSync(base)) renameSync(base, base + ".prev") } catch {}
+}
+
+// 1) 等旧进程退出（最长 60s）
+const t1 = Date.now()
+while (Date.now() - t1 < 60000) {
+  if (!alive(CFG.oldPid)) break
+  await sleep(500)
+}
+if (alive(CFG.oldPid)) {
+  writeState({ ok: false, error: "等待旧进程（PID " + CFG.oldPid + "）退出超时（60s）", port: CFG.port, oldPid: CFG.oldPid })
+  step("旧进程未退出，放弃")
+  process.exit(1)
+}
+step("旧进程已退出")
+
+// 2) 等端口释放（最长 30s）：属主消失且能 bind 才算真释放
+const t2 = Date.now()
+let owner = listenOwner(CFG.port)
+while (owner && Date.now() - t2 < 30000) {
+  await sleep(500)
+  owner = listenOwner(CFG.port)
+}
+if (!owner && !(await canBind(CFG.port))) owner = listenOwner(CFG.port) || -1
+// 端口仍被占用/不可绑：区分「真被其他进程抢占」与「僵尸套接字」——端口是否释放的判据是
+// socket 句柄引用计数归零，不是「拥有者进程是否存活」。两情形都严格失败（不抢端口、不动无辜进程），
+// 但必须报准原因——否则用户只能猜。
+if (owner) {
+  const ownerPid = owner > 0 ? owner : 0
+  const ownerAlive = ownerPid ? alive(ownerPid) : false
+  writeState(
+    ownerPid && ownerAlive
+      ? { ok: false, reason: "occupied", port: CFG.port, ownerPid, error: "端口 " + CFG.port + " 被其他进程(PID " + ownerPid + ")占用，未启动新服务", logTail: abortTail() }
+      : {
+          ok: false,
+          reason: "zombie-socket",
+          port: CFG.port,
+          ownerPid,
+          error:
+            "端口 " + CFG.port + " 被僵尸套接字占用" +
+            (ownerPid ? "：属主进程 PID " + ownerPid + " 已不存在" : "") +
+            "，但端口仍不可绑定（socket 句柄被其他进程持有、引用计数未归零）；用户空间无法释放该端口",
+          logTail: abortTail(),
+        },
+  )
+  step("端口仍被占用 owner=" + ownerPid + " alive=" + ownerAlive)
+  process.exit(1)
+}
+step("端口已释放")
+
+// 3) 启动新服务（拉起器已与原服务零亲缘，新进程作为拉起器子进程存活；Windows 无 job object 连坐）
+let started
+// env 合并：Windows 环境变量名大小写不敏感，同名不同大小写的旧键（如 Path 与 PATH）必须先删，
+// 否则子进程可能拿到旧值——拉起器注入的端口/家目录就不能生效。
+const env = { ...process.env }
+for (const [k, v] of Object.entries(CFG.env)) {
+  for (const existing of Object.keys(env)) {
+    if (existing !== k && existing.toUpperCase() === k.toUpperCase()) delete env[existing]
+  }
+  env[k] = v
+}
+try {
+  const outFd = openSync(CFG.logOut, "w")
+  const errFd = openSync(CFG.logErr, "w")
+  started = spawn(CFG.exePath, CFG.args, {
+    cwd: CFG.cwd,
+    env,
+    detached: true,
+    windowsHide: true,
+    stdio: ["ignore", outFd, errFd],
+  })
+  started.unref()
+  step("新服务已拉起 pid=" + started.pid + " exe=" + CFG.exePath + " args=" + JSON.stringify(CFG.args))
+} catch (err) {
+  writeState({ ok: false, error: "新服务启动失败：" + String(err && err.message || err), port: CFG.port, logTail: abortTail() })
+  step("新服务 spawn 失败: " + String(err && err.message || err))
+  process.exit(1)
+}
+
+// 4) 就绪探测（最长 90s）：端口属主 ≠ 旧 PID 且 HTTP 200 双条件——单看 200 会在旧服务未死时误判
+const t3 = Date.now()
+let readyPid = 0
+while (Date.now() - t3 < 90000) {
+  const o = listenOwner(CFG.port)
+  if (o && o !== CFG.oldPid) {
+    try {
+      const r = await fetch("http://127.0.0.1:" + CFG.port + CFG.probePath, { signal: AbortSignal.timeout(3000) })
+      if (r.status === 200) { readyPid = o; break }
+    } catch {}
+  }
+  await sleep(800)
+}
+if (readyPid) {
+  writeState({ ok: true, port: CFG.port, pid: readyPid, note: "新服务已就绪" })
+  step("就绪 owner=" + readyPid)
+  process.exit(0)
+}
+writeState({ ok: false, reason: "ready-timeout", error: "就绪超时（90s）", port: CFG.port, logTail: tail() })
+step("就绪超时")
+process.exit(1)
+`
+
+/** Windows 拉起器脚本（JS 源）：配置内联 + 主体。
+ *
+ * 为何是 JS 而不是 PowerShell：拉起器要在**任意**机器上能起来——PowerShell/cmd/WMIC 在受限环境里
+ * 可能不存在、执行策略被拦或无权限（`Bun.spawn` 只会得到 `uv_spawn` 类失败，且脚本里的复杂命令行
+ * 本身也会触发它）。本服务自己就带着运行时（`process.execPath`），用它执行纯 JS 不额外依赖任何系统程序。
+ */
+export function buildLauncherScriptWin(deps: RestartDeps): string {
+  const cfg = winLauncherConfig(deps)
   return [
-    "$ErrorActionPreference = 'Continue'",
-    // 日志轮转：Start-Process 的 -RedirectStandardOutput 为**覆盖写**，连续重启会吞掉上一次的诊断日志
-    `if (Test-Path '${logPs}.out') { Move-Item '${logPs}.out' '${logPs}.out.prev' -Force }`,
-    `if (Test-Path '${logPs}.err') { Move-Item '${logPs}.err' '${logPs}.err.prev' -Force }`,
-    `$port = ${deps.port}`,
-    `$oldPid = ${deps.oldPid}`,
-    // 1) 等旧进程退出（进程不存在即释放；最长 60s）
-    "$deadline = (Get-Date).AddSeconds(60)",
-    "while ((Get-Date) -lt $deadline) {",
-    "  $alive = $false",
-    "  try { Get-Process -Id $oldPid -ErrorAction Stop | Out-Null; $alive = $true } catch {}",
-    "  if (-not $alive) { break }",
-    "  Start-Sleep -Milliseconds 500",
-    "}",
-    // 2) 再等端口释放（旧进程死了端口可能短暂 TIME_WAIT；TCP 探测）
-    "$deadline = (Get-Date).AddSeconds(30)",
-    "while ((Get-Date) -lt $deadline) {",
-    "  $open = $false",
-    "  try { $c = New-Object Net.Sockets.TcpClient; $r = $c.BeginConnect('127.0.0.1', $port, $null, $null); $open = $r.AsyncWaitHandle.WaitOne(500); if ($open) { $c.EndConnect($r) }; $c.Close() } catch { $open = $false }",
-    "  if (-not $open) { break }",
-    "  Start-Sleep -Milliseconds 500",
-    "}",
-    // 端口仍被占用：**区分「真被其他进程抢占」与「僵尸套接字」**——端口释放的判据是 socket 句柄
-    // 引用计数归零，不是「拥有者进程存在」：句柄被其他进程继承时，进程已消失而端口仍 LISTENING
-    // （netstat 显示 PID / tasklist 查不到 / taskkill 报找不到进程，用户空间无法释放）。
-    // 两种情形都严格失败（不动无辜进程、不自动换端口），但必须报准原因——否则用户只能猜。
-    "$owner = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess",
-    "if ($owner) {",
-    "  $ownerAlive = $false",
-    "  try { Get-Process -Id $owner -ErrorAction Stop | Out-Null; $ownerAlive = $true } catch {}",
-    "  $tail = ''",
-    // 中止即还原轮转掉的诊断日志（成功路径才需要让位给新日志）：**必须先还原再读**——
-    // 文件在脚本开头已被轮转为 .prev，直接读 .err 会拿到空值，使 logTail 恒为空
-    `  if (Test-Path '${logPs}.out.prev') { Move-Item '${logPs}.out.prev' '${logPs}.out' -Force }`,
-    `  if (Test-Path '${logPs}.err.prev') { Move-Item '${logPs}.err.prev' '${logPs}.err' -Force }`,
-    `  if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -Encoding UTF8 -ErrorAction SilentlyContinue) -join [char]10 }`,
-    "  if ($ownerAlive) {",
-    `    [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; reason = 'occupied'; port = $port; ownerPid = [int]$owner; error = ('端口 ' + $port + ' 被其他进程(PID ' + $owner + ')占用，未启动新服务'); logTail = $tail } | ConvertTo-Json -Compress))`,
-    "  } else {",
-    `    [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; reason = 'zombie-socket'; port = $port; ownerPid = [int]$owner; error = ('端口 ' + $port + ' 被僵尸套接字占用：属主进程 PID ' + $owner + ' 已不存在，但端口仍 LISTENING（socket 句柄被其他进程持有、引用计数未归零）；用户空间无法释放该端口'); logTail = $tail } | ConvertTo-Json -Compress))`,
-    "  }",
-    "  exit 1",
-    "}",
-    // 3) 启动新服务（Start-Process：新进程脱离原服务进程树——拉起器由独立 PowerShell 宿主拉起、
-    //    与原服务零亲缘；拉起器退出后 Windows 不连坐子进程（无 job object），新服务继续运行）
-    `$env:GEBAI_PORT = '${String(deps.port)}'`,
-    ...Object.entries(deps.env).filter(([k]) => k !== "GEBAI_PORT").map(([k, v]) => `$env:${k} = '${psq(v)}'`),
-    `Start-Process -FilePath '${psq(process.execPath)}' ${deps.binary ? `` : `-ArgumentList 'run','${psq(deps.entry!)}' `}-WorkingDirectory '${psq(deps.cwd)}' -WindowStyle Hidden -RedirectStandardOutput '${logPs}.out' -RedirectStandardError '${logPs}.err' | Out-Null`,
-    // 4) 等 HTTP 就绪 + 端口属主为新进程（只看 200 会误判——老服务未死时端口一直 200；
-    //    属主必须存在且 ≠ 老进程 PID）
-    "$deadline = (Get-Date).AddSeconds(90)",
-    "$ready = $false",
-    "$newPid = 0",
-    "while ((Get-Date) -lt $deadline) {",
-    "  $owner = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess",
-    "  if ($owner -and [int]$owner -ne $oldPid) {",
-    `    try { $r = Invoke-WebRequest -Uri ('http://127.0.0.1:' + $port + '${probe}') -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { $ready = $true; $newPid = [int]$owner; break } } catch {}`,
-    "  }",
-    "  Start-Sleep -Milliseconds 800",
-    "}",
-    // 5) 写状态文件（成功=就绪；失败=日志尾部）
-    "$tail = ''",
-    `if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -Encoding UTF8 -ErrorAction SilentlyContinue) -join [char]10 }`,
-    "if ($ready) {",
-    `  [IO.File]::WriteAllText('${statePs}', (@{ ok = $true; port = $port; pid = $newPid; note = '新服务已就绪' } | ConvertTo-Json -Compress))`,
-    "} else {",
-    `  [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; error = '就绪超时（90s）'; logTail = $tail } | ConvertTo-Json -Compress))`,
-    "}",
+    "/** 歌白服务重启拉起器（由 restart_server 生成；无外部程序依赖）。 */",
+    `const CFG = ${JSON.stringify(cfg)}`,
+    'import { appendFileSync, existsSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs"',
+    'import { createServer } from "node:net"',
+    'import { execFileSync, spawn } from "node:child_process"',
+    WIN_LAUNCHER_BODY,
   ].join("\n")
 }
 
-/** Windows 默认拉起器部署：二段式 PowerShell Start-Process（WMIC 已废弃：Win11 24H2+ 默认移除，不可再用）。
+/** Windows 默认拉起器部署：自有运行时执行本脚本的 `--mid` 模式（二段式，见 WIN_LAUNCHER_BODY 头注释）。
  *
- * 不能直接 Bun.spawn("powershell -File launcher.ps1")：拉起器会成为服务的直接子进程，Bun 子进程经
- * job object 连坐——服务退出时拉起器一起被杀，重启必败。二段式：外层 powershell（服务的短暂子进程）
- * 经 Start-Process 启动内层 powershell 执行拉起器——Start-Process 创建的新进程不受父 job object
- * kill-on-close 连坐（中间的外层进程退出后链路断开），与原服务彻底零亲缘；外层确认内层已创建后
- * 立即退出（存活秒级），服务随后自杀不牵连任何人。
+ * 不直接 Bun.spawn(脚本) 起拉起器：那样拉起器仍是服务的直接子进程——服务退出时 Bun 的 job object
+ * 连坐、用户 `taskkill /T` 也按父子链整树杀，重启必败。中间进程是一条**短命**的同一脚本，
+ * detached 派生真正的拉起器后立即退出：链路一断，服务怎么死都追不到拉起器。
  */
-async function startProcessSpawnLauncher(scriptPath: string): Promise<{ ok: boolean; error?: string }> {
-  const proc = Bun.spawn(
-    [
-      "powershell",
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      `$p = Start-Process -FilePath powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','${psq(scriptPath)}') -WindowStyle Hidden -PassThru; if ($p) { exit 0 } else { exit 1 }`,
-    ],
-    { stdout: "pipe", stderr: "pipe", windowsHide: true },
-  )
+async function winSpawnLauncher(scriptPath: string, deps?: RestartDeps): Promise<{ ok: boolean; error?: string }> {
+  const binary = deps ? deps.binary : isBinaryMode()
+  const cmd = binary ? [process.execPath, "exec", scriptPath, "--mid"] : [process.execPath, scriptPath, "--mid"]
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">
+  try {
+    proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", windowsHide: true })
+  } catch (err) {
+    return { ok: false, error: `拉起器中间进程启动失败：${String((err as Error)?.message || err)}` }
+  }
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
   if (code !== 0) {
-    return { ok: false, error: `二段式 Start-Process 启动失败 (exit=${code}): ${(out + err).slice(-300)}` }
+    return { ok: false, error: `拉起器部署失败 (exit=${code})：${(out + err).slice(-300) || "无输出"}` }
   }
   return { ok: true }
 }
@@ -433,24 +607,27 @@ export function buildLauncherScript(deps: RestartDeps): string {
   return deps.platform === "win32" ? buildLauncherScriptWin(deps) : buildLauncherScriptPosix(deps)
 }
 
-/** 部署拉起器：脚本落盘（Windows 带 UTF-8 BOM）+ 平台对应方式启动（脱离进程树）。 */
+/** 部署拉起器：脚本落盘（两平台均 UTF-8 无 BOM）+ 平台对应方式启动（脱离服务进程树）。 */
 async function deployLauncher(deps: RestartDeps): Promise<{ ok: boolean; error?: string }> {
   const dir = restartDir(deps.tmpDir)
   await mkdir(dir, { recursive: true })
   const isWin = deps.platform === "win32"
-  const script = join(dir, isWin ? "launcher.ps1" : "launcher.sh")
-  const content = buildLauncherScript(deps)
-  await writeFile(script, isWin ? "\uFEFF" + content : content, "utf8")
+  const script = join(dir, isWin ? "launcher.mjs" : "launcher.sh")
+  await writeFile(script, buildLauncherScript(deps), "utf8")
   if (!isWin) {
     const { chmod } = await import("node:fs/promises")
     await chmod(script, 0o755).catch(() => {})
   }
-  return deps.spawnLauncher(script, deps.platform)
+  return deps.spawnLauncher(script, deps.platform, deps)
 }
 
 /** 默认拉起器部署（按平台分发）。 */
-async function defaultSpawnLauncher(scriptPath: string, platform: NodeJS.Platform): Promise<{ ok: boolean; error?: string }> {
-  return platform === "win32" ? startProcessSpawnLauncher(scriptPath) : setsidSpawnLauncher(scriptPath)
+async function defaultSpawnLauncher(
+  scriptPath: string,
+  platform: NodeJS.Platform,
+  deps?: RestartDeps,
+): Promise<{ ok: boolean; error?: string }> {
+  return platform === "win32" ? winSpawnLauncher(scriptPath, deps) : setsidSpawnLauncher(scriptPath)
 }
 
 /** 读 state.json（拉起器写入的重启结论；不存在/损坏返回 null）。 */

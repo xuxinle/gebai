@@ -244,7 +244,7 @@ bun run mutate:status:why  # 自助定位：指纹过期了没、该不该重跑
   - **`run()` 类入口可能是异步推进的**：入队后立即 `await` 完成态前，先确认它已离开可入队态（仍处 `queued` 时再次发起会被幂等短路，目标轮次永远不会来）。
   - 真实 spawn 类用例给足用例超时（默认 20s，`GEBAI_TEST_TIMEOUT` 可覆盖）。
   - 失败用例会被**自动串行复验**区分「并行抖动」与「真失败」：抖动不阻塞提交但会告警并附复现命令；反复抖动的用例应当按上面的规则修掉，而不是依赖复验。
-- **真起服务进程的用例必须自收尾且环境隔离**（实机冒烟类）：外部拉起器 / `Start-Process` 创建的子进程**不受测试进程 job object 约束**，测试退出不会自动回收——用例必须 `try/finally` 杀进程树（`state.json` 记的 PID + 端口属主 + `taskkill /T /F`）并删临时目录；`GEBAI_HOME` 指向用例临时目录、显式关闭后台副作用（`GEBAI_IDLE_TODO_ENABLED`/`GEBAI_TASKS_ENABLED`/`GEBAI_FEISHU_BOT_ENABLED`/`GEBAI_GC_DISABLED`）——残留实例没有任何会话，会持续抢跑真实实例的闲时待办与定时任务。
+- **真起服务进程的用例必须自收尾且环境隔离**（实机冒烟类）：外部拉起器创建的子进程**不受测试进程 job object 约束**，测试退出不会自动回收——用例必须 `try/finally` 杀进程树（`state.json` 记的 PID + 端口属主 + `taskkill /T /F`）并删临时目录；`GEBAI_HOME` 指向用例临时目录、显式关闭后台副作用（`GEBAI_IDLE_TODO_ENABLED`/`GEBAI_TASKS_ENABLED`/`GEBAI_FEISHU_BOT_ENABLED`/`GEBAI_GC_DISABLED`）——残留实例没有任何会话，会持续抢跑真实实例的闲时待办与定时任务。
 - 分层：单元测试（核心模块必须，零外部依赖）→ 集成测试（mock LLM Provider 跑 AgentEngine 主循环）→ 契约测试（WS/REST/SSE 消息格式、SDK 一致性）→ E2E（mock LLM + 内存存储跑主路径）。
 - 覆盖率门槛（**目标值**，无 `coverageThreshold` 配置与 CI 强制，靠约定）：核心引擎（`AgentEngine`/`ToolRegistry`/`EnvManager`/`Sandbox`/命名空间解析）行覆盖率 ≥ 90%；工具函数 ≥ 80%；整体 ≥ 70%。
 - 可伪造性：`LLMProvider`、时间、文件系统均有测试替身（fake），测试不依赖真实网络/时钟/磁盘。

@@ -21,6 +21,7 @@ import {
   removeContinuation,
   restoreRunningSessions,
   restartDir,
+  winLauncherConfig,
   writeContinuation,
   writeRunningSessions,
 } from "./restart"
@@ -66,40 +67,56 @@ function ctxStub(workdir: string): never {
 }
 
 describe("restart_server（Windows 拉起器）", () => {
-  test("buildLauncherScriptWin：等旧进程/端口释放 → Start-Process 启动（环境继承+cwd+日志重定向）→ 就绪探测 → 状态文件", () => {
+  test("winLauncherConfig：新服务启动计划（源形态=run 入口 / 二进制=自身可执行）+ 状态与日志路径", () => {
+    const src = winLauncherConfig(makeDeps())
+    expect(src).toMatchObject({ port: 3001, oldPid: 1234, binary: false, args: ["run", "/repo/packages/server/src/index.ts"], cwd: "/repo/packages/server" })
+    expect(src.exePath).toBe(process.execPath)
+    expect(src.env).toEqual({ GEBAI_PORT: "3001", GEBAI_HOME: "/repo" })
+    expect(src.stateFile.endsWith("state.json")).toBe(true)
+    expect(src.launcherFile.endsWith("launcher.mjs")).toBe(true)
+    const bin = winLauncherConfig(makeDeps({ binary: true }))
+    expect(bin.args).toEqual([])
+  })
+
+  test("buildLauncherScriptWin：自包含 JS 拉起器——不依赖 PowerShell/WMIC/外部 shell", () => {
     const script = buildLauncherScriptWin(makeDeps())
-    expect(script).toContain("$oldPid = 1234")
-    expect(script).toContain("$port = 3001")
-    expect(script).toContain("Get-Process -Id $oldPid")
-    expect(script).toContain("Move-Item") // 日志轮转（Start-Process 覆盖写会吞掉上次诊断日志）
-    expect(script).toContain("server.log.out.prev")
-    expect(script).toContain("Start-Process -FilePath")
-    expect(script).toContain("-WorkingDirectory '/repo/packages/server'")
-    expect(script).toContain("$env:GEBAI_PORT = '3001'")
-    expect(script).toContain("$env:GEBAI_HOME = '/repo'")
+    // 关键：不是 PowerShell 脚本，也不含任何外部解释器调用（受限机器上 powershell 可能不存在或被拦）
+    expect(script).not.toContain("Start-Process")
+    expect(script).not.toContain("Get-NetTCPConnection")
+    expect(script).not.toContain("Invoke-WebRequest")
+    expect(script).not.toContain("powershell")
+    expect(script).not.toContain("wmic")
+    expect(script).toContain('import { appendFileSync, existsSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs"')
+    // 配置内联（不经命令行传参，无引号/代码页构造面）
+    expect(script).toContain("const CFG = {")
+    expect(script).toContain('"port":3001')
+    // 流程各段在场：等旧进程退出 / 等端口释放 / 拉起新服务 / 就绪探测 / 写状态
+    expect(script).toContain("process.kill(pid, 0)")
+    expect(script).toContain('execFileSync(exe, ["-ano", "-p", "TCP"]')
+    expect(script).toContain("spawn(CFG.exePath, CFG.args")
+    expect(script).toContain("AbortSignal.timeout(3000)")
+    expect(script).toContain("writeFileSync(CFG.stateFile")
     expect(script).toContain("/api/v1/sub-agents")
-    expect(script).toContain("state.json")
+    // 二段式中间进程分支在场
+    expect(script).toContain('process.argv.includes("--mid")')
+    expect(script).toContain("detached: true")
   })
 
-  test("buildLauncherScriptWin：状态文件无 BOM（[IO.File]::WriteAllText，PS5.1 Set-Content UTF8 会带 BOM）", () => {
+  test("buildLauncherScriptWin：状态文件无 BOM（node:fs 写入天然无 BOM，且不存在 Set-Content/WriteAllText 路径）", () => {
     const script = buildLauncherScriptWin(makeDeps())
-    expect(script).toContain("[IO.File]::WriteAllText")
-    expect(script).not.toContain("Set-Content -Encoding UTF8")
-  })
-
-  test("buildLauncherScriptWin：就绪探测走服务自身路径（不依赖代理前缀）", () => {
-    const script = buildLauncherScriptWin(makeDeps({ env: { GEBAI_PORT: "3001" } }))
-    expect(script).toContain("'http://127.0.0.1:' + $port + '/api/v1/sub-agents'")
+    expect(script).toContain("writeFileSync(CFG.stateFile, JSON.stringify(obj), \"utf8\")")
+    expect(script).not.toContain("Set-Content")
+    expect(script).not.toContain("[IO.File]::WriteAllText")
   })
 
   test("buildLauncherScriptWin：binary 模式无 run 入口参数", () => {
     const script = buildLauncherScriptWin(makeDeps({ binary: true }))
-    expect(script).toContain("Start-Process -FilePath")
-    expect(script).not.toContain("-ArgumentList 'run'")
+    expect(script).toContain('"args":[]')
+    expect(script).not.toContain('"run"')
   })
 
-  test("buildLauncherScript 按平台分发：win32 → PowerShell；其余 → bash", () => {
-    expect(buildLauncherScript(makeDeps())).toContain("$ErrorActionPreference")
+  test("buildLauncherScript 按平台分发：win32 → JS 拉起器；其余 → bash", () => {
+    expect(buildLauncherScript(makeDeps())).toContain("const CFG = {")
     expect(buildLauncherScript(makeDeps({ platform: "linux" }))).toContain("#!/usr/bin/env bash")
     expect(buildLauncherScript(makeDeps({ platform: "darwin" }))).toContain("#!/usr/bin/env bash")
   })
@@ -124,13 +141,17 @@ describe("restart_server（Linux/macOS 拉起器）", () => {
   })
 
   test("拉起器脚本：logTail 先还原再读取（否则读的是已轮转走的空文件，诊断信息丢失）", () => {
-    // Windows：脚本开头把 .out/.err 轮转为 .prev，因此失败分支必须**先 Move-Item 还原、再 Get-Content 读**
-    const winLines = buildLauncherScriptWin(makeDeps()).split("\n")
-    const winRestore = winLines.findIndex((l) => l.includes(".err.prev") && l.includes("Move-Item"))
-    const winRead = winLines.findIndex((l) => l.includes("Get-Content") && l.includes(".err'"))
-    expect(winRestore).toBeGreaterThan(-1)
-    expect(winRead).toBeGreaterThan(-1)
-    expect(winRestore).toBeLessThan(winRead) // 顺序断言：还原在前
+    // Windows：脚本开头把 .out/.err 轮转为 .prev，因此失败分支必须**先还原（abortTail/restoreLogs）再读（tail）**
+    const winScript = buildLauncherScriptWin(makeDeps())
+    const winLines = winScript.split("\n")
+    const restoreFn = winLines.findIndex((l) => l.includes("const restoreLogs = () =>"))
+    const abortFn = winLines.findIndex((l) => l.includes("const abortTail = () =>"))
+    expect(restoreFn).toBeGreaterThan(-1)
+    expect(abortFn).toBeGreaterThan(-1)
+    expect(restoreFn).toBeLessThan(abortFn) // 定义顺序：还原在前
+    // 失败的三个分支全部经 abortTail（内部先 restoreLogs 再 tail）
+    expect(winScript).toContain("const abortTail = () => { restoreLogs(); return tail() }")
+    expect(winScript.match(/logTail: abortTail\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3)
     // posix：同口径（还原 mv -f 先于 tail_log 定义/调用）
     const posix = buildLauncherScriptPosix(makeDeps({ platform: "linux" }))
     const posixLines = posix.split("\n")
@@ -139,10 +160,7 @@ describe("restart_server（Linux/macOS 拉起器）", () => {
     expect(posRestore).toBeGreaterThan(-1)
     expect(posTail).toBeGreaterThan(-1)
     expect(posRestore).toBeLessThan(posTail)
-    // 占用分支必须带 logTail（两平台）；Windows 读日志需显式 -Encoding UTF8（服务日志为 UTF-8，
-    // PS5.1 的 Get-Content 缺省按 ANSI 读 → 中文诊断信息会乱码）
-    expect(buildLauncherScriptWin(makeDeps())).toContain("logTail = $tail")
-    expect(winLines.filter((l) => l.includes("Get-Content")).every((l) => l.includes("-Encoding UTF8"))).toBe(true)
+    // 占用分支必须带 logTail（两平台）
     expect(posix).toContain('"logTail":"%s"')
     // tail_log 只定义一次（避免重复定义）
     expect(posixLines.filter((l) => l.includes("tail_log()")).length).toBe(1)
@@ -158,18 +176,18 @@ describe("restart_server（Linux/macOS 拉起器）", () => {
   test("buildLauncherScriptWin：端口占用分类——属主存活=真占用、属主已死=僵尸套接字（各写准原因）", () => {
     const script = buildLauncherScriptWin(makeDeps())
     // 属主存活判定：端口释放的判据是 socket 句柄引用计数归零，不是「进程存在」
-    expect(script).toContain("$ownerAlive = $false")
-    expect(script).toContain("Get-Process -Id $owner")
-    expect(script).toContain("reason = 'occupied'")
-    expect(script).toContain("reason = 'zombie-socket'")
-    // 僵尸套接字的错误文案要点明「用户空间无法释放」
+    expect(script).toContain("const ownerAlive = ownerPid ? alive(ownerPid) : false")
+    expect(script).toContain('reason: "occupied"')
+    expect(script).toContain('reason: "zombie-socket"')
+    // 僵尸套接字的错误文案要点明「用户空间无法释放」与「端口仍不可绑定」
     expect(script).toContain("僵尸套接字")
-    expect(script).toContain("已不存在，但端口仍 LISTENING")
+    expect(script).toContain("已不存在")
+    expect(script).toContain("端口仍不可绑定")
     // 两种情形都严格失败（不自动换端口、不动无辜进程）
-    expect(script).toContain("exit 1")
+    expect(script).toContain("process.exit(1)")
     // 中止时还原轮转掉的诊断日志（否则现场只剩 .prev）
-    expect(script).toContain("Move-Item '")
-    expect(script.match(/\.prev' '[^']*server\.log/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+    expect(script).toContain("const restoreLogs = () =>")
+    expect(script.match(/renameSync\(base \+ "\.prev", base\)/g)?.length ?? 0).toBe(1)
   })
 
   test("buildLauncherScriptPosix：属主已死 → 陈旧监听记录分类（与 Windows 同口径）", () => {
@@ -289,7 +307,7 @@ describe("restart_server 工具行为", () => {
     const deployed: Array<{ script: string; platform: string }> = []
     const tool = makeRestartServerTool({
       tmpDir: dir,
-      platform: "win32", // 断言 PowerShell 拉起器：显式注入，不随宿主平台漂移
+      platform: "win32", // 断言 Windows（JS）拉起器：显式注入，不随宿主平台漂移
       exitDelayMs: 5,
       exit: () => {
         exited++
@@ -304,7 +322,7 @@ describe("restart_server 工具行为", () => {
     // 任务终结声明：本轮任务到此结束，引擎不再把结果回灌模型（续跑由 prompt 机制接续）
     expect(res.endsTask).toBe(true)
     expect(deployed).toHaveLength(1)
-    expect(deployed[0].script.endsWith("launcher.ps1")).toBe(true)
+    expect(deployed[0].script.endsWith("launcher.mjs")).toBe(true)
     expect(deployed[0].platform).toBe("win32")
     const state = JSON.parse(readFileSync(join(restartDir(dir), "state.json"), "utf8"))
     expect(state.ok).toBeNull()
@@ -366,21 +384,21 @@ async function pickFreePort(): Promise<number> {
   })
 }
 
-/** 端口监听者 PID（无监听返回 0；探测方式与拉起器同源：Get-NetTCPConnection）。 */
+/** 端口监听者 PID（无监听返回 0；探测方式与拉起器同源：netstat -ano，不依赖 PowerShell）。 */
 async function portOwnerPid(port: number): Promise<number> {
-  const proc = Bun.spawn(
-    [
-      "powershell",
-      "-NoProfile",
-      "-Command",
-      `((Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess)`,
-    ],
-    { stdout: "pipe", stderr: "ignore", windowsHide: true },
-  )
-  const out = (await new Response(proc.stdout).text()).trim()
+  const proc = Bun.spawn(["netstat", "-ano", "-p", "TCP"], { stdout: "pipe", stderr: "ignore", windowsHide: true })
+  const out = await new Response(proc.stdout).text()
   await proc.exited
-  const pid = Number(out)
-  return Number.isFinite(pid) && pid > 0 ? pid : 0
+  let fallback = 0
+  for (const line of out.split(/\r?\n/)) {
+    const f = line.trim().split(/\s+/)
+    if (f.length < 5 || !/^TCP$/i.test(f[0]) || !f[1].endsWith(`:${port}`)) continue
+    const pid = Number(f[f.length - 1])
+    if (!Number.isInteger(pid) || pid <= 0) continue
+    if (/LISTEN/i.test(f[3])) return pid
+    if (!fallback) fallback = pid
+  }
+  return fallback
 }
 
 /** 进程是否存在（ESRCH=不存在；EPERM 等=存在但非本进程，按存在计）。 */
@@ -487,16 +505,16 @@ async function waitRestartState(tmpDir: string, timeoutMs = 150_000): Promise<{ 
   }
 }
 
-// Windows 部署器实机冒烟（跳过条件：非 win32 宿主）：Win11 24H2+ 移除 WMIC 后 wmic 不可用，
-// 拉起器部署改用二段式 PowerShell Start-Process。
+// Windows 部署器实机冒烟（跳过条件：非 win32 宿主）：拉起器是自包含 JS（由本进程自带运行时执行），
+// 不依赖 PowerShell/cmd/WMIC（受限机器上这些可能不存在、执行策略被拦或无权限）。
 // 本用例**真跑全链路**：拉起器在随机空闲端口真拉起一个完整服务、真等 HTTP 就绪、真写 state.json。
-// 因此收尾与隔离是硬要求——拉起器经 Start-Process 由独立 PowerShell 宿主创建（与服务/测试进程零亲缘），
+// 因此收尾与隔离是硬要求——拉起器经二段式中间进程 detached 创建（与服务/测试进程零亲缘），
 // **不受测试进程 job object 约束**，测试结束不会自动回收：不主动 kill 就会留下「没有任何会话、
 // 永远认为服务端空闲」的孤儿实例，抢跑真实实例的闲时待办与定时任务。
 // 故：读 state.json 收掉新服务 PID（try/finally 保证断言失败也收）；环境显式隔离到用例临时目录。
 ;(process.platform === "win32" ? describe : describe.skip)("restart_server（Windows 部署器实机冒烟）", () => {
   test(
-    "默认部署器（win32）：二段式 Start-Process 成功启动拉起器，不再依赖 WMIC",
+    "默认部署器（win32）：自有运行时二段式成功启动拉起器（不依赖 PowerShell/WMIC）",
     async () => {
       const tmpDir = mkdtempSync(join(tmpdir(), "restart-smoke-"))
       const entry = join(import.meta.dirname, "..", "..", "index.ts")
@@ -667,7 +685,7 @@ describe("restart_server 继承 dev-reload（重启后前端构建 watch 不丢�
       })
       const res = await tool.execute({ action: "restart" }, ctxStub(dir))
       expect(res.output).toContain("dev-reload 模式继承")
-      expect(readFileSync(scripts[0], "utf8")).toContain("$env:GEBAI_DEV_RELOAD = '1'")
+      expect(readFileSync(scripts[0], "utf8")).toContain('"GEBAI_DEV_RELOAD":"1"')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
