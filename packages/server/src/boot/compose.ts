@@ -48,7 +48,7 @@ import { FeishuBot } from "../feishu-bot/bot"
 import { EngineBotAdapter } from "../feishu-bot/adapter"
 import { createFeishuApi } from "../feishu-bot/api"
 import { makeWsSink } from "./serve"
-import { planXiangqiLaunch } from "./xiangqi-launch"
+import { planXiangqiLaunch, xiangqiHomeFor } from "./xiangqi-launch"
 import { installBrowserFetchProxy } from "../core/browser/fetch-proxy"
 import { ensureCorporateTrust } from "../core/trust/corporate"
 import { dataSubdir, log, setLogLevel } from "@gebai/sdk/node"
@@ -317,6 +317,27 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     for (const k of list ?? []) {
       if (!isPromptSectionKey(k)) log.warn(`[gebai] ${key} 中的提示词段落不存在: ${k}（可用: ${PROMPT_SECTION_KEYS.join("/")}）`)
     }
+  }
+
+  // 相期数据根的**唯一真源**：在此注入 `XIANGQI_HOME`，让控制器（读取时读它）与
+  // 拉起窗口的 `--home` 参数永远算出同一个目录。
+  //
+  // ## 为何必须在这里显式写入（不写就是一个真实的“推送全丢”故障）
+  //
+  // 两边原来各用一套公式，而它们结果不同：
+  //  - 宿主 `xiangqiHomeFor(config.gebaiHome)` → `{仓库根}/data/xiangqi`（窗口开的就是这个）
+  //  - 控制器 `homeFromEnv()` → `XIANGQI_HOME` → `GEBAI_HOME` → **`process.cwd()`**
+  //
+  // 开发形态下服务是用 `bun run --cwd packages/server` 起的，cwd 是 `packages/server`，
+  // 又没有设 `GEBAI_HOME`（`.env` 里那行被注释掉了）→ 控制器算出
+  // `packages/server/xiangqi`，与窗口读的 `data/xiangqi` **不是同一个目录**。
+  // 后果：WS 一通看起来正常，一旦走文件降级（相期未连/判死）卡片就落进没人读的目录，
+  // “降级兜底”形同虚设——用户侧的表现就是“相期开着但什么也收不到”。
+  //
+  // 放在 `loadConfig` 之后立即执行：控制器是进程级单例，谁先拿到它就用哪份 home，
+  // 越早定下来越安全（`push` 首次调用时才构造，所以这里仍然早得多）。
+  if (process.env.XIANGQI_HOME === undefined || process.env.XIANGQI_HOME.trim() === "") {
+    process.env.XIANGQI_HOME = xiangqiHomeFor(config.gebaiHome, process.env as Record<string, string | undefined>)
   }
 
   // 透明浏览器代理（GEBAI_BROWSER_PROXY=1，重启生效）：服务启动即安装 fetch 垫片——平台级

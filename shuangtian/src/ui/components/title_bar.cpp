@@ -39,6 +39,11 @@ constexpr std::size_t k_button_minimize = 0;
 constexpr std::size_t k_button_maximize = 1;
 constexpr std::size_t k_button_close = 2;
 
+/// 标题条带拖动阈值（逻辑像素）：指针离开按落点超过它才启动系统拖动。
+///
+/// 与 `ClickStreak::slop` 同量级（4px）——手抖不能把单击变成拖动。
+constexpr float kCaptionDragSlop = 4.0f;
+
 /// 按钮图标边长（逻辑像素）：46×40 的按钮里居中放 14px 图标，命中区够大、观感不臃肿。
 ///
 /// ⚠ 两个图标尺寸常量**分列**（而非共用）：按钮图标与标题图标虽然常取同一档 14/16px，
@@ -696,16 +701,29 @@ auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
         // **不能就此吞掉**：那样边缘就成了"死区"，窗口反而变得拖不动。
       }
       // ③ 标题条带 → 拖动窗口。
+      //
+      // **按下不当场进系统模态循环**：`window_begin_move()` 在 Win32 上是
+      // `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`，系统**同步**进入拖动模态
+      // 循环并在这里消化掉后续鼠标消息——于是双击的第二次按下永远到不了 UI
+      // （实测：真实双击标题栏，后端只推出一条 MouseMove，`DoubleClick` 一次都
+      // 没产出；打日志确认 `title_bar.cpp` 的 `DoubleClick` 分支从未执行，
+      // 而控制通道合成的 `dblclick` 能正常命中）。
+      //
+      // 现在的分工：按下只记起点，**指针真的移动超过阈值**才启动系统拖动
+      //（在 MouseMove 里）。这样单击/双击的按下与抬起都完整经过 UI，
+      // 双击判定回到框架的连击账（`ClickStreak`）上。
       if (hits_caption(event.position)) {
-        if (control_ != nullptr && control_->window_control_available()) {
-          (void)control_->window_begin_move();
-        }
+        caption_press_ = event.position;
+        caption_pressed_ = true;
         return true;   // 无论后端是否支持都消费：标题栏上的按下不该穿透到下层界面
       }
       return false;
     }
     case EventKind::MouseUp: {
-      if (pressed_button_ < 0 && pressed_caption_ < 0) return false;
+      // 标题条带上按过就消费这次松手（与按下对偶）：不消费就会穿透到下层界面。
+      const bool was_caption = caption_pressed_;
+      caption_pressed_ = false;
+      if (pressed_button_ < 0 && pressed_caption_ < 0) return was_caption;
       const bool was_control = pressed_button_ >= 0;
       const auto pressed =
           static_cast<std::size_t>(was_control ? pressed_button_ : pressed_caption_);
@@ -740,6 +758,21 @@ auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::MouseMove: {
+      // 标题条带上按下后真正拖起来：指针离开按落点超过阈值才启动系统拖动。
+      //
+      // 阈值用系统同一量级（`GetSystemMetrics(SM_CXDRAG)` 由后端定义；这里取 4 逻辑
+      // 像素，与 `ClickStreak::slop` 同口径）——手抖不能把单击变成拖动，也不能
+      // 把拖动的第一步拖没。一旦启动就清标记：拖完的松手不该再当一次点击。
+      if (caption_pressed_) {
+        const float dx = std::abs(event.position.x - caption_press_.x);
+        const float dy = std::abs(event.position.y - caption_press_.y);
+        if (dx > kCaptionDragSlop || dy > kCaptionDragSlop) {
+          caption_pressed_ = false;
+          if (control_ != nullptr && control_->window_control_available()) {
+            (void)control_->window_begin_move();
+          }
+        }
+      }
       // 悬浮态：按钮高亮（`hovered_` 由 UiRoot 维护在元素级，按钮级需要自己算）。
       int hovered = -1;
       if (show_controls_) {

@@ -1051,6 +1051,19 @@ CodeEditor 的 copy/cut **双写**（平台写失败静默降级，进程内永�
 回归：`tests/ui_clipboard_test.cpp` 七条（假 provider 断言写入内容/失败透传/密码拒绝/双写优先级）
 + `shell_backend_test` headless 读写闭环一条 + gbcode e2e [5b]（编辑器/Text 复制 → 粘贴读回）。
 
+**脚本侧的剪贴板（2026-11-11）**：`ScriptBridge` 构造时（传入 `UiRoot` 时）内置
+`app.clipboard.get()` / `app.clipboard.set(text)`，与上表**同一份平台轨**
+（经 `UiRoot` 的 provider）——不是另开一条路径。
+
+为何归框架而不各应用自己 `expose`：剪贴板是**平台能力**（与 `platform.open_url` 同类），
+而应用拿不到 `UiRoot` 的 provider（那由 `Application` 装配）。每应用各写一份的结果是
+一模一样的三行桥代码，而且很容易写成“进程内副本”（与 Ctrl+C 两条轨，于是
+“Ctrl+C 能拷、按钮拷不了”）。
+失败语义：provider 未装配时 `set` 抛 JS 异常而不是静默成功——
+静默成功会让用户以为拷到了，黏出来却是上一次的内容。
+回归：`tests/script_bridge_test.cpp` 的 `script_bridge_clipboard_round_trip`
+（断言内容真落到 provider + 失败转异常）。
+
 **渲染缓存分两层**：行索引（`line_spans_`，随文本变，一趟扫描）与高亮 token（`line_tokens_`，
 还要看语言规则）。分开后"取行号/算列"这类高频操作不会触发高亮重算——否则批量编辑会退化成 O(n²)。
 
@@ -1736,6 +1749,23 @@ Row 里，断言给子面板的约束 == 真实分栏几何）、
 **③ 行内交互补齐**：链接命中/点击回调/悬停（`link_at`）+ 代码块命中
 （`code_block_at`）——两者都与 `paint` 共用 `rows_`（绘制与命中不会胖滑）；
 表格单元格 `span_x` 记 x 区间供命中。`selectable` 默认 true。
+
+**链接可点：声明式宿主的通路（2026-11-11）**。`on_link_click` 是 C++ 回调，
+而**XML / JS 建出来的视图拿不到它**（XML 只能写属性，JS 无法把函数挂进 `std::function`）。
+于是同一个需求在声明式应用里只能二选一：绕开 `MarkdownView` 自己排版，
+或者让用户看到链接却点不动。补两个对称的开关：
+
+- `set_open_links(bool)` + 属性面 `open_links`（默认 **false**，保持“只上报、不动作”）：
+  打开后点击直接交给 `st::platform::open_external`，**只放行 http/https**
+  （其它 scheme 是任意程序启动面，不该由“点了文档里一个链接”触发）；
+- `link_opener`（`std::function`，默认指向 `open_external`）：
+  这是**可测试性接缝**——`open_external` 的副作用（启动外部程序）无法断言、
+  在 CI 里会弹真窗口且撤不回来。没有它，测试只能断言“点击被消费（`handled`）”，
+  而把打开那行拿掉也不会变红——实测就是这样一条**恒绿的假护栏**
+  （第一版逆向验证全绿）。注入记录器后可直接断言“打开的正是这个 URL、且只一次”。
+
+优先级：`on_link_click` 在场时**回调优先**（它做了决定就不再被动打开一次）。
+回归：`md_view_open_links_switch`（已逆向验证：拿掉 `link_opener` 调用即变红）。
 
 **④ 新增框架能力 `st::platform::open_external`**：用系统默认程序打开
 URL（Linux `xdg-open` / Windows `ShellExecuteW` / macOS `open`，均经 fork+exec
@@ -5004,7 +5034,7 @@ Win32 侧的做法要点（**"外观自绘、行为仍用系统"**——不重�
 | `WM_NCHITTEST` | 用 `resize_edge_at` 判八向边缘→`HT*`；最大化后不再给边 | 少了它：边缘既不是拖动也不是缩放（"自绘换来功能倒退"） |
 | 最大化尺寸 | `WM_SYSCOMMAND`/`WM_SIZE` 里按 `MonitorFromWindow().rcWork` 校正 | 无边框下系统算不对：**盖住任务栏**、底部多一条（经典副作用） |
 | 最小尺寸 | `WM_GETMINMAXINFO` 给 `240×120`（逻辑） | 能拖到比窗框按钮还窄，且**再也拖不回来** |
-| 拖动/缩放起点 | `WM_NCLBUTTONDOWN` + `HT*`（先 `ReleaseCapture`） | 自己算窗口位置 = 重实现吸附/双屏/任务栏避让 |
+| 拖动/缩放起点 | `WM_NCLBUTTONDOWN` + `HT*`（先 `ReleaseCapture`）；**但标题栏延到指针移出 4px 阈值才发起** | 自己算窗口位置 = 重实现吸附/双屏/任务栏避让。而按下即发起会让系统**同步**进入拖动模态循环，把双击的第二次按下吃掉（实测：真实双击标题栏产不出 `DoubleClick`，成功率约 50%） |
 | 标题栏附属槽 | `TitleBar::add_leading/add_trailing`（单行横排由标题栏自己算） | 否则示例只能另建一条与窗框**并列**的顶部栏：两份高度、两个拖拽区 |
 | 附属槽的地盘 | 槽内控件**不参与**拖动/双击：`hits_caption()` = `drag_rect()` 减去 `leading`/`trailing` 各槽的矩形 | 只排除尾部槽（旧写法）时，挂进 `leading` 的菜单栏**双击会把窗口最大化**（菜单自己消费了按下与单击，唯独双击冒泡到标题栏） |
 | 「铺满父级」的测量 | `fill_width/fill_height`（取 `available_*` 而非 `max_*`） | 行布局里 `max_width` 是 1e9：直接拿它当尺寸会量出天文宽度，把整行撞爆 |

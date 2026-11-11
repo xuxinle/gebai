@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "st/core/string.hpp"
+#include "st/core/platform.hpp"   // 链接点击直开（set_open_links）
 #include "st/md/highlight.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
@@ -284,6 +285,9 @@ MarkdownView::MarkdownView(std::string markdown) {
   style_.padding = math::Insets::symmetric(16.0f, 12.0f);
   style_.font_size = metrics_.base;
   set_focusable(true);
+  // 默认带真实打开能力（`st::platform::open_external`）：不装它时
+  // `set_open_links(true)` 会静默不动作——那是最难查的一种“开关没效果”。
+  link_opener = [](std::string_view url) { (void)st::platform::open_external(url); };
   if (!markdown.empty()) set_markdown(std::move(markdown));
 }
 
@@ -324,6 +328,13 @@ auto MarkdownView::block_count() const noexcept -> std::size_t { return blocks_.
 void MarkdownView::set_selectable(bool value) {
   if (selectable_ == value) return;
   selectable_ = value;
+  mark_dirty();
+}
+
+void MarkdownView::set_open_links(bool value) {
+  if (open_links_ == value) return;
+  open_links_ = value;
+  // 不标脏布局：它只影响点击行为，不影响排版/绘制。
   mark_dirty();
 }
 
@@ -507,6 +518,7 @@ auto MarkdownView::get_property(std::string_view name) const -> std::optional<st
        text_bytes, row.group_first ? "1" : "0", row.group_head_row);
  }
   if (name == "selectable") return selectable_ ? "true" : "false";
+  if (name == "open_links") return open_links_ ? "true" : "false";
   if (name == "stick_to_bottom") return stick_to_bottom_ ? "true" : "false";
   if (name == "pending") return stream_.pending() ? "true" : "false";
   return Element::get_property(name);
@@ -525,6 +537,12 @@ auto MarkdownView::set_property(std::string_view name, std::string_view value) -
     const auto flag = st::parse_bool(value);
     if (!flag.has_value()) return false;
     set_selectable(*flag);
+    return true;
+  }
+  if (name == "open_links") {
+    const auto flag = st::parse_bool(value);
+    if (!flag.has_value()) return false;
+    set_open_links(*flag);
     return true;
   }
   if (name == "stick_to_bottom") {
@@ -562,7 +580,8 @@ auto MarkdownView::set_property(std::string_view name, std::string_view value) -
 auto MarkdownView::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"markdown",       "text",          "block_count",    "content_height",
           "scroll",         "max_scroll",    "viewport_height", "base_font_size",
-          "code_font_size", "max_width",     "selectable",     "stick_to_bottom",
+          "code_font_size", "max_width",     "selectable",     "open_links",
+          "stick_to_bottom",
           "pending",        "selection",     "layout_width",
           // 可见行区间（只读）：与 `Tree`/`Table`/`Text`/`CodeEditor` 同一口径。
           // 为何必须暴露（2026-10-18，实测）：排查“滚动后大片空白”时，
@@ -2133,7 +2152,20 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
       const math::Point content = content_point_of(event.position);
       const std::string url = link_at(content);
       if (!url.empty()) {
-        if (on_link_click) on_link_click(url);
+        // 宿主回调优先（可拦截/记录）；回调不在场且开了 `open_links` 才自己打开。
+        //
+        // 为何回调优先：声明式应用（XML/JS）拿不到 `on_link_click`，只能用开关；
+        // 而 C++ 应用可能想把“打开”换成别的动作（在内部视图里展示、写日志、
+        // 记统计）——两者都要时回调先跑，它做了决定就不该再被动打开一次。
+        if (on_link_click) {
+          on_link_click(url);
+        } else if (open_links_ && link_opener) {
+          // 只放行 http(s)：其它 scheme（`file:`/`javascript:`/自定义）
+          // 是任意程序启动面，不该由“点了文档里一个链接”触发。
+          if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+            link_opener(url);
+          }
+        }
         event.handled = true;
         return true;
       }

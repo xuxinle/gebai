@@ -163,6 +163,15 @@ export interface XiangqiController {
   acceptPeer(ws: PeerSocket): void
   /** 宿主注入形态：主服务把该连接收到的消息交给控制器。 */
   peerMessage(raw: unknown): void
+  /**
+   * 宿主注入形态：证明对端**还活着**（收到任意帧都算，含 WS ping/pong）。
+   *
+   * 为何不能只靠 `peerMessage`：相期窗口空闲时不发应用消息，只靠每 30 秒一次的
+   * WS ping 保活。若不把 ping/pong 也算作活动，服务端会在空闲 90 秒后把
+   * **活着的**连接判死——而窗口那侧因为收到了 pong，图标一直是绿的。
+   * 两边认知就此分裂：用户看着窗口正常，agent 却说「相期未连接」。实测踩过。
+   */
+  peerActivity(): void
   /** 宿主注入形态：主服务在该连接关闭时通知控制器。 */
   peerClosed(): void
   /** 投递一张卡；`delivered=false` 表示此刻送不到（卡片已缓存，连上会重推）。 */
@@ -293,17 +302,24 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
    * `isConnected()` 会报“已连”——而卡片根本送不到人眼前。
    * 上层（审批桥、出站审核）据此做的判断会全错：以为提醒已送达，实际没人看得见。
    *
-   * 判据：`peer` 存在 **且** 距上次成功发送/收消息不超过 `STALE_PEER_MS`。
+   * 判据：`peer` 存在 **且** 距上次成功发送/收消息/ping-pong 不超过 `STALE_PEER_MS`。
    * 超时就当作没有 peer（但**不主动 close**：若它其实活着，重连会自然恢复；
    * 若真死了，它的 close 回调会把它清掉）。
-   */
+   *
+   * ## 为何“判死”不等于“不再尝试发送”（曾经这样，是致命错误）
+   *
+   * 旧实现里 `push()` 是 `if (isConnected()) sendCards() else writeInbox()`。
+   * 一旦时间戳过期，就**再也不发一帧**——于是活动时间永远不会被刷新，
+   * 状态永久卡死：窗口明明连着，卡片却全部落到没人读的文件里。
+   * 现在的语义：**时间戳只用于「这一刻要不要走降级兜底」**，只要还持有 peer 就真的试一次。
+ */
   function isConnected(): boolean {
     if (peer === null) return false
     return now() - lastPeerActivityMs <= STALE_PEER_MS
   }
 
   /**
-   * 标记相期最近一次被确认“活着”（收到消息 / 发送成功）。
+   * 标记相期最近一次被确认“活着”（收到消息 / 收到 ping-pong / 发送成功）。
    *
    * 抽成函数而不是在四处写 `lastPeerActivityMs = now()`：漏一处就会让
    * 一个活着的连接被误判为丧尸，而症状是“卡片偶尔不推”——极难归因。
@@ -607,17 +623,30 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
     live.set(id, card)
     if (server === null) listen()
     startPolling()
-    const viaWs = isConnected()
+    // ## 为何用 `peer !== null` 而不是 `isConnected()`
+    //
+    // 旧写法是 `if (isConnected())`，而 `isConnected()` 是**衰减型**判据：
+    // 一段时间没往来就返回 false。后果是：判死 → 不发帧 → 活动时间永不刷新 →
+    // **永久卡死**。窗口明明连着（图标绿色），卡片却全部落进没人读的文件。
+    //
+    // 正确的语义：**只要还持着一个 peer 就试一次发送**。真活着 → 送达并续命；
+    // 真死了 → `send()` 抛错 → `sendCards` 里揭掉 peer，然后在下面走文件降级。
+    // 降级写盘的代价是一次几十字节的文件写，远小于「把活连接永久判死」的代价。
+    const viaWs = peer !== null
     if (viaWs) {
       sendCards()
-    } else {
+    }
+    // 发送后重新判定：`sendCards` 可能因发送失败把 peer 揭掉（连接已坏）。
+    // 此时必须走文件降级，否则这张卡就真的丢了（live 里有，但没人读）。
+    const ok = peer !== null
+    if (!ok) {
       // WS 不通 → 写 inbox 做降级。相期启动/下次 `poll_inbox()` 会吃掉它。
       // 写不进去也不算致命：卡片仍在 `live` 里，连上后会重推。
       writeInbox(card)
     }
     // `delivered` 的含义是“**此刻**用户能实时看到”：
     // 写进 inbox 不算——相期没在跑就不会有人去读那个目录。
-    return { id, delivered: viaWs }
+    return { id, delivered: ok }
   }
 
   async function waitForAnswer(id: string, timeoutMs: number): Promise<CardAnswer | null> {
@@ -683,7 +712,9 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
   function dismissAll(): void {
     live.clear()
     arrivedEarly.clear()
-    if (isConnected()) sendCards()
+    // 同 `push`：持有 peer 就试一次，不凭衰减判据放弃（否则活连接被永久判死后，
+    // 扇卡也送不出去，用户看到的是“agent 说撤了，窗口上还挂着”）。
+    if (peer !== null) sendCards()
   }
 
   /**
@@ -703,7 +734,7 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
       waiting.delete(id)
       waiter.cancel()
     }
-    if (had && isConnected()) sendCards()
+    if (had && peer !== null) sendCards()
     return had
   }
 
@@ -735,6 +766,17 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
 
   function peerMessage(raw: unknown): void {
     handleMessage(raw)
+  }
+
+  /**
+   * 宿主告知“对端确实还在”（收到任意帧，含 WS ping/pong）。
+   *
+   * 相期窗口空闲时不发应用消息，只靠每 30 秒一次的 WS ping 保活。
+   * 没有这条路径，服务端只能拿“90 秒没动静”把活连接判死（见 `isConnected` 注释）。
+   */
+  function peerActivity(): void {
+    if (peer === null) return
+    touchPeer()
   }
 
   function peerClosed(): void {
@@ -785,6 +827,7 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
     // 宿主注入形态：主服务 `/xiangqi` 升级后的连接桥（见 acceptPeer 注释）
     acceptPeer,
     peerMessage,
+    peerActivity,
     peerClosed,
     push,
     waitForAnswer,

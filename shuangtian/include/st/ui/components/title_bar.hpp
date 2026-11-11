@@ -36,8 +36,10 @@ namespace st::ui {
 /// 自绘标题栏：图标 + 标题 + 右侧最小化/最大化/关闭。
 ///
 /// 交互（与系统标题栏**一致**，这是"自绘不丢手势"的关键）：
-/// - 标题区**按下** → `WindowControl::window_begin_move()`（等价于拖系统标题栏：吸附、
-///   跨屏拖动等系统手势随之生效——自己算窗口位置会把这些全丢掉）；
+/// - 标题区**按下并拖动**（指针移出 4 逻辑像素阈值）→ `WindowControl::window_begin_move()`
+///   （等价于拖系统标题栏：吸附、跨屏拖动等系统手势随之生效——自己算窗口位置会把这些全丢掉）。
+///   **按下本身不启动拖动**：`begin_move` 在 Win32 上是同步的系统拖动模态循环，
+///   按下即调用会把双击的第二次按下吃掉（实测真实双击不产生 `DoubleClick`）；
 /// - 标题区**双击** → 最大化/还原（系统标题栏同款语义）；
 /// - **边缘带按下**（`ui::resize_edge_at`，物理像素经 `device_scale` 折算）→
 ///   `window_begin_resize(edge)`（X11/Wayland 走它；Win32 由 `WM_NCHITTEST` 覆盖，
@@ -256,6 +258,14 @@ class TitleBar : public Element {
   /// 悬浮/按下的**命令**按钮序号（与控制按钮分开记；`-1` = 无）。
   mutable int hovered_caption_{-1};
   int pressed_caption_{-1};
+  /// 标题条带上已按下、但**尚未**启动系统拖动（指针还没移出阈值）。
+  ///
+  /// 存在的理由：`window_begin_move()` 在 Win32 上会同步进入系统拖动模态循环，
+  /// 把双击的第二次按下吃掉（实测：真实双击不产生 `DoubleClick`）。
+  /// 所以按下只记起点，指针真正移动超阈值时才启动拖动。
+  bool caption_pressed_{false};
+  /// 按下时的指针位置（逻辑坐标，与 `event.position` 同一坐标系）。
+  math::Point caption_press_{};
   /// 内嵌主题选择器（caption 位 0 的动作目标）：按钮点击转接给它，
   /// 它自己经宿主契约弹模态/切主题。不可见（不占布局），仅作逻辑部件；
   /// 以**子节点**上树（不可见子元素也会被 `adopt_host`），否则 `host()` 为空、

@@ -160,14 +160,23 @@ if (app.tray_ready()) app.set_tray_tooltip("相期 · " + std::to_string(cards.s
 托盘图标在 `WM_DESTROY` 里自动移除（不留僵尸图标）。后端不支持时只告警、不阻止启动，
 `app.tray_ready()` 如实反映是否真的建出来了——**不假装成功**。
 
-## 两种形态：轻提示与主界面
+## 窗口尺寸：固定 560×720（逻辑）= 700×900（物理）
 
-「不必每次弹出主界面」是这个应用的核心体验：
+窗口固定，启动时由 `main.cpp` 的 `app_options` 定好，**运行期永不改变**。
+应用层没有任何 `set_size` 调用。
 
-| 形态 | 何时 | 窗口 | 内容 |
-|---|---|---|---|
-| **轻提示** | 只有 `notice` | 360×200 | 最新一条 + 「展开 / 知道了」 |
-| **主界面** | 有 `choice` / `todo` | 460×620 | 全部卡片（可滚动） |
+⚠ 框架的 `width/height` 是**逻辑像素**，物理尺寸 = 逻辑 × `device_scale`：
+本机 DPI 100%（scale=1.0）时 700×900 就写 700×900，DPI 125%（scale=1.25）时
+写 560×720 才得到 700×900 物理。改这两个值前先查 `metrics.device_scale`。
+
+为什么固定而不按内容自适应：相期的正文是飞书授权说明、工具参数预览、带 URL 的卡片，
+而尺寸一变，MarkdownView 的折行、卡片高、滚动位置都会重排——用户正在读的那一屏
+会被抽走。屏幕空间在这里不是稀缺资源，**阅读位置稳定**才是。
+按内容定高还会让窗口在每次刷新时跳动（卡片数 0 到十几张都要能看）。
+
+早期版本有个「轻提示形态」：只有 `notice` 时自动缩成 420×200 贴角。它已**删除**——
+在一个固定尺寸的面板里，“缩成一小块只显示一条”只是把同一件事做得更差
+（其余卡片被藏起来，而窗口并不会真的变小）。now notice 与 choice/todo 走同一块面板。
 
 ## 布局：只有一条栏
 
@@ -188,18 +197,13 @@ if (app.tray_ready()) app.set_tray_tooltip("相期 · " + std::to_string(cards.s
 `#dismiss-all` 都能 `get`/`set`/`invoke`）：`snapshot()` 从 `UiRoot::content()`
 递归，而 `WindowFrame` 自身就是 content 根，标题栏是它的子节点。
 
-判定在 `app.js` 的 `desiredCompact()`：只要出现需要决策或动手的卡片就必须给足界面
-（360×200 里连选项都放不下）。用户主动点过「展开」后不再自动缩回——自动收起是打断。
-
-窗口尺寸用 `app.set_window_size(w, h)` 运行时切换（框架能力，见下）。
-
 ## 本轮补的框架能力（不是应用层绕路）
 
 | 能力 | 位置 | 为什么该在框架 |
 |---|---|---|
 | 系统托盘 | `shell::Backend::set_tray_icon/remove_tray_icon/take_tray_clicks` + win32 `Shell_NotifyIcon` | 托盘是**桌面环境概念**（Windows 通知区 / Linux StatusNotifier / macOS 菜单栏），机制完全不同；且生命周期要跟窗口一起管 |
 | 窗口恢复 | `shell::Backend::restore` + `Application::window_restore` | 各平台做法不同（win32 要 `SW_RESTORE` + 前台锁、X11 要 `_NET_ACTIVE_WINDOW`、Wayland 基本不允许） |
-| 运行时改窗口尺寸 | `shell::Backend::set_size` + `Application::set_window_size` | 常驻面板的「缩成一角 / 展开」基础；多窗口在无头后端与截图验证里都要额外路径 |
+| 运行时改窗口尺寸 | `shell::Backend::set_size` + `Application::set_window_size` | 框架能力（相期本身不用它——窗口尺寸固定；保留给需要“缩成一角 / 展开”的常驻面板）|
 | 绑定随元素销毁回收 | `ScriptHost::prune_dead_bindings` | 元素生命周期是框架的事，不能要求应用记得 `off()` |
 | 选择器解析缓存 | `ScriptBinding::parsed` | 绑定表规模由应用决定，框架不该在每次事件上重算 |
 
@@ -236,6 +240,6 @@ $('#btn').on('click', () => { list.clear(); 重建...; });  // 见下方说明
 
 ### 3. 无头模式下窗口尺寸不变
 
-`--headless` 时 `set_size` 不改变截图尺寸（无头后端没有真窗口），
-所以 e2e 能验证**内容形态切换**，但验证不了**窗口像素尺寸**。
-真窗口下的尺寸变化需要在有头模式手动确认。
+`--headless` 时没有真窗口，`set_size` 不改变截图尺寸，截图尺寸由 `capture` 的 region 决定。
+所以 e2e 能验证**内容与交互**，但验证不了**真窗口的像素尺寸**——后者需要在有头模式
+手动确认（或查控制通道 `metrics` 的 `physical_width/height`）。

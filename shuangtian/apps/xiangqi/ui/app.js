@@ -20,6 +20,15 @@
 //
 // 卡片从哪来、答复往哪去，都在 C++（文件/管道/套接字）。JS 只管呈现与转发——
 // 这与 xmlapp 同一条分工：数据留 C++，逻辑留 JS。
+//
+// ## 窗口尺寸不归本文件管
+//
+// 相期的窗口是**固定的 560×720（逻辑）= 700×900（物理，DPI 1.25）**，
+// 启动时由 `main.cpp` 的 `app_options` 一次性定好、运行期永不改变。
+// 一次性定好、运行期永不改变。本文件**不调** `app.window.set_size`：
+// 曾按“只有 notice 就缩成 420×200 轻提示”自动改尺寸，于是同一块面板有
+// 两种宽度——MarkdownView 折行、卡片高、滚动位置全部重排，用户正读的那一屏
+// 会被抽走；日志里则表现为画布反复 resize。尺寸是启动参数，不是运行期状态。
 
 (function () {
   'use strict';
@@ -27,10 +36,6 @@
   // ── 状态 ────────────────────────────────────────────────────────────────
   let cards = [];
   let peer = { connected: false, name: '' };
-  /** 当前是否为轻提示形态（窗口缩小、只显示最新一条）。 */
-  let compact = false;
-  /** 用户主动展开过（此后不再自动缩回——自动收起是打断）。 */
-  let userExpanded = false;
   /** 界面需要重画（所有变更置脏，由 tick 统一渲染）。 */
   let dirty = false;
 
@@ -83,13 +88,6 @@
     const list = $('#cards');
     if (!list) return;
 
-    // 轻提示形态：窗口已缩成小尺寸，只显示最新一条（不画主界面）。
-    // 这样 notice 类不会把整个工作面板拉出来——只是通知一声。
-    if (compact) {
-      renderCompact();
-      return;
-    }
-
     // ## 自然的写法：清空 + 整片重建
     //
     // 早期版本这里是"槽位复用"（结构只建一次、之后只 set 属性），
@@ -111,9 +109,6 @@
     // 徽标：有卡时主色强调、空态弱化（动态信息该比静态标题跳一级）
     $('#badge').set({ text: badgeText(), tone: cards.length > 0 ? 'primary' : 'faint' });
 
-    // 形态互斥：展开态下隐藏 compact 区（标题栏一直可见）
-    $('#compact').set({ visible: 'false' });
-
     // 空状态与卡片区互斥（都占同一块 grow 区域，同时可见会各分一半高度）。
     // ⚠ 必须隐 **`#cards-scroll`（外层滚动容器）**，不是 `#cards`：
     //   `#cards` 只是滚动区里的内容列，隐它以后滚动区自己还在布局里，
@@ -130,78 +125,11 @@
   }
 
   /**
-   * 该用哪种形态？——**这是"不必每次弹出主界面"的判定处**。
-   *
-   * 规则（按用户视角倒推）：
-   * - 只有 notice（纯告知）且**用户没在看**时才用轻提示；
-   * - 一旦有 choice/todo，就必须给足界面（那两类要求用户做出动作，
-   *   挤在 360×200 的小窗里连选项都放不下）；
-   * - 用户主动展开过之后，不再自动缩回去（人已经决定要看了，
-   *   自动收起是打断——那种"手一动就没了"的界面最烦人）。
-   */
-  function desiredCompact() {
-    if (userExpanded) return false;
-    if (cards.length === 0) return false;
-    // 有任何需要决策/动手的卡片 → 必须展开
-    for (const card of cards) {
-      if (card.kind === 'choice' || card.kind === 'todo') return false;
-    }
-    return true;   // 全是 notice
-  }
-
-  // ── 轻提示形态：一屏只说一件事 ──────────────────────────────────────────
-
-  function renderCompact() {
-    // 主区域全隐：这一形态下只剩 compact 区
-    $('#cards').set({ visible: 'false' });
-    $('#empty').set({ visible: 'false' });
-    // ⚠ 标题栏**不隐藏**：徽标、连接状态、「全部忽略」都住在那里（见 main.cpp）。
-    // 以前这里还隐 `#header`/`#footer`，那是 XML 自带的两条冗余带；
-    // 现在它们没了，隐藏标题栏等于把连接状态也一起藏了。
-    $('#compact').set({ visible: 'true' });
-
-    // 徽标在**两种形态下都要更新**：它住在常驻标题栏里，
-    // 只在主界面分支里写会让轻提示形态停在“暂无待办”——
-    // 而同一屏下面明明写着“另 5 件”，两处自相矛盾。
-    $('#badge').set({ text: badgeText(), tone: cards.length > 0 ? 'primary' : 'faint' });
-
-    const card = cards[0];
-    if (!card) {
-      // 没有卡片时不该停在 compact（否则窗口小小一片、什么都没）
-      set_compact(false);
-      return;
-    }
-    const tone = toneOf(card.kind);
-    $('#compact-kind').set({ text: tone.label, tone: tone.tone });
-    $('#compact-title').set({ text: card.title || '（无标题）' });
-    // 正文也是 markdown（与主界面同一口径——同一条内容两种形态不应长得不一样）
-    if (card.body) {
-      $('#compact-body').set({ markdown: card.body, visible: 'true' });
-    } else {
-      $('#compact-body').set({ visible: 'false' });
-    }
-    // 还有几件在排队（让用户知道"叫我的不止这一件"）
-    $('#compact-more').set({ text: cards.length > 1 ? '另 ' + (cards.length - 1) + ' 件' : '' });
-
-    // 「知道了」只对 notice 有意义（choice/todo 必须给结果 → 引导去展开）
-    const isNotice = card.kind === 'notice';
-    $('#compact-ok').set({ visible: isNotice ? 'true' : 'false' });
-    $('#compact-expand').set({ label: isNotice ? '展开' : '去处理' });
-
-    // 连接状态：这一形态把主界面底部栏整个隐了，所以必需在 compact 区里有一份。
-    // 断线时用户必须能看见——否则他会以为 agent 还在盯着。
-    paintLinkState($('#compact-link'), $('#compact-link-icon'));
-  }
-
-  /**
    * 绘制连接状态：**只用一个图标**。
    *
    * 为何不写文字：常驻面板的横向空间很贵，而“已连接”三个字占的位置
    * 比图标大好几倍，信息量却一样——绿色链子 = 通着，红色警告 = 断了。
    * 具体原因（如“对端已关闭连接”）保留在 `title` 属性里，悬停可见。
-   *
-   * 为何抽出来：主界面与轻提示各有一份元素，但**判定逻辑必须一致**——
-   * 两份各写一遍，早晚会出现“一种形态说已连接、另一种说未连接”。
    */
   function paintLinkState(textHandle, iconHandle) {
     if (peer && peer.connected) {
@@ -217,32 +145,6 @@
         ? ('已连接' + (peer.name ? ' · ' + peer.name : ''))
         : (peer && peer.detail ? peer.detail : '未连接');
     iconHandle.set({ hint: detail });
-  }
-
-  /**
-   * 切换形态（同时把窗口改成对应尺寸）。
-   *
-   * 为何窗口尺寸也变：轻提示的全部意义就是"不占地方"。
-   * 若窗口仍是主界面那么大，只是内容变少，那和"弹主界面"没区别。
-   */
-  function set_compact(next) {
-    if (compact === next) return;
-    compact = next;
-    try {
-      app.window.set_size(compact ? 360 : 460, compact ? 200 : 620);
-    } catch (e) {
-      log('相期：切换窗口尺寸失败 — ' + e);
-    }
-    // 切回展开态：只需收起 compact 区（标题栏一直可见）
-    if (!compact) {
-      $('#compact').set({ visible: 'false' });
-    }
-    render();
-  }
-
-  /** 事件回调里只置脏（不在事件栈上改结构）。 */
-  function requestRender() {
-    dirty = true;
   }
 
   // ── 单张卡片：三类的内部结构不同，各建各的 ──────────────────────────────
@@ -287,6 +189,12 @@
         id: sid + '-body',
         markdown: card.body,
         max_height: '220',
+        // 链接可点（框架能力）：点击直接交给系统浏览器。
+        // 卡片正文里的授权/登录链接是“要去做的事”，点不动等于断在半路。
+        open_links: 'true',
+        // 可拖选 + Ctrl+C（默认就是 true，写出来是让它成为显式约定）：
+        // “把这段文字拷走”是卡片的高频动作（命令、单号、号码）。
+        selectable: 'true',
       });
     }
 
@@ -351,6 +259,60 @@
       $('#' + okId).on('click', function () {
         submit(card.id, { acknowledged: true });
       });
+    }
+
+    // ④ 「复制」：把这条内容的**纯文本**放进剪贴板。
+    //
+    // ## 为何需要一个按钮（正文已经能拖选 + Ctrl+C）
+    //
+    // 那两条要求用户先知道“这里能选”，而且得先把焦点落到正文上；
+    // 而“把这条提醒拷到别处”（贴给同事、存到工单、运行一条命令）
+    // 是常驻面板最高频的动作之一。按钮 == 一眼可见的入口。
+    //
+    // 拷的是**标题 + 正文纯文本**（含链接原地址）：给出去的东西要能独立读懂，
+    // 只拷正文时对方看不到“这是什么事”。
+    //
+    // 靠右摆（Spacer 隔开）：它是辅助动作，不能与“必须给结果”的主操作抢位置。
+    {
+      const copyId = actId + '-copy';
+      $('#' + actId).append('Spacer', { grow: 'true' });
+      $('#' + actId).append('Button', {
+        id: copyId, label: '复制', icon: 'copy', variant: 'ghost', scale: 'small',
+        hint: '把这条内容的文字拷到剪贴板（正文也可直接拖选 / Ctrl+C）',
+      });
+      $('#' + copyId).on('click', function () {
+        copyCard(card);
+      });
+    }
+  }
+
+  /**
+   * 把一张卡片拷进剪贴板（纯文本：标题 + 正文 + 链接地址）。
+   *
+   * 为何不是拷 `body` 原样的 markdown：用户拿到的文本是要**给别人看**的
+   * （贴群、贴工单），markdown 标记在那里只会显得乱。而链接必须**留下地址**——
+   * 纯文本环境里 `[文字](url)` 里的 `url` 才是可用的那一半。
+   */
+  function copyCard(card) {
+    const parts = [];
+    if (card.title) parts.push(card.title);
+    if (card.body) parts.push(card.body);
+    // 选项里的链接地址单独附在后面：正文里的 `[x](url)` 在纯文本里不再可点。
+    if (card.options && card.options.length) {
+      const links = card.options.filter(function (o) { return o.url; });
+      if (links.length) {
+        parts.push(links.map(function (o) { return o.url; }).join('\n'));
+      }
+    }
+    const text = parts.join('\n\n');
+    if (!text) return;
+    try {
+      app.clipboard.set(text);
+      log('相期：已复制卡片 ' + card.id + '（' + text.length + ' 字）');
+    } catch (e) {
+      // 剪贴板失败必须说出来：静默失败会让用户以为拷到了，黏出去是上一次的内容。
+      log('相期：复制失败 — ' + e);
+      $('#link-text').set({ text: '复制失败：' + e, tone: 'danger', visible: 'true' });
     }
   }
 
@@ -453,27 +415,15 @@
     // 放在 tick 里而不是各回调里，是为了保证**只在主循环、不在事件派发栈上**改结构。
     if (dirty) {
       dirty = false;
-      const want = desiredCompact();
-      if (want !== compact) set_compact(want);
-      else render();
+      render();
     }
   }
 
   // ── 启动 ────────────────────────────────────────────────────────────────
 
-  $('#compact-ok').on('click', function () {
-    const card = cards[0];
-    if (card) submit(card.id, { acknowledged: true });
-  });
-  $('#compact-expand').on('click', function () {
-    userExpanded = true;   // 主动展开后不再自动缩回
-    requestRender();       // 由 tick 调 set_compact（不在事件栈上改结构）
-  });
-
   $('#dismiss-all').on('click', function () {
     try {
       cards = app.cards.dismiss_all();
-      userExpanded = false;   // 内容清空 → 下次新卡片重新走轻提示
       dirty = true;           // 统一由 tick 渲染（不在事件栈上改结构）
     } catch (e) {
       log('相期：批量忽略失败 — ' + e);
