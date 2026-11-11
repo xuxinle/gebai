@@ -3097,6 +3097,9 @@ if (target == nullptr) {
 // 会互相写坏）。串行是这里的正解，不是保守。
 if (target->kind == "group") {
   std::vector<std::string> built;
+  // 失败成员（名字 + 原因）：汇总后交给 CLI 报告，不在本层打印
+  // （构建器不负责终端输出；输出口径归 CLI，见 `tools/stpm/main.cpp`）。
+  std::vector<std::pair<std::string, std::string>> skipped;
   for (const auto& member : target->libraries) {
     const TargetSpec* member_target = manifest.find_target(member);
     if (member_target == nullptr) {
@@ -3115,8 +3118,12 @@ if (target->kind == "group") {
     // 成员内部仍会走“先递归建它的库依赖”那段逻辑（st_core 等）。
     auto member_stats = build(manifest, member_options);
     if (!member_stats) {
-      return unexpected(member_stats.error().code,
-                        std::format("[{}] {}", member, member_stats.error().message));
+      // **代码/环境失败 → 记录并继续**（不中止整批）：一个应用因缺料建不出来，
+      // 不应把其余本可编译的应用一起挡下。理由与整体仍非 0 退出的约束
+      // 见 `BuildStats::skipped_members` 的注释。
+      // 清单配置错（成员缺失 / 嵌套 group）已在上面 return，不走这里。
+      skipped.push_back({member, member_stats.error().message});
+      continue;
     }
     built.push_back(member);
     stats.units_total += member_stats->units_total;
@@ -3126,13 +3133,31 @@ if (target->kind == "group") {
     stats.link_ms += member_stats->link_ms;
   }
   stats.linked = true;
+  stats.skipped_members = std::move(skipped);
   // 产物字段记一行“N 个目标”，而不是最后一个成员的名字（那会误导）。
   // 拼接走 `vector<string_view>`：`st::join` 只收 string_view（零拷贝，不偷字符串）。
   std::vector<std::string_view> names_view;
   names_view.reserve(built.size());
   for (const auto& name : built) names_view.emplace_back(name);
-  stats.artifact = std::format("{} 个目标（{}）", built.size(), st::join(names_view, " "));
+  // 有失败成员时把“成功/总数”写清楚：只说“1 个目标”会让人以为 all 只列了一个。
+  stats.artifact = stats.skipped_members.empty()
+                       ? std::format("{} 个目标（{}）", built.size(), st::join(names_view, " "))
+                       : std::format("{} / {} 个目标（成功: {}；失败: {}）", built.size(),
+                                     target->libraries.size(), st::join(names_view, " "),
+                                     st::join([&] {
+                                       std::vector<std::string_view> names;
+                                       names.reserve(stats.skipped_members.size());
+                                       for (const auto& [name, _] : stats.skipped_members) {
+                                         names.emplace_back(name);
+                                       }
+                                       return names;
+                                     }(), " "));
   stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
+  // **不在这里 return unexpected**：失败成员的**名字与原因**必须能被上层拿到，
+  // 而 `unexpected` 只带得了一句 message。若这里就失败返回，
+  // CLI 也无从得知“哪几个已经建成了”——而「哪几个成了、哪几个没成」正是这次
+  // 改动的全部价值。故：stats 正常返回（带上 skipped_members），
+  // 由 CLI 看到 skipped_members 非空时把退出码置非 0（见 `tools/stpm/main.cpp`）。
   return stats;
 }
 
@@ -3217,7 +3242,7 @@ if (target->kind == "group") {
     // 生成的源与上游运行时都按"第三方"对待（`-w`、不插桩）——它们不是本工程的手写代码。
     UnitIncludeMap unit_includes;
     std::set<std::string> target_third_party = third_party_paths;  // 本目标的第三方集合（含生成的嵌入源码）
-    if (!target->embed.empty()) {
+    if (!target->embed.empty() || !target->optional_embed.empty()) {
       // 目标级嵌入（作用域 = 目标名，只下发给本目标的单元）。
       // 运行时实现由"库级嵌入"提供（框架有嵌入则归框架、否则归工程库级、都没有则归本目标）
       // ——同链接里出现两份全局态会重复定义符号（踩过）。
@@ -3228,12 +3253,26 @@ if (target->kind == "group") {
       request.build_subdir = subdir;
       request.scope = options.target;
       request.with_runtime = !framework_owns_runtime && manifest.embed.empty();
-      EmbedContribution contribution;
-      contribution.base_directory = manifest.directory;
-      contribution.patterns = target->embed;
-      contribution.identifier_prefix = options.target;
-      contribution.origin = std::format("目标 {}", options.target);
-      request.contributions.push_back(std::move(contribution));
+      // 必顶资源与可选资源分**两个贡献方**：只有后者带 `optional`。
+      // 分开而不是合一，是因为语义不同：必顶资源缺了就该报错（路径写错的典型形态），
+      // 可选资源缺了就该降级（本地生图产线产出、不入库的大文件）。
+      if (!target->embed.empty()) {
+        EmbedContribution contribution;
+        contribution.base_directory = manifest.directory;
+        contribution.patterns = target->embed;
+        contribution.identifier_prefix = options.target;
+        contribution.origin = std::format("目标 {}", options.target);
+        request.contributions.push_back(std::move(contribution));
+      }
+      if (!target->optional_embed.empty()) {
+        EmbedContribution contribution;
+        contribution.base_directory = manifest.directory;
+        contribution.patterns = target->optional_embed;
+        contribution.identifier_prefix = options.target;
+        contribution.origin = std::format("目标 {}（可选）", options.target);
+        contribution.optional = true;
+        request.contributions.push_back(std::move(contribution));
+      }
       // `attach_embeds` 会把包含目录下发到 `target_sources` 里的每个单元
       // （含目标自身的源——只给生成源加会报 "battery/embed.hpp: No such file or directory"），
       // 键的绝对化也在里面统一处理（曾因相对/绝对不匹配静默查不到）。

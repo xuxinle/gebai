@@ -354,3 +354,74 @@ ST_TEST(group_builds_every_member) {
     ST_CHECK(run->stdout_text.find(name + "-ok") != std::string::npos);
   }
 }
+
+/// 合成目标里**某个成员建不出来时，其余成员照常建完**（2026-10-29 用户需求）。
+///
+/// ## 为什么这条得单独立一个用例
+///
+/// 旧行为是「首个失败即整体中止」：一个应用因环境缺料（典型：格斗的立绘是本地 AI 生图
+/// 产出、未入库，另一台机器上没有）建不出来时，**7 个本是好的应用一个都没编**，
+/// 而使用者只看到格斗那条报错——很容易误判“整个工程坏了”。
+///
+/// 这类回归**不会报错**：要么全绿（少了成员也没人发现），要么整批红（看不出其实只坏一个）。
+/// 所以判据钉在三个可观测事实上：
+///   ① 好成员**确实出了产物且能跑**（不是“只报了个成功”）；
+///   ② `skipped_members` **确实记下了**坏成员（名字对得上）；
+///   ③ 构建**不返回 error**（stats 仍可拿到，CLI 才能先把成功的报出来）。
+///
+/// 清单配置错（成员名不存在）**仍必须硬失败**——那条由
+/// `group_rejects_unknown_member` 守着，两个用例合起来才是完整的语义边界：
+/// 「环境/代码建不出来」可跳过，「清单指向不存在的目标」不可。
+ST_TEST(group_skips_failed_member_and_builds_rest) {
+  TempDir temp("st_group_skip_fail");
+  const std::string root = temp.path();
+  ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src")).has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(st::fs::join(root, "src"), "good.cpp"),
+                                "#include <cstdio>\nauto main() -> int { std::puts(\"good-ok\"); return 0; }\n")
+                 .has_value());
+  // 故意写一个**编译不过**的源：模拟“这台机器缺料/代码坏了”的成员
+  ST_REQUIRE(st::fs::write_text(st::fs::join(st::fs::join(root, "src"), "bad.cpp"),
+                                "auto main() -> int { this_is_not_declared_anywhere(); return 0; }\n")
+                 .has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(root, "st.pkg"), R"({
+  "shuangtian_pkg_format": 1,
+  "name": "groupprobe5",
+  "version": "0.1.0",
+  "kind": "static_library",
+  "cxx_standard": 23,
+  "include_dirs": ["src"],
+  "sources": [],
+  "targets": {
+    "all": { "kind": "group", "libraries": ["bad", "good"] },
+    "bad": { "kind": "executable", "sources": ["src/bad.cpp"] },
+    "good": { "kind": "executable", "sources": ["src/good.cpp"] }
+  }
+})")
+                 .has_value());
+
+  const auto manifest = st::pkg::Manifest::load(st::fs::join(root, "st.pkg"));
+  ST_REQUIRE(manifest.has_value());
+  st::pkg::BuildOptions options{};
+  options.target = "all";
+  options.profile = "dev";
+  options.no_tests = true;
+  const auto stats = st::pkg::build(*manifest, options);
+  // ③ 不整体失败：stats 拿得到（否则 CLI 无从得知“哪几个已建成”）
+  ST_REQUIRE(stats.has_value());
+  // ② 坏成员被记下来，且原因里带着它自己的报错（不是一句笼统的“失败”）
+  ST_REQUIRE(stats->skipped_members.size() == 1);
+  ST_CHECK_EQ(stats->skipped_members[0].first, std::string("bad"));
+  ST_CHECK(!stats->skipped_members[0].second.empty());
+  // ① 好成员照常出了产物且有能跑
+  const std::string good_exe =
+      st::fs::join(st::fs::join(st::fs::join(st::fs::join(root, "build"), "dev"), "bin"), "good.exe");
+  ST_CHECK(st::fs::is_regular_file(good_exe));
+  const auto run = st::process::run(good_exe, {});
+  ST_REQUIRE(run.has_value());
+  ST_CHECK_EQ(run->exit_code, 0);
+  ST_CHECK(run->stdout_text.find("good-ok") != std::string::npos);
+  // 坏成员没有产物（不能“跳过”成“也建了个空壳”那种假成功）
+  const std::string bad_exe =
+      st::fs::join(st::fs::join(st::fs::join(st::fs::join(root, "build"), "dev"), "bin"), "bad.exe");
+  ST_CHECK(!st::fs::is_regular_file(bad_exe));
+}

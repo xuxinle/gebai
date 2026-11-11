@@ -19,11 +19,11 @@ namespace st::pkg {
 namespace {
 
 /// 本层已识别的顶层字段（其余进 `extra_fields`，回写时保留）。
-inline constexpr std::array<std::string_view, 22> known_keys{
+inline constexpr std::array<std::string_view, 23> known_keys{
     "name",       "version",     "kind",        "modules",        "include_dirs",
     "sources",    "tests",       "flags",       "defines",        "system_libs",
     "targets",    "dependencies", "dependency_modules", "dependency_system",
-    "third_party_sources", "c_flags", "embed", "toolchains", "framework",
+    "third_party_sources", "c_flags", "embed", "optional_embed", "toolchains", "framework",
     "shuangtian_pkg_format", "log", "cxx_standard"};
 
 [[nodiscard]] auto known_key(std::string_view key) -> bool {
@@ -66,6 +66,7 @@ inline constexpr std::array<std::string_view, 22> known_keys{
   target.include_third_party_sources =
       json_get_string_array(json, "include_third_party_sources");
   target.embed = json_get_string_array(json, "embed");
+  target.optional_embed = json_get_string_array(json, "optional_embed");
   target.libraries = json_get_string_array(json, "libraries");
   if (const st::Json* flag = st::json_find(json, "inherit_project_embed");
       flag != nullptr && flag->is_boolean()) {
@@ -474,6 +475,9 @@ auto Manifest::to_json() const -> st::Json {
       entry["include_third_party_sources"] = to_array(target.include_third_party_sources);
     }
     if (!target.embed.empty()) entry["embed"] = to_array(target.embed);
+// 可选嵌入也回写：丢这一行会让 `st add` 类工具重写清单时**静默丢掉**降级声明，
+// 于是下一台机器上构建又变成硬失败（而症状是“以前能编、现在不行”）。
+if (!target.optional_embed.empty()) entry["optional_embed"] = to_array(target.optional_embed);
     if (!target.libraries.empty()) entry["libraries"] = to_array(target.libraries);
     if (target.inherit_project_embed.has_value()) {
       entry["inherit_project_embed"] = *target.inherit_project_embed;

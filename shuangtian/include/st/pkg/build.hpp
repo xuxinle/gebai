@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "st/core/error.hpp"
@@ -122,6 +123,25 @@ struct BuildStats {
   /// （Windows 宿主上 mingw 交叉档产出本机 PE）；目标≠宿主（Linux 宿主编 mingw）
   /// 为 false——`st run`/`st test` 拒绝执行并提示在目标平台运行。
   bool runs_on_host{false};
+  /// 合成目标（`kind = "group"`）里**构建失败但被跳过**的成员：`{成员名, 失败原因}`。
+  ///
+  /// ## 为什么失败要“跳过”而不是“中止”（2026-10-29，用户实测需求）
+  ///
+  /// `st build all` 的用途是「把全部真实应用编一遍」。其中一个应用因**环境缺料**
+  /// （典型：格斗的立绘是本地 AI 生成的 PNG、未入库，别的机器上没有）而建不出来时，
+  /// 旧行为是**首个失败即整体中止**——于是 7 个本是好的应用一个都没编，
+  /// 而使用者看到的只是格斗那条报错，很容易误判“整个工程坏了”。
+  ///
+  /// 改法：**继续建完其余成员**，把失败集中记在这里由 CLI 汇总报告，
+  /// 并且**整体仍以非 0 退出**（少编了一个应用就是没成功——不能静默变绿，
+  /// 那会让 CI 和“我全编过了”这种结论一起失真）。
+  ///
+  /// 注意：**清单配置错误不在此列**（成员名不存在 / 成员是嵌套 group）——
+  /// 那是清单写错，必须当场硬失败：它的存在意义就是“一个应用都不漏”，
+  /// 静默跳过会让 `all` 悄悄少编一个目标。两种失败的区别是
+  /// 「**环境/代码**建不出来」（可跳过，继续验证其余）与
+  /// 「**清单**指向不存在的目标」（配置错，跳过就是掩盖）。
+  std::vector<std::pair<std::string, std::string>> skipped_members{};
 };
 
 /// profile → 编译/链接标志（debug: -O0 -g / release: -O2 -DNDEBUG / san: ASan+UBSan）。

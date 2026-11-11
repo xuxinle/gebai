@@ -383,6 +383,21 @@ auto command_build(const Arguments& arguments) -> int {
                 stats->workers_large);
   }
   if (!stats->artifact.empty()) st::log::out("产物: {}\n", stats->artifact);
+  // 合成目标（`st build all`）里的失败成员：**逐个点名**并给退出码非 0。
+  //
+  // 为何不能只打一句“N 个失败”（2026-10-29）：失败原因各不相同（格斗是缺立绘资源、
+  // 别的可能是编译错），而用户下一步要做的事就取决于“是谁、为啥”。
+  // 为何仍要非 0 退出：少建了一个应用就是“没成功”——如果这里返回 0，
+  // CI 与「我全编过了」的结论会一起失真（而这正是当初写 `all` 要防的事）。
+  if (!stats->skipped_members.empty()) {
+    st::log::out("\n以下 {} 个目标未能构建（已跳过，其余已完成）：\n",
+                stats->skipped_members.size());
+    for (const auto& [name, reason] : stats->skipped_members) {
+      st::log::out("  ✗ {}: {}\n", name, reason);
+    }
+    std::fprintf(stderr, "错误: %zu 个目标构建失败（见上方清单）\n", stats->skipped_members.size());
+    return 1;
+  }
   // 测试二进制被顺带重建时必须说一声——这个动作的全部价值就在于消除
   // 「以为验了新代码，其实跑的是旧的」。静默重建等于把功劳埋了。
   if (stats->tests_rebuilt) {
