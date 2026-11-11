@@ -37,7 +37,7 @@ PKG = ROOT / "st.pkg"
 PROFILE = "dev"
 
 # 桌面应用（应为 GUI）
-DESKTOP_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xiangqi", "cefu", "gedou"]
+DESKTOP_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xiangqi", "cefu", "gedou", "jianmu"]
 # 命令行工具（应保持 CONSOLE）
 CLI_TARGETS = ["gedou_rl"]
 

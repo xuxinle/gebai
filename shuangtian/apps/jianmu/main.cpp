@@ -44,10 +44,12 @@
 #include <string_view>
 #include <vector>
 
+#include "battery/embed.hpp"   // 编译期资源嵌入（图标两件；stpm 生成）
+#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
-#include "st/app/cli.hpp"
-#include "st/core/string.hpp"   // parse_i64（参数取值校验）   // 通用参数解析（框架统一入口；本应用只声明特有参数）
-#include "st/core/entry.hpp"
+#include "st/app/cli.hpp"      // 通用参数解析（框架统一入口；本应用只声明特有参数）
+#include "st/core/string.hpp"  // parse_i64（参数取值校验）
+#include "st/core/entry.hpp"   // ST_MAIN（跨平台入口：UTF-8 参数 + 诊断接线）
 #include "st/core/fs.hpp"
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
@@ -460,12 +462,26 @@ auto run_app(int argc, char** argv) -> int {
   // 脚本宿主：本示例的界面联动靠 JS（与 xmlapp 同一形态）
   app_options.enable_script = true;
 
+  // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
+  //
+  // 两条链路不会自动互通：`st.pkg` 里的 `.ico` 只进 PE 资源（资源管理器看），
+  // 任务栏上是窗口的 `WM_SETICON`，只能由这里的 PNG 给。
+  st::app::icon::attach_png(app_options.window_icon_png,
+                            b::embed<"apps/jianmu/assets/jianmu-icon.png">());
+  st::app::icon::register_svg("jianmu-logo",
+                              b::embed<"apps/jianmu/assets/jianmu-logo.svg">());
+
   st::app::Application app("jianmu", "0.1.0", app_options);
 
   auto frame = std::make_unique<st::ui::WindowFrame>("建木 · 三维建模与演示");
   frame->set_id("window-frame");
   frame->set_window_control(&app);
-  if (frame->title_bar() != nullptr) frame->title_bar()->set_id("titlebar");
+  if (frame->title_bar() != nullptr) {
+    frame->title_bar()->set_id("titlebar");
+    // 品牌标记（本应用自己的 SVG 记号，不是通用图标）。
+    // 注意：**不要**在这之后再调 `set_icon("某个内置名")`——那会把品牌标记覆盖掉。
+    st::app::icon::apply_brand(frame->title_bar(), "jianmu-logo");
+  }
 
   // ── 内容：三维视口占满，底部一条状态栏 ──
   //

@@ -29,6 +29,31 @@ st build jianmu
 > ⚠ 目录里的场景名**带扩展名**：同名两种写法（`quad.js` / `quad.py`）是常见情形
 >（就是要对比两条路），用裸主名会让清单里出现两个 "quad"，选中哪个没法分辨。
 
+它是**桌面应用**而不是“带窗口的命令行程序”：PE 子系统为 GUI（双击不弹控制台，
+`st.pkg` 的 `"system": "gui"`）。从 cmd/PowerShell 带参数跑时输出不丢——
+入口的 `startup_configure_console` 会把 stdout/stderr 接回父控制台。
+
+## 图标（三条独立链路，不是同一份东西）
+
+| 链路 | 素材 | 谁设 | 看到的地方 |
+|---|---|---|---|
+| exe 文件图标 | `assets/jianmu.ico` | 构建期进 PE 资源（`st.pkg` 的 `"icon"`） | 资源管理器 / 快捷方式 |
+| 窗口 / 任务栏图标 | `assets/jianmu-icon.png`（`b::embed`） | 运行期 `AppOptions::window_icon_png` | 任务栏 / Alt-Tab |
+| 标题栏品牌标记 | `assets/jianmu-logo.svg`（`b::embed`） | 运行期 `svg_registry` + `TitleBar::set_icon` | 标题栏左上角 |
+
+三份是**同一个记号**（等轴测立方体 + 顶上长出的树）：立方体说“三维”，树说“建木”。
+源图由代码生成，不手改位图：
+
+```bash
+py -3 tools/make_icons.py jianmu                                              # → assets/jianmu-icon.png（256²）
+py -3 tools/make_ico.py apps/jianmu/assets/jianmu-icon.png apps/jianmu/assets/jianmu.ico
+py -3 tools/make_brand_svgs.py jianmu                                         # → assets/jianmu-logo.svg
+```
+
+应用侧接入在 `main.cpp`（与其它应用同四行，见 `apps/app_icon.hpp`）。
+核验读**产物**而不是构建输出：`py -3 tools/gui_subsystem_check.py jianmu`
+（Subsystem=2 + 有 256 档图标）、`py -3 tools/window_icon_check.py`（窗口图标真设了）。
+
 ## 这个示例检验什么
 
 四件事缺一条就用不了：
@@ -264,8 +289,9 @@ py tools/jianmu_e2e.py
 
 | 文件 | 作用 |
 |---|---|
-| `main.cpp` | 应用装配：窗口 + 视口 + 状态栏 + 文件监听（`.js`/`.py`）+ 脚本桥 |
+| `main.cpp` | 应用装配：窗口 + 视口 + 状态栏 + 文件监听（`.js`/`.py`）+ 脚本桥 + 图标接入 |
 | `scenes/*.js` / `scenes/*.py` | 示例场景（普通 three.js 代码 / 普通 bpy 脚本） |
+| `assets/jianmu-icon.png` / `jianmu.ico` / `jianmu-logo.svg` | 图标三份（同一记号；由 `tools/make_*.py` 生成，勿手改） |
 | `include/st/ui/components/three_view.hpp` | 视口组件（本示例的核心，框架级可复用；含按扩展名分派） |
 | `src/ui/components/three_view.cpp` | 实现：轨道相机 + 拾取 + 高亮 + HUD |
 | `tests/ui_three_view_test.cpp` | 组件回归 |

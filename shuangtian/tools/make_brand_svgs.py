@@ -108,6 +108,21 @@ XIANGQI = svg("#3D4249", '''    <rect x="4.6" y="5.0" width="14.8" height="14.0"
     "       \"有个人在等你\"是它的语义，比原来的 bell（铃铛=通知）更准：\n"
     "       它不只是提醒，是**待办/等待用户介入**。")
 
+JIANMU = svg("#2F6E52", '''    <path d="M12 10.359 L16.547 12.984 L12 15.609 L7.454 12.984 Z" opacity="0.66"/>
+    <path d="M12 15.609 L12 20.859 L7.454 18.234 L7.454 12.984 Z" opacity="0.40"/>
+    <path d="M12 15.609 L12 20.859 L16.547 18.234 L16.547 12.984 Z" opacity="0.24"/>
+    <g stroke="#FFFFFF" stroke-linecap="round">
+      <path d="M12 13.805 L12 5.438" stroke-width="1.477"/>
+      <path d="M12 9.047 L9.703 6.586 M12 9.047 L14.297 6.586" stroke-width="1.066"/>
+    </g>''',
+    "jianmu —— 建木（三维建模与演示）。等轴测立方体 + 顶上长出的树。\n"
+    "       立方体说\"三维\"，树说\"建木\"（纯几何体太像任意 3D 软件）。\n"
+    "       树干从顶面中心起笔、往下压进顶面——不压进去会读成\"浮在方块上方\"；\n"
+    "       顶面明度必须与树干拉开（0.66 / 左0.40 / 右0.24）：初版顶面 0.88 时\n"
+    "       纯白树干与纯白顶面连成一片，树干几乎看不见。\n"
+    "       坐标与 tools/make_icons.py 的 icon_jianmu 同源：256 画布按 21/255 映射进\n"
+    "       1.5..22.5 的家族底，两边改一边必改另一边。")
+
 APPS = {
     "gallery": ("apps/gallery/assets/gallery-logo.svg", GALLERY),
     "louyue":  ("apps/louyue/assets/louyue-logo.svg",   LOUYUE),
@@ -115,6 +130,7 @@ APPS = {
     "gedou":   ("apps/gedou/assets/gedou-logo.svg",     GEDOU),
     "cefu":    ("apps/cefu/assets/cefu-logo.svg",       CEFU),
     "xiangqi": ("apps/xiangqi/assets/xiangqi-logo.svg", XIANGQI),
+    "jianmu":  ("apps/jianmu/assets/jianmu-logo.svg",   JIANMU),
 }
 
 

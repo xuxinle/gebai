@@ -136,7 +136,7 @@
 | [`render_parity.md`](render_parity.md) | **与浏览器像素级对标**：真值通道（无头 Chrome + `readPixels`）、逐项归因与消融数据、统一内核 `pbr.hpp` 的口径与已知残余、`env_*`→`ibl_*` 与 bpy 重标 | 详读 | 活 |
 | [`bpy_render_parity.md`](bpy_render_parity.md) | **bpy 渲染与真 Cycles 像素级对标**（三期）：`__st_compat__='cycles'` 开关、真值通道（EXR+PNG，确定性逐像素）、四条参数错归因、**AgX 像素级（OCIO LUT，9 样本 max=2）**、**`shadow_map` 接通与实测**、**AO 近似 GI（含 199s→1.58s 的性能教训）**、永久基线测试表 | 详读 | 活·**接口** |
 | [`eevee_vs_cycles.md`](eevee_vs_cycles.md) | **EEVEE 与 Cycles 的算法分界**：屏幕空间 GI vs 全场景光传输（画面外光源 34.4 vs 2.5 级实测）、有偏/无偏的收敛证据、霜天内核最像谁、对标该选哪个 | 速查 | 活 |
-| [`jianmu.md`](jianmu.md) | **jianmu 应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、控制通道驱动、e2e 验收 | 速查 | 活 |
+| [`jianmu.md`](jianmu.md) | **jianmu 应用**：three.js 实时预览器（热重载 + 轨道相机 + 拾取高亮）、操作表、图标三条链路、控制通道驱动、e2e 验收 | 速查 | 活 |
 | [`cross_platform.md`](cross_platform.md) | 跨平台会怎么错、提交前逐条自查什么 | 速查 | 活 |
 | [`declarative.md`](declarative.md) | 声明式 UI（`st::ui::dsl` + `declarative.js`）的设计与**调用方契约** | 详读 | 活·**接口** |
 | [`perceptual_changes.md`](perceptual_changes.md) | 观感类改动怎么做：正交量、量尺三坑、八步循环 | 详读 | 活 |

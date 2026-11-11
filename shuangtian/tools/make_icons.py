@@ -338,6 +338,41 @@ def icon_gbcode(c):
     thick_line(c, apex_r, cy, apex_r - dx, cy + dy, w, fg, alpha=0.62)
 
 
+def icon_jianmu(c):
+    """建木（三维建模与演示）：**等轴测立方体 + 顶上长出的树**。
+
+    ## 为什么是这两件
+
+    名字取意《山海经》的建木（天地通道），职责是三维建模/演示。所以记号要同时读出两件事：
+    - **等轴测立方体** = 三维场景（这是它在视觉上唯一的“三维”线索）
+    - **树** = 建木本身（纯几何体图标会与“任意 3D 软件”混同，树才指向这个应用）
+
+    试过的两个被否掉的方案：纯世界树（好看，但完全不像三维工具）、
+    立方体顶面长一根竖直“通道”（像棒棒糖插在方块上，且看不出是树）。
+
+    ## 参数取值
+
+    树干从**顶面中心**起笔并往下压进顶面 30px——不压进去会看到“浮在方块上方”，
+    压进去才有“从这里长出来”的读法。顶面明度必须与树干拉开：初版顶面 alpha 0.88 时
+    纯白树干画在纯白顶面上直接连成一片（树干几乎看不见），现在压到 0.66（左 0.40 / 右 0.24）。
+    分枝只留一层（主干 + 两根 V 形枝）：两层枝在 32px 以下糊成一团。
+    """
+    fg = (1.0, 1.0, 1.0)
+    cx, cy, r = 128.0, 172.0, 64.0
+    sw, hh = r * 0.866, r * 0.5
+    top = (cx, cy - r)
+    left_t, right_t = (cx - sw, cy - r + hh), (cx + sw, cy - r + hh)
+    mid = (cx, cy - r + 2 * hh)
+    bot = (cx, cy + r)
+    left_b, right_b = (cx - sw, cy + r - hh), (cx + sw, cy + r - hh)
+    quad(c, [top, right_t, mid, left_t], fg, alpha=0.66)      # 顶面
+    quad(c, [left_t, mid, bot, left_b], fg, alpha=0.40)       # 左面（受光）
+    quad(c, [right_t, mid, bot, right_b], fg, alpha=0.24)     # 右面（背光）
+    thick_line(c, cx, 150, cx, 48, 18, fg)                    # 主干（根部压进顶面）
+    thick_line(c, cx, 92, cx - 28, 62, 13, fg)                # 左枝
+    thick_line(c, cx, 92, cx + 28, 62, 13, fg)                # 右枝
+
+
 APPS = {
     # name: (源图输出路径, 底色, 画法)
     "gallery": ("apps/gallery/assets/gallery-icon.png", (0.36, 0.42, 0.86), icon_gallery),
@@ -347,6 +382,7 @@ APPS = {
     "cefu":    ("apps/cefu/assets/cefu-icon.png",       (0.42, 0.36, 0.68), icon_cefu),
     "xiangqi": ("apps/xiangqi/assets/xiangqi-icon.png", (0x14 / 255.0, 0x11 / 255.0, 0x0E / 255.0), icon_xiangqi),
     "gbcode":  ("apps/gbcode/assets/gbcode-icon.png",   (0.33, 0.42, 0.95), icon_gbcode),
+    "jianmu":  ("apps/jianmu/assets/jianmu-icon.png",   (0x2F / 255.0, 0x6E / 255.0, 0x52 / 255.0), icon_jianmu),
 }
 
 
