@@ -1,5 +1,5 @@
 /**
- * 册府工具面：桥函数 → 标准工具（懒启动控制器，第一次调用才 spawn 无头进程）。
+ * 册府工具面：桥函数 → 标准工具（懒启动控制器，第一次调用才拉起册府进程）。
  *
  * 七个工具与霜天应用的桥函数一一对应（`cefu.stats/categories/list/get/search/
  * put/remove/confirm/review`；工具面去掉了 categories——list 已覆盖浏览需求，

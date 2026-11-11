@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { CEFU_EXE_NAME, makeFrameReader, resolveCefuBin } from "./controller"
+import { CEFU_EXE_NAME, buildCefuArgs, makeFrameReader, resolveCefuBin, resolveCefuMode } from "./controller"
 
 const roots: string[] = []
 function tmp(tag: string): string {
@@ -84,6 +84,57 @@ describe("resolveCefuBin 探测顺序", () => {
     const r = resolveCefuBin({ gebaiHome: home, moduleDir: join(home, "x") })
     expect(r.bin).toBeNull()
     expect(r.candidates.length).toBeGreaterThan(0)
+  })
+})
+
+describe("resolveCefuMode：启动姿态", () => {
+  test("缺省是窗口（不是无头）——用户报的就是这个", () => {
+    // 为何捕这条：旧实现把 `--headless` 写死在参数字符串里，读代码时很容易
+    // 以为“它本来就这样”而没意识到那是个默认值。
+    expect(resolveCefuMode({})).toBe("window")
+    expect(resolveCefuMode({ CEFU_HEADLESS: "" })).toBe("window")
+    expect(resolveCefuMode({ CEFU_HEADLESS: "0" })).toBe("window")
+    expect(resolveCefuMode({ CEFU_HEADLESS: "no" })).toBe("window")
+  })
+
+  test("CEFU_HEADLESS 的肯定值（无桌面环境逃生口）", () => {
+    for (const v of ["1", "true", "TRUE", "yes", "on", " 1 "]) {
+      expect(resolveCefuMode({ CEFU_HEADLESS: v })).toBe("headless")
+    }
+  })
+})
+
+describe("buildCefuArgs：命令行拼接", () => {
+  const base = { dbPath: "/home/x/cefu.db", noSeedPath: "/home/x/no-seed.md", ctlFile: "/home/x/ctl.json" }
+
+  test("窗口模式**不得出现** `--headless`", () => {
+    const args = buildCefuArgs({ ...base, mode: "window" })
+    expect(args).not.toContain("--headless")
+    expect(args[0]).toBe("--db")
+  })
+
+  test("无头模式才带 `--headless`（且只在开头一个）", () => {
+    const args = buildCefuArgs({ ...base, mode: "headless" })
+    expect(args.filter((a) => a === "--headless").length).toBe(1)
+    expect(args[0]).toBe("--headless")
+  })
+
+  test("四个必需参数一个都不能漏（漏 seed 污染生产库、漏 ctl 连不上）", () => {
+    const args = buildCefuArgs({ ...base, mode: "window" })
+    expect(args).toContain("--db")
+    expect(args[args.indexOf("--db") + 1]).toBe(base.dbPath)
+    expect(args).toContain("--seed")
+    expect(args[args.indexOf("--seed") + 1]).toBe(base.noSeedPath)
+    expect(args).toContain("--control-port")
+    expect(args[args.indexOf("--control-port") + 1]).toBe("0")
+    expect(args).toContain("--control-file")
+    expect(args[args.indexOf("--control-file") + 1]).toBe(base.ctlFile)
+  })
+
+  test("uiDir：给了才追加（空值不产生孤立的 `--ui`）", () => {
+    expect(buildCefuArgs({ ...base, mode: "window", uiDir: "/repo/ui" })).toContain("--ui")
+    expect(buildCefuArgs({ ...base, mode: "window", uiDir: null })).not.toContain("--ui")
+    expect(buildCefuArgs({ ...base, mode: "window" })).not.toContain("--ui")
   })
 })
 

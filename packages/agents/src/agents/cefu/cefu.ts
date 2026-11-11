@@ -47,6 +47,10 @@ export const envVars = [
     name: "CEFU_HOME",
     description: "册府数据根（含 cefu.db 与 ctl.json，缺省 {GEBAI_HOME}/data/cefu）",
   },
+  {
+    name: "CEFU_HEADLESS",
+    description: "设为 1 时不建窗口（无头）。缺省建窗口——用户能看能翻还能看三维图谱；只在无桌面环境（CI/纯 SSH）才需要开",
+  },
 ]
 
 export const def: SubAgentDef = {
