@@ -332,6 +332,17 @@ export interface AgentEngineOptions {
   /** 认证模式（"server"=服务模式多用户隔离）。无交互通道（REST）的审批策略按此分级：本地模式保持「自动通过」，
    * 服务模式下需审批工具一律拒绝执行（防普通用户经 REST 免审批执行 sh/py 等敏感工具）。 */
   authMode?: "local" | "server"
+  /**
+   * 按工具名强制审批（宿主注入；返回 true = 这个工具必须问人）。
+   *
+   * 为何需要它：`autoApprove` 是**会话级**开关，只能“全审”或“全免”。
+   * 人格会话需要的是“整体不弹卡，但 `sh` / `file.delete` 这类必须问人”——
+   * 那是一个**工具级**的结论，只能由宿主（它知道自己是哪种会话）来回答。
+   *
+   * 优先级：高于所有免审判定（`GEBAI_APPROVAL_SKIP` / 无交互自动通过），
+   * 仅低于请求级 `deny`（那个是“什么都别执行”）。
+   */
+  forceApprovalFor?: (sessionId: string, toolName: string) => boolean | Promise<boolean>
   /** 任务收尾回调（完成/取消/出错都会调，在运行态释放之后）：供会话输入队列在任务结束后派发下一条排队输入。
    *  必须晚于 `tasks.delete`——否则回调里判定的「会话空闲」还是假（队列 drain 会空转）。 */
   onTaskSettled?: (ev: { sessionId: string; user: string; outcome: "done" | "error" | "cancelled" }) => void
@@ -988,13 +999,27 @@ private activeSchemas(sessionId: string) {
    * 发布 event.capture.request（含 captureId），前端捕获渲染后 DOM html 与截图后经
    * decideCaptureResult 回传；30 秒超时返回 null（前端离线或捕获超时）。
    */
-  /** 自动审批实时判定：任务 env 快照（含浏览器本地注入）或会话内存态 env 任一为 true 即跳过审批——会话运行中开启自动审批即时生效（关闭需下次任务；会话 env 不落盘，重启后由前端重新同步）。 */
-  private async isApprovalSkipped(sessionId: string, user: string, env: Record<string, string>): Promise<boolean> {
+  /** 自动审批实时判定：任务 env 快照（含浏览器本地注入）或会话内存态 env 任一为 true 即跳过审批——会话运行中开启自动审批即时生效（关闭需下次任务；会话 env 不落盘，重启后由前端重新同步）。
+   *
+   * `toolName` 是新增的可选维度：宿主可以装一个**按工具名强制审批**的钩子（人格会话的
+   * 「默认全部不审批，只有名单里的工具要弹窗」就是靠它）。它优先于所有免审判断（除 deny），
+   * 因为“这个工具必须问人”是比“这个会话全免”更强的约束。
+   */
+  private async isApprovalSkipped(
+    sessionId: string,
+    user: string,
+    env: Record<string, string>,
+    toolName?: string,
+  ): Promise<boolean> {
     const task = this.tasks.get(sessionId)
     // 请求级审批策略优先（REST prompt/chat 的 autoApprove）：auto 显式自动通过（含服务模式——调用方
     // 即用户本人，等价其自设 GEBAI_APPROVAL_SKIP）；deny 显式不跳过（配合下方无交互硬门槛直接拒绝）
     if (task?.approvalPolicy === "auto") return true
     if (task?.approvalPolicy === "deny") return false
+    // 【按工具名强制审批】先于“会话级全免”判定：
+    // 人格会话整体不弹卡，但名单里的工具（如 sh / file.delete）必须问人。
+    // 顺序很关键——若放在下面几行之后，`GEBAI_APPROVAL_SKIP=true` 会把名单一起绕掉。
+    if (toolName && (await this.opts.forceApprovalFor?.(sessionId, toolName)) === true) return false
     // 无交互模式（REST 等单次请求通道）：单用户本地模式无人可询问，需审批工具自动通过；
     // 多用户隔离模式下不允许自动通过——普通用户不得经 REST 免审批执行敏感工具（见审批点拒绝逻辑）
     if (task?.interactionMode === "none" && this.opts.authMode !== "server") return true
@@ -2540,7 +2565,7 @@ private activeSchemas(sessionId: string) {
             continue
           }
           const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
-          const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
+          const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env, rt.name)
           // 无交互通道硬门槛（服务模式默认 / 请求级 autoApprove=false）：无人可审批，默认需审批的工具
           // 直接拒绝（防普通用户经 REST 免审批执行敏感工具）；approval:false 只放宽交互审批——硬门槛按
           // 剥离免审标记后的审批姿态解析（js 嵌套调用同规则），防模型自行声明免审绕过
@@ -3422,7 +3447,7 @@ private activeSchemas(sessionId: string) {
           continue
         }
         const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
-        const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
+        const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env, rt.name)
         // 与主循环一致：无交互通道硬门槛（服务模式默认 / 请求级 autoApprove=false）按默认审批姿态拒绝
         //（approval:false 免审标记剥离后解析，防绕过）
         if (

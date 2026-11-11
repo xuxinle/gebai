@@ -17,7 +17,7 @@
  *
  * 扩展方式（与子 Agent 同款）：在 `packages/persona/src/sources/`（内置）或
  * `custom/persona/`（二开域）放一个 `export const source: EventSourceDef` 的文件即注册。
- * 详见 `docs/event-sources.md` 与 `src/sources/file_drop.ts` 参考实现。
+ * 详见 `docs/event-sources.md` 与 `src/sources/schedule.ts` 参考实现。
  */
 
 // ── 事件模型 ──
@@ -157,16 +157,35 @@ export { classifySpeaker, replyToOwnerFromEnv, speakerNote } from "./speaker-fil
 export type { LearnedCandidate } from "./memory-learn"
 export { detectConsensus, detectCorrection, detectProcedure, shouldLearn } from "./memory-learn"
 
-// ── 部署配置面（启用名单/入站收窄/输出目标/审批姿态/会话路由）──
-export type { EnvView, PersonaApprovalMode, PersonaEnvReport } from "./env-config"
+// ── 部署配置面（启用名单/入站收窄/输出目标/审批工具名单/会话路由）──
+export type { EnvView, PersonaEnvReport } from "./env-config"
 export {
   applyPersonaEnv,
   chatSessionKeyOf,
   narrowSubscriptions,
   parseOutputTargets,
-  personaApprovalMode,
   sessionRoutingMode,
 } from "./env-config"
+
+// ── 行为参数（逐分身：replyToOwner / yieldSeconds / humanInterrupt / sessionRouting）──
+export type { BehaviorParams } from "./behavior-params"
+export { BEHAVIOR_DEFAULTS, behaviorParamsFor } from "./behavior-params"
+
+// ── 工具审批（默认全部不审批，只有名单里的工具弹窗）──
+export type { AskToolPattern } from "./approval-tools"
+export {
+  askTools,
+  askToolsFor,
+  matchesAskTool,
+  needsApproval,
+  parseAskToolList,
+  readAskToolsFromPersonaJson,
+  unknownAskTools,
+} from "./approval-tools"
+
+// ── 声明式部署配置（`GEBAI_PERSONA_<ID>` JSON 数组，每项一个分身）──
+export type { DriverEnvItem, ParsedPersonaEnv } from "./persona-config"
+export { mergeDriverEnv, outputsFromChannels, parsePersonaEnv } from "./persona-config"
 
 // ── 人格定义扩展规范（与事件源、子 Agent、渠道同款「丢文件即注册」）──
 export type { PersonaCatalogOptions, PersonaCatalogDiff } from "./catalog"
@@ -178,6 +197,6 @@ export { defaultPersonaScanDirs, discoverPersonas, readPersonaFile, validatePers
 export type { PersonaTokenStoreOptions, PersonaUserToken, TokenState } from "./user-token"
 export { PersonaTokenStore } from "./user-token"
 export type { AuthorizeOptions, AuthorizeTicket, ExchangeOptions, PendingAuthorize } from "./oauth"
-export { extractCode, extractState, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, PersonaOAuth, scopesFromEnv } from "./oauth"
+export { extractCode, extractState, mergeScopes, ERR_OFFLINE_ACCESS_NOT_ENABLED, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, PersonaOAuth } from "./oauth"
 export type { PersonaCredentialStatus, PersonaCredentialsOptions } from "./credentials"
-export { PersonaCredentials } from "./credentials"
+export { PersonaCredentials, isOfflineAccessRejection } from "./credentials"

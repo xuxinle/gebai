@@ -3,7 +3,7 @@
  *
  * ## 与入站对称
  *
- * 入站侧（compose `applyPersonaEnv`）把 `GEBAI_PERSONA_<ID>_CHATS` 注入人格订阅：
+ * 入站侧（compose `applyPersonaEnv`）把 `GEBAI_PERSONA_<ID>` 数组里的 `chats` 注入人格订阅：
  * 人格只**收**这些群的消息。出站侧在这里补上另一半——人格会话只**发**到这些群。
  *
  * 只拦入站不拦出站的后果：A 人格收到群甲的消息，却能 act(reply) 发到群乙
@@ -13,7 +13,7 @@
  * ## 判定链（fail-closed）
  *
  * 1. 非人格会话（普通对话/子会话无 persona 归属）→ 不过滤（沿用渠道全局白名单）
- * 2. 人格会话但未配 `GEBAI_PERSONA_<ID>_CHATS` → 不过滤（未配置 = 不限群，与入站同语义）
+ * 2. 人格会话但 `GEBAI_PERSONA_<ID>` 里没写 `chats` → 不过滤（未配置 = 不限群，与入站同语义）
  * 3. 人格会话 + 已配置 → 目标群必须在名单内，否则**直接拒绝**（不进审批）
  *
  * 身份从会话归属读（`SessionData.persona`），不由模型自报——与 driver_tools 同一原则。
@@ -25,6 +25,7 @@
  */
 
 import type { ToolContext } from "../base/types"
+import { parsePersonaEnv } from "@gebai/persona"
 
 /** 目标地址里取飞书群 id：`feishu:oc_xxx` → `oc_xxx`。非飞书目标返回 null。 */
 export function feishuChatIdOf(target: string): string | null {
@@ -38,11 +39,21 @@ export function feishuChatIdOf(target: string): string | null {
   return addr
 }
 
-/** 读 `GEBAI_PERSONA_<ID>_CHATS`（与入站同变量同语义）。返回已配置的群 id 集合；未配置返回 null。 */
+/**
+ * 读 `GEBAI_PERSONA_<ID>` 数组里的群白名单（与入站同语义）。返回已配置的群 id 集合；未配置返回 null。
+ *
+ * 取并集的原因：入站把群写在数组的任意项里（人格级默认项或某个分身项），
+ * 而出站判定只知道“是这个人格的会话”、不一定知道是哪个分身（会话归属不携带 driver）。
+ * 取并集是**宽松但一致**的：只要这个群在该人格的任一配置项里，就允许发。
+ */
 export function personaChatWhitelist(personaId: string, env: Record<string, string | undefined>): Set<string> | null {
-  const raw = env[`GEBAI_PERSONA_${personaId.toUpperCase()}_CHATS`] ?? ""
-  const chats = raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
-  return chats.length ? new Set(chats) : null
+  const parsed = parsePersonaEnv(personaId, env[`GEBAI_PERSONA_${personaId.toUpperCase()}`])
+  const all = new Set<string>()
+  for (const c of parsed.personaDefaults?.chats ?? []) all.add(c)
+  for (const item of parsed.drivers.values()) {
+    for (const c of item.chats ?? []) all.add(c)
+  }
+  return all.size ? all : null
 }
 
 /** 详情（供拒绝信息带出，方便排查）。 */

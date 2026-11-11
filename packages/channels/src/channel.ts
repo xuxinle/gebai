@@ -103,10 +103,26 @@ export interface ChannelContext {
   name: string
   /** 结构化日志。 */
   log(level: "info" | "warn" | "error", msg: string): void
-  /** 声明白名单内的环境变量（未声明读不到）。 */
-  env(name: string): string | undefined
+  /**
+   * 本实例的配置项（已在解析期按 `def.config` 校验过）。
+   *
+   * 与旧的 `env(name)` 的区别：那是「按变量名读全局环境」——同类型第二个实例
+   * 拿到的会是同一份值（所以同类配不了两份）。这里给的是**这个实例自己的**配置。
+   */
+  config: Readonly<Record<string, unknown>>
   /** 宿主注入的共享依赖（只读；如凭据存储）。 */
   deps: Readonly<Record<string, unknown>>
+}
+
+/** 配置项声明（`GEBAI_CHANNEL_<TYPE>` JSON 里的一个键）。 */
+export interface ConfigKeySpec {
+  type: "string" | "number" | "boolean" | "string[]"
+  /** 一句话说明（报错与面板展示用）。 */
+  description: string
+  /** 必填（缺失时启动期如实报错，不静默用默认值）。 */
+  required?: boolean
+  /** 敏感值（面板掩码显示；不参与日志）。 */
+  secret?: boolean
 }
 
 /**
@@ -185,12 +201,50 @@ export type EmitResult =
  * 不改核心代码、不改提示词。
  */
 export interface ChannelDef {
-  /** 渠道名（`[a-z0-9_]+`，须与文件名一致）：也是 target 的前缀。 */
+  /**
+   * 类型名（`[a-z0-9_]+`，须与文件名一致）：只用于**找配置**与报错。
+   *
+   * 实例名（真正的 target 前缀、日志前缀）来自配置里的 `name`，见 `config.ts`。
+   * 所以 `feishu.ts` 能配出 `feishu_main` / `feishu_ops` 两个实例。
+   */
   name: string
   /** 一句话说明（面板与 channels_list 可见）。 */
   description: string
-  /** 本渠道需要的环境变量（声明式白名单）。 */
-  envVars?: Array<{ name: string; description: string; secret?: boolean }>
+
+  /**
+   * 配置项声明（`GEBAI_CHANNEL_<TYPE>` JSON 里允许出现的键）。
+   *
+   * 为何从 `envVars`（环境变量名白名单）改成这个：旧形态一个实例的 4 项配置
+   * 分散在 4 个环境变量里，同类配不了第二份；且变量名把类型焊死。
+   * 现在一个实例的全部配置写在它自己那个 JSON 对象里，键集合由类型声明，
+   * 于是**拼错键能精确报到实例级**（拼错的键若不报错 = 静默袏回默认值）。
+   */
+  config?: Record<string, ConfigKeySpec>
+
+  /**
+   * 该类型支持哪些方向（缺省两者都支持）。
+   *
+   * - `in`：能**收**消息（需要长连接 / 轮询目录）。实例只暴露 `startListen`
+   * - `out`：能**发**消息与读取（纯请求-响应）。实例只暴露 `act`/`observe`
+   *
+   * 为何要在**类型**上声明而不是每个实例自己写：方向是**能力事实**（这个插件能不能收），
+   * 不是部署选择。写在类型上就能在“配了 `GEBAI_CHANNEL_IN_X` 却 X 不支持入站”时直接报错，
+   * 而不是等到长连接始终建不起来才发现。
+   *
+   * 拆方向带来的最大好处：**输出实例不建长连接**，所以它可以和入站实例/会话机器人
+   * 共用同一个飞书应用（同一应用只能一条长连接，而不建连就不占用）。
+   */
+  dirs?: Array<"in" | "out">
+
+  /**
+   * 是否**必须**配置才能起来（缺省 false）。
+   *
+   * true（如 feishu）：`GEBAI_CHANNEL_IN_FEISHU` / `OUT_FEISHU` 都没配 → 不创建任何实例，
+   * 并报一条「需要配」的提示（而不是凭默认值空跑一个没有凭据的实例）。
+   * false（如 local）：未配置时用**一个缺省实例**（名字 = 类型名），
+   * 因为它的所有项都有合理缺省值，不需要部署方先写一行 JSON。
+   */
+  requiresConfig?: boolean
 
   /** 写面声明：verb → 声明。空/缺省 = 该渠道无写能力。 */
   verbs?: Record<string, CapabilitySpec>

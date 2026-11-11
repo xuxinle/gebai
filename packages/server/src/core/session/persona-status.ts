@@ -55,6 +55,15 @@ export interface PersonaDriverView {
   sessionId: string | null
   /** 该会话此刻是否真的在跑任务（引擎视角，比调度计数更可信）。 */
   sessionRunning: boolean
+  /**
+   * 该分身的出站目标（来自 `GEBAI_PERSONA_<ID>` 数组里的 channels/chats）。
+   *
+   * 为何要露出来：“它能发到哪个群”是部署方最常搞错的一项（尤其实例名引用），
+   * 而错误形态是**静默**的——模型不去发那个群，就永远没报错。
+   */
+  outputs?: Array<{ channel: string; address: string; label?: string; default?: boolean }>
+  /** 会话映射规则条数（0 = 一个常驻上下文）。 */
+  sessionMapRules?: number
 }
 
 export interface PersonaView {
@@ -98,6 +107,25 @@ export interface PersonaStateSnapshot {
   sourceErrors: Record<string, string>
   /** 渠道入站计数（按渠道名）。 */
   channelInput: Record<string, InputCounters>
+  /**
+   * 渠道自身的启停状态（含**启动失败原因**）。
+   *
+   * 为何要进这份快照：渠道启动失败（如与已启用的会话机器人同 AppID 而互踢）时，
+   * 错误只落在 `channels_list` 工具输出与启动日志里——模型看得见、**人看不见**。
+   * 而“人格不回话”的第一嫌疑就是“渠道没起来”，面板必须自己能回答。
+   *
+   * `undefined` = 该宿主未注入渠道注册表（不是错误，只是不可观测）。
+   */
+  channelState?: Array<{
+    name: string
+    description: string
+    enabled: boolean
+    started: boolean
+    /** 启动/加载失败原因（有值 = 该渠道不可用）。 */
+    error?: string
+    /** 是否已建立入站长连接。 */
+    listening?: boolean
+  }>
   /** 派出去的活（最近的在前，最多 20 条）。 */
   workers: PersonaWorkerView[]
   /** 出站凭据（不含令牌明文）。 */
@@ -138,6 +166,15 @@ export interface PersonaStatusDeps {
   /** 派活账本（未注入时不展示 worker 段）。 */
   workers?: WorkerTaskBook | null
   channelInput?: () => Record<string, InputCounters>
+  /** 渠道注册表状态（未注入时不展示渠道段）。 */
+  channelState?: () => Array<{
+    name: string
+    description: string
+    enabled: boolean
+    started: boolean
+    error?: string
+    listening?: boolean
+  }>
   /** 册府统计（未接册府时不传）。异步：要问边车进程。 */
   memoryStats?: () => Promise<{ entries: number; categories: number; verified: number; inferred: number; stale: number; needs_review: number; db_path: string } | null>
   /** 会话是否在跑（引擎 `isRunning`）：比调度器计数更早/更准地反映「正在干活」。 */
@@ -168,6 +205,17 @@ export async function collectPersonaState(deps: PersonaStatusDeps): Promise<Pers
         origin: rec?.origin ?? "static",
         ...(rec?.reason ? { reason: rec.reason } : {}),
         ...(d.maxConcurrent !== undefined ? { maxConcurrent: d.maxConcurrent } : {}),
+        ...(d.outputs?.length
+          ? {
+              outputs: d.outputs.map((o) => ({
+                channel: o.channel,
+                address: o.address,
+                ...(o.label ? { label: o.label } : {}),
+                ...(o.default ? { default: true } : {}),
+              })),
+            }
+          : {}),
+        ...(d.sessionMap?.length ? { sessionMapRules: d.sessionMap.length } : {}),
         ...(d.schedules?.length
           ? {
               schedules: d.schedules.map((s) => ({
@@ -258,6 +306,9 @@ export async function collectPersonaState(deps: PersonaStatusDeps): Promise<Pers
     sources,
     sourceErrors: deps.sources?.loadErrors() ?? {},
     channelInput: deps.channelInput?.() ?? {},
+    // 渠道启停与失败原因：与 channelInput（计数）互补——那个说“收到了多少”，
+    // 这个说“到底起没起来”。渠道撞车/缺凭据时只有它能给出原因。
+    channelState: deps.channelState ? safeCall(() => deps.channelState!(), []) : undefined,
     workers,
     credentials,
     // 册府统计：异步（要问边车），失败就当未接——不能因为它拖垮整个状态快照

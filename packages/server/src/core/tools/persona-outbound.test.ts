@@ -22,7 +22,13 @@ function ctxWithPersona(personaId: string | null, sessionId = "s1") {
   }
 }
 
-const envWith = (personaId: string, chats: string) => ({ [`GEBAI_PERSONA_${personaId.toUpperCase()}_CHATS`]: chats } as Record<string, string>)
+/** 造一个「该人格只看这些群」的配置（新形态：JSON 数组里写 chats）。 */
+const envWith = (personaId: string, chats: string) =>
+  ({
+    [`GEBAI_PERSONA_${personaId.toUpperCase()}`]: JSON.stringify([
+      { chats: chats.split(/[,\s]+/).filter(Boolean) },
+    ]),
+  }) as Record<string, string>
 
 describe("feishuChatIdOf", () => {
   test("feishu:oc_xxx → oc_xxx", () => {
@@ -41,14 +47,29 @@ describe("personaChatWhitelist", () => {
   test("未配置 → null（不限群）", () => {
     expect(personaChatWhitelist("finops_auditor", {})).toBeNull()
   })
-  test("配置解析：逗号/空格分隔", () => {
+  test("配置解析：数组里的 chats", () => {
     const s = personaChatWhitelist("finops_auditor", envWith("finops_auditor", "oc_a, oc_b"))
     expect(s).not.toBeNull()
     expect(s!.has("oc_a")).toBe(true)
     expect(s!.has("oc_b")).toBe(true)
   })
   test("id 大写归一：小写人格 id 也读同变量", () => {
-    expect(personaChatWhitelist("xiaoshuang", { GEBAI_PERSONA_XIAOSHUANG_CHATS: "oc_z" })).not.toBeNull()
+    expect(
+      personaChatWhitelist("xiaoshuang", {
+        GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ chats: ["oc_z"] }]),
+      }),
+    ).not.toBeNull()
+  })
+  test("分身项里的 chats 也计入（出站不知道分身，取并集）", () => {
+    const s = personaChatWhitelist("xiaoshuang", {
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+        { chats: ["oc_default"] },
+        { name: "support", chats: ["oc_own"] },
+      ]),
+    })
+    console.log(`    实测: ${[...(s ?? [])].join(",")}`)
+    expect(s!.has("oc_default")).toBe(true)
+    expect(s!.has("oc_own")).toBe(true)
   })
 })
 

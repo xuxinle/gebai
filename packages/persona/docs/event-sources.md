@@ -14,7 +14,7 @@
 
 | 域 | 路径 | 说明 |
 |---|---|---|
-| 内置 | `packages/persona/src/sources/` | 随包分发（`file_drop` 参考实现 · `feishu` · `schedule`） |
+| 内置 | `packages/persona/src/sources/` | 随包分发（**只剩 `schedule`**）。飞书源与 `file_drop` 均已删除：前者由渠道接，后者的目录投递由 `local` 渠道承担 |
 | 二开 | `custom/persona/`（仓库内二开域，同名**覆盖**内置）|
 
 支持两种形态（与子 Agent 一致）：
@@ -182,6 +182,25 @@ async stop() {
 它与其他源的差别只有一处：声明不是自己扫目录得来的，而是宿主经 `ctx.deps.personaSchedules`
 注入的读取函数（人格定义由 `PersonaCatalog` 热加载，源再扫一份就是第二份发现逻辑）。
 
+### cron 表达式可被环境变量覆盖
+
+声明（有没有这条任务、id 叫什么、prompt 写什么）是**代码事实**；
+而“几点跑”往往是**部署差异**（开发想每分钟、生产要 8 点）。所以在
+`GEBAI_PERSONA_<ID>` 的数组项里可以按声明 id 覆盖：
+
+```jsonc
+{"name":"report","schedules":{
+  "morning":{"cron":"0 8 * * 1-5"},   // 只改时间，prompt/description 沿用代码
+  "weekly":{"enabled":false}            // 临时关掉这条
+}}
+```
+
+- **只覆盖已有声明**：id 拼错会报错并列出可用 id——不允许环境变量新增声明，
+  否则一个拼写错误会变成“凭空多出一个定时任务”（零报错、极难发现）。
+- **不写就用代码里的值**：`GEBAI_PERSONA_<ID>` 里没有 `schedules` 时行为完全不变。
+- 可覆盖字段：`cron` / `prompt` / `timezone` / `enabled`。
+- 启动日志会明确打出“哪些分身的定时表达式被覆盖了几条”，便于事后核对。
+
 ## 7. 与子 Agent 一致的机制
 
 | 机制 | 行为 |
@@ -216,8 +235,8 @@ const manager = new EventSourceManager({
   }),
   runtime,                              // PersonaRuntime 实例
   home: config.gebaiHome,               // 仅作 ctx.home（插件自有状态落盘位置）
-  enable: splitList(env("GEBAI_EVENT_SOURCES_ENABLE")),
-  disable: splitList(env("GEBAI_EVENT_SOURCES_DISABLE")),
+  // 没有启停名单：**注册了就跑**。想停某条定时的手段在人格配置里
+  // （`schedules:{"morning":{"enabled":false}}`），不需要另一层开关。
   log: { info: log.info, warn: log.warn, error: log.error },
 })
 

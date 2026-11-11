@@ -1,4 +1,4 @@
-/** 组合根（DI 装配）：loadConfig → 各组件构建（store/registry/sandbox/auth/subAgents/engine/
+﻿/** 组合根（DI 装配）：loadConfig → 各组件构建（store/registry/sandbox/auth/subAgents/engine/
  *  webhooks/tasks/todos/gc/feishuBot/externalAuth/state/app/devReload）→ Composed。网络监听见 serve.ts，
  *  进程入口见 cli.ts / index.ts。自原单文件 index.ts 的 startServer 装配段拆分，行为不变。 */
 import { existsSync } from "node:fs"
@@ -58,6 +58,7 @@ import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard, r
 import { HumanSpeechWindow, yieldWindowFromEnv } from "../core/session/human-speech-window"
 import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
 import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
+import { askToolsFor as askToolsForPure, behaviorParamsFor as behaviorParamsForPure } from "@gebai/persona"
 
 /**
  * 未装配人格运行时的输入面落点：把入站事件记入日志并计数。
@@ -107,7 +108,7 @@ class LogOnlyDispatcher implements PersonaDispatchPort {
       `[gebai] 渠道事件（无人格运行时，仅记录）：channel=${event.channel} kind=${event.kind} ` +
         `source=${event.context.source} summary=${event.context.summary}`,
     )
-    return { status: "unrouted", reason: "人格运行时尚未装配（GEBAI_PERSONA 未启用），事件已记入日志" }
+    return { status: "unrouted", reason: "人格运行时尚未装配（没有任何 GEBAI_PERSONA_<ID> 配置），事件已记入日志" }
   }
 }
 
@@ -233,35 +234,7 @@ async function resolvePersonaPackageRoot(): Promise<string> {
   return join(import.meta.dirname, "__no_personas__")
 }
 
-/**
- * 取飞书 tenant_access_token（应用身份）。
- *
- * 为何在本文件里再写一遍而不复用 `feishu-bot/api.ts` 的缓存版：
- * 那里返回的是一个封装对象（发送消息用），令牌藏在闭包里拿不到；
- * 而这里只需要“拿一个令牌去 GET 群历史”。为一次读多开一个公开接口不值得。
- * 调用频率也低（只在没用户授权时才走到）。
- */
-async function feishuTenantToken(appId: string, appSecret: string): Promise<string> {
-  const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  })
-  const json = (await res.json()) as { code?: number; msg?: string; tenant_access_token?: string }
-  if (!res.ok || json.code !== 0 || !json.tenant_access_token) {
-    throw new Error(`获取 tenant_access_token 失败：code=${json.code} msg=${json.msg ?? res.status}`)
-  }
-  return json.tenant_access_token
-}
-
 /** 逗号/空白分隔的名单解析（与既有 `GEBAI_*_ENABLE/DISABLE` 同口径）。 */
-function splitList(raw: string | undefined): string[] {
-  if (!raw) return []
-  return raw
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-}
 
 /** 组合产物：全部组件实例 + 监听所需的依赖包（serve.ts 消费）。 */
 export interface Composed {
@@ -437,7 +410,7 @@ const inputQueue = new SessionInputQueue()
   // 必须建在渠道之前：渠道发消息时要用它（`as_user=true` 以用户本人名义发）。
   // 只依赖 config 与环境变量，不依赖 engine，所以可以提前建。
   //
-  // **仅 GEBAI_PERSONA=true 时创建**：关闭时连读盘都不做（行为零影响）。
+  // **仅拟人装配时创建**：未配任何 GEBAI_PERSONA_<ID> 时连读盘都不做（行为零影响）。
   //
   // 授权提醒走**相期卡片**（用户桌面上的常驻窗口）：需要授权时推一张带链接的卡，
   // 授权完成后自动撤掉。不阻塞启动，也不靠“用户恰好打开网页”才看得到。
@@ -475,11 +448,119 @@ const inputQueue = new SessionInputQueue()
   // launchXiangqi 的反向引用（定义在函数尾 return 前；出站审核自动重启用它）：
   // persona 块先于其定义，故用可变引用桥接，launchXiangqi 定义后填充。
   let launchXiangqiRef: ((port: number) => Promise<void>) | null = null
+  /**
+   * 渠道注册表（**必须先于人格凭据装配**）。
+   *
+   * 为何是这个顺序：人格 OAuth 的 client_id 与 scopes 都从**渠道实例配置**读
+   * （`"scopes":["offline_access"]` 就在那里面）。若先建人格凭据再建渠道，
+   * 人格侧只能拿到“渠道还不存在”的空值，静默回落成会话机器人的应用 + 基础 scopes——
+   * 现象是“配了 offline_access 但授权链接里没有、client_id 也是别的应用”，零报错。
+   *
+   * 提前是安全的：`discoverOnly()` 只展开实例（读配置），不建长连接、不启渠道。
+   * 真正的 `init()` 仍在 engine 之后（输入面需要可用的 dispatcher）。
+   */
+  const sentMessages = new SentMessageRegistry({
+    storePath: join(dataSubdir(config.gebaiHome, "persona"), "sent-messages.jsonl"),
+  })
+  const channels = new ChannelRegistry({
+    scanDirs: defaultChannelScanDirs({ packageRoot: await resolveChannelsPackageRoot() }),
+    home: config.gebaiHome,
+    deps: {
+      feishuLongConn: (o: { appId: string; appSecret: string; onEvent: (ev: Record<string, unknown>) => void }) =>
+        new FeishuConn({
+          appId: o.appId,
+          appSecret: o.appSecret,
+          onEvent: (ev) => o.onEvent(ev as Record<string, unknown>),
+          log: (m) => log.info(`[channels:feishu] ${m}`),
+        }),
+      // 会话机器人 AppID + 是否启用：渠道据此检测「与自己的 AppID 撞车」并拒绝启动
+      //（同一飞书应用只能一条长连接，同时用会互踢，表现为其中一边偶发收不到消息）。
+      // enabled 必须一起传：bot 停用时同 AppID 不构成冲突（渠道侧只在启用时才判撞）。
+      ...(config.feishuAppId ? { feishuSessionAppId: config.feishuAppId, feishuSessionBotEnabled: config.feishuBotEnabled } : {}),
+      sentMessages,
+      // 发送者判定（防回灌 + 是否回用户本人）：与人格事件源用**同一个**实现。
+      //
+      // 为何注入而不是在 channels 里重写：判定涉及「用户 openId」（要从凭据存取）
+      // 与「发送记录」，channels 包不能依赖 persona；而两边口径必须完全一致
+      //（不一致的现象是“有时回有时不回”）。
+      speakerFilter: async (i: { senderId?: string; isSelf: boolean }) => {
+        const { classifySpeaker, behaviorParamsFor, speakerNote } = await import("@gebai/persona")
+        const ownerOpenId = await personaCredentials?.ownerOpenId().catch(() => undefined)
+        // 入站时**还没有会话**（请求正是要把消息变成会话），所以拿不到具体分身。
+        // 这里只回答“这个人说的话该不该回”——而“哪个分身要回”是后面的路由决定的事。
+        // 因此用**全局/缺省**参数（逐分身的值在分发阶段按目标分身生效）。
+        const beh = behaviorParamsFor(process.env as Record<string, string | undefined>, "")
+        const v = classifySpeaker({
+          ...(i.senderId ? { senderId: i.senderId } : {}),
+          ...(ownerOpenId ? { ownerOpenId } : {}),
+          isSelf: i.isSelf,
+          replyToOwner: beh.replyToOwner,
+        })
+        // 把身份注记一并给渠道：它是**正文的一部分**（模型看得到），不是日志。
+        // 在这里算而不让渠道自己拼：两种发送者的措辞差一个字都可能让模型误判。
+        const note = speakerNote(v.kind)
+        return { deliver: v.deliver, record: v.record, kind: v.kind, ...(v.reason ? { reason: v.reason } : {}), ...(note ? { note } : {}) }
+      },
+      // 拟人凭据（feishu 渠道的 `as_user=true` 用它以用户本人名义发消息）。
+      // **帧内 getter**：人格凭据在本块之后才装配，取值快照会永远是 undefined。
+      get personaCredentials() {
+        return personaCredentials ?? undefined
+      },
+    },
+    log: { info: log.info, warn: log.warn, error: log.error },
+  })
+  // 只展开实例（不建连接）——人格凭据需要靠它取 appId/scopes
+  await channels.discoverOnly()
   if (config.personaEnabled) {
    try {
-    const { PersonaTokenStore, PersonaOAuth, PersonaCredentials, scopesFromEnv } = await import("@gebai/persona")
-    const personaAppId = () => process.env.GEBAI_CHANNELS_FEISHU_APP_ID || process.env.GEBAI_FEISHU_APP_ID
-    const personaAppSecret = () => process.env.GEBAI_CHANNELS_FEISHU_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET
+    const { PersonaTokenStore, PersonaOAuth, PersonaCredentials, mergeScopes } = await import("@gebai/persona")
+    /**
+     * 人格 OAuth 用哪个实例的凭据。
+     *
+     * 优先**真正配了 appId/appSecret** 的出站实例（没有则入站），因为：
+     * - 出站实例就是“往群里发”的那个应用，授权以它的名义最合理
+     * - 取凭据时**必须跳过没配 appId 的实例**：`local` 也是出站但没有任何飞书凭据，
+     *   按“第一个 out 实例”取会拿到空值，静默回落成会话机器人应用——
+     *   现象是“配了 offline_access 但授权链接里没有、client_id 也是别的应用”。
+     *   这个 bug 只在 `local` 已展开（即 `discoverOnly` 之后）才显现，
+     *   所以它曾经“偶尔正常、重启后变错”，极难排查。
+     */
+    const personaChannel = (): string | undefined => {
+      const dirs = channels.instanceDirections()
+      const credOf = (n: string) => channels.instanceCredentials(n)
+      const hasCred = (n: string) => {
+        const c = credOf(n)
+        return Boolean(c?.appId && c?.appSecret)
+      }
+      const names = [...dirs.keys()]
+      const outs = names.filter((n) => dirs.get(n) === "out")
+      const ins = names.filter((n) => dirs.get(n) === "in")
+      return outs.find(hasCred) ?? ins.find(hasCred) ?? outs[0] ?? ins[0]
+    }
+    const personaCred = () => {
+      const name = personaChannel()
+      return name ? channels.instanceCredentials(name) : undefined
+    }
+    // 启动时把“人格用哪个应用授权”说清楚：这里选错实例会直接影响授权能否长期有效，
+    // 而现象（client_id 是另一个应用 / 授权链接里没 offline_access）本身看不出原因。
+    {
+      const n = personaChannel()
+      const c = personaCred()
+      log.info(
+        `[gebai] 人格授权用实例 ${n ?? "（无）"} 的应用 ${c?.appId ?? "（未配，回落 GEBAI_FEISHU_APP_ID）"}` +
+          `；额外 scopes：[${(c?.scopes ?? []).join(" ") || "无"}]`,
+      )
+    }
+    const personaAppId = (): string | undefined => personaCred()?.appId ?? process.env.GEBAI_FEISHU_APP_ID
+    const personaAppSecret = (): string | undefined =>
+      personaCred()?.appSecret ?? process.env.GEBAI_FEISHU_APP_SECRET
+    /**
+     * 授权要申请的 scopes：基础集 + 渠道实例里写的 `scopes`（并集）。
+     *
+     * `offline_access` 就是在这里生效的——它是**应用能不能长期授权**的属性，
+     * 所以写在渠道实例上（`"scopes":["offline_access"]`），而不是单开一个全局变量。
+     */
+    const personaScopes = (): string => mergeScopes(personaCred()?.scopes ?? [])
     /**
      * 飞书授权回调地址（**唯一真源**）。
      *
@@ -589,10 +670,12 @@ const inputQueue = new SessionInputQueue()
       oauth: new PersonaOAuth(),
       appId: personaAppId,
       appSecret: personaAppSecret,
-      // 申请哪些 scopes：默认是「能跑起来的最小集」（不含 offline_access——
-      // 它需应用在飞书后台开通，未开通时授权页报 20027 把人挡在外面）。
-      // 部署方在后台开通后可经 GEBAI_PERSONA_SCOPES 追加。
-      scopes: scopesFromEnv(),
+      // 申请哪些 scopes：基础集（**已含 `offline_access`**）+ 渠道实例声明的额外权限（并集）。
+      //
+      // 长期/短期授权**不是配置项**：默认就要长期，应用未开通时飞书会回 20027，
+      // 那时自动改发短期链接重试（见 PersonaCredentials.downgradeToShortLived 与
+      // 回调路由的 302）。所以这里不需要任何“看应用开没开”的判断。
+      scopes: personaScopes,
       // 回调走拟人专用端点（与会话级 /api/v1/oauth/feishu/callback 分开）
       redirectUri: callbackUrl,
       log: (level, msg) => log[level](msg),
@@ -672,8 +755,14 @@ const inputQueue = new SessionInputQueue()
   //
   // 为何挂在出站而不是入站：用户说话时人格仍应该能读、能答（那是它的工作），
   // 只是不该**抢话**。所以限的是“主动发言”这一动作，不是“处理事件”。
+  //
+  // 窗口长度是**逐分身**的（`yieldSeconds`），而时间戳是进程级共享的（按群）：
+  // 所以这里建单例，长度在查询时由出站审核按目标分身传入。
   personaHumanSpeech = new HumanSpeechWindow({ windowMs: yieldWindowFromEnv(process.env) })
   personaOutboundDeps.humanSpeech = personaHumanSpeech
+  // 让位窗口长度按**该分身**的 `yieldSeconds`（逐分身可不同）
+  personaOutboundDeps.yieldWindowMsFor = (personaId: string) =>
+    behaviorParamsForPure(process.env as Record<string, string | undefined>, personaId).yieldSeconds * 1000
     // 启动检查（不吐令牌明文，只报状态）
     const cred = await creds.status()
     if (cred.ready) {
@@ -683,7 +772,7 @@ const inputQueue = new SessionInputQueue()
       log.warn(`[gebai] 授权链接：${cred.authorizeUrl}`)
       log.warn(`[gebai] 回调地址需已在飞书后台登记：${callbackUrl()}`)
     } else {
-      log.warn(`[gebai] 飞书凭据不可用：${cred.message}（未配置 GEBAI_CHANNELS_FEISHU_APP_ID / _APP_SECRET，无法发起授权）`)
+              log.warn(`[gebai] 飞书凭据不可用：${cred.message}（渠道实例未配 appId/appSecret，无法发起授权）`)
     }
     // 启动即尝试推卡：相期若已连上立刻可见；没开着也无妨（卡片会缓存，它启动后重推）
     // 这里只尝试一次；子Agent 发现是异步的，若此时还没就绪，下面 discover 之后会再补推。
@@ -722,8 +811,10 @@ const inputQueue = new SessionInputQueue()
                 state: decision.state === "expiring" ? "expiring" : st.state,
                 message:
                   decision.state === "expiring"
-                    ? `飞书授权将在 ${Math.max(1, Math.round(remaining / 60000))} 分钟后失效。` +
-                      `当前应用未开通长期授权（offline_access），飞书令牌最长只有 2 小时，到期需重新授权一次。`
+                    ? `飞书授权将在 ${Math.max(1, Math.round(remaining / 60000))} 分钟后失效。\n\n` +
+                      `原因：本次授权是**短期**的（未拿到 refresh_token，飞书令牌最长 2 小时）。\n` +
+                      `想以后不用反复授权：飞书开放平台 → 该应用 → 权限管理 → 开通「持续访问已授权的数据」（offline_access），` +
+                      `再重新授权一次即会自动变成长期（不用改任何配置）。`
                     : st.message,
               })
             } else {
@@ -768,61 +859,6 @@ const inputQueue = new SessionInputQueue()
   // 唯一依据就是这里的记录。飞书重投可能远超 10 分钟，进程重启也会清空——
   // 两者任一发生，人格就会把自己说过的话当用户的新指令再答一遍。
   // 落点放 data/persona/ 下（与人格其余状态同级，迁移时一起带走）。
-  const sentMessages = new SentMessageRegistry({
-    storePath: join(dataSubdir(config.gebaiHome, "persona"), "sent-messages.jsonl"),
-  })
-  // 对外动作渠道（act/observe 工具，DESIGN「对外动作：渠道抽象」）：与子Agent/事件源同款
-  // 「丢文件即注册」——内置 packages/channels/src/channels/ + 二开 custom/channels/。
-  // 发现/启动失败只记 loadErrors 不阻断启动（单渠道坏不能连带整个服务起不来）。
-  const channels = new ChannelRegistry({
-    scanDirs: defaultChannelScanDirs({ packageRoot: await resolveChannelsPackageRoot() }),
-    home: config.gebaiHome,
-    enable: splitList(process.env.GEBAI_CHANNELS_ENABLE),
-    disable: splitList(process.env.GEBAI_CHANNELS_DISABLE),
-    // 宿主注入的能力（channels 包零依赖，不 import 本包）：
-    // - feishuLongConn：飞书长连接工厂（渠道自建**独立**连接，与会话机器人互不干扰）
-    // - feishuSessionAppId：会话机器人 AppID——渠道据此检测「与自己的 AppID 撞车」并拒绝启动
-    //   （同一飞书应用只能一条长连接，同时用会互踢，表现为其中一边偶发收不到消息）
-    deps: {
-      feishuLongConn: (o: { appId: string; appSecret: string; onEvent: (ev: Record<string, unknown>) => void }) =>
-        new FeishuConn({
-          appId: o.appId,
-          appSecret: o.appSecret,
-          onEvent: (ev) => o.onEvent(ev as Record<string, unknown>),
-          log: (m) => log.info(`[channels:feishu] ${m}`),
-        }),
-      // 会话机器人 AppID + 是否启用：渠道据此检测「与自己的 AppID 撞车」并拒绝启动
-      //（同一飞书应用只能一条长连接，同时用会互踢，表现为其中一边偶发收不到消息）。
-      // enabled 必须一起传：bot 停用时同 AppID 不构成冲突（渠道侧只在启用时才判撞）。
-      ...(config.feishuAppId ? { feishuSessionAppId: config.feishuAppId, feishuSessionBotEnabled: config.feishuBotEnabled } : {}),
-      // 自发送消息记账（防回灌，与人格事件源共享同一实例）
-      sentMessages,
-      // 发送者判定（防回灌 + 是否回用户本人）：与人格事件源用**同一个**实现。
-      //
-      // 为何注入而不是在 channels 里重写：判定涉及「用户 openId」（要从凭据存取）
-      // 与「发送记录」，channels 包不能依赖 persona；而两边口径必须完全一致
-      //（不一致的现象是“有时回有时不回”）。
-          speakerFilter: async (i: { senderId?: string; isSelf: boolean }) => {
-      const { classifySpeaker, replyToOwnerFromEnv, speakerNote } = await import("@gebai/persona")
-      const ownerOpenId = await personaCredentials?.ownerOpenId().catch(() => undefined)
-      const v = classifySpeaker({
-        ...(i.senderId ? { senderId: i.senderId } : {}),
-        ...(ownerOpenId ? { ownerOpenId } : {}),
-        isSelf: i.isSelf,
-        replyToOwner: replyToOwnerFromEnv(process.env as Record<string, string | undefined>),
-      })
-      // 把身份注记一并给渠道：它是**正文的一部分**（模型看得到），不是日志。
-      // 在这里算而不让渠道自己拼：两种发送者的措辞差一个字都可能让模型误判。
-      const note = speakerNote(v.kind)
-      return { deliver: v.deliver, record: v.record, kind: v.kind, ...(v.reason ? { reason: v.reason } : {}), ...(note ? { note } : {}) }
-    },
-      // 拟人凭据（feishu 渠道的 `as_user=true` 用它以用户本人名义发消息）；未启用时为 null
-      ...(personaCredentials ? { personaCredentials } : {}),
-    },
-    log: { info: log.info, warn: log.warn, error: log.error },
-  })
-  // 注：`channels.init()` 在 engine 创建之后调用（见下）——输入面需要把事件投给引擎，
-  // 若在此处 init，`startListen` 拿不到可用的 dispatcher，事件会全部落到 unavailable。
   // 客卿（DESIGN「客卿」）：仅本地形态启用——沙箱启用（服务端部署）时注入 null
   // 显式禁用；GEBAI_KEQING=off 同效。发现失败不阻断启动（逐项记 loadErrors）。
   subAgents.setKeqingOpts(sandbox.enabled ? null : {})
@@ -861,6 +897,20 @@ const inputQueue = new SessionInputQueue()
     }
   }
 
+  // 审批名单：逐分身的 `askTools` 优先，全局 `GEBAI_PERSONA_APPROVAL_ASK_TOOLS` 兑底。
+  // 用静态导入（在这里就要用到；晚于动态 import 的 persona 块会撞 TDZ）。
+  // 现读环境变量而不快照：人格进程常跑几周，临时改名单不该需要重启。
+  /**
+   * “这个会话属于哪个人格/分身”——供强制审批钩子用（null = 普通会话）。
+   *
+   * **延迟解析**：engine 在 personaCatalog/store 就绪前构造，直接引用会撞 TDZ
+   * （而且那个异常会被外层 try/catch 吞掉，表现为“名单里的工具不弹窗”，零报错）。
+   * 默认返回 null（= 不强制审批）：未启用拟人时根本没有人格会话。
+   */
+  let personaSessionIdentity: (
+    sessionId: string,
+  ) => Promise<{ personaId: string; driverId?: string } | null> = async () => null
+
   const engine = new AgentEngine({
     provider,
     registry,
@@ -873,6 +923,32 @@ const inputQueue = new SessionInputQueue()
     // 对外动作渠道（act/observe）：进程级单例，父子会话/子代理共用
     channels,
     authMode: config.auth,
+    /**
+     * 按工具名强制审批（人格会话的名单）：
+     *
+     * 人格会话整体 `autoApprove: true`（工具直接执行），但**名单里的工具**必须弹窗问人。
+     * 名单从**会话自己的人格/分身配置**读（`GEBAI_PERSONA_<ID>` 数组项的 `askTools`），
+     * 所以不同分身可以有不同名单——盯告警的不必拦，执行运维的要拦 `sh`。
+     *
+     * 在这里统一回答（而不是在 runner/worker 各判一次）：
+     * - 只代理人**人格会话**：普通 web 会话有真前端，用户会自己点
+     * - 名单**现读**：热改下一个工具调用即生效
+     * - driver 派出的 worker 会话也走同一条（按会话归属的 persona/driver 判，
+     *   所以它跟随 driver 的名单，不会出现“driver 被卡、worker 却放开”的绕过）
+     */
+    forceApprovalFor: async (sessionId, toolName) => {
+      // 先拿会话归属：普通会话直接返回，不查名单（绝大多数工具调用走这条快路）
+      const who = await personaSessionIdentity(sessionId)
+      if (!who) return false
+      const list = askToolsForPure(
+        process.env as Record<string, string | undefined>,
+        who.personaId,
+        who.driverId,
+      )
+      if (!list.length) return false
+      const { matchesAskTool } = await import("@gebai/persona")
+      return list.some((p: string) => matchesAskTool(p, toolName))
+    },
     // 任务级主模型解析：会话/前端 env 配置 GEBAI_LLM_* 时按任务重建 Provider（模型/地址/密钥/类型/上下文预算/多模态声明覆盖启动配置），
     // 无覆盖返回 undefined（引擎沿用 opts.provider 实例）
     resolveProvider: (env) => {
@@ -913,7 +989,7 @@ const inputQueue = new SessionInputQueue()
       events.publish({ type: "event.queue.update", sessionId, payload: { sessionId, items: inputQueue.listPublic(sessionId) }, timestamp: Date.now() })
     },
   })
-  // 拟人模式装配（GEBAI_PERSONA=true）：**开关关闭时以下代码一行不执行**。
+  // 拟人模式装配：**有 GEBAI_PERSONA_<ID> 配置就启用**（没有总开关）。
   //
   // 「关闭时行为逐字节不变」的具体保证：
   // 1. `PersonaRuntime` / `Catalog` / `Resolver` / `Runner` 均不被实例化（无副作用、无扫描、无文件读写）
@@ -927,7 +1003,7 @@ const inputQueue = new SessionInputQueue()
   let personaSources: import("@gebai/persona").EventSourceManager | null = null
   /** 渠道入站桥接（诊断计数；未启用时为 null）。 */
   let personaChannelBridge: ChannelInputBridge | null = null
-  /** 人格审批桥（把引擎审批/选择送到相期；仅 ask 姿态下装配）。 */
+  /** 人格审批桥（把引擎审批/选择送到相期弹窗）。只在名单命中时才会真被用到，但始终装配干净。 */
   let approvalBridge: import("../core/session/persona-approval").ApprovalBridge | null = null
   /** 运行态快照（REST /api/v1/persona/state 与前端面板共用）。 */
   let personaState: (() => Promise<import("../core/session/persona-status").PersonaStateSnapshot>) | null = null
@@ -971,8 +1047,6 @@ const inputQueue = new SessionInputQueue()
       scheduleKey,
       manualRunEventId,
       buildEvent,
-      personaApprovalMode: readApprovalMode,
-      sessionRoutingMode: readSessionRouting,
     } = await import("@gebai/persona")
     type PersonaDef = import("@gebai/persona").PersonaDef
     const { PersonaSessionResolver } = await import("../core/session/persona-sessions")
@@ -1017,15 +1091,27 @@ const inputQueue = new SessionInputQueue()
     // 不是某一种宿主的装配细节；写两处必然分叉（同一个变量被两种口径解释过，是真实踩过的坑）。
     //
     // 覆盖的变量（完整语义见 `packages/persona/src/env-config.ts`）：
-    //   GEBAI_PERSONA_ENABLE                   启用白名单
-    //   GEBAI_PERSONA_<ID>_CHATS               该人格只监听这些群
-    //   GEBAI_PERSONA_<ID>_<DRIVER>_CHATS      该分身只监听这些群（更细）
-    //   GEBAI_PERSONA_<ID>[_<DRIVER>]_OUTPUT   输出目标（channel:address[#话题][=标签]，逗号分隔）
+    //   GEBAI_PERSONA_ENABLE   启用白名单
+    //   GEBAI_PERSONA_<ID>     该人格的全部分身配置（JSON 数组，每项一个分身）
     const envView = process.env as Record<string, string | undefined>
     /** 上一次的解析报告（只为「只在变化时打日志」，避免热加载每 5s 刷屏）。 */
     let lastEnvReport = ""
+    /**
+     * 通道实例名 → 该实例允许的群（供人格的 `channels:["实例名"]` 引用解析）。
+     *
+     * 为何问渠道注册表而不是自己再解一遍：注册表已经做过“类型发现 + 配置键校验
+     * + 启停名单过滤”，自己再解一遍就会出现“人格认为某实例存在、而渠道实际没起”的
+     * 分叉——那正是要消除的一类不一致。
+     *
+     * `discoverOnly()` 不启动任何东西（不建长连接），只把实例与配置展开出来，
+     * 所以能在渠道启动之前安全调用。
+     */
+    const channelChatsOf = (): Map<string, string[]> => channels.instanceChats()
+    // 实例方向（in/out）：人格侧用它把“send 引用了入站实例”这类错在装配期就报出来
+    const channelDirsOf = (): Map<string, "in" | "out"> => channels.instanceDirections()
+
     const applyPersonaEnv = (personas: Map<string, PersonaDef>): Map<string, PersonaDef> => {
-      const { personas: next, report } = applyPersonaEnvCore(personas, envView)
+      const { personas: next, report } = applyPersonaEnvCore(personas, envView, channelChatsOf(), channelDirsOf())
       const sig = JSON.stringify(report)
       if (sig !== lastEnvReport) {
         lastEnvReport = sig
@@ -1035,23 +1121,27 @@ const inputQueue = new SessionInputQueue()
         }
         for (const [who, n] of Object.entries(report.outputs)) log.info(`[gebai] ${who} 已注入 ${n} 个输出目标`)
         for (const [who, n] of Object.entries(report.sessionMaps)) log.info(`[gebai] ${who} 会话映射已生效：${n} 条规则`)
+        // 定时表达式被环境变量改过时要说出来：不然“为什么它 8 点跑而不是代码里的 9 点”无从查。
+        for (const [who, n] of Object.entries(report.scheduleOverrides)) {
+          if (n > 0) log.info(`[gebai] ${who} 的定时表达式被环境变量覆盖：${n} 条`)
+        }
+        // 关审核是“人格会以你名义不打招呼就发言”：启动时必须看得见（缺省是开的）
+        for (const who of report.reviewDisabled) {
+          log.warn(`[gebai] ${who} 已**关闭**出站审核（reviewOutbound=false）：它发飞书消息不再弹卡确认`)
+        }
         for (const e of report.errors) log.warn(`[gebai] 人格环境变量配置有误：${e}`)
       }
       return next
     }
-    // 审批姿态与会话路由（两处都现读环境，改完下次请求即生效；热加载不必重扫目录）
-    const personaApprovalMode = readApprovalMode(envView)
-    const sessionRouting = readSessionRouting(envView)
-    /** 输出审核开关（与工具审批分开：人格发言始终要人点头，可显式关）。仅用于日志展示。 */
-    const personaOutboundReviewOn = (() => {
-      const raw = (envView.GEBAI_PERSONA_OUTBOUND_REVIEW ?? "").trim().toLowerCase()
-      return !raw || !/^(off|0|false|no)$/i.test(raw)
-    })()
+    // 会话路由（现读环境，改完下次请求即生效；热加载不必重扫目录）
+    // 运行时级行为参数（单值）：在下面 runtime 构造前解析
+    let runtimeInterruptOnHumanSpeech = false
+    let runtimeSessionRouting: "driver" | "chat" = "driver"
 
     const foundFiltered = applyPersonaEnv(found.personas)
     if (found.personas.size === 0) {
       log.warn(
-        `[gebai] GEBAI_PERSONA 已开启但未发现任何人格定义（内置 ${personaDirs.builtin} / 二开 ${personaDirs.custom}）` +
+        `[gebai] 已配置拟人相关变量、但未发现任何人格定义（内置 ${personaDirs.builtin} / 二开 ${personaDirs.custom}）` +
           `——入站事件将无人处理（记日志）。放一个 \`export const persona: PersonaDef\` 文件即可。`,
       )
     } else {
@@ -1163,15 +1253,25 @@ const inputQueue = new SessionInputQueue()
     const workerSpawner = new SessionWorkerSpawner({
       engine,
       store,
-      // worker 是「派出去的活」，审批姿态**必须跟随 driver**，否则会出现两种错配：
-      // - driver 是 readonly 而 worker 不自动通过 → 派出去的活反而被审批卡住（比不派更差）
-      // - driver 是 ask 而 worker 自动通过 → driver 被卡、worker 却自行放开（绕过人的把关）
-      // 这里只区分“是否需要人点头”：ask 档不自动通过，其余档自动通过。
-      autoApprove: personaApprovalMode !== "ask",
+      // worker 是「派出去的活」，审批面**跟随 driver**：名单里的工具同样要弹卡，
+      // 否则会出现“driver 被卡、它派出去的 worker 却自行放开”的绕过。
+      // 具体判定统一走引擎的 `forceApprovalFor` 钩子（见下面 engine 构造），
+      // 这里只需保证 worker 与 driver 走**同一条**审批通道。
+      autoApprove: true,
       log: { info: log.info, warn: log.warn },
     })
 
-      personaRuntime = new PersonaRuntime({
+    // 运行时级行为参数（一个 PersonaRuntime 只能一个值）：
+    // 取“第一个人格的默认”> 全局变量 > 代码缺省。
+    // 为何不逐分身：同一个 runtime 内不同分身不可能用不同路由（它们共享同一个调度器）。
+    {
+      const firstId = (personaCatalog?.ids() ?? [])[0]
+      const beh = behaviorParamsForPure(process.env as Record<string, string | undefined>, firstId ?? "")
+      runtimeInterruptOnHumanSpeech = beh.humanInterrupt
+      runtimeSessionRouting = beh.sessionRouting
+    }
+
+    personaRuntime = new PersonaRuntime({
     lookup: personaCatalog,
     sessions: personaSessions,
     // 用户亲手发言 → 记入让位窗口（C）。
@@ -1184,16 +1284,17 @@ const inputQueue = new SessionInputQueue()
       personaHumanSpeech?.note(event.context.refs?.chatId)
     },
     // 硬打断（缺省关）：用户说话就抢方向盘，仅适合坐席类场景。
-    interruptOnHumanSpeech: /^(1|true|on|yes)$/i.test((process.env.GEBAI_PERSONA_HUMAN_INTERRUPT ?? "").trim()),
-      // 会话关联规则（`GEBAI_PERSONA_SESSION_ROUTING`）：**缺省 driver = 一个分身一个上下文**，
-      // 不同群的消息都注入同一会话（会话面向上下文，不面向群）。
-      // `chat` 只是可选的群间隔离模式，需部署方显式要求。
-      sessionRouting,
+    interruptOnHumanSpeech: runtimeInterruptOnHumanSpeech,
+    // 会话关联规则：**缺省 driver = 一个分身一个上下文**（不同群的消息都注入同一会话）。
+    // `chat`（按群×话题分会话）只是可选的群间隔离模式，需部署方显式要求。
+    sessionRouting: runtimeSessionRouting,
       runner: new EnginePersonaRunner({
         engine,
-        // 传**函数**而不是快照：`GEBAI_PERSONA_APPROVAL` 热改后下一个审批即生效
-        // （人格进程常常跑几周，“临时放开审批”是真实诉求，而重启会中断在跑的任务）。
-        approvalMode: () => readApprovalMode(process.env as Record<string, string | undefined>),
+        // 名单**逐分身不同**：传函数（参数是 personaId/driverId），热改即生效。
+        // 这里只影响**提示词**（告诉模型“有几类工具会弹卡”）——
+        // 真正的审批判定在引擎的 `forceApprovalFor`，两边用同一个 `askToolsForPure`。
+        askTools: (personaId: string, driverId: string) =>
+          askToolsForPure(process.env as Record<string, string | undefined>, personaId, driverId),
         // 每轮之前两项重扫：源（驱动面）与人格定义（身份/订阅）——
         // 两者各自节流。不放定时器：空闲进程不该白跑目录遍历。
         refreshBeforeRun: async () => {
@@ -1281,30 +1382,42 @@ const inputQueue = new SessionInputQueue()
     //
     // 只代理人**人格会话**：普通 web 会话有真前端，用户会自己在页面上点，
     // 不判定的话会把网页里的审批重复推一张到桌面。
-    if (personaApprovalMode === "ask") {
+    //
+    // ## 现在无条件装配
+    //
+    // 不再有“哪个档才装”的分支：工具默认全部不审批，只有 `askTools` 名单里的
+    // 工具会被引擎的 `forceApprovalFor` 钩子拦回来。不配名单就永远不会走到这里。
+    {
+      // 注意：`approvalBridge` 是外层声明的变量（与本块共用）——不要再 let 一次，
+      // 那会遮蔽外层，导致外部读到的永远是 null。
+      // 只代理人**人格会话**：普通 web 会话有真前端，用户会自己点；
+      // 不判定的话会把网页里的审批重复推一张到桌面。
+      // 这一段同时被引擎的 `forceApprovalFor` 用（同一条判定，不能两处各写一遍）——
+      // 所以返回**身份**而不只是 bool：审批名单是按 persona/driver 不同而不同的。
+      personaSessionIdentity = async (sid: string) => {
+        const s = await store.load(sid, "admin").catch(() => null)
+        if (s?.persona?.personaId) return { personaId: s.persona.personaId, driverId: s.persona.driverId }
+        // 归属可能是部署自定用户（PersonaDef.user），不能只试 admin：
+        // 拿不到就退一步逐个已知人格的 owner 试一遍（有界：人格数很少）。
+        for (const pid of personaCatalog?.ids() ?? []) {
+          const owner = personaCatalog?.userOf?.(pid) ?? "admin"
+          if (owner === "admin") continue
+          const other = await store.load(sid, owner).catch(() => null)
+          if (other?.persona?.personaId) {
+            return { personaId: other.persona.personaId, driverId: other.persona.driverId }
+          }
+        }
+        return null
+      }
       approvalBridge = new ApprovalBridge({
         engine: {
           decideApproval: (sid, tcId, approve) => engine.decideApproval(sid, tcId, approve),
           decideChoice: (sid, chId, selection) => engine.decideChoice(sid, chId, selection),
-          isPersonaSession: async (sid) => {
-            const s = await store.load(sid, "admin").catch(() => null)
-            // 归属可能是部署自定用户（PersonaDef.user），不能只试 admin：
-            // 拿不到就退一步按 sessionId 问引擎的 personaSessions 视图不可得，
-            // 于是逐个已知人格的 owner 试一遍（有界：人格数很少）。
-            if (s?.persona?.personaId) return true
-            for (const pid of personaCatalog?.ids() ?? []) {
-              const owner = personaCatalog?.userOf?.(pid) ?? "admin"
-              if (owner === "admin") continue
-              const other = await store.load(sid, owner).catch(() => null)
-              if (other?.persona?.personaId) return true
-            }
-            return false
-          },
+          isPersonaSession: async (sid) => (await personaSessionIdentity(sid)) !== null,
         },
         deps: {
           ...(personaOutboundDeps.askCard ? { askCard: personaOutboundDeps.askCard } : {}),
           ...(personaOutboundDeps.isXiangqiConnected ? { isXiangqiConnected: personaOutboundDeps.isXiangqiConnected } : {}),
-          mode: () => readApprovalMode(process.env as Record<string, string | undefined>),
           log: { info: log.info, warn: log.warn },
         },
       })
@@ -1314,23 +1427,30 @@ const inputQueue = new SessionInputQueue()
         if (!ev.sessionId) return
         approvalBridge!.onEvent({ type: ev.type, sessionId: ev.sessionId, payload: ev.payload })
       })
-      log.info(
-        `[gebai] 人格审批桥已启用（GEBAI_PERSONA_APPROVAL=ask）：需审批操作推相期卡等人点；` +
-          `相期不在时**拒绝**（fail-closed）`,
-      )
-    } else {
-      // readonly / auto / deny：不订阅审批事件（工具直接执行或直接拒），避免每步弹卡。
-      const why =
-        personaApprovalMode === "deny"
-          ? "需审批工具一律拒绝——人格只做只读的事"
-          : "工具执行不弹卡（**输出仍需人批准**，见 GEBAI_PERSONA_OUTBOUND_REVIEW）"
-      log.info(`[gebai] 人格工具审批姿态：${personaApprovalMode}（${why}）`)
+      // 启动时把“哪些分身的哪些工具会弹卡”逐条说清楚：
+      // 名单是**逐分身**的，一句“有名单/无名单”说不明白——而“我以为 sh 会被拦、
+      // 结果它直接执行了”是安全相关的事，必须可核。
+      const globalList = askToolsForPure(process.env as Record<string, string | undefined>, "")
+      const perDriver: string[] = []
+      for (const p of personaCatalog?.all() ?? []) {
+        for (const d of p.drivers ?? []) {
+          const l = askToolsForPure(process.env as Record<string, string | undefined>, p.id, d.id)
+          if (l.length) perDriver.push(`${p.id}/${d.id}→[${l.join(" ")}]`)
+        }
+      }
+      if (perDriver.length) {
+        log.info(`[gebai] 人格工具审批：名单内的工具弹相期卡问人；其余直接执行。相期不在时**拒绝**`)
+        for (const line of perDriver) log.info(`[gebai]   ${line}`)
+      } else if (globalList.length) {
+        log.info(`[gebai] 人格工具审批：全局名单 [${globalList.join(" ")}] 弹相期卡问人；其余直接执行`)
+      } else {
+        log.info(`[gebai] 人格工具审批：全部不弹卡（输出仍需人批准，见 reviewOutbound）`)
+      }
     }
-    // 输出审核（默认开）：与工具审批**分开**、且**不看 approvalMode**。
-    // 人格以用户本人名义发言，发出去就是他说的话——这一步始终需要人点头（可显式关）。
-    log.info(
-      `[gebai] 人格输出审核：${personaOutboundReviewOn ? "开（飞书发送前推相期卡，驳回/超时不发）" : "关（GEBAI_PERSONA_OUTBOUND_REVIEW=false 自行承担）"}`,
-    )
+    // 输出审核（缺省开）：与工具审批**分开**、且**不看 approvalMode**。
+    // 人格以用户本人名义发言，发出去就是他说的话——缺省需要人点头；
+    // 关掉它必须在 `GEBAI_PERSONA_<ID>` 数组项里显式写 `"reviewOutbound": false`。
+    // 具体哪些分身关了，已在上面的人格配置报告里逐条 warn 出来（不在这里重复）。
 
     // ── 自我组织：把 driver_list / driver_create / driver_retire 交给模型 ──
     //
@@ -1341,7 +1461,11 @@ const inputQueue = new SessionInputQueue()
     // `onChange` 里的 `syncDriver` 不能省：少了它，新建的分身只在盘上/注册表里，
     // 调度器没条目——工具回「已创建」，而那个分身**从不响应**（现象极像订阅配错）。
     {
-      const wantApproval = process.env.GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL === "true"
+      // 是否弹窗由**审批名单**统一决定（`askTools`）：写 `driver_create` 进去就会弹卡。
+      // 不再单开 `GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL`：那会让“哪些工具要问人”
+      // 散在两个地方（一个名单 + 一个开关），而它们本该是同一条规则的两种写法。
+      // 这里传 false：工具自身的 `requireApproval` 声明不参与——审批完全由名单决定。
+      const wantApproval = false
       const deps = {
         registry: driverRegistry,
         store,
@@ -1414,6 +1538,17 @@ const inputQueue = new SessionInputQueue()
         credentials: personaCredentials,
         workers: workerBook,
         channelInput: () => personaChannelBridge?.allStats() ?? {},
+        // 渠道启停状态（含启动失败原因）：渠道撞车/缺凭据时，错误只在工具输出与日志里，
+        // 人看不见。面板要能自己回答“渠道起没起来”。`channels` 在下方创建，故炋惰性函数。
+        channelState: () =>
+          channels.state().map((c) => ({
+            name: c.name,
+            description: c.description,
+            enabled: c.enabled,
+            started: c.started,
+            listening: c.listening,
+            ...(c.error ? { error: c.error } : {}),
+          })),
     // 册府统计（未装册府时子Agent 取不到 → 返回 null，面板不显示该段）
     memoryStats: async () => {
       const statsTool = subAgents.defOf("cefu")?.tools?.cefu_stats
@@ -1549,7 +1684,7 @@ const inputQueue = new SessionInputQueue()
       personaOutboundDeps.pushAuthCard = undefined
       log.error(
         `[gebai] 拟人模式装配失败（服务继续启动，主界面不受影响）：${message}\n` +
-          `  已回滚为「拟人未启用」：入站事件只记日志。修好后重启即可，或设 GEBAI_PERSONA=false 显式关闭。`,
+          `  已回滚为「拟人未启用」：入站事件只记日志。修好后重启即可，或把 GEBAI_PERSONA_<ID> 配置注释掉显式关闭。`,
       )
       if (err instanceof Error && err.stack) log.warn(`[gebai] 拟人装配堆栈：\n${err.stack}`)
     }
@@ -1585,47 +1720,23 @@ const inputQueue = new SessionInputQueue()
     // 失败形态：人格仍在（渠道消息照常处理），只是定时/webhook 类驱动源没通电。
     try {
     const { EventSourceManager, defaultEventSourceScanDirs } = await import("@gebai/persona")
-    // 宿主能力注入（长连接 + 读历史）：两处都是“配错时错得很难查”的地方，
-    // 所以集中在 persona-feishu-deps.ts 里判定并在启动期如实报错。
-    const { createFeishuSourceDeps } = await import("../core/session/persona-feishu-deps")
-    const feishuDeps = createFeishuSourceDeps({
-      appId: () => process.env.FEISHU_BOT_APP_ID || process.env.GEBAI_FEISHU_APP_ID,
-      appSecret: () => process.env.FEISHU_BOT_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET,
-      sessionBot: () => ({ enabled: config.feishuBotEnabled, ...(config.feishuAppId ? { appId: config.feishuAppId } : {}) }),
-      // 渠道面互检：渠道已用同一应用建长连接时本源不再建（三处两两互检的第三对）
-      channelAppId: () => process.env.GEBAI_CHANNELS_FEISHU_APP_ID,
-      makeConn: (o) =>
-        new FeishuConn({
-          appId: o.appId,
-          appSecret: o.appSecret,
-          onEvent: o.onEvent,
-          log: (m) => log.info(`[persona:sources:feishu] ${m}`),
-        }),
-      ...(personaCredentials ? { userToken: () => personaCredentials!.token() } : {}),
-      appToken: async () => {
-        // 应用身份读历史：同一应用、同一凭据（只在无用户授权时才走到）
-        const id = process.env.FEISHU_BOT_APP_ID || process.env.GEBAI_FEISHU_APP_ID
-        const secret = process.env.FEISHU_BOT_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET
-        if (!id || !secret) throw new Error("缺少飞书应用凭据（应用身份读历史不可用）")
-        return await feishuTenantToken(id, secret)
-      },
-      log: { info: log.info, warn: log.warn },
-              // 自发送消息记账（防回灌，与渠道共享同一实例）：入站过滤自己发出的消息
-        sentMessages,
-        // 用户本人 openId（判定“这条是不是用户自己发的”；见 speaker-filter）
-        ...(personaCredentials ? { personaOwnerOpenId: () => personaCredentials!.ownerOpenId() } : {}),
-    })
     personaSources = new EventSourceManager({
       scanDirs: defaultEventSourceScanDirs({ packageRoot: await resolvePersonaPackageRoot() }),
       runtime: personaRuntime,
       home: config.gebaiHome,
-      enable: config.eventSourcesEnable,
-      disable: config.eventSourcesDisable,
-      // 宿主能力注入：人格定时声明（内置 `schedule` 源用它算档期）。
-      // **读函数而非快照**：人格定义是可热加载的（catalog 整体替换），快照会让
-      // 「新加的定时任务要重启才生效」；每次 tick 现取才是热加载的兑现。
+      // 没有启停名单：**注册了就跑**。
+      //
+      // 为何删掉 `GEBAI_EVENT_SOURCES_ENABLE/DISABLE`：还剩的源只有 `schedule`（定时驱动），
+      // 而它是人格的核心能力，几乎不会想关掉；想停某条定时就在人格数组项里写
+      // `schedules:{"morning":{"enabled":false}}`（那个能力已经有了）。
+      // 留着一对启停变量只会多一个“本想关 A、结果连 B 一起关了”的陷阱。
+      // （`file_drop` 已删除：它的目录投递由 `local` 渠道的 drop/inbox 承担。）
+      // 宿主能力注入：只给**渠道替代不了**的那些源。
+      //
+      // 为何这里没有飞书：入站链路是「渠道 → 驱动 → 会话」，飞书消息由渠道接，
+      // 渠道每个实例自带账号与群白名单，还能 observe 读历史——这比再养一个
+      // 全局账号的飞书事件源既一致又简单。（旧的内置 feishu 源已删除。）
       deps: {
-        ...feishuDeps,
         personaSchedules: () => collectPersonaSchedules(),
       },
       log: { info: log.info, warn: log.warn, error: log.error },
@@ -1832,6 +1943,11 @@ const inputQueue = new SessionInputQueue()
     modelConfigs: () => modelConfigs,
     // 拟人模式运行态（未启用时 undefined → REST 端点 404）
     ...(personaState ? { personaState } : {}),
+    // 渠道状态：**不跟拟人开关走**。没配人格时也要能看到“渠道起没起来、为什么没起来”
+    // （撞车/缺凭据这类故障与人格无关，但会导致“它不说话”这个相同现象）。
+    channelState: () => channels.state(),
+    // 渠道监听启停（**只停收消息**，发送/读取照常；只影响本次运行）
+    channelListenControl: (name: string, want: boolean) => channels.setListening(name, want),
     ...(personaSetupError ? { personaSetupError } : {}),
     ...(personaPushAuthCard ? { personaPushAuthCard } : {}),
     ...(personaSources

@@ -63,11 +63,17 @@ async function tenantToken(appId: string, appSecret: string): Promise<string> {
   return json.tenant_access_token
 }
 
-/** 本渠道的凭据（**独立机器人**，不回落 GEBAI_FEISHU_*）。 */
+/**
+ * 本实例的凭据（来自它自己那份 `GEBAI_CHANNEL_IN/OUT_FEISHU[]` 项，**不回落** `GEBAI_FEISHU_*`）。
+ *
+ * 为何取 `ctx.config` 而不是 `ctx.env(...)`：后者是全局环境变量，同类型的第二个实例
+ * （`feishu_ops`）拿到的是同一份值——那样“同类配两份”根本不成立。
+ */
 function credsOf(ctx: ChannelContext): { appId: string | undefined; appSecret: string | undefined } {
+  const c = ctx.config
   return {
-    appId: ctx.env("GEBAI_CHANNELS_FEISHU_APP_ID"),
-    appSecret: ctx.env("GEBAI_CHANNELS_FEISHU_APP_SECRET"),
+    appId: typeof c.appId === "string" ? c.appId : undefined,
+    appSecret: typeof c.appSecret === "string" ? c.appSecret : undefined,
   }
 }
 
@@ -309,21 +315,49 @@ async function observeIdentity(ctx: ChannelContext): Promise<{ token?: string; n
   }
 }
 
+/**
+ * 本实例的群白名单（来自它自己那份配置的 `chats`）。
+ *
+ * 两个面都用它：出站 `targets()`（fail-closed）与入站群过滤。
+ */
+function chatsOf(ctx: ChannelContext): string[] {
+  const c = ctx.config.chats
+  if (!Array.isArray(c)) return []
+  return c.filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim())
+}
+
 export const channel: ChannelDef = {
   name: "feishu",
   description: "飞书群：发消息 / 引用回复，读历史消息与群成员",
-  envVars: [
-    { name: "GEBAI_CHANNELS_FEISHU_APP_ID", description: "本渠道专用机器人 App ID（**不回落** GEBAI_FEISHU_APP_ID——会话机器人与对外人格是两个机器人）" },
-    { name: "GEBAI_CHANNELS_FEISHU_APP_SECRET", description: "本渠道专用机器人 App Secret（敏感）", secret: true },
-    {
-      name: "GEBAI_CHANNELS_FEISHU_CHATS",
-      description: "允许操作的群 chat_id（逗号分隔）——**白名单，越界直接拒绝**；留空则该渠道不可用（fail-closed）",
+  // 凭据是必需的：没有 AppID/Secret 的 feishu 实例只会把“配了但没反应”
+  // 变成更难查的形态，所以未配置时干脆不造实例。
+  requiresConfig: true,
+  // 能收也能发。入站实例建长连接；出站实例**不建连接**（只调 HTTP），
+  // 所以两者可以用同一个飞书应用。
+  dirs: ["in", "out"],
+  config: {
+    appId: {
+      type: "string",
+      description: "本实例专用机器人 App ID（每个实例一个应用——同一应用只能一条长连接）",
+      required: true,
     },
-    {
-      name: "GEBAI_CHANNELS_FEISHU_IGNORE_SELF",
-      description: "忽略本机器人自己发的消息（默认 on；关掉会因自己发的消息再次触发而无限循环）",
+    appSecret: { type: "string", description: "本实例专用机器人 App Secret", required: true, secret: true },
+    chats: {
+      type: "string[]",
+      description: "允许操作的群 chat_id 列表——**白名单，越界直接拒绝**；留空则实例不可用（fail-closed）",
     },
-  ],
+    ignoreSelf: {
+      type: "boolean",
+      description: "忽略本机器人自己发的消息（缺省 true；关掉会因自己发的消息再次触发而无限循环）",
+    },
+    scopes: {
+      type: "string[]",
+      description:
+        "以**用户本人**名义授权时要申请的额外权限（并集，基础集自动包含）。" +
+        "填 [\"offline_access\"] 才能拿到 refresh_token——否则 user_access_token 2 小时就过期、需重新授权。" +
+        "⚠ 该权限需先在飞书后台开通，未开通时授权页会报 20027。只对人恪生效；不填 = 不要长期授权",
+    },
+  },
 
   verbs: {
     send: {
@@ -372,19 +406,14 @@ export const channel: ChannelDef = {
   defaultKind: "message",
 
   /**
-   * 白名单：**只**允许 `GEBAI_CHANNELS_FEISHU_CHATS` 列出的群。
+   * 白名单：**只**允许本实例 `chats` 里列出的群。
    *
-   * 留空返回 `[]`（而不是 `null`）：未配置白名单时该渠道**不能**发任何消息。
+   * 留空返回 `[]`（而不是 `null`）：未配置白名单时该实例**不能**发任何消息。
    * 这是 fail-closed——「没配就是不许发」比「没配就是随便发」安全得多，
    * 因为后者的失败形态是「把内部信息发错群」，而前者只是「还没配好」。
    */
   targets(ctx: ChannelContext) {
-    const raw = ctx.env("GEBAI_CHANNELS_FEISHU_CHATS")
-    if (!raw) return []
-    return raw
-      .split(/[,\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean)
+    return chatsOf(ctx)
   },
 
   async start(ctx: ChannelContext) {
@@ -404,16 +433,17 @@ export const channel: ChannelDef = {
     const sessionBotEnabled = ctx.deps.feishuSessionBotEnabled !== false // 缺省视为启用（兼容旧宿主只注入 appId 的形态）
     if (sessionBotEnabled && typeof sessionAppId === "string" && sessionAppId && sessionAppId === appId) {
       throw new Error(
-        "GEBAI_CHANNELS_FEISHU_APP_ID 与已启用的会话机器人（GEBAI_FEISHU_APP_ID）相同：同一飞书应用不能建两条长连接（会互踢）。" +
-          "给本渠道新建一个独立机器人应用，或关闭其中一个（GEBAI_FEISHU_BOT_ENABLED=false）。",
+        `通道实例「${ctx.name}」的 appId 与已启用的会话机器人（GEBAI_FEISHU_APP_ID）相同：` +
+          "同一飞书应用不能建两条长连接（会互踢）。" +
+          "给本实例换一个独立应用，或关闭其中一个（GEBAI_FEISHU_BOT_ENABLED=false）。",
       )
     }
-    const chats = (ctx.env("GEBAI_CHANNELS_FEISHU_CHATS") ?? "").split(/[,\s]+/).filter(Boolean)
+    const chats = chatsOf(ctx)
     if (!chats.length) {
-      // 不抛错：凭据是好的，只是没配白名单 → 渠道起来但什么也发不出去（targets 返回 []）
-      ctx.log("warn", "未配置 GEBAI_CHANNELS_FEISHU_CHATS —— 该渠道不允许任何目标（fail-closed），act 会被直接拒绝")
+      // 不抛错：凭据是好的，只是没配白名单 → 实例起来但什么也发不出去（targets 返回 []）
+      ctx.log("warn", `实例「${ctx.name}」未配 chats —— 该实例不允许任何目标（fail-closed），act 会被直接拒绝`)
     } else {
-      ctx.log("info", `飞书渠道就绪，允许 ${chats.length} 个群：${chats.join("、")}`)
+      ctx.log("info", `实例「${ctx.name}」就绪，允许 ${chats.length} 个群：${chats.join("、")}`)
     }
     // 验一次令牌（失败即该渠道不可用：与其等到第一次发消息才炸，不如启动期如实失败）
     await tenantToken(appId, appSecret)
@@ -445,13 +475,15 @@ export const channel: ChannelDef = {
       )
     }
 
-    const ignoreSelf = !/^(off|0|false|no)$/i.test(ctx.env("GEBAI_CHANNELS_FEISHU_IGNORE_SELF") ?? "")
+    // 缺省 true（忽略自己发的）；显式 false 才关
+    const ignoreSelfCfg = ctx.config.ignoreSelf
+    const ignoreSelf = ignoreSelfCfg === undefined ? true : ignoreSelfCfg !== false
     // 自发送消息记账（宿主注入）：自己发出/回复的消息按 message_id 精确过滤——
     // 以用户名义（as_user=true）发的消息 sender_type=user，能绕过 IGNORE_SELF 的 app 过滤，
     // 不查这笔账就会把自己说的话又当新消息投回去（人格多处理一轮）。
-    const allowed = new Set((ctx.env("GEBAI_CHANNELS_FEISHU_CHATS") ?? "").split(/[,\s]+/).filter(Boolean))
+    const allowed = new Set(chatsOf(ctx))
     // 未配白名单 = 不限定入站群（入站不做写操作，风险低于出站）；但日志里明确说清楚
-    if (!allowed.size) ctx.log("info", "未配置 GEBAI_CHANNELS_FEISHU_CHATS：入站不限群（出站仍 fail-closed）")
+    if (!allowed.size) ctx.log("info", `实例「${ctx.name}」未配 chats：入站不限群（出站仍 fail-closed）`)
 
     const conn = factory({
       appId,

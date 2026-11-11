@@ -212,7 +212,8 @@ describe("写面 admin 门槛（requireAdmin）", () => {
     expect((await app.request("/api/v1/persona/authorize", { method: "POST" })).status).toBe(403)
     expect((await app.request("/api/v1/persona/authorize", { method: "DELETE" })).status).toBe(403)
     expect((await app.request("/api/v1/persona/authorize/complete", { method: "POST", body: "{\"code\":\"x\"}", headers: { "content-type": "application/json" } })).status).toBe(403)
-    expect((await app.request("/api/v1/persona/sources/feishu/stop", { method: "POST" })).status).toBe(403)
+    // 用任意源名验证权限门槛（不依赖具体源是否存在：无权限时连转发都不该发生）
+    expect((await app.request("/api/v1/persona/sources/anything/stop", { method: "POST" })).status).toBe(403)
     expect(log).toEqual([]) // 一次都没转发
   })
 

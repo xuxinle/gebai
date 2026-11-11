@@ -16,13 +16,13 @@
  * 设计口径写的就是第三条（不能决策或需要实际用户帮助时用相期弹窗让人介入），
  * 而此前实现里相期只用于**出站审核**（发消息前批准），审批本身完全没接。
  *
- * ## 三档策略（`GEBAI_PERSONA_APPROVAL`）
+ * ## 什么时候会用上它
  *
- * | 值 | 语义 | 适用 |
- * |---|---|---|
- * | `ask`（缺省） | 推相期卡，按答复放行/拒绝 | 生产默认 |
- * | `auto` | 直接通过（引擎 `autoApprove`） | 完全信任的隔离环境 |
- * | `deny` | 直接拒绝（fail-closed，不空等） | 只读人格 / 高敏环境 |
+ * 人格的工具调用**默认全部不审批**；只有 `GEBAI_PERSONA_APPROVAL_ASK_TOOLS`
+ * 名单里的工具会走到这里（引擎的 `forceApprovalFor` 钩子把它们拦回来）。
+ * 不填名单 = 这个桥永远不会被唤醒（没必要为了“以防万一”把每步都推成卡）。
+ *
+ * 名单内与名单外是**同一条路**：引擎推事件 → 桥转成相期弹窗 → 人点一下继续。
  *
  * ## 三条工程约束（都是真实事故形态）
  *
@@ -59,17 +59,10 @@ export interface ApprovalBridgeEnginePort {
 }
 
 export interface ApprovalBridgeDeps {
-  /** 相期 `card_ask`（compose 注入；缺省 = 无法问人 → ask 模式按拒绝处理）。 */
+  /** 相期 `card_ask`（compose 注入；缺省 = 无法问人 → 按拒绝处理）。 */
   askCard?: AskCardTool
   /** 相期是否已连接（拿不到视为可用——送卡本身还有 `delivered` 兜底）。 */
   isXiangqiConnected?: () => boolean
-  /**
-   * 审批姿态。可以传函数以支持热改（`GEBAI_PERSONA_APPROVAL` 改完下一个审批即生效）。
-   *
-   * 审批桥只在 `ask` 档下有意义（其它档根本不订阅事件，见 compose）；
-   * `readonly`/`auto` 在这里作为“直接放行”处理，以免意外挂起。
-   */
-  mode: import("@gebai/persona").PersonaApprovalMode | (() => import("@gebai/persona").PersonaApprovalMode)
   /** 等待答复时限（毫秒，缺省 5 分钟；与引擎审批超时对齐）。 */
   waitMs?: number
   log?: { info(msg: string): void; warn(msg: string): void }
@@ -192,17 +185,6 @@ export class ApprovalBridge {
     this.deps = opts.deps
   }
 
-  /** 审批姿态（运行期现读；改配置后下次请求即生效）。 */
-  get mode(): import("@gebai/persona").PersonaApprovalMode {
-    const m = this.deps.mode
-    if (typeof m !== "function") return m
-    try {
-      return m()
-    } catch {
-      return "readonly" // 解析抛错：回到缺省档（不把人格卡死）
-    }
-  }
-
   /**
    * 事件入口：只处理 `event.approval.request` / `event.choice.request`。
    *
@@ -254,17 +236,9 @@ export class ApprovalBridge {
     const isPersona = await this.safeIsPersona(req.sessionId)
     if (!isPersona) return
 
-    // ② 姿态：readonly / auto 直接放行（不推卡）；deny 直接拒绝
-    const mode = this.mode
-    if (mode === "readonly" || mode === "auto") {
-      await this.decide(req.sessionId, req.toolCallId, true, mode)
-      return
-    }
-    if (mode === "deny") {
-      this.deps.log?.info(`[persona:approval] ${req.tool}（${req.toolCallId}）按 deny 策略拒绝`)
-      await this.decide(req.sessionId, req.toolCallId, false, "deny")
-      return
-    }
+    // ② 走到这里就说明**名单命中**（名单外的工具根本不会被引擎拦回来），直接问人。
+    // 旧实现在这里还有一段“按档位放行/拒绝”的分支，那些档位已取消：
+    // 不再有“什么都问”或“什么都拒”的模式，名单本身就是唯一依据。
 
     // ③ 同一调用已经问出过结论：按结论回答（引擎重试不该在窗口上再刷一张卡）
     const known = this.verdicts.get(`${req.sessionId}:${req.toolCallId}`)
@@ -353,16 +327,8 @@ export class ApprovalBridge {
     const isPersona = await this.safeIsPersona(req.sessionId)
     if (!isPersona) return
 
-    if (this.deps.mode === "auto") {
-      await this.safeDecideChoice(req.sessionId, req.choiceId, null)
-      return
-    }
-    // deny：明确回「用户拒绝」，模型据此停止追问
-    if (this.deps.mode === "deny") {
-      await this.safeDecideChoice(req.sessionId, req.choiceId, null)
-      return
-    }
-
+    // 选择请求（模型的 `ask` 工具）与审批名单无关：它本身就是“模型想听人拿主意”，
+    // 应该照实弹出选项。旧实现在这里还按档位提前回 null，已随档位一起删。
     const ask = this.deps.askCard
     if (!ask) return // 没卡工具：不干预，等引擎自己的超时（拒绝语义）
 
@@ -409,8 +375,8 @@ export class ApprovalBridge {
   }
 
   /** 诊断：已记住的结论条数。 */
-  stats(): { remembered: number; inflight: number; mode: string } {
-    return { remembered: this.verdicts.size(), inflight: this.inflight.size, mode: this.mode }
+  stats(): { remembered: number; inflight: number } {
+    return { remembered: this.verdicts.size(), inflight: this.inflight.size }
   }
 
   private async safeIsPersona(sessionId: string): Promise<boolean> {

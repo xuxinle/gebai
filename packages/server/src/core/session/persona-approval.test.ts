@@ -64,7 +64,7 @@ const REQ = { sessionId: "s1", toolCallId: "tc1", tool: "sh", args: { command: "
 describe("审批桥：fail-closed 的三条路径", () => {
   test("相期卡未装配 → 拒绝（不能静默放行）", async () => {
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask" } })
+    const b = new ApprovalBridge({ engine, deps: {} })
     await b.handleApproval(REQ)
     expect(approvals).toEqual([{ sessionId: "s1", toolCallId: "tc1", approve: false }])
   })
@@ -74,7 +74,7 @@ describe("审批桥：fail-closed 的三条路径", () => {
     const { engine, approvals } = makeEngine()
     const b = new ApprovalBridge({
       engine,
-      deps: { mode: "ask", askCard: ask.tool, isXiangqiConnected: () => false },
+      deps: { askCard: ask.tool, isXiangqiConnected: () => false },
     })
     await b.handleApproval(REQ)
     expect(ask.calls).toHaveLength(0) // 连推都不推（推也是白推）
@@ -84,7 +84,7 @@ describe("审批桥：fail-closed 的三条路径", () => {
   test("推卡抛错 → 拒绝（异常不得变成放行令）", async () => {
     const ask = makeAsk({ throw: "相期炸了" })
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
     expect(approvals[0]!.approve).toBe(false)
   })
@@ -92,7 +92,7 @@ describe("审批桥：fail-closed 的三条路径", () => {
   test("送卡未送达（delivered=false）→ 拒绝", async () => {
     const ask = makeAsk({ delivered: false })
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
     expect(approvals[0]!.approve).toBe(false)
   })
@@ -100,7 +100,7 @@ describe("审批桥：fail-closed 的三条路径", () => {
   test("等待超时（answered=false）→ 拒绝，且**不记住**这个结论（卡还在，人稍后点了还认）", async () => {
     const ask = makeAsk({ delivered: true, answered: false })
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
     expect(approvals[0]!.approve).toBe(false)
     expect(b.stats().remembered).toBe(0)
@@ -111,7 +111,7 @@ describe("审批桥：问人与结论", () => {
   test("用户批准 → approve=true，卡片带完整命令（那是他要判断的东西）", async () => {
     const ask = makeAsk({ answered: true, choice: "approve" })
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval({ ...REQ, personaName: "小霜" })
     expect(approvals[0]!.approve).toBe(true)
     const body = String(ask.calls[0]!.body)
@@ -123,7 +123,7 @@ describe("审批桥：问人与结论", () => {
   test("用户驳回 → approve=false，且消息提示“不要重试”", async () => {
     const ask = makeAsk({ answered: true, choice: "reject" })
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
     expect(approvals[0]!.approve).toBe(false)
   })
@@ -131,7 +131,7 @@ describe("审批桥：问人与结论", () => {
   test("同一调用重试（引擎重投同一 toolCallId）→ 不重复推卡，按记住的结论回答", async () => {
     const ask = makeAsk({ answered: true, choice: "approve" })
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
     await b.handleApproval({ ...REQ, retries: 1 })
     expect(ask.calls).toHaveLength(1) // 窗口上只有一张卡
@@ -141,45 +141,42 @@ describe("审批桥：问人与结论", () => {
   test("并发重复请求（同一 toolCallId 同时到达）→ 单飞，只推一张", async () => {
     const ask = makeAsk({ answered: true, choice: "approve" })
     const { engine } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await Promise.all([b.handleApproval(REQ), b.handleApproval(REQ)])
     expect(ask.calls).toHaveLength(1)
   })
 })
 
-describe("审批桥：姿态与作用域", () => {
-  test("mode=readonly（缺省）→ 直接放行，且不推卡（工具执行不审）", async () => {
+describe("审批桥：只问不判", () => {
+  test("名单命中 → 推弹窗，按人的答复放行", async () => {
+    const ask = makeAsk({ answered: true, choice: "approve" })
+    const { engine, approvals } = makeEngine()
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
+    await b.handleApproval(REQ)
+    expect(ask.calls).toHaveLength(1)
+    expect(approvals[0]!.approve).toBe(true)
+  })
+
+  test("名单命中 + 人驳回 → 拒绝", async () => {
     const ask = makeAsk({ answered: true, choice: "reject" })
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "readonly", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
-    // 注意：就算相期送了“驳回”也不影响——readonly 根本不问
-    expect(approvals[0]!.approve).toBe(true)
-    expect(ask.calls).toHaveLength(0)
+    expect(ask.calls).toHaveLength(1)
+    expect(approvals[0]!.approve).toBe(false)
   })
 
-  test("mode=auto → 直接通过，且不推卡", async () => {
-    const ask = makeAsk({ answered: true, choice: "approve" })
+  test("相期不在（无卡工具）→ 拒绝，且不空等（fail-closed）", async () => {
     const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "auto", askCard: ask.tool } })
-    await b.handleApproval(REQ)
-    expect(approvals[0]!.approve).toBe(true)
-    expect(ask.calls).toHaveLength(0)
-  })
-
-  test("mode=deny → 直接拒绝，且不推卡", async () => {
-    const ask = makeAsk({ answered: true, choice: "approve" })
-    const { engine, approvals } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "deny", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: {} })
     await b.handleApproval(REQ)
     expect(approvals[0]!.approve).toBe(false)
-    expect(ask.calls).toHaveLength(0)
   })
 
   test("非人格会话 → 完全不干预（网页里有真前端，不重复弹卡）", async () => {
     const ask = makeAsk({ answered: true, choice: "approve" })
     const { engine, approvals } = makeEngine({ persona: false })
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
     expect(ask.calls).toHaveLength(0)
     expect(approvals).toHaveLength(0)
@@ -195,7 +192,7 @@ describe("审批桥：姿态与作用域", () => {
         throw new Error("store 挂了")
       },
     }
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleApproval(REQ)
     expect(ask.calls).toHaveLength(0)
     expect(approvals).toHaveLength(0)
@@ -208,7 +205,7 @@ describe("审批桥：选择请求（ask 选项分支）", () => {
   test("字符串选项 → 卡片 label/value 都是原文，答复原样回引擎", async () => {
     const ask = makeAsk({ answered: true, choice: "乙" })
     const { engine, choices } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleChoice(CH)
     const opts = ask.calls[0]!.options as Array<{ label: string; value: string }>
     expect(opts.map((o) => o.label)).toEqual(["甲", "乙"])
@@ -218,7 +215,7 @@ describe("审批桥：选择请求（ask 选项分支）", () => {
   test("{title,description} 选项 → label 取 title、hint 取 description（否则用户在卡上看到「选项 1」）", async () => {
     const ask = makeAsk({ answered: true, choice: "方案 A" })
     const { engine } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleChoice({ ...CH, options: [{ title: "方案 A", description: "快但糙" }, { title: "方案 B" }] })
     const opts = ask.calls[0]!.options as Array<{ label: string; value: string; hint?: string }>
     expect(opts[0]).toEqual({ label: "方案 A", value: "方案 A", hint: "快但糙" })
@@ -227,7 +224,7 @@ describe("审批桥：选择请求（ask 选项分支）", () => {
   test("超时/未送达 → 回 null（= 用户未作答，模型自行决策），不是“拒绝”", async () => {
     const ask = makeAsk({ delivered: true, answered: false })
     const { engine, choices } = makeEngine()
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleChoice(CH)
     expect(choices[0]!.selection).toBeNull()
   })
@@ -235,7 +232,7 @@ describe("审批桥：选择请求（ask 选项分支）", () => {
   test("非人格会话的选择请求 → 不干预", async () => {
     const ask = makeAsk({ answered: true, choice: "甲" })
     const { engine, choices } = makeEngine({ persona: false })
-    const b = new ApprovalBridge({ engine, deps: { mode: "ask", askCard: ask.tool } })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
     await b.handleChoice(CH)
     expect(ask.calls).toHaveLength(0)
     expect(choices).toHaveLength(0)

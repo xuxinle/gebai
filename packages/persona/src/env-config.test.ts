@@ -19,7 +19,6 @@ import {
   chatSessionKeyOf,
   narrowSubscriptions,
   parseOutputTargets,
-  personaApprovalMode,
   sessionRoutingMode,
 } from "./env-config"
 import { validatePersonaDef } from "./persona"
@@ -272,40 +271,82 @@ describe("applyPersonaEnv：三个配置面 + 分身级覆盖", () => {
     expect(report.disabled).toEqual(["xiaoshuang"])
   })
 
-  test("人格级 CHATS 收窄所有分身的 feishu 消息订阅", () => {
-    const { personas, report } = applyPersonaEnv(map, { GEBAI_PERSONA_XIAOSHUANG_CHATS: "oc_a,oc_b" })
+  test("人格级 chats（无 name 的项）收窄所有分身的消息订阅（前缀 = 实例名）", () => {
+    const { personas, report } = applyPersonaEnv(
+      map,
+      {
+        GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ chats: ["oc_a", "oc_b"] }]),
+      },
+      new Map([["feishu_main", ["oc_a", "oc_b"]]]),
+    )
     const d = personas.get("xiaoshuang")!
-    expect(d.drivers![0]!.subscriptions).toEqual(["feishu:oc_a:message", "feishu:oc_b:message"])
-    // alerts 只订 webhook：收窄后原有订阅保留，又多了逐群消息订阅（CHATS 的语义就是“只看这些群”）
+    // 前缀是**实例名** feishu_main（不是类型名 feishu）
+    expect(d.drivers![0]!.subscriptions).toEqual(["feishu_main:oc_a:message", "feishu_main:oc_b:message"])
+    // alerts 只订 webhook：收窄后原有订阅保留，又多了逐群消息订阅（chats 的语义就是“只看这些群”）
     expect(d.drivers![1]!.subscriptions).toContain("webhook")
     expect(report.narrowed.xiaoshuang).toEqual(["oc_a", "oc_b"])
   })
 
-  test("分身级 CHATS 优先于人格级（更具体的声明胜出）", () => {
-    const { personas, report } = applyPersonaEnv(map, {
-      GEBAI_PERSONA_XIAOSHUANG_CHATS: "oc_persona",
-      GEBAI_PERSONA_XIAOSHUANG_SUPPORT_CHATS: "oc_driver",
-    })
+  test("分身级 chats 优先于人格级（更具体的声明胜出）", () => {
+    const { personas, report } = applyPersonaEnv(
+      map,
+      {
+        GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+          { chats: ["oc_persona"] },
+          { name: "support", chats: ["oc_driver"] },
+        ]),
+      },
+      new Map([["feishu_main", ["oc_persona", "oc_driver"]]]),
+    )
     const d = personas.get("xiaoshuang")!
-    expect(d.drivers![0]!.subscriptions).toEqual(["feishu:oc_driver:message"])
-    expect(d.drivers![1]!.subscriptions).toContain("feishu:oc_persona:message")
+    expect(d.drivers![0]!.subscriptions).toEqual(["feishu_main:oc_driver:message"])
+    expect(d.drivers![1]!.subscriptions).toContain("feishu_main:oc_persona:message")
     expect(report.narrowed["xiaoshuang/support"]).toEqual(["oc_driver"])
   })
 
-  test("输出目标注入到 driver（人格级作为默认值，分身级覆盖）", () => {
-    const { personas } = applyPersonaEnv(map, {
-      GEBAI_PERSONA_XIAOSHUANG_OUTPUT: "feishu:oc_persona",
-      GEBAI_PERSONA_XIAOSHUANG_ALERTS_OUTPUT: "feishu:oc_ops=运维群",
-    })
+  test("输出目标：channels 引用通道实例，人格级作默认、分身级覆盖", () => {
+    // 通道实例 → 它允许的群（宿主从已装配的渠道注册表取）
+    const channelChats = new Map<string, readonly string[]>([
+      ["feishu_main", ["oc_persona"]],
+      ["feishu_ops", ["oc_ops"]],
+    ])
+    const { personas, report } = applyPersonaEnv(
+      map,
+      {
+        GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+          { channels: ["feishu_main"] },
+          { name: "alerts", channels: ["feishu_ops"] },
+        ]),
+      },
+      channelChats,
+    )
     const d = personas.get("xiaoshuang")!
+    console.log(`    实测: support=${JSON.stringify(d.drivers![0]!.outputs)}`)
     expect(d.drivers![0]!.outputs?.[0]?.address).toBe("oc_persona")
+    expect(d.drivers![0]!.outputs?.[0]?.channel).toBe("feishu_main")
     expect(d.drivers![1]!.outputs?.[0]?.address).toBe("oc_ops")
-    expect(d.drivers![1]!.outputs?.[0]?.label).toBe("运维群")
+    expect(d.drivers![1]!.outputs?.[0]?.channel).toBe("feishu_ops")
+    expect(report.errors).toEqual([])
   })
 
-  test("输出目标格式错 → 进 report.errors（不静默丢）", () => {
-    const { report } = applyPersonaEnv(map, { GEBAI_PERSONA_XIAOSHUANG_OUTPUT: "bad" })
-    expect(report.errors.some((e) => e.includes("格式非法"))).toBe(true)
+  test("引用不存在的通道实例 → 进 report.errors（不静默丢弃）", () => {
+    const { report } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ channels: ["feishu_nope"] }]),
+    })
+    console.log(`    实测: ${report.errors[0]}`)
+    expect(report.errors.some((e) => e.includes("未配置的通道实例「feishu_nope」"))).toBe(true)
+  })
+
+  test("JSON 写错 → 进 report.errors（不静默当未配置）", () => {
+    const { report } = applyPersonaEnv(map, { GEBAI_PERSONA_XIAOSHUANG: "[bad" })
+    expect(report.errors.some((e) => e.includes("不是合法 JSON"))).toBe(true)
+  })
+
+  test("数组里拼错键 → 进 report.errors（不知道的键不得静默忽略）", () => {
+    const { report } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ name: "support", chat: ["oc_a"] }]),
+    })
+    expect(report.errors.some((e) => e.includes("未知键「chat」"))).toBe(true)
   })
 
   test("未配置任何变量 → 定义原样返回（零配置不改行为）", () => {
@@ -335,41 +376,5 @@ describe("会话路由：缺省面向上下文，不面向群", () => {
     expect(sessionRoutingMode({ GEBAI_PERSONA_SESSION_ROUTING: "CHAT" })).toBe("chat")
     // 无法识别的值回到缺省（不同群共享上下文），而不是悄悄改成分群
     expect(sessionRoutingMode({ GEBAI_PERSONA_SESSION_ROUTING: "胡说" })).toBe("driver")
-  })
-})
-
-describe("审批姿态解析（工具执行 vs 对外输出）", () => {
-  test("缺省 readonly：**工具执行不审，输出才审**", () => {
-    expect(personaApprovalMode({})).toBe("readonly")
-  })
-
-  test("ask 才回到“每个需审批工具都弹卡”（高敏环境显式选）", () => {
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "ask" })).toBe("ask")
-  })
-
-  test("auto / off / true → auto（旧名，与 readonly 同效）", () => {
-    for (const v of ["auto", "off", "true", "1"]) {
-      expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: v })).toBe("auto")
-    }
-  })
-
-  test("deny / false → deny（只读人格）", () => {
-    for (const v of ["deny", "false", "0", "no"]) {
-      expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: v })).toBe("deny")
-    }
-  })
-
-  test("readonly 可显式写", () => {
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "readonly" })).toBe("readonly")
-  })
-
-  test("无法识别的值 → readonly（不是 ask：不能把人格卡死）", () => {
-    expect(personaApprovalMode({ GEBAI_PERSONA_APPROVAL: "也许吧" })).toBe("readonly")
-  })
-
-  test("向后兼容：旧 GEBAI_PERSONA_AUTO_APPROVE=false → deny", () => {
-    expect(personaApprovalMode({ GEBAI_PERSONA_AUTO_APPROVE: "false" })).toBe("deny")
-    // 旧缺省 true 不再生效（它曾是“工具全自动执行”的根源）
-    expect(personaApprovalMode({ GEBAI_PERSONA_AUTO_APPROVE: "true" })).toBe("readonly")
   })
 })

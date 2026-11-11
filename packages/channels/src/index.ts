@@ -75,6 +75,10 @@ export type {
 } from "./executor"
 export { ActionExecutor } from "./executor"
 
+// ── 声明式实例配置（`GEBAI_CHANNEL_<TYPE>` JSON 数组）──
+export type { ChannelInstance, ParseInstancesResult } from "./config"
+export { materializeInstance, parseChannelInstances } from "./config"
+
 // ── 输入面（渠道 → 调度内核） ──
 export type { ChannelInputBridgeOptions, InputCounters, PersonaDispatchPort } from "./bridge"
 export { ChannelInputBridge, eventIdFor, hash32 } from "./bridge"

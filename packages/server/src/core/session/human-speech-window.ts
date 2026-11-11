@@ -63,27 +63,31 @@ export class HumanSpeechWindow {
     }
   }
 
-  /** 该群是否正在让位窗口内。 */
-  inWindow(chatId: string, at = this.now()): boolean {
-    // 0 窗口 = 显式关闭（GEBAI_PERSONA_YIELD_SECONDS=0）。
+  /** 该群是否正在让位窗口内。
+   *
+   * `windowMs` 可选：不同分身可以有不同让位窗口，而本对象是进程级的
+   * （按群共享时间戳）。传了就按传入值算，不传用构造时的缺省值。
+   */
+  inWindow(chatId: string, at = this.now(), windowMs = this.windowMs): boolean {
+    // 0 窗口 = 显式关闭（yieldSeconds: 0）。
     // 不单列这个分支的话，`at - ts > 0` 在同一毫秒内为 false，会返回 true——
     // 即“明明关了却还拦一次”，而配置的意图是彻底不拦。
-    if (this.windowMs <= 0) return false
+    if (windowMs <= 0) return false
     const ts = this.lastAt.get(chatId)
     if (ts === undefined) return false
-    if (at - ts >= this.windowMs) {
-      this.lastAt.delete(chatId)   // 过期即清：避免长期占着
+    if (at - ts >= windowMs) {
+      this.lastAt.delete(chatId) // 过期即清：避免长期占着
       return false
     }
     return true
   }
 
   /** 距窗口结束还有多久（毫秒；不在窗口内为 0）。用于给模型的提示措辞。 */
-  remainingMs(chatId: string, at = this.now()): number {
-    if (this.windowMs <= 0) return 0
+  remainingMs(chatId: string, at = this.now(), windowMs = this.windowMs): number {
+    if (windowMs <= 0) return 0
     const ts = this.lastAt.get(chatId)
     if (ts === undefined) return 0
-    return Math.max(0, this.windowMs - (at - ts))
+    return Math.max(0, windowMs - (at - ts))
   }
 
   /** 当前受影响的群数（诊断用）。 */

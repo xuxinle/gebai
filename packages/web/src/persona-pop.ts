@@ -26,6 +26,7 @@ import { clampPos } from "./todo-core"
 import { makeDraggable } from "./fw/draggable"
 import { el } from "./state"
 import {
+  fetchChannelState,
   fetchPersonaSchedules,
   fetchPersonaState,
   renderPersonaPanel,
@@ -151,14 +152,42 @@ async function refresh(force = false): Promise<void> {
     return
   }
   if (!snapshot) {
-    // 从「启用」变成「未启用」：只可能是服务端关了开关并重启。如实说，并把入口按钮一并隐藏
+    // 拟人未启用：**不再整块消失**。
+    //
+    // 为何要改：未启用时把入口隐藏，等于在最需要排查的时候把工具收起来——
+    // 用户想查的“它为什么不说话”，很可能与人格无关（渠道没起来/撞车/缺凭据）。
+    // 渠道是独立一层，它起来没起来不该因为“没配人格”而不可见。
     const btn = document.getElementById("persona-btn")
-    if (btn) btn.hidden = true
+    if (btn) btn.hidden = false
+    setBadge("未启用", "warn")
     refs.body.innerHTML = ""
     refs.body.appendChild(
-      el("div", "persona-pop-hint", "拟人模式当前未启用（GEBAI_PERSONA=false）。重新启用后刷新页面即可。"),
+      el(
+        "div",
+        "persona-pop-hint",
+        "拟人模式未启用：没有配任何 GEBAI_PERSONA_<人格ID>。下面是渠道状态（它不依赖拟人）。",
+      ),
     )
-    setBadge("未启用", "warn")
+    const channels = await fetchChannelState()
+    if (channels.length) {
+      // 复用面板的渠道段渲染（同一份数据、同一种说法，不另写一套）
+      renderPersonaPanel(refs.body, {
+        enabled: false,
+        generatedAt: Date.now(),
+        personas: [],
+        sources: [],
+        sourceErrors: {},
+        channelInput: {},
+        channelState: channels,
+        workers: [],
+        credentials: null,
+        totals: { drivers: 0, activeDrivers: 0, running: 0, queued: 0, failed: 0, workersRunning: 0 },
+      })
+    } else {
+      refs.body.appendChild(
+        el("div", "persona-pop-hint", "渠道状态也读不到（此宿主未注入渠道注册表）。"),
+      )
+    }
     return
   }
   lastSnapshot = snapshot

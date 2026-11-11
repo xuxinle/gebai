@@ -60,6 +60,25 @@ export interface PersonaStateView {
   }>
   sourceErrors: Record<string, string>
   channelInput: Record<string, { emitted: number; accepted: number; unrouted: number; duplicate: number; overflow: number; unavailable: number }>
+  /**
+   * 渠道启停状态（含**启动失败原因**）。`undefined` = 旧服务端未提供该字段。
+   *
+   * 为何单列一段：渠道因“与已启用的会话机器人同 AppID”而拒启时，那条错误只在
+   * `channels_list` 工具输出与启动日志里——模型看得见、**人看不见**。而“人格不回话”的
+   * 首要嫌疑就是“渠道没起来”，面板必须自己能答。
+   */
+  channelState?: Array<{
+    name: string
+    description: string
+    enabled: boolean
+    started: boolean
+    error?: string
+    listening?: boolean
+    /** 方向：in 只收；out 只发/读（不建连接）。旧后端不返回时当 out 处理。 */
+    dir?: "in" | "out"
+    /** 这个实例能否启停监听（out 实例或渠道类型未实现 startListen 时为 false）。 */
+    canListen?: boolean
+  }>
   /** 派出去的活（最近的在前；快照有、面板渲染它） */
   workers: Array<{
     runId: string
@@ -74,6 +93,24 @@ export interface PersonaStateView {
   /** 拟人装配失败原因（服务仍正常运行；有值 = 开关开了但坏了）。 */
   setupError?: string
   totals: { drivers: number; activeDrivers: number; running: number; queued: number; failed: number; workersRunning: number }
+}
+
+/**
+ * 拉取渠道启停状态（**不依赖拟人是否启用**）。
+ *
+ * 为何单独一个请求：拟人未启用时 `/persona/state` 是 404，但“渠道起没起来”
+ * 恰恰是用户最需要看的——它跟人格无关，却是“它不说话”的常见成因（撞车/缺凭据）。
+ * 拿不到就返回空数组（不抛：渠道面板不是关键路径，不该因它拖垮整个浮层）。
+ */
+export async function fetchChannelState(): Promise<NonNullable<PersonaStateView["channelState"]>> {
+  try {
+    const res = await fetch("/api/v1/channels/state")
+    if (!res.ok) return []
+    const body = (await res.json()) as { channels?: NonNullable<PersonaStateView["channelState"]> }
+    return body.channels ?? []
+  } catch {
+    return []
+  }
 }
 
 /** 拉取快照（404 = 拟人未启用或装配失败；装配失败时 body 带 setupError，透出给调用方；其它错误抛出）。 */
@@ -92,6 +129,8 @@ export async function fetchPersonaState(): Promise<PersonaStateView | null> {
         sources: [],
         sourceErrors: {},
         channelInput: {},
+        // 装配失败也要看得到渠道（可能是渠道配置错导致装配失败）
+        channelState: await fetchChannelState(),
         workers: [],
         credentials: null,
         setupError: body.setupError,
@@ -160,6 +199,19 @@ export async function fetchPersonaSchedules(): Promise<{ ok: boolean; rows: Sche
   }
   const body = (await res.json().catch(() => ({}))) as { schedules?: ScheduleControlRow[]; error?: string }
   return { ok: true, rows: Array.isArray(body.schedules) ? body.schedules : [] }
+}
+
+/** 开/关一个渠道实例的**监听**（只停收消息；只影响本次运行）。 */
+export async function controlChannelListen(
+  name: string,
+  listen: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/v1/channels/${encodeURIComponent(name)}/listen/${listen ? "start" : "stop"}`, {
+    method: "POST",
+  })
+  if (!res.ok) return { ok: false, error: await readFailure(res) }
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+  return { ok: body.ok !== false, ...(body.error ? { error: body.error } : {}) }
 }
 
 /** 开/关一条定时任务（持久）。 */
@@ -267,6 +319,55 @@ function counters(...pairs: Array<[string, number]>): HTMLElement {
 }
 
 /**
+ * 标签页容器：返回「往哪个面板里放内容」。
+ *
+ * 为何分页而不是继续往下接：面板已经到 6 段——「找渠道开关」和「看人格状态」是
+ * 两个不相关的事，却排在同一个长页面里。分页的判据是**它们服务哪个对象**：
+ * - 人格页：这个人格怎么说话/怎么干活（身份、订阅、定时、派活、凭据）
+ * - 通道页：消息从哪个口进来/从哪个口出去（实例、长连接、监听开关）
+ *
+ * 两页各自保留滚动位置（切换不重渲染），且**默认停在人格页**（那是主要查看对象）。
+ */
+function tabbedPanel(
+  host: HTMLElement,
+  tabs: Array<{ id: string; label: string; build: () => void }>,
+): void {
+  const bar = el("div", "persona-tabs")
+  const body = el("div", "persona-tabs-body")
+  const panes = new Map<string, HTMLElement>()
+  const buttons = new Map<string, HTMLElement>()
+  for (const t of tabs) {
+    const btn = el("button", "persona-tab", t.label)
+    btn.type = "button"
+    btn.dataset.tab = t.id
+    const pane = el("div", "persona-tab-pane")
+    panes.set(t.id, pane)
+    buttons.set(t.id, btn)
+    btn.addEventListener("click", () => activate(t.id))
+    bar.appendChild(btn)
+    body.appendChild(pane)
+  }
+  const activate = (id: string): void => {
+    for (const [tid, btn] of buttons) {
+      const on = tid === id
+      btn.classList.toggle("persona-tab-active", on)
+      panes.get(tid)!.style.display = on ? "" : "none"
+    }
+  }
+  host.append(bar, body)
+  // 构建内容（每页只在首次激活时构建：避免一进面板就把所有请求都发出去）
+  const built = new Set<string>()
+  const ensureBuilt = (id: string): void => {
+    if (built.has(id)) return
+    built.add(id)
+    tabs.find((t) => t.id === id)?.build()
+  }
+  // 先构建全量：内容都在本地快照里，构建成本是 DOM 拼装（无请求），预先建好让切页瞬时完成
+  for (const t of tabs) ensureBuilt(t.id)
+  activate(tabs[0]!.id)
+}
+
+/**
  * 渲染整个面板（append 到给定容器）。
  *
  * `onChanged` 在手动启停源之后调用：让调用方决定重渲染方式（面板自己不做全量刷新，
@@ -285,6 +386,11 @@ export function renderPersonaPanel(
   //
   // 为何不在本函数里 fetch：渲染是同步的，异步补数据只能靠「回来后重画」，
   // 而重画会再触发一次 fetch——一个自反馈的刷新环。取数交给调用方一次取全。
+  // 两个标签页的容器：人格（怎么说话/怎么干活）与通道（消息从哪进/从哪出）。
+  // 各段内容仍由下面原有代码构建，只是挂到对应页里而不是全部堆在 host 上。
+  const personaPane = el("div", "persona-pane")
+  const channelPane = el("div", "persona-pane")
+
   const scheduleState = new Map<string, ScheduleControlRow>()
   for (const row of schedules ?? []) scheduleState.set(row.key, row)
 
@@ -321,9 +427,98 @@ export function renderPersonaPanel(
     // 这里保留的是两个**兼底入口**：相期没开/推送失败时，用户仍有路可走。
     cred.appendChild(authorizeActions(onChanged))
   }
-  host.appendChild(cred)
+  personaPane.appendChild(cred)
 
-  // ── 2. 事件源 ──
+  // ── 2. 渠道（飞书应用与长连接）──
+  //
+  // 为何排在事件源之前、且必须是独立一段：人格“不回话”的首要嫌疑不是人格本身，而是
+  // **渠道没起来**。而渠道最常见的坏法是一个协议硬约束：同一飞书应用只允许一条长连接，
+  // 两个角色配了同一个 AppID 就会互踢——渠道侧直接拒启，错误只说在工具输出与日志里。
+  // 所以这一段要把“哪个渠道、起没起来、为什么没起来、有没有建连”直接摆在脸上。
+  const chState = snapshot.channelState
+  if (chState && chState.length) {
+    const achSec = section("飞书应用与本机渠道（输入 / 输出）")
+    const list = el("div", "settings-list")
+    for (const c of chState) {
+      const row = el("div", "settings-row")
+      const info = el("div", "settings-row-info")
+      // 方向决定“什么算健康”：
+      //   入站（in） 建长连接才算健康 → 看 listening
+      //   出站（out）**本来就不建连接** → listening=false 正常，只看 started
+      // 不区分就会把每个出站实例都标成“只能发不能收”，那是假告警。
+      const isIn = c.dir === "in"
+      const faces = [
+        isIn ? "输入（收）" : "输出（发/读）",
+        c.started ? "已启动" : "未启动",
+        isIn
+          ? c.listening
+            ? "长连接已建"
+            : "未建长连接"
+          : "不建连接（纯请求-响应）",
+      ].join(" · ")
+      info.append(
+        el("div", "settings-row-name", c.name),
+        el("div", "settings-row-desc", `${faces}${c.description ? ` — ${c.description}` : ""}`),
+      )
+      row.appendChild(info)
+      row.appendChild(
+        c.error
+          ? badge("不可用", "bad")
+          : !c.enabled
+            ? badge("已停用", "warn")
+            : !c.started
+              ? badge("未启动", "warn")
+              : isIn && !c.listening
+                ? badge("只能发不能收", "warn")
+                : badge("正常", "ok"),
+      )
+      list.appendChild(row)
+      // 监听开关：**只停收消息**，发/读照常（后端的语义就是只动 startListen/stopListen）。
+      //
+      // 为何需要它：“群太吵先别收”“重新授权前先掐断入站”“排查事件风暴”都是常见动作，
+      // 而它们都不该逼人改 .env 重启（重启会中断正在跑的人格任务）。
+      // 只影响**本次运行**：不写配置、不落盘，重启后回到配置里的状态。
+      if (c.canListen) {
+        const bar = el("div", "settings-row-actions")
+        const btn = el("button", "mini-btn", c.listening ? "停监听" : "开监听")
+        btn.addEventListener("click", async () => {
+          btn.disabled = true
+          const r = await controlChannelListen(c.name, !c.listening)
+          btn.disabled = false
+          if (!r.ok) {
+            // 失败要看得见：静默不动会让人以为已经改好了
+            btn.textContent = "失败"
+            bar.appendChild(el("div", "settings-row-desc persona-error", r.error ?? "未知错误"))
+            return
+          }
+          onChanged?.()
+        })
+        bar.appendChild(btn)
+        bar.appendChild(
+          el("div", "settings-row-desc", "只停收消息（发送/读历史不受影响）；仅本次运行有效"),
+        )
+        list.appendChild(bar)
+      } else if (isIn) {
+        // 入站实例却没有 canListen（渠道类型没实现 startListen）：不默默少一个按钮
+        list.appendChild(el("div", "settings-row-desc", "该渠道类型不支持手动启停监听"))
+      }
+      // 失败原因原文照排：长（含修复指引），但它是唯一能直接照着改的东西，不放折叠。
+      if (c.error) list.appendChild(blockLine(`原因：${c.error}`))
+    }
+    achSec.appendChild(list)
+    achSec.appendChild(
+      el(
+        "div",
+        "settings-row-desc",
+        "同一飞书应用只允许一条长连接：所以两个**输入**实例（以及会话机器人）必须各用独立应用。" +
+          "**输出**实例不建连接，因此可以与输入实例/会话机器人共用同一应用。" +
+          "角色对照与配置形态见 docs/feishu-apps.md。",
+      ),
+    )
+    channelPane.appendChild(achSec)
+  }
+
+  // ── 3. 事件源 ──
   const srcSec = section("事件源（驱动面）")
   if (snapshot.sources.length === 0) {
     srcSec.appendChild(
@@ -382,9 +577,9 @@ export function renderPersonaPanel(
   } else if (snapshot.sources.length > 0) {
     srcSec.appendChild(el("div", "settings-row-desc", "全部源加载正常（没有加载失败记录）"))
   }
-  host.appendChild(srcSec)
+  personaPane.appendChild(srcSec)
 
-  // ── 3. 渠道入站 ──
+  // ── 4. 渠道入站（计数）──
   const chNames = Object.keys(snapshot.channelInput)
   if (chNames.length) {
     const chSec = section("渠道入站（人群来的消息）")
@@ -416,10 +611,10 @@ export function renderPersonaPanel(
         "「无人订阅」持续增长 = 该渠道没被任何人格的订阅覆盖（改人格定义的 subscriptions，不是渠道坏了）。",
       ),
     )
-    host.appendChild(chSec)
+    channelPane.appendChild(chSec)
   }
 
-  // ── 4. 人格与分身 ──
+  // ── 5. 人格与分身 ──
   const pSec = section(`人格与分身（${snapshot.totals.drivers} 个分身，${snapshot.totals.activeDrivers} 个已通电）`)
   const pList = el("div", "settings-list")
   for (const p of snapshot.personas) {
@@ -540,9 +735,9 @@ export function renderPersonaPanel(
       "「未通电」= 还没发生过投递（调度器惰性创建）。若长期如此，先看事件源与渠道入站两项。",
     ),
   )
-  host.appendChild(pSec)
+  personaPane.appendChild(pSec)
 
-  // ── 5. 派活（driver 派出去的独立工作会话）──
+  // ── 6. 派活（driver 派出去的独立工作会话）──
   // 五面里唯一原先无 UI 的一环：后端快照一直有 workers，不渲染就成了盲区——
   // 「人格说查了但没结果」时，这里能直接看到活是 running/failed/cancelled。
   const running = snapshot.workers.filter((w) => w.status === "running").length
@@ -567,7 +762,13 @@ export function renderPersonaPanel(
     }
     wSec.appendChild(wList)
   }
-  host.appendChild(wSec)
+  personaPane.appendChild(wSec)
+
+  // 把两页挂上（页面顺序：人格在前——那是主要查看对象）
+  tabbedPanel(host, [
+    { id: "persona", label: "人格", build: () => host.appendChild(personaPane) },
+    { id: "channel", label: "通道", build: () => host.appendChild(channelPane) },
+  ])
 }
 
 function blockLine(text: string): HTMLElement {

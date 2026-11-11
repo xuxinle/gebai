@@ -85,6 +85,15 @@ export interface AppDeps {
   personaSetupError?: string | undefined
   /** 把授权卡推到相期（令牌请求主通路）；未启用拟人/相期不可用时 undefined。 */
   personaPushAuthCard?: (() => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>) | undefined
+  /**
+   * 渠道启停状态（**不依赖拟人是否启用**）。
+   *
+   * 为何分开注入：`personaState` 未配人格时为空，而渠道是独立一层——
+   * “渠道因为撞车没起来”与“人格没配”是两回事，不能一起消失。
+   */
+  channelState?: (() => Array<{ name: string; description: string; started: boolean; error?: string; listening?: boolean; dir?: "in" | "out"; canListen?: boolean }>) | undefined
+  /** 启停单个渠道实例的**监听**（只影响收消息；不落盘）。 */
+  channelListenControl?: ((name: string, want: boolean) => Promise<{ ok: boolean; reason?: string }>) | undefined
   /** 文件工作台：写操作审计（组合根注入；缺省不审计）。 */
   fsAudit?: import("./core/fs/audit").FsAudit
   /** 文件工作台：Git 服务（组合根注入；缺省时 git 端点返回 503「Git 能力未启用」）。 */
@@ -231,6 +240,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   ...(d.personaScheduleControl ? { scheduleControl: d.personaScheduleControl } : {}),
     ...(d.personaSetupError ? { setupError: d.personaSetupError } : {}),
     ...(d.personaPushAuthCard ? { pushAuthCard: d.personaPushAuthCard } : {}),
+    // 渠道状态**不受拟人开关影响**：没配人格时面板也要能看见渠道起没起来
+    ...(d.channelState ? { channelState: d.channelState } : {}),
+    ...(d.channelListenControl ? { channelListenControl: d.channelListenControl } : {}),
     // 写面（授权发起/兑换/撤销、源启停）是部署级操作：服务模式下仅 admin
     requireAdmin: rc.requireAdmin,
   })

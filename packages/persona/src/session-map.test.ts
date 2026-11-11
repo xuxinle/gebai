@@ -246,7 +246,7 @@ describe("validateSessionMap：人格定义加载期校验", () => {
   })
 })
 
-describe("部署配置：GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP", () => {
+describe("部署配置：GEBAI_PERSONA_<ID> 数组里的 sessionMap", () => {
   const DEF: PersonaDef = {
     id: "xiaoshuang",
     name: "小霜",
@@ -259,8 +259,10 @@ describe("部署配置：GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP", () => {
   }
   const map = new Map([[DEF.id, DEF]])
 
-  test("人格级生效到所有分身", () => {
-    const { personas, report } = applyPersonaEnv(map, { GEBAI_PERSONA_XIAOSHUANG_SESSION_MAP: "per_thread" })
+  test("人格级（无 name 项）生效到所有分身", () => {
+    const { personas, report } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ sessionMap: "per_thread" }]),
+    })
     const d = personas.get("xiaoshuang")!
     expect(d.drivers![0]!.sessionMap).toEqual(SESSION_MAP_PRESETS.per_thread!)
     expect(d.drivers![1]!.sessionMap).toEqual(SESSION_MAP_PRESETS.per_thread!)
@@ -269,8 +271,10 @@ describe("部署配置：GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP", () => {
 
   test("分身级覆盖人格级（更具体的声明胜出）", () => {
     const { personas } = applyPersonaEnv(map, {
-      GEBAI_PERSONA_XIAOSHUANG_SESSION_MAP: "per_chat",
-      GEBAI_PERSONA_XIAOSHUANG_SUPPORT_SESSION_MAP: "per_thread",
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+        { sessionMap: "per_chat" },
+        { name: "support", sessionMap: "per_thread" },
+      ]),
     })
     const d = personas.get("xiaoshuang")!
     expect(d.drivers![0]!.sessionMap).toEqual(SESSION_MAP_PRESETS.per_thread!)
@@ -279,7 +283,9 @@ describe("部署配置：GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP", () => {
 
   test("DSL 写法可用", () => {
     const { personas } = applyPersonaEnv(map, {
-      GEBAI_PERSONA_XIAOSHUANG_SESSION_MAP: "feishu:message={chat}__t_{thread};message={chat}",
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+        { sessionMap: "feishu:message={chat}__t_{thread};message={chat}" },
+      ]),
     })
     expect(personas.get("xiaoshuang")!.drivers![0]!.sessionMap).toHaveLength(2)
   })
@@ -288,7 +294,9 @@ describe("部署配置：GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP", () => {
     const withDef = new Map([
       ["xiaoshuang", { ...DEF, drivers: [{ ...DEF.drivers![0]!, sessionMap: SESSION_MAP_PRESETS.single }] }],
     ])
-    const { personas, report } = applyPersonaEnv(withDef, { GEBAI_PERSONA_XIAOSHUANG_SESSION_MAP: "message={thred}" })
+    const { personas, report } = applyPersonaEnv(withDef, {
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ sessionMap: "message={thred}" }]),
+    })
     expect(report.errors.some((e) => e.includes("未知占位符"))).toBe(true)
     expect(personas.get("xiaoshuang")!.drivers![0]!.sessionMap).toEqual(SESSION_MAP_PRESETS.single!)
   })

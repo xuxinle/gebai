@@ -26,8 +26,33 @@
  * `ready` 为 false 时**不是错误**——首次部署天然如此。上层据此提示用户，而不是抛错。
  */
 
+import { OFFLINE_ACCESS_SCOPE, ERR_OFFLINE_ACCESS_NOT_ENABLED } from "./oauth"
 import type { PersonaOAuth, AuthorizeTicket } from "./oauth"
 import type { PersonaTokenStore, PersonaUserToken } from "./user-token"
+
+/** 从空格分隔的 scope 串里剔掉一个（不区分位置、不重复）。 */
+function stripScope(scopes: string | undefined, drop: string): string | undefined {
+  if (!scopes) return scopes
+  const keep = scopes.split(/\s+/).filter((s) => s && s !== drop)
+  return keep.length ? keep.join(" ") : undefined
+}
+
+/**
+ * 这个错误是不是“应用未开通 offline_access”。
+ *
+ * 认两种形态：
+ * - 回调地址里带的 `error=20027`（授权页跳转前就拒了）
+ * - 兑换失败的 `兑换失败：code=20027 …`
+ *
+ * **只认 20027**，不靠“文案里出现 offline_access”推断：飞书报权限不足可能有很多原因
+ * （管理员限制、用户没勾选某个 scope、应用权限配置改过），那些都不该被当成
+ * “应用没开长期权限”而去降级——降了没用，还把真正的错误掩盖了；
+ * 更坏的副作用是把用户送去一次莫名的新授权。
+ */
+export function isOfflineAccessRejection(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? err ?? "")
+  return msg.includes(String(ERR_OFFLINE_ACCESS_NOT_ENABLED))
+}
 
 /** 对外状态（REST/前端消费）。**不含任何令牌明文**。 */
 export interface PersonaCredentialStatus {
@@ -68,8 +93,13 @@ export interface PersonaCredentialsOptions {
   /** 视频应用凭据（生成授权链接与刷新都需要）。 */
   appId: () => string | undefined
   appSecret: () => string | undefined
-  /** 覆盖 scopes（缺省 PERSONA_SCOPES）。 */
-  scopes?: string
+  /** 覆盖 scopes（缺省 PERSONA_SCOPES）。
+   *
+   * 与 appId/appSecret 一样取**函数**而非值：它从渠道实例配置里读，
+   * 而渠道在凭据对象构造之后才展开——取值快照会永远停在空的初值上
+   * （现象：配了 offline_access 但授权链接里没有它，且零报错）。
+   */
+  scopes?: () => string
   log?: (level: "info" | "warn", msg: string) => void
   /** 当前时刻（测试注入；缺省 `Date.now`）。授权链接的保质期判定靠它。 */
   now?: () => number
@@ -168,15 +198,49 @@ export class PersonaCredentials {
     if (!appId || !appSecret) {
       throw new Error("未配置飞书应用凭据（AppID/AppSecret）：无法发起授权")
     }
-    const ticket = this.opts.oauth.startAuthorize({
-      appId,
-      appSecret,
-      redirectUri: this.opts.redirectUri(),
-      ...(this.opts.scopes ? { scopes: this.opts.scopes } : {}),
-    })
+    const ticket = this.mintTicket(appId, appSecret, false)
     this.lastTicket = ticket
     this.opts.log?.("info", `[persona:credentials] 已生成授权链接（${PENDING_HINT}）`)
     return ticket
+  }
+
+  /**
+   * 飞书拒绝了长期授权（20027）→ 改用**不带 offline_access** 的链接重发。
+   *
+   * 为何需要这个方法：`offline_access` 要应用在飞书后台开通，没开通时授权页
+   * **直接报 20027 把人挡在外面**——连基本授权都完不成。部署方不该为了这个
+   * 去查后台是否开了某个权限，所以由代码自己退一步：先要长期，被拒就要短期。
+   *
+   * **不记住“这个应用不支持”**：后台随时可能开通，记住了就永远不会再试。
+   * 每次授权都重新要一遍，只在本次降级。
+   */
+  downgradeToShortLived(): AuthorizeTicket {
+    const appId = this.opts.appId()
+    const appSecret = this.opts.appSecret()
+    if (!appId || !appSecret) {
+      throw new Error("未配置飞书应用凭据（AppID/AppSecret）：无法重新发起授权")
+    }
+    const ticket = this.mintTicket(appId, appSecret, true)
+    this.lastTicket = ticket
+    this.opts.log?.(
+      "warn",
+      `[persona:credentials] 该应用未开通长期授权（20027），已改为**短期授权**链接；` +
+        `飞书令牌最长 2 小时，到期会提醒你重新授权。想免重复授权：飞书开放平台 → 权限管理 → 开通「持续访问已授权的数据」。`,
+    )
+    return ticket
+  }
+
+  /** 生成一张授权票据（`withoutOfflineAccess` 时从 scopes 里剔掉它）。 */
+  private mintTicket(appId: string, appSecret: string, withoutOfflineAccess: boolean): AuthorizeTicket {
+    // scopes 延迟求值：它读的是渠道实例配置（渠道在凭据对象之后才展开）
+    const declared = this.opts.scopes?.()
+    const scopes = withoutOfflineAccess ? stripScope(declared, OFFLINE_ACCESS_SCOPE) : declared
+    return this.opts.oauth.startAuthorize({
+      appId,
+      appSecret,
+      redirectUri: this.opts.redirectUri(),
+      ...(scopes ? { scopes } : {}),
+    })
   }
 
   /**
@@ -185,10 +249,31 @@ export class PersonaCredentials {
    * 成功后清掉 `lastTicket`（旧的授权链接不应再被展示）。
    */
   async complete(rawCode: string, state?: string): Promise<PersonaCredentialStatus> {
-    const entry = await this.opts.oauth.exchange({ code: rawCode, ...(state ? { state } : {}) })
+    let entry: PersonaUserToken
+    try {
+      entry = await this.opts.oauth.exchange({ code: rawCode, ...(state ? { state } : {}) })
+    } catch (err) {
+      // 兑换阶段才报 20027（少数情况下授权页放行了、换令牌时才拒）：
+      // 同样退一步——改发不带 offline_access 的链接，让用户重新点一下。
+      if (isOfflineAccessRejection(err)) {
+        this.downgradeToShortLived()
+        throw new Error(
+          "该飞书应用未开通长期授权（offline_access 报 20027）——已改为**短期授权**，请重新点一次授权链接。\n" +
+            "想免重复授权：飞书开放平台 → 该应用 → 权限管理 → 开通「持续访问已授权的数据」。",
+        )
+      }
+      throw err
+    }
     await this.opts.store.set(entry)
     this.lastTicket = null
-    this.opts.log?.("info", `[persona:credentials] 授权完成${entry.name ? `（${entry.name}）` : ""}`)
+    // 以**实际拿到的** refresh_token 为准判定长期/短期，不凭“我请求过”推断：
+    // 飞书可以不理 offline_access（应用没开通、或管理员拒了），那样就是短期。
+    const longLived = !!entry.refreshToken
+    this.opts.log?.(
+      "info",
+      `[persona:credentials] 授权完成${entry.name ? `（${entry.name}）` : ""}：` +
+        (longLived ? "长期（可自动续期）" : "短期（无 refresh_token，到期需重新授权）"),
+    )
     const status = await this.status()
     // 授权完成 → 通知外层（相期会把那张“去授权”卡撤掉）
     this.opts.onChange?.(status)
@@ -242,6 +327,12 @@ export class PersonaCredentials {
    */
   authorizeUrl(): string | null {
     if (this.lastTicket === null) return null
+    // 应用变了 → 旧票据失效（同 ensureTicket 的理由：client_id/scopes 都是旧应用的）
+    const appId = this.opts.appId()
+    if (appId === undefined || !this.lastTicket.url.includes(`client_id=${appId}`)) {
+      this.lastTicket = null
+      return null
+    }
     if (this.ticketExpired(this.lastTicket)) {
       this.lastTicket = null
       return null
@@ -266,11 +357,15 @@ export class PersonaCredentials {
    * 而拿到一个死链接会把它展示给用户并让人白跑一趟授权页。
    */
   private ensureTicket(): AuthorizeTicket | null {
+    const appId = this.opts.appId()
     if (this.lastTicket !== null) {
-      if (!this.ticketExpired(this.lastTicket)) return this.lastTicket
+      // 应用换了就不能再用旧票据：票据里的 client_id / scopes 都是旧应用的，
+      // 拿它去授权会得到一个属于另一个应用的令牌（或者 20027）。
+      const sameApp = appId !== undefined && this.lastTicket.url.includes(`client_id=${appId}`)
+      if (sameApp && !this.ticketExpired(this.lastTicket)) return this.lastTicket
       this.lastTicket = null
     }
-    if (!this.opts.appId() || !this.opts.appSecret()) return null
+    if (!appId || !this.opts.appSecret()) return null
     try {
       return this.startAuthorize()
     } catch {

@@ -121,24 +121,18 @@ export interface ServerConfig {
   devReload: boolean
   /** 飞书机器人对话桥接（GEBAI_FEISHU_BOT_ENABLED=true 时启用长连接事件订阅）。 */
   feishuBotEnabled: boolean
-  /** 拟人模式（GEBAI_PERSONA=true）：渠道收到的入站事件交给人格分身处理。
-   *  关闭时 persona 运行时**根本不实例化**，事件只记日志——既有行为零影响。 */
-  personaEnabled: boolean
   /**
-   * @deprecated 已被 `GEBAI_PERSONA_APPROVAL`（ask/auto/deny，缺省 ask）取代。
-   * 保留字段只为不改 config 形状（旧部署设了 `GEBAI_PERSONA_AUTO_APPROVE=false` 时，
-   * 人格块的 approvalMode 会把 false 映射为自动拒绝——见 `readApprovalMode`）。
+   * 拟人模式是否装配：**有配置就启用，没配置就不启用**（没有单独开关）。
    *
-   * 为何不能再让它决定行为：旧默认 `true` 等于“群里一条消息触发的轮次里
-   * `sh`/删文件自动执行”，没有任何人把关；而它的反面 `false` 又会让工具一律拒绝。
-   * 两者都不是生产形态——正确的是“推相期卡问人”。
+   * 判定依据（任一非空即启用）：
+   * - `GEBAI_PERSONA_ENABLE`（人格启用白名单）
+   * - 任意 `GEBAI_PERSONA_<ID>`（某个人格的分身配置）
+   *
+   * 为何不再提供 `GEBAI_PERSONA=true` 总开关：开关与配置两处都能说话时，“为什么它不回话”
+   * 多了一种成因（开关没开），而那个成因完全不可见（开关写在 .env 里、界面上无处确认）。
+   * 现在“配了就启用”使配置本身成为唯一事实来源：想关就把配置注释掉。
    */
-  personaAutoApprove: boolean
-  /** 事件源白名单（GEBAI_EVENT_SOURCES_ENABLE，逗号分隔）：非空时仅启用名单内的事件源。
-   *  与 `GEBAI_TOOL_*` / `GEBAI_SUB_AGENTS_*` 同口径（先白后黑）；仅在 GEBAI_PERSONA=true 时生效。 */
-  eventSourcesEnable: string[]
-  /** 事件源黑名单（GEBAI_EVENT_SOURCES_DISABLE，逗号分隔）：名单内的源不启动（黑名单最终生效）。 */
-  eventSourcesDisable: string[]
+  personaEnabled: boolean
   /** 飞书机器人行为配置（GEBAI_FEISHU_BOT_*）：工具调用过程推送（滚动状态消息）。 */
   feishuBotNotifyTools: boolean
   /** 助手中间轮文本推送（预览消息；引擎 notifyIntermediate 事件）。 */
@@ -207,6 +201,35 @@ function bool(name: string, fallback = false): boolean {
   const v = process.env[name]
   if (v === undefined) return fallback
   return v === "true" || v === "1"
+}
+
+/**
+ * 拟人模式是否装配：**有配置就启用**（没有 `GEBAI_PERSONA` 这样的总开关）。
+ *
+ * 判据：存在任意一个 `GEBAI_PERSONA_<ID>`（全大写的人格配置）或 `GEBAI_PERSONA_ENABLE`。
+ *
+ * 为何要把“公共变量”排除干净：`GEBAI_PERSONA_APPROVAL_ASK_TOOLS`、`GEBAI_PERSONA_YIELD_SECONDS`
+ * 这类是**全局兑底的行为参数**，不是“我要跑人格”。若把它们也算作配置，部署方改一个审批名单
+ * 就会凭空启用整个人格运行时——包括开始刷群。所以公共项单独列一份并显式排除；
+ * 新增公共项忘了加进这个表时，后果是“改参数就开了人格”（严重），所以该表要跟着新增项一起改。
+ */
+export function hasPersonaConfig(env: Record<string, string | undefined>): boolean {
+  if ((env.GEBAI_PERSONA_ENABLE ?? "").trim()) return true
+  /** 公共行为参数（不是“某个人格”的配置）。 */
+  const SHARED = new Set([
+    "GEBAI_PERSONA_ENABLE",
+    "GEBAI_PERSONA_APPROVAL_ASK_TOOLS",
+    "GEBAI_PERSONA_REPLY_TO_OWNER",
+    "GEBAI_PERSONA_HUMAN_INTERRUPT",
+    "GEBAI_PERSONA_YIELD_SECONDS",
+    "GEBAI_PERSONA_SESSION_ROUTING",
+  ])
+  for (const k of Object.keys(env)) {
+    if (!k.startsWith("GEBAI_PERSONA_")) continue
+    if (SHARED.has(k)) continue
+    if ((env[k] ?? "").trim()) return true
+  }
+  return false
 }
 
 /** 正数环境变量（非法/非正回退默认值）。 */
@@ -376,16 +399,10 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     devReload: process.argv.includes("--reload") || env("GEBAI_DEV_RELOAD") === "1",
     // 飞书机器人对话桥接（长连接模式）：需同时配置 GEBAI_FEISHU_APP_ID / GEBAI_FEISHU_APP_SECRET
     feishuBotEnabled: bool("GEBAI_FEISHU_BOT_ENABLED", false),
-    // 拟人模式（事件驱动：渠道收到的事件 → 人格分身跑一轮）：**默认关**。
-    // 关闭时 persona 运行时根本不实例化，输入面接到日志消费者——所有既有行为逐字节不变。
-    personaEnabled: bool("GEBAI_PERSONA", false),
-    // 人格运行是否自动通过审批（默认 true：无人值守场景没有人守着审批卡；
-    // 与 GEBAI_FEISHU_BOT_AUTO_APPROVE 同一姿态——部署方整体担责）
-    personaAutoApprove: bool("GEBAI_PERSONA_AUTO_APPROVE", false),
-    // 事件源启停名单（GEBAI_EVENT_SOURCES_ENABLE / DISABLE）：与子Agent 同名机制同口径——
-    // 白名单非空仅启用名单内，黑名单移除名单内（先白后黑）。只在拟人模式启用时才有意义。
-    eventSourcesEnable: splitList(env("GEBAI_EVENT_SOURCES_ENABLE")),
-    eventSourcesDisable: splitList(env("GEBAI_EVENT_SOURCES_DISABLE")),
+    // 拟人模式（事件驱动：渠道收到的事件 → 人格分身跑一轮）：**有配置就启用**。
+    // 判定：GEBAI_PERSONA_ENABLE 非空，或存在任意 GEBAI_PERSONA_<ID>（人格 id 的配置）。
+    // 注意排除统一配置项：只能看「除已知公共变量以外还有没有 GEBAI_PERSONA_*」。
+    personaEnabled: hasPersonaConfig(process.env as Record<string, string | undefined>),
     // 飞书机器人行为配置（均默认 false 保持现状）：过程推送两类 + 自动审批
     feishuBotNotifyTools: bool("GEBAI_FEISHU_BOT_NOTIFY_TOOLS", false),
     feishuBotNotifyAssistant: bool("GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT", false),

@@ -41,6 +41,7 @@
  */
 
 import type { ToolContext } from "../base/types"
+import { parsePersonaEnv } from "@gebai/persona"
 
 /** 相期 card_ask 工具的最小执行面（注入形态；compose 从 subAgents.defOf 取）。 */
 export interface AskCardTool {
@@ -50,11 +51,33 @@ export interface AskCardTool {
   ): Promise<{ output: string; data?: { id?: string; delivered?: boolean; answered?: boolean; answer?: { choice?: unknown } } }>
 }
 
-/** 出站审核配置（每次调用现读 env，改配置无需重启）。 */
-export function outboundReviewEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  const raw = (env.GEBAI_PERSONA_OUTBOUND_REVIEW ?? "").trim().toLowerCase()
-  if (!raw) return true // 缺省开
-  return !/^(off|0|false|no)$/i.test(raw)
+/**
+ * 出站审核配置：**从 `GEBAI_PERSONA_<ID>` 数组里读**（不再是单独的环境变量）。
+ *
+ * 读序：分身级（给了 driverId 时）→ 人格级默认项 → 任一项写了就生效。
+ * 取“任一”而非“只认人格级”的原因：会话归属只带 personaId、不一定带 driverId，
+ * 而“这个分身关了审核”不应该因为拿不到 driverId 就默默变回开着。
+ *
+ * **缺省 true**：安全的那一侧。只有显式写 `"reviewOutbound": false` 才关。
+ * 每次调用现读 env ——改配置无需重启（与既有行为一致）。
+ */
+export function outboundReviewEnabled(
+  personaId: string | null,
+  env: Record<string, string | undefined> = process.env,
+  driverId?: string,
+): boolean {
+  if (!personaId) return true // 无人格归属：不是人格发言，走不到审核卡这一步
+  const parsed = parsePersonaEnv(personaId, env[`GEBAI_PERSONA_${personaId.toUpperCase()}`])
+  if (driverId) {
+    const own = parsed.drivers.get(driverId)?.reviewOutbound
+    if (own !== undefined) return own
+  }
+  const fromDefaults = parsed.personaDefaults?.reviewOutbound
+  if (fromDefaults !== undefined) return fromDefaults
+  for (const item of parsed.drivers.values()) {
+    if (item.reviewOutbound !== undefined) return item.reviewOutbound
+  }
+  return true
 }
 
 /** 会话的人格归属（缓存模块级——store.load 每会话首查后 memo；同 persona-outbound 共用逻辑的本地实现）。 */
@@ -89,8 +112,16 @@ export interface OutboundGateDeps {
    *
    * 缺省不注入 = 不启用让位（保持旧行为），而不是“静默当成在窗口内”——
    * 后者会让所有发送被莫名其妙地拒。
+   *
+   * `windowMs` 由调用方（compose）按**当前分身**的 `yieldSeconds` 传入：
+   * 让位窗口是逐分身的（值班分身可能要 60 秒，日报分身不必）。
    */
-  humanSpeech?: { inWindow(chatId: string): boolean; remainingMs(chatId: string): number }
+  humanSpeech?: {
+    inWindow(chatId: string, at?: number, windowMs?: number): boolean
+    remainingMs(chatId: string, at?: number, windowMs?: number): number
+  }
+  /** 该分身声明的让位窗口（毫秒）；返回 undefined = 用 window 自己的缺省值。 */
+  yieldWindowMsFor?: (personaId: string) => number | undefined
   /**
    * 让位窗口的例外：明确是用户本人要求的发送（如他说“你回复他”）。
    * 由调用方传入（`args.__explicit`）；缺省 false。
@@ -250,8 +281,11 @@ export async function personaOutboundGate(
   const explicit = input.args.explicit === true || deps.isExplicitRequest?.(input.args) === true
   // 引用回复 = 在回具体某条消息：这是对话主线，永远不被让位拦。
   const isReply = input.verb === "reply" || String(input.args.reply_to ?? "").trim() !== "" || String(input.args.root ?? "").trim() !== ""
-  if (chatId && !explicit && !isReply && deps.humanSpeech?.inWindow(chatId)) {
-    const seconds = Math.max(1, Math.ceil(deps.humanSpeech.remainingMs(chatId) / 1000))
+      // 让位窗口长度：按**这个分身**的 `yieldSeconds`（逐分身可不同）。
+    // 拿不到分身配置时 `yw` 为 undefined → window 用自己的缺省值（= 旧行为）。
+    const yw = deps.yieldWindowMsFor?.(personaId)
+    if (chatId && !explicit && !isReply && deps.humanSpeech?.inWindow(chatId, undefined, yw)) {
+      const seconds = Math.max(1, Math.ceil((deps.humanSpeech.remainingMs(chatId, undefined, yw) ?? 0) / 1000))
     return {
       allowed: false,
       reason:
@@ -261,8 +295,8 @@ export async function personaOutboundGate(
     }
   }
 
-  // ③ 出站审核（默认开）：推 card_ask 等批准
-  if (!outboundReviewEnabled(env)) return { allowed: true, review: "disabled" }
+  // ③ 出站审核（缺省开）：推 card_ask 等批准
+  if (!outboundReviewEnabled(personaId, env)) return { allowed: true, review: "disabled" }
 
   // 送卡前确保相期通道就绪：不在 → 自动重启 + 等重连（防抖/single-flight 在 ensureXiangqiReady 内）
   const ready = await ensureXiangqiReady(deps)

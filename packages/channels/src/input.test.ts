@@ -52,14 +52,25 @@ function makeKernel(): { runtime: PersonaRuntime; runs: PersonaRunInput[] } {
 }
 
 function makeRegistry(home: string): ChannelRegistry {
+  // 这里要的是**双向的 local**：写/读/收（记忆 + 落盘 + 收件目录）。
+  //
+  // 两个方向各一个实例会重名，而本组用例到处写 `local:memory` / `local:inbox`，
+  // 所以让**出站实例**叫 `local`（写入/读取），**入站实例**也叫它——
+  // 不行，重名会被拒。因此这里用两个不同名字，并把用例指向它们：
+  //   local       → 出站（append/put/observe）
+  //   local_in    → 入站（轮询 drop/inbox 目录）
+  const item = {
+    dropDir: join(home, "channel-drop"),
+    inboxDir: join(home, "persona-inbox"),
+  }
   const reg = new ChannelRegistry({
     scanDirs: { builtin: join(home, "__n1__"), custom: join(home, "__n2__") },
     home,
-    envReader: (n) =>
-      n === "GEBAI_CHANNELS_LOCAL_DROP_DIR" ? join(home, "channel-drop")
-        : n === "GEBAI_CHANNELS_LOCAL_INBOX_DIR"
-          ? join(home, "persona-inbox")
-          : undefined,
+    envReader: (n) => {
+      if (n === "GEBAI_CHANNEL_OUT_LOCAL") return JSON.stringify([{ name: "local", ...item }])
+      if (n === "GEBAI_CHANNEL_IN_LOCAL") return JSON.stringify([{ name: "local_in", ...item }])
+      return undefined
+    },
     log: { info: () => {}, warn: () => {}, error: () => {} },
   })
   reg.register(localChannel)
@@ -153,19 +164,28 @@ describe("eventIdFor：幂等键推导（桥接层唯一实现）", () => {
    }
  })
 
- test("同一渠道同时声明写/读/收三面", async () => {
+   test("方向隔离：出站实例只有写/读，入站实例只有收", async () => {
     const home = mkdtempSync(join(tmpdir(), "in-asm-"))
     const reg = makeRegistry(home)
     const { runtime } = makeKernel()
     reg.attachDispatcher(new ChannelInputBridge({ dispatch: runtime }))
     await reg.init()
-    const st = reg.state().find((s) => s.name === "local")!
-    console.log(`    实测: 写[${st.verbs}] 读[${st.observes}] 收[${st.listens}] listening=${st.listening}`)
-    expect(st.verbs.length).toBeGreaterThan(0)
-    expect(st.observes.length).toBeGreaterThan(0)
-    expect(st.listens).toEqual(["drop", "inbox"])
-    expect(st.listening).toBe(true)
-    expect(reg.isListening("local")).toBe(true)
+    const out = reg.state().find((s) => s.name === "local")!
+    const inp = reg.state().find((s) => s.name === "local_in")!
+    console.log(`    实测: out 写[${out.verbs}] 读[${out.observes}] 收[${out.listens}] listening=${out.listening}`)
+    console.log(`          in  写[${inp.verbs}] 读[${inp.observes}] 收[${inp.listens}] listening=${inp.listening}`)
+    // 出站实例：能写能读，**没有收的一面**
+    expect(out.verbs.length).toBeGreaterThan(0)
+    expect(out.observes.length).toBeGreaterThan(0)
+    expect(out.listens).toEqual([])
+    expect(out.listening).toBe(false)
+    // 入站实例：能收，**没有写/读**
+    expect(inp.listens).toEqual(["drop", "inbox"])
+    expect(inp.listening).toBe(true)
+    expect(inp.verbs).toEqual([])
+    expect(inp.observes).toEqual([])
+    expect(reg.isListening("local_in")).toBe(true)
+    expect(reg.isListening("local")).toBe(false)
     await reg.stop()
     runtime.stop()
     rmSync(home, { recursive: true, force: true })
@@ -208,7 +228,8 @@ describe("端到端：真投递 → 真跑 driver", () => {
     expect(runs.length).toBe(1)
     const e = runs[0]!.events[0]!
     console.log(`    driver 看到: id=${e.id} kind=${e.kind} channel=${e.channel} source=${e.context.source}`)
-    expect(e.channel).toBe("local") // 渠道标识由注册表给，渠道不能自己宣布
+    // 渠道标识由注册表给（这里是**入站实例名** local_in，不是类型名）
+    expect(e.channel).toBe("local_in")
     expect(e.kind).toBe("message") // 类别归一
     expect(e.context.source).toBe("飞书群「支持群」") // 来源透传
     expect(e.body).toContain("pending")
@@ -312,7 +333,8 @@ describe("治理：渠道拿不到内核能力", () => {
     const reg = makeRegistry(home)
     const keys = Object.keys(reg.context(localChannel)).sort()
     console.log(`    实测: ctx 键 = ${keys.join(", ")}`)
-    expect(keys).toEqual(["deps", "env", "home", "log", "name"])
+    // config 取代了旧的 env：实例自己的配置（同类型两个实例不会拿到同一份值）
+    expect(keys).toEqual(["config", "deps", "home", "log", "name"])
     expect(keys).not.toContain("emit") // sink 单独传入，渠道不能自己造事件
     rmSync(home, { recursive: true, force: true })
   })
@@ -374,7 +396,9 @@ describe("生命周期：stopListen 真的摘订阅", () => {
 
     // 签名未变 → 不重扫，订阅不受影响
     expect(await reg.refreshIfChanged()).toBe(false)
-    expect(reg.isListening("local")).toBe(true)
+    expect(reg.isListening("local_in")).toBe(true)
+    // 出站实例不建连接：它不该在监听
+    expect(reg.isListening("local")).toBe(false)
 
     writeFileSync(join(dropDir, "after-refresh.json"), JSON.stringify({ summary: "刷新后投递", body: "应被处理", kind: "message" }))
     await until(() => runs.length > 0)

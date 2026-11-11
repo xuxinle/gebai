@@ -9,7 +9,7 @@
  * 5. 环境变量白名单：未声明即不可读（防「读告警的插件」拿到模型密钥）
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { defaultEventSourceScanDirs, discoverEventSources, discoverySignature, validateSourceDef } from "./discovery"
@@ -544,85 +544,5 @@ describe("EventSourceManager：热加载", () => {
     expect(mgr.loadErrors().fixme2).toBeUndefined()
     expect(mgr.state().find((s) => s.name === "fixme2")!.started).toBe(true)
   })
-})
-
-describe("EventSourceManager：参考实现 file_drop", () => {
-  test("内置示例源可被发现并启动（真实全链路）", async () => {
-    const rt = makeRuntime()
-    // 指向本包的 sources 目录（内置示例真正生效的路径）
-    const builtin = join(import.meta.dir, "sources")
-    const logs: string[] = []
-    const mgr = new EventSourceManager({
-      scanDirs: { builtin, custom: join(root, "none") },
-      runtime: rt,
-      home: root,
-      enable: ["file_drop"],
-      envReader: () => undefined,
-      log: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
-    })
-    await mgr.start()
-    const st = mgr.state().find((s) => s.name === "file_drop")!
-    expect(st.started).toBe(true)
-    expect(st.channel).toBe("filedrop")
-    // 投递一个 JSON → 被接管并删除
-    const dropDir = join(root, "persona-drop")
-    mkdirSync(dropDir, { recursive: true })
-    writeFileSync(join(dropDir, "t1.json"), JSON.stringify({ kind: "message", source: "投递", summary: "测试", body: "帮我看看" }))
-    // 轮询间隔 1.5s，等待首次扫描（start 内立即 poll 一次）+ 竞态余量
-    const deadline = Date.now() + 4000
-    while (Date.now() < deadline) {
-      const cur = mgr.state().find((s) => s.name === "file_drop")!
-      if (cur.stats.emitted > 0) break
-      await new Promise((r) => setTimeout(r, 100))
-    }
-    const after = mgr.state().find((s) => s.name === "file_drop")!
-    expect(after.stats.emitted).toBeGreaterThan(0)
-    expect(after.stats.accepted).toBeGreaterThan(0)
-    await mgr.stop()
-  }, 15000)
-})
-
-describe("端到端：内置参考源 file_drop", () => {
-  /**
-   * 唯一一条真实链路用例：投递 JSON → file_drop 轮询 → ctx.emit → runtime 接管。
-   *
-   * 为何只保留一条：它依赖 1.5s 轮询间隔与模块级实例状态，多条同类用例会互相干扰
-   * （前一条的 timer/停在后台仍在跑）。桥接语义的细粒度断言交由上面的 fake 源覆盖。
-   */
-  test("投递文件被接管并删除（真实全链路）", async () => {
-    const home = join(root, "e2e-" + crypto.randomUUID())
-    mkdirSync(home, { recursive: true })
-    const rt = makeRuntime()
-    const builtin = join(import.meta.dir, "sources")
-    const logs: string[] = []
-    const mgr = new EventSourceManager({
-      scanDirs: { builtin, custom: join(home, "none") },
-      runtime: rt,
-      home,
-      enable: ["file_drop"],
-      envReader: () => undefined,
-      log: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
-    })
-    await mgr.start()
-    const st = mgr.state().find((s) => s.name === "file_drop")
-    expect(st?.started).toBe(true)
-    expect(st?.channel).toBe("filedrop")
-
-    const drop = join(home, "persona-drop")
-    mkdirSync(drop, { recursive: true })
-    writeFileSync(join(drop, "t.json"), JSON.stringify({ kind: "message", source: "投递", summary: "测试", body: "帮我看看" }))
-
-    const deadline = Date.now() + 8000
-    let stats = mgr.state().find((s) => s.name === "file_drop")!.stats
-    while (Date.now() < deadline && stats.accepted === 0) {
-      await new Promise((r) => setTimeout(r, 100))
-      stats = mgr.state().find((s) => s.name === "file_drop")!.stats
-    }
-    expect(stats.emitted).toBeGreaterThan(0)
-    expect(stats.accepted).toBeGreaterThan(0)
-    // 处理完即删（不残留）
-    expect(existsSync(join(drop, "t.json"))).toBe(false)
-    await mgr.stop()
-  }, 20000)
 })
 

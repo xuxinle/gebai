@@ -49,18 +49,38 @@ const PENDING_MAX = 8
  * 只要「收发消息 + 读群」这几类——**不申请云文档权限**（那是 `feishu_docs` 的事）。
  * 少要权限的好处是真实的：授权页勾选项越少，用户越愿意点同意。
  *
- * ## 为何默认不包含 `offline_access`
+ * ## 关于 `offline_access`（长期授权）：配置不区分，代码自适应
  *
  * `offline_access`（飞书后台叫「持续访问已授权的数据」）是换取 `refresh_token`
- * 的前提。但它**需要应用在后台显式开通**，没开通时授权页会直接报 20027
- * 把用户挡在外面——连基本授权都完不成。
+ * 的前提：有它 → 长期（自动续期，不用再点授权）；没它 → 短期
+ *（令牌最长 2 小时，到期需重新授权）。
  *
- * 所以默认只要能用起来的权限；需要长期免除重新授权时，部署方在后台开通后
- * 经 `GEBAI_PERSONA_SCOPES` 追加即可（见 `scopesFromEnv`）。
+ * 它**要求应用在飞书后台开通**，没开通时授权页会报 20027 把用户挡在外面——
+ * 连基本授权都完不成。所以历史上把它做成了“部署方自己选的开关”。
  *
- * 代价（如实告知）：无 `offline_access` 时飞书 user_access_token 最长
- * 2 小时（`expires_in: 7200`），这是服务端硬限制，到期后需重新授权。
+ * 现在改为**代码自适应**，部署方不需要知道这个概念：
+ * ```
+ * 1. 授权链接默认**就是要长期**（总是带上 offline_access）
+ * 2. 应用没开通时，飞书在**跳转授权页前**就以 redirect_uri?error=20027 拒绝
+ *    → 自动改发不带 offline_access 的链接重试（用户几乎无感，只多一次跳转）
+ * 3. 兑换后以**实际拿到的 refresh_token** 为准判定：
+ *    有 → long，无 → short（不凭“我请求过”推断，飞书可以不理它）
+ * 4. `short` 被记住（同一个 appId 不再白试一次），到期前主动弹卡提醒
+ * ```
+ *
+ * 于是“短期/长期”是**观测结果**而不是配置项：同一个部署换个应用就自动变了。
+ * 想强制的部署仍可在渠道实例的 `scopes` 里写 `offline_access`（等同现在行为）。
+ *
+ * **不记住“这个应用不支持”**：后台随时可能开通长期授权，记住了就永远不会再试。
+ * 每次授权都重新要，拿不到就当短期——自己降级、无需人管。
  */
+
+/** 换取 refresh_token 所需的 scope（需应用在飞书后台开通后才可用）。 */
+export const OFFLINE_ACCESS_SCOPE = "offline_access"
+
+/** 飞书“应用未开通 offline_access”的错误码（授权页跳转前就会带回来）。 */
+export const ERR_OFFLINE_ACCESS_NOT_ENABLED = 20027
+
 export const PERSONA_SCOPES = [
   "im:message",
   "im:message:send_as_bot",
@@ -70,24 +90,25 @@ export const PERSONA_SCOPES = [
   "im:message.group_msg:get_as_user",
   "im:chat:readonly",
   "im:chat.members:read",
+  // 长期授权：**默认就要**。应用没开通时由下层（20027 降级）自动重试，
+  // 不需要部署方先知道这个权限存不存在（见上方“代码自适应”）。
+  OFFLINE_ACCESS_SCOPE,
 ].join(" ")
 
-/** 换取 refresh_token 所需的 scope（需应用在飞书后台开通后才可用）。 */
-export const OFFLINE_ACCESS_SCOPE = "offline_access"
-
 /**
- * 从 `GEBAI_PERSONA_SCOPES` 读 scopes 覆盖（未设时用基础集）。
+ * scopes 合成：基础集 + 部署方额外声明的（**并集**）。
  *
- * 只做**并集**而不是全量替换：环境变量里写漏一个基础权限会让拟人模式
- * 静默少一项能力（例如漏了 `im:message:readonly` 就读不到入站消息，
- * 而表面上看授权是“成功”的）。
+ * 为何是并集而不是全量替换：漏写一个基础权限会让拟人模式静默少一项能力
+ * （例如漏了 `im:message:readonly` 就读不到入站消息，而表面上看授权是“成功”的）。
+ *
+ * 入参来自**渠道实例的 `scopes` 字段**（不是环境变量）：
+ * `offline_access` 是“这个应用能不能长期授权”的属性，
+ * 跟着应用/实例走才对——同类配两份时全局变量根本表达不了。
  */
-export function scopesFromEnv(env: NodeJS.ProcessEnv = process.env): string {
-  const extra = (env.GEBAI_PERSONA_SCOPES ?? "").trim()
-  if (!extra) return PERSONA_SCOPES
-  const merged = new Set([...PERSONA_SCOPES.split(/\s+/), ...extra.split(/\s+/)])
-  merged.delete("")
-  return [...merged].join(" ")
+export function mergeScopes(extra: readonly string[] = []): string {
+  const base = PERSONA_SCOPES.split(/\s+/).filter(Boolean)
+  const add = extra.flatMap((s) => s.split(/\s+/)).filter(Boolean)
+  return [...new Set([...base, ...add])].join(" ")
 }
 
 export interface PendingAuthorize {

@@ -15,6 +15,7 @@
 import { readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import type { ChannelContext, ChannelDef, ChannelLoadError } from "./channel"
+import { materializeInstance, parseChannelInstances } from "./config"
 
 /** 扫描域（内置 + 二开）。 */
 export interface ChannelScanDirs {
@@ -212,9 +213,16 @@ const ARG_TYPES = new Set(["string", "number", "boolean", "array", "object"])
 export function validateChannelDef(raw: unknown, expectedName?: string): string | null {
   if (!raw || typeof raw !== "object") return "channel 必须是对象"
   const o = raw as Record<string, unknown>
-  const allowed = new Set(["name", "description", "envVars", "verbs", "observes", "listens", "defaultKind", "targets", "act", "observe", "startListen", "stopListen", "start", "stop"])
+  const allowed = new Set(["name", "description", "config", "requiresConfig", "dirs", "verbs", "observes", "listens", "defaultKind", "targets", "act", "observe", "startListen", "stopListen", "start", "stop"])
   for (const k of Object.keys(o)) {
     if (!allowed.has(k)) return `含未知字段「${k}」（可用：${[...allowed].join(" / ")}）`
+  }
+  // dirs：类型能力声明，写错会让该方向永远展不开（静默失效）
+  if (o.dirs !== undefined) {
+    if (!Array.isArray(o.dirs) || o.dirs.length === 0) return "dirs 必须是非空数组（如 [\"in\",\"out\"]）"
+    for (const d of o.dirs) {
+      if (d !== "in" && d !== "out") return `dirs 只能含 "in" / "out"（当前：${String(d)}）`
+    }
   }
   if (typeof o.name !== "string" || !NAME_RE.test(o.name)) return `name 必须是 [a-z0-9_]+（当前：${String(o.name)}）`
   if (expectedName !== undefined && o.name !== expectedName) {
@@ -256,16 +264,25 @@ export function validateChannelDef(raw: unknown, expectedName?: string): string 
   }
   if (o.start !== undefined && typeof o.start !== "function") return "start 必须是非空函数"
   if (o.stop !== undefined && typeof o.stop !== "function") return "stop 若提供必须是函数"
-  if (o.envVars !== undefined) {
-    if (!Array.isArray(o.envVars)) return "envVars 必须是数组"
-    for (const v of o.envVars) {
-      if (!v || typeof v !== "object") return "envVars 每项必须是对象"
-      const item = v as Record<string, unknown>
-      if (typeof item.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.name)) {
-        return `envVars.name 非法：${String(item.name)}`
-      }
-      if (typeof item.description !== "string") return `envVars「${item.name}」缺少 description`
+  if (o.config !== undefined) {
+    if (!o.config || typeof o.config !== "object" || Array.isArray(o.config)) {
+      return "config 必须是对象（键 → 声明，如 { appId: { type: \"string\", description: \"…\", required: true } }）"
     }
+    const TYPES = new Set(["string", "number", "boolean", "string[]"])
+    for (const [k, v] of Object.entries(o.config as Record<string, unknown>)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) return `config 键名非法：${k}（须 [A-Za-z_][A-Za-z0-9_]*）`
+      if (!v || typeof v !== "object") return `config「${k}」必须是对象`
+      const spec = v as Record<string, unknown>
+      if (typeof spec.type !== "string" || !TYPES.has(spec.type)) {
+        return `config「${k}」的 type 必须是 ${[...TYPES].join(" / ")}（当前：${String(spec.type)}）`
+      }
+      if (typeof spec.description !== "string" || !spec.description.trim()) {
+        return `config「${k}」缺少 description`
+      }
+    }
+  }
+  if (o.requiresConfig !== undefined && typeof o.requiresConfig !== "boolean") {
+    return "requiresConfig 必须是布尔值"
   }
   return null
 }
@@ -343,15 +360,25 @@ export interface ChannelState {
   listening: boolean
   /** 是否有限定目标白名单。 */
   restricted: boolean
+  /**
+   * 方向：`in` 只收（不建写/读面）、`out` 只发/读（不建连接）。
+   *
+   * 面板必须区分，否则出站实例的 `listening=false` 会被误判成“只能发不能收”的故障态——
+   * 而它本来就不该建连接。
+   */
+  dir: "in" | "out"
+  /**
+   * 这个实例能否启停监听（前端据此决定开关是否可点）。
+   *
+   * `dir=out` 时为 false（本来就不建连接）；渠道类型没实现 `startListen` 时也为 false。
+   */
+  canListen: boolean
 }
 
 export interface ChannelRegistryOptions {
   scanDirs: ChannelScanDirs
   /** 数据根（`ctx.home`）。 */
   home: string
-  /** 启停名单（`GEBAI_CHANNELS_ENABLE` / `DISABLE`）：白名单非空仅启用名单内，先白后黑。 */
-  enable?: string[]
-  disable?: string[]
   /** 环境变量读取器（缺省 `process.env`；测试注入）。 */
   envReader?: (name: string) => string | undefined
   /** 宿主注入的共享依赖（经 `ctx.deps` 给渠道只读访问）。 */
@@ -366,6 +393,9 @@ export interface ChannelRegistryOptions {
  * 热加载：`refreshIfChanged()` 比对目录签名（成本约一次目录遍历）。
  */
 export class ChannelRegistry {
+  /** 类型名 → 定义（来自目录扫描 / 显式注册）。实例展开前只有这一层。 */
+  private types = new Map<string, ChannelDef>()
+  /** 实例名 → 定义（已按 `GEBAI_CHANNEL_<TYPE>` 展开）。对外一律看这一层。 */
   private defs = new Map<string, ChannelDef>()
   private errors = new Map<string, ChannelLoadError>()
   private started = new Map<string, ChannelDef>()
@@ -377,6 +407,10 @@ export class ChannelRegistry {
   private signature: string | null = null
   private starting = false
   private explicit = new Set<string>()
+  /** 实例名 → 该实例的配置（解析自 `GEBAI_CHANNEL_<DIR>_<TYPE>`）；与 `defs` 分开存。 */
+  private instanceSettings = new Map<string, Readonly<Record<string, unknown>>>()
+  /** 实例名 → 方向（`in` 只收、`out` 只发/读）。 */
+  private instanceDirs = new Map<string, "in" | "out">()
 
   constructor(private readonly opts: ChannelRegistryOptions) {}
 
@@ -384,6 +418,57 @@ export class ChannelRegistry {
   async init(): Promise<void> {
     await this.discover()
     await this.startAll()
+  }
+
+  /**
+   * 只做发现与实例展开，**不启动**（也不建连接）。
+   *
+   * 为何需要这一步：人格在启动早期就要解析 `channels:["实例名"]`（输出目标、
+   * 入站收窄），而它必须知道“这个实例允许哪些群”——那是渠道配置的事。
+   * 但此时渠道还不能启动（依赖尚未就绪）。`init()` 之后再调一次 `discover()`
+   * 是幂等的（签名未变不重扫），所以两步可以安全拼起来。
+   */
+  async discoverOnly(): Promise<void> {
+    await this.discover()
+  }
+
+  /** 实例名 → 允许的群（供人格引用解析；无 chats 的实例为空数组）。 */
+  instanceChats(): Map<string, string[]> {
+    const out = new Map<string, string[]>()
+    for (const [name, settings] of this.instanceSettings) {
+      const c = settings.chats
+      out.set(name, Array.isArray(c) ? (c as string[]).filter((x): x is string => typeof x === "string") : [])
+    }
+    return out
+  }
+
+  /** 实例名 → 方向（`in`/`out`）。人格据此报“拿输出实例配 listen”这类错。 */
+  instanceDirections(): Map<string, "in" | "out"> {
+    return new Map(this.instanceDirs)
+  }
+
+  /** 实例名 → 该实例的原始配置项（只读快照）。 */
+  instanceConfig(name: string): Readonly<Record<string, unknown>> | undefined {
+    return this.instanceSettings.get(name)
+  }
+
+  /**
+   * 某个实例的凭据与授权补充（供人格 OAuth 用）。
+   *
+   * 为何从实例配置取而不是读环境变量：
+   * 凭据与 `offline_access` 都是**应用级**属性，跟着实例走才是对的——
+   * 同类配两份时（`feishu_in` / `feishu_ops`）环境变量只能表达一份。
+   * 旧形态把它们焊在 `GEBAI_CHANNELS_FEISHU_APP_ID` / `GEBAI_PERSONA_SCOPES` 上，
+   * 实例化之后这两个变量已经不存在，继续读只会静默拿到 `undefined`（真实踩过的坑）。
+   */
+  instanceCredentials(name: string): { appId?: string; appSecret?: string; scopes: string[] } | undefined {
+    const c = this.instanceSettings.get(name)
+    if (!c) return undefined
+    const str = (k: string): string | undefined => (typeof c[k] === "string" && c[k] ? (c[k] as string) : undefined)
+    const scopes = Array.isArray(c.scopes)
+      ? (c.scopes as unknown[]).filter((x): x is string => typeof x === "string")
+      : []
+    return { appId: str("appId"), appSecret: str("appSecret"), scopes }
   }
 
   /**
@@ -429,6 +514,42 @@ export class ChannelRegistry {
     this.started.clear()
   }
 
+  /**
+   * 启动/停止单个实例的**监听**（不动它的 act/observe 能力）。
+   *
+   * 为何单独一个方法而不复用 `startOne/stopOne`：那两者启停的是“整个实例”
+   * （含写/读面与连接）。而“停监听”的真实诉求是「先别收消息了，但还能发」——
+   * 比如群太吵了、或要重新授权前先把入站掐断。两者混在一起就只能二选一。
+   *
+   * 返回 `{ ok:false }` 而不是抛错：这是诊断/运营动作，失败原因要能直接展示给用户。
+   */
+  async setListening(name: string, want: boolean): Promise<{ ok: boolean; reason?: string }> {
+    const def = this.defs.get(name)
+    if (!def) return { ok: false, reason: `未知渠道实例「${name}」` }
+    if (this.instanceDirs.get(name) === "out") {
+      // 出站实例本来就不建连接（能力面里没有 startListen），开关对它没有意义。
+      // 不静默成功：前端要能告诉用户“这个开关为何点不了”。
+      return { ok: false, reason: `实例「${name}」是出站实例（只发/读，不建连接），没有可启停的监听` }
+    }
+    if (!def.startListen) return { ok: false, reason: `实例「${name}」不支持监听（渠道类型未实现 startListen）` }
+    if (want === this.listening.has(name)) {
+      // 幂等：已经是目标状态，直接认为成功（避免重复建连接）
+      return { ok: true }
+    }
+    try {
+      if (want) {
+        await this.startListeningFor(name, def)
+      } else {
+        await def.stopListen?.(this.context(def))
+        this.listening.delete(name)
+        this.log("info", `实例「${name}」的监听已手动停止（发送/读取能力不受影响）`)
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, reason: `操作失败：${String((err as Error)?.message || err)}` }
+    }
+  }
+
   /** 热加载检查（目录签名变化即重扫重启）。返回是否发生了重扫。 */
   async refreshIfChanged(): Promise<boolean> {
     const sig = await discoverySignature(this.opts.scanDirs)
@@ -449,11 +570,10 @@ export class ChannelRegistry {
   usable(name: string): ChannelDef | null {
     const def = this.defs.get(name)
     if (!def) return null
-    if (!this.isEnabled(name)) return null
     return this.started.has(name) ? def : null
   }
 
-  /** 已注册的全部渠道（含未启用）。 */
+  /** 已展开的全部渠道实例（名字 = 配置里的 name；没有启停名单，存在即启用）。 */
   list(): ChannelDef[] {
     return [...this.defs.values()]
   }
@@ -465,7 +585,8 @@ export class ChannelRegistry {
       out.push({
         name,
         description: def.description,
-        enabled: this.isEnabled(name),
+        // 没有启停名单了：能展开成实例就是启用（存在即启用）
+        enabled: true,
         started: this.started.has(name),
         ...(this.startErrors.has(name) ? { error: this.startErrors.get(name) } : {}),
         verbs: Object.keys(def.verbs ?? {}),
@@ -473,6 +594,9 @@ export class ChannelRegistry {
         listens: Object.keys(def.listens ?? {}),
         listening: this.listening.has(name),
         restricted: typeof def.targets === "function",
+        dir: this.instanceDirs.get(name) ?? "out",
+        // 能启停监听 = 入站实例 + 渠道类型实现了 startListen
+        canListen: (this.instanceDirs.get(name) ?? "out") === "in" && typeof def.startListen === "function",
       })
     }
     for (const [name, err] of this.errors) {
@@ -488,6 +612,8 @@ export class ChannelRegistry {
         listens: [],
         listening: false,
         restricted: false,
+        dir: "out",
+        canListen: false,
       })
     }
     return out.sort((a, b) => a.name.localeCompare(b.name))
@@ -506,6 +632,9 @@ export class ChannelRegistry {
    *
    * 语义与扫描发现一致：同名覆盖，且不受启停名单约束（显式注册即视为部署方意图）。
    * 仍走字段校验（不能绕过）。
+   *
+   * 注册的是**类型**，随即按配置展开成实例（与目录发现走同一条展开路径）——
+   * 否则程序化注册的渠道会绕过实例化，`ctx.config` 永远是空的。
    */
   register(def: ChannelDef): void {
     const invalid = validateChannelDef(def, def.name)
@@ -514,8 +643,9 @@ export class ChannelRegistry {
       this.log("warn", `渠道 ${def.name} 注册被拒绝：${invalid}`)
       return
     }
-    this.defs.set(def.name, def)
+    this.types.set(def.name, def)
     this.explicit.add(def.name)
+    this.expandTypes([def])
   }
 
   /** 手动启动单个渠道。 */
@@ -525,23 +655,21 @@ export class ChannelRegistry {
     return this.startDef(def)
   }
 
-  /** 构造渠道上下文：`ctx` 是全流程唯一出口。 */
+  /**
+   * 构造渠道上下文：`ctx` 是全流程唯一出口。
+   *
+   * 实例隔离靠 `name`：同一份类型定义（`feishu.ts`）的多个实例（`feishu_main` /
+   * `feishu_ops`）各自拿到**自己的 settings**，所以凭据/白名单不会串。
+   */
   context(def: ChannelDef): ChannelContext {
-    const declared = new Set((def.envVars ?? []).map((v) => v.name))
-    const readEnv = this.opts.envReader ?? ((n: string) => process.env[n])
+    const key = def.name
+    const settings = this.instanceSettings.get(key) ?? {}
     return {
       name: def.name,
       home: this.opts.home,
       deps: this.opts.deps ?? {},
       log: (level, msg) => this.log(level, `[${def.name}] ${msg}`),
-      env: (name) => {
-        // 白名单过滤：未声明即不可读（防「读告警的渠道」顺手拿到模型密钥）
-        if (!declared.has(name)) {
-          this.log("warn", `渠道 ${def.name} 读取未声明的环境变量 ${name}（已拒绝；请在 envVars 中声明）`)
-          return undefined
-        }
-        return readEnv(name)
-      },
+      config: settings,
     }
   }
 
@@ -555,30 +683,113 @@ export class ChannelRegistry {
       // 合并而非覆盖：显式 register() 的渠道不经目录扫描，重扫不能把它们丢掉
       for (const [name, def] of result.channels) {
         if (this.explicit.has(name)) continue
-        this.defs.set(name, def)
+        this.types.set(name, def)
       }
       for (const [name, err] of result.errors) {
         if (this.explicit.has(name)) continue
         this.errors.set(name, err)
       }
       this.signature = result.signature
-      // 已消失的目录渠道从 defs 里摘除（显式注册的保留）
-      for (const name of [...this.defs.keys()]) {
+      // 已消失的目录渠道从 types 里摘除（显式注册的保留）
+      for (const name of [...this.types.keys()]) {
         if (this.explicit.has(name)) continue
-        if (!result.channels.has(name)) this.defs.delete(name)
+        if (!result.channels.has(name)) this.types.delete(name)
       }
+      await this.expandInstances()
       for (const [name, err] of result.errors) {
         this.log("warn", `渠道 ${name} 加载失败 [${err.domain}]: ${err.error}`)
       }
-      this.warnUnknownAllowlistNames()
     } finally {
       this.starting = false
     }
   }
 
+  /**
+   * 把「类型」展开成「实例」：一份 `GEBAI_CHANNEL_<TYPE>` 配置 → 一个可运行实例。
+   *
+   * 两个关键决定：
+   * - **实例名与类型名解耦**：`feishu.ts` 能配出 `feishu_main` / `feishu_ops`；
+   *   同类的第二份配置从此有地方可写（旧形态因变量名把类型焊死，做不到）。
+   * - **未配置但可选**：`requiresConfig=false` 的类型（如 local）自动得到一个
+   *   缺省实例（名字 = 类型名），不必让部署方先写一行 JSON；
+   *   而 `requiresConfig=true`（如 feishu）未配置时**不凭空造实例**——
+   *   一个没有凭据的 feishu 实例只会把“配了但没反应”变成更难查的形态。
+   */
+  private async expandInstances(): Promise<void> {
+    // 先清掉旧的展开结果（热加载/重扫时要能反映配置变化）
+    for (const name of [...this.defs.keys()]) {
+      if (!this.types.has(name)) {
+        this.defs.delete(name)
+        this.instanceSettings.delete(name)
+        this.instanceDirs.delete(name)
+      }
+    }
+    this.expandTypes([...this.types.values()])
+  }
+
+  /** 把指定类型集合展开成实例（`register` 与 `discover` 共用同一条路径）。 */
+  private expandTypes(list: ChannelDef[]): void {
+    const readEnv = this.opts.envReader ?? ((n: string) => process.env[n])
+
+    for (const typeDef of list) {
+      const typeName = typeDef.name
+      // 类型声明了哪些方向就展开哪些组；未声明 = 两者都支持（兼容旧写法与自带缺省值的类型）
+      const dirs: Array<"in" | "out"> = typeDef.dirs ?? ["in", "out"]
+      let made = 0
+
+      for (const dir of dirs) {
+        const varName = `GEBAI_CHANNEL_${dir.toUpperCase()}_${typeName.toUpperCase()}`
+        const parsed = parseChannelInstances(typeName, readEnv(varName), typeDef.config, dir)
+        for (const e of parsed.errors) this.log("warn", `[配置] ${e}`)
+        if (parsed.errors.length) {
+          // 配错时不启用（也不回退默认值）：带着半份配置跑起来比不跑更难查
+          this.startErrors.set(`${dir}:${typeName}`, `${varName} 配置有误：${parsed.errors[0]}`)
+          continue
+        }
+
+        for (const inst of parsed.instances) {
+          // 两个方向的实例名必须全局唯一：它们共享 target 前缀与事件 channel 字段，
+          // 同名会让“发到 feishu_x”指向不可预期的一侧。
+          if (this.defs.has(inst.name)) {
+            this.startErrors.set(inst.name, `实例名「${inst.name}」与已有实例重名（in/out 两组之间也必须唯一）`)
+            this.log("warn", `渠道实例名「${inst.name}」重名，已忽略 ${varName} 中的这一项`)
+            continue
+          }
+          this.defs.set(inst.name, materializeInstance(typeDef, inst))
+          this.instanceSettings.set(inst.name, Object.freeze({ ...inst.settings }))
+          this.instanceDirs.set(inst.name, dir)
+          made++
+        }
+      }
+
+      // 两端都未配置：必需配置的类型要一条可查询的提示；可选类型给一个缺省**出站**实例
+      if (made === 0 && typeDef.requiresConfig) {
+        const hint =
+          `未配置 ${dirs.map((d) => `GEBAI_CHANNEL_${d.toUpperCase()}_${typeName.toUpperCase()}`).join(" 或 ")}` +
+          `（JSON 数组，每项一个实例，如 [{"name":"${typeName}_main",${Object.keys(typeDef.config ?? {})
+            .slice(0, 2)
+            .map((k) => `"${k}":"…"`)
+            .join(",")}}]）`
+        this.log("warn", `渠道类型「${typeName}」${hint}`)
+        this.startErrors.set(typeName, hint)
+      } else if (made === 0 && dirs.includes("out")) {
+        // 可选类型且未配置：给一个缺省**出站**实例（名字 = 类型名）。
+        //
+        // 为何缺省只造 out、不造 in：入站往往意味着常驻资源（轮询定时器/长连接），
+        // 为“没写任何配置的部署”无形中多开一个轮询器是不对的；
+        // 而缺省出站实例是「本地记忆/落盘」这类开箱即用的能力，代价为零。
+        const def = materializeInstance(typeDef, { name: typeName, dir: "out", settings: {} })
+        if (!this.defs.has(typeName)) {
+          this.defs.set(typeName, def)
+          this.instanceSettings.set(typeName, Object.freeze({}))
+          this.instanceDirs.set(typeName, "out")
+        }
+      }
+    }
+  }
+
   private async startAll(): Promise<void> {
     for (const def of this.defs.values()) {
-      if (!this.isEnabled(def.name)) continue
       await this.startDef(def)
     }
   }
@@ -598,15 +809,8 @@ export class ChannelRegistry {
       // 输入面：start 成功后才订阅（避免停不下来的半启动态）。
       // 监听失败只记日志、不回滚 start —— 该渠道的写/读面仍然可用（降级而非全损）。
       if (def.startListen && this.bridge) {
-        // 每个渠道拿到**绑了自己名字**的 sink：渠道无从伪造路由键
-        const chName = def.name
-        const dk = def.defaultKind
-        const sink = {
-          emit: (ev: import("./channel").IngressEvent) => this.bridge!.deliver(chName, dk, ev),
-        }
         try {
-          await def.startListen(sink, this.context(def))
-          this.listening.add(def.name)
+          await this.startListeningFor(def.name, def)
         } catch (err) {
           const msg = `订阅失败: ${String((err as Error)?.message || err)}`
           this.startErrors.set(def.name, msg)
@@ -622,22 +826,22 @@ export class ChannelRegistry {
     }
   }
 
-  /** 启停名单判定（先白后黑）。 */
-  private isEnabled(name: string): boolean {
-    if (this.explicit.has(name)) return true
-    const enable = this.opts.enable ?? []
-    const disable = this.opts.disable ?? []
-    if (enable.length && !enable.includes(name)) return false
-    return !disable.includes(name)
-  }
-
-  /** 名单里的未知名告警（拼错名单会让渠道静默不启用，属最难排查的一类）。 */
-  private warnUnknownAllowlistNames(): void {
-    for (const name of [...(this.opts.enable ?? []), ...(this.opts.disable ?? [])]) {
-      if (!this.defs.has(name) && !this.errors.has(name)) {
-        this.log("warn", `启停名单中的渠道「${name}」不存在（拼写错误？已注册：${[...this.defs.keys()].join(", ") || "无"}）`)
-      }
+  /**
+   * 真正把监听建起来（`startDef` 与手动启停共用）。
+   *
+   * 每个渠道拿到**绑了自己名字**的 sink：渠道无从伪造路由键。
+   * 抛错由调用方处理（启动期记 loadError 降级，手动启停则回给用户）。
+   */
+  private async startListeningFor(name: string, def: ChannelDef): Promise<void> {
+    if (!this.bridge) throw new Error("未注入输入桥接器（先 attachDispatcher），无法订阅")
+    const chName = name
+    const dk = def.defaultKind
+    const sink = {
+      emit: (ev: import("./channel").IngressEvent) => this.bridge!.deliver(chName, dk, ev),
     }
+    await def.startListen!(sink, this.context(def))
+    this.listening.add(name)
+    this.startErrors.delete(name)
   }
 
   private log(level: "info" | "warn" | "error", msg: string): void {

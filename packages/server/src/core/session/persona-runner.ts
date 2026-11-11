@@ -41,7 +41,7 @@ export interface PersonaEnginePort {
     opts?: {
       attachments?: Array<{ name: string; mime?: string; path?: string; data?: Uint8Array }>
       channelNote?: string
-      /** auto 姿态：需审批工具自动通过（仅当 `approvalMode` 为 readonly/auto）。 */
+      /** 入站免审：人格的工具调用默认全部不审批（名单里的除外，见 `askTools`）。 */
       autoApprove?: boolean
       /**
        * 交互模式（**必须显式传**）。
@@ -70,24 +70,18 @@ export interface EnginePersonaRunnerOptions {
    */
   refreshBeforeRun?: () => Promise<void>
   /**
-   * 审批姿态（`GEBAI_PERSONA_APPROVAL` 的解析结果）。
+   * 要审批的工具名单（`GEBAI_PERSONA_<ID>` 的 `askTools`，全局变量兑底）。
    *
-   * 可以传**函数**以支持热改（推荐：读环境变量的解析函数）——人格进程常常跑几周，
-   * 而“临时放开/收紧”是真实诉求；写死成构造快照就必须重启，而重启会中断在跑的人格任务。
+   * 语义只有一条：**名单内弹窗问人，名单外直接执行**。
+   * 不传/返回空数组 = 该分身工具全部不审批（缺省）。
    *
-   * - `readonly`（缺省）：**工具执行不弹卡，输出才审**（出站审核独立开关）
-   * - `ask`：需审批工具走引擎审批点 → 审批桥推相期卡问人
-   * - `auto`：同 readonly（旧名）
-   * - `deny`：需审批工具直接拒绝
-   *
-   * 四档与引擎入参的对应关系见 `run()` 里的表格（尤其 deny 必须显式传
-   * `autoApprove: false`，否则会被引擎的“无交互自动通过”变成全放行）。
+   * 传函数时参数是 `(personaId, driverId)`：**不同分身可以有不同名单**——
+   * 盯告警的只需要读日志（全不必问），执行运维动作的应该把 `sh` 拦住。
+   * 同时也就支持热改（进程常跑几周，临时收紧不该需要重启）。
    */
-  approvalMode?: import("@gebai/persona").PersonaApprovalMode | (() => import("@gebai/persona").PersonaApprovalMode)
-  /**
-   * @deprecated 旧字段（等价 `approvalMode` 的 deny/readonly 两态）。保留只为兼容既有装配代码。
-   */
-  autoApprove?: boolean
+  askTools?:
+    | import("@gebai/persona").AskToolPattern[]
+    | ((personaId: string, driverId: string) => import("@gebai/persona").AskToolPattern[])
   /**
    * 自动学习回调（可选）：每轮跑完后调一次，从**进来的人话**里识别值得记的知识。
    *
@@ -118,7 +112,7 @@ export interface EnginePersonaRunnerOptions {
  * 5. **同人格其它分身**：不告诉它有哪些兄弟时，同一个问题会被几个分身重复答一遍
  *    （每个都在自己的会话里把它当第一次看见）
  */
-export function personaNote(input: PersonaRunInput, now = Date.now(), approvalMode: "readonly" | "ask" | "auto" | "deny" = "readonly"): string {
+export function personaNote(input: PersonaRunInput, now = Date.now(), askToolCount = 0): string {
   const { identity, driver } = input
   const siblings = (input.siblings ?? []).filter((s) => s.id !== driver.id)
   const lines: string[] = []
@@ -180,23 +174,21 @@ export function personaNote(input: PersonaRunInput, now = Date.now(), approvalMo
   // 审批姿态：模型必须知道“哪些事会被人卡住”，否则它会反复重试被拒的操作，
   // 或者把“等审批”误当成“已失败”。
   //
-  // 关键在于把**工具执行**与**对外输出**分开说：人格在 readonly 下可以随便动手查/算，
+  // 关键在于把**工具执行**与**对外输出**分开说：人格的工具调用默认全部不审批，
   // 但“发出去的话”仍要人批准——这两件事混淆时，模型要么不敢动手，要么以为发消息也不用审。
+  //
+  // 名单里要审批的工具另外提一句（否则模型不知道自己会遇到弹卡，被拒后会无意义重试）。
   lines.push("## 动手与发言：审的东西不一样")
   lines.push("")
-  if (approvalMode === "deny") {
-    lines.push("这个部署把你设成了**只读**：需要授权的操作（改删文件、提交单据等）会直接失败。")
-    lines.push("遇到失败不要反复重试——改用只读手段查清事实，并在回复里把“需要人来做的那一步”说清楚。")
-  } else if (approvalMode === "ask") {
-    lines.push("这个部署要求：**需要授权的操作会弹卡让人点头**（卡片在他桌面上）。因此：")
-    lines.push("")
-    lines.push("- 被拒或超时后**不要重复试同一个操作**——先换方案，或在消息里说清需要人做什么。")
-    lines.push("- 能自己查清的不必等人：只读操作（读文件/查接口/跑查询）不弹卡。")
-  } else {
-    lines.push("- **动手不弹卡**：读文件、跑命令、查接口这些你自己做，不必等人批准（错了能改）。")
-    lines.push("- **发言要人点头**：以用户本人名义发出去的消息会先弹卡给人看（发出去就是他说的，错发代价在他）。")
-    lines.push("  所以一次把话说清就行；**被驳回了不要改个字再发一遍**——那等于绕过审核。")
+  lines.push("- **动手一般不用批**：读文件、跑命令、查接口这些你自己做（错了能改）。")
+  if (askToolCount > 0) {
+    lines.push(
+      `- **有 ${askToolCount} 类工具会弹卡等人点头**（本部署指定的敏感操作）。被拒或超时后` +
+        "**不要重复试同一个操作**——换方案，或在回复里说清需要人做什么。",
+    )
   }
+  lines.push("- **发言要人点头**：以用户本人名义发出去的消息会先弹卡给人看（发出去就是他说的，错发代价在他）。")
+  lines.push("  所以一次把话说清就行；**被驳回了不要改个字再发一遍**——那等于绕过审核。")
   lines.push("- 需要主管决策、需要外部信息、需要人去某个地方动手时，不要硬猜也不要装成功：")
   lines.push("  在你要发出去的回复里**直接把问题问出来**（“这个要你确认一下：……”），不要自言自语。")
   lines.push("")
@@ -296,29 +288,39 @@ export function personaNote(input: PersonaRunInput, now = Date.now(), approvalMo
 
 export class EnginePersonaRunner implements PersonaRunner {
   private readonly engine: PersonaEnginePort
-  private readonly approvalModeOf: () => import("@gebai/persona").PersonaApprovalMode
+  private readonly askToolsOf: (
+    personaId: string,
+    driverId: string,
+  ) => import("@gebai/persona").AskToolPattern[]
   private readonly log?: EnginePersonaRunnerOptions["log"]
   private readonly refreshBeforeRun?: () => Promise<void>
   private readonly learnFrom?: EnginePersonaRunnerOptions["learnFrom"]
 
   constructor(opts: EnginePersonaRunnerOptions) {
     this.engine = opts.engine
-    // 兼容旧字段：显式给 autoApprove=false 的场景等价于 deny；旧缺省 true 等价 readonly。
-    // 缺省（都不给）= readonly（工具执行不弹卡，输出仍审）。
-    const fixed = opts.approvalMode ?? (opts.autoApprove === false ? "deny" : "readonly")
-    this.approvalModeOf = typeof fixed === "function" ? fixed : () => fixed
+    // 缺省空名单 = 工具全部不审批（人格能干活；发出去的话仍过出站审核）
+    const fixed = opts.askTools ?? []
+    this.askToolsOf = typeof fixed === "function" ? fixed : () => fixed
     this.log = opts.log
     this.refreshBeforeRun = opts.refreshBeforeRun
     this.learnFrom = opts.learnFrom
   }
 
-  /** 当前审批姿态（每次现取，支持热改）。 */
-  get approvalMode(): import("@gebai/persona").PersonaApprovalMode {
+  /**
+   * 某个分身当前要审批的工具名单（每次现取，支持热改与逐分身不同）。
+   *
+   * 只用于**提示词**（告要不要告诉模型“有几类工具会弹卡”）。
+   * 真正的审批判定在引擎的 `forceApprovalFor`——它按会话拿到具体分身，
+   * 与这里是**同一份名单的两个用途**，不会出现两处口径不一致。
+   */
+  askToolsFor(personaId: string, driverId: string): import("@gebai/persona").AskToolPattern[] {
     try {
-      return this.approvalModeOf()
+      return this.askToolsOf(personaId, driverId)
     } catch {
-      // 解析函数抛错：回到缺省 readonly（不把人格卡死，也不意外提权）
-      return "readonly"
+      // 解析函数抛错：回到空名单（= 不弹卡）。
+      // 为何不反过来“出错就全审”：那会让一个配置笔误把人格卡死在无人值守里，
+      // 而它本来的缺省就是“不审”。
+      return []
     }
   }
 
@@ -395,13 +397,20 @@ export class EnginePersonaRunner implements PersonaRunner {
       //
       // 后者假定有实时前端：`ask` 会推一张没人看的选择卡并阻塞 5 分钟，
       // `show` 的 html 分支 / `page_capture` 被当成可用随后失败。
-      const mode = this.approvalMode
-      const interactionMode: "none" | "multi_turn" = mode === "deny" ? "none" : "multi_turn"
-      const approveOpt = mode === "readonly" || mode === "auto" ? { autoApprove: true } : mode === "deny" ? { autoApprove: false } : {}
+      // 引擎入参固定三项：
+      //
+      //   autoApprove: true        → 工具默认直接执行（人格会话不弹卡）
+      //   interactionMode: multi_turn → 保留弹窗能力（模型主动 ask / 名单里的工具要靠它）
+      //
+      // **名单里要审批的工具靠 `forceApprovalFor` 钩子拦回**（引擎侧按工具名判定），
+      // 而不是靠 `autoApprove` —— 后者是会话级的，只能“全审”或“全免”。
+      //
+      // `interactionMode` 绝不能用引擎缺省的 `realtime`：后者假定有实时前端，
+      // `show` 的 html 分支 / `page_capture` 会被当成可用随后失败。
       await this.engine.run(input.sessionId, input.user, prompt, {
-        channelNote: personaNote(input, undefined, mode),
-        interactionMode,
-        ...approveOpt,
+        channelNote: personaNote(input, undefined, this.askToolsFor(input.personaId, input.driver.id).length),
+        interactionMode: "multi_turn",
+        autoApprove: true,
         ...(attachments.length ? { attachments } : {}),
       })
       // ⑦ 自动学习（只在装了册府时）：从**进来的人话**里识别值得记的东西。

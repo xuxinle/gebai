@@ -23,6 +23,7 @@
 import type { Context, Hono } from "hono"
 import type { AppEnv } from "../app"
 import type { PersonaCredentials } from "@gebai/persona"
+import { isOfflineAccessRejection } from "@gebai/persona"
 import type { PersonaStateSnapshot } from "../core/session/persona-status"
 
 /**
@@ -106,6 +107,29 @@ export interface PersonaRouteDeps {
    * 撤销全局授权（令所有人格失声）或停掉全局驱动源。未注入时不拦截（本地模式/单测）。
    */
   requireAdmin?: (c: Context) => Response | null
+  /**
+   * 渠道启停与失败原因（**不依赖拟人是否启用**）。
+   *
+   * 为何单独一个口子：渠道状态与人格运行时是两件独立的事——渠道在先，人格在其上。
+   * 把渠道状态只放在 `/persona/state` 里，会造成“没配人格 → 什么都看不到”（包括
+   * “渠道因为撞车没起来”这种与人格无关的故障）。未注入时为 undefined（客户端自行降级）。
+   */
+  channelState?: () => Array<{
+    name: string
+    description: string
+    started: boolean
+    error?: string
+    listening?: boolean
+    dir?: "in" | "out"
+    canListen?: boolean
+  }>
+  /**
+   * 启停单个渠道实例的**监听**（不动发送/读取能力）。
+   *
+   * 返回 `{ ok:false, reason }` 而不是抛错：失败原因（如“这是出站实例，没有监听可启停”）
+   * 要能直接展示给用户，而不是变成一个 500。
+   */
+  channelListenControl?: (name: string, want: boolean) => Promise<{ ok: boolean; reason?: string }>
 }
 
 /** HTML 转义（反射型 XSS 防护：错误消息可能含外部可控内容）。 */
@@ -129,18 +153,18 @@ body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:cen
 }
 
 export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps): void {
-  // 未启用/装配失败：把**真实原因**一并返回。
+  // 未装配/装配失败：把**真实原因**一并返回。
   //
   // 装配失败已被隔离成「服务照常启动」，但这意味着用户看到的只是「人格不回消息」——
   // 如果没有这一行，他就只能去翻启动日志。两种情形语义不同，不能混为一谈：
-  //   · 未启用（GEBAI_PERSONA 未设）——开关没开，不关心
-  //   · 装配失败——开关开了但坏了，**这就是用户最需要看到的那句话**
+  //   · 未配置——没写任何 GEBAI_PERSONA_<ID>，没打算跑人格
+  //   · 装配失败——配了但坏了，**这就是用户最需要看到的那句话**
   const notEnabled = (c: Context) =>
     c.json(
       {
         error: deps.setupError
           ? `拟人模式装配失败：${deps.setupError}`
-          : "拟人模式未启用（GEBAI_PERSONA=true 后可用）",
+          : "拟人模式未启用（没有任何 GEBAI_PERSONA_<ID> 配置）",
         ...(deps.setupError ? { setupError: deps.setupError } : {}),
       },
       404,
@@ -235,9 +259,24 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
    * 此时用最近一次 pending 的 redirect_uri——否则飞书会因 redirect_uri 不匹配拒绝。
    */
   app.get("/api/v1/persona/feishu/callback", async (c) => {
-    if (!deps.credentials) return page("拟人模式未启用", "请先设置 GEBAI_PERSONA=true 并重启歌白。", false)
+    if (!deps.credentials) return page("拟人模式未启用", "请先配置 GEBAI_PERSONA_<人格ID> 与渠道实例，然后重启歌白。", false)
     const { code = "", state = "", error = "", error_description = "" } = c.req.query()
     if (error) {
+      // 飞书在**跳转授权页前**就把应用没开通 offline_access 挡回来了（20027）。
+      // 部署方不该为了这个去查后台权限，所以这里自己退一步：
+      // 换一张不带 offline_access 的短期授权链接，直接把人送过去（用户几乎无感）。
+      if (isOfflineAccessRejection(error) || isOfflineAccessRejection(error_description)) {
+        const ticket = deps.credentials.downgradeToShortLived?.()
+        if (ticket) {
+          deps.publish("event.persona.credentials", {
+            ready: false,
+            state: "short_lived",
+            message: "应用未开通长期授权，已改为短期授权",
+          })
+          // 302 自动跳转：用户不需再回面板点一次
+          return c.redirect(ticket.url, 302)
+        }
+      }
       return page("飞书授权失败", `飞书返回错误：${esc(String(error_description || error))}`, false)
     }
     if (!code) {
@@ -282,6 +321,60 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
   })
 
   /**
+   * 渠道启停状态（**不受拟人开关影响**）。
+   *
+   * 为何需要这个独立端点：渠道与人格是两层东西（渠道先起、人格在其上），而
+   * “渠道因为撞车没起来”与“人格没配”是两回事。若只把渠道状态塞在
+   * `/persona/state` 里，没配人格时那个端点 404，面板就整块黑屏——
+   * 而这恰恰是用户最想查“它为什么不说话”的时候。
+   *
+   * 只读、无副作用；未注入渠道注册表时如实回 404（客户端自行降级）。
+   */
+  app.get("/api/v1/channels/state", (c) => {
+    if (!deps.channelState) return c.json({ error: "渠道状态不可用（此宿主未注入渠道注册表）" }, 404)
+    try {
+      return c.json({ channels: deps.channelState() })
+    } catch (err) {
+      return c.json({ error: `渠道状态读取失败：${String((err as Error)?.message || err)}` }, 500)
+    }
+  })
+
+  /**
+   * 手动启停**单个渠道实例的监听**（收消息）。
+   *
+   * 语义（刻意窄）：
+   * - **只停监听**：发送/读取能力不受影响——否则“先别收消息”就无法表达，
+   *   而那是真实需求（群太吵、要先重新授权、排查事件风暴）
+   * - **只影响本次运行**：不写配置、不落盘；重启后回到配置里的状态
+   * - 只对**入站实例**有意义：出站实例本来就不建连接，返回 400 并说明原因
+   *   （静默成功会让用户以为“点了开关它就会收”，而实际什么都没发生）
+   *
+   * 需管理员：这是部署级资源（进程级、跨用户共享）。
+   */
+  app.post("/api/v1/channels/:name/listen/:action", async (c) => {
+    if (deps.requireAdmin) {
+      const denied = deps.requireAdmin(c)
+      if (denied) return denied
+    }
+    if (!deps.channelListenControl) {
+      return c.json({ ok: false, error: "渠道监听控制不可用（此宿主未注入渠道注册表）" }, 404)
+    }
+    const action = String(c.req.param("action") ?? "").toLowerCase()
+    if (action !== "start" && action !== "stop") {
+      return c.json({ ok: false, error: `未知动作「${action}」（可用：start / stop）` }, 400)
+    }
+    const name = decodeURIComponent(String(c.req.param("name") ?? ""))
+    try {
+      const r = await deps.channelListenControl(name, action === "start")
+      if (!r.ok) return c.json({ ok: false, name, action, error: r.reason }, 400)
+      deps.publish("event.channel.listen", { name, listening: action === "start" })
+      return c.json({ ok: true, name, action, listening: action === "start" })
+    } catch (err) {
+      return c.json({ ok: false, name, action, error: String((err as Error)?.message || err) }, 500)
+    }
+  })
+
+  /**
    * 手动启停单个事件源（诊断）。
    *
    * 典型用途：新写了一个源，想确认它能不能连上、事件能不能进——
@@ -298,7 +391,7 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
         {
           error: deps.setupError
             ? `拟人模式装配失败：${deps.setupError}`
-            : "拟人模式未启用（GEBAI_PERSONA=true 后可用）",
+            : "拟人模式未启用（没有任何 GEBAI_PERSONA_<ID> 配置）",
         },
         404,
       )

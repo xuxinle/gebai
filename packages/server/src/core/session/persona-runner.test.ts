@@ -299,66 +299,61 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
     expect(new EnginePersonaRunner({ engine: makeEngine({ running: false }).engine }).isRunning("s")).toBe(false)
   })
 
- test("审批姿态：缺省 readonly（工具执行不弹卡，输出才审）", async () => {
+test("工具审批：缺省名单为空 → autoApprove=true（工具全部直接执行）", async () => {
   const a = makeEngine()
   await new EnginePersonaRunner({ engine: a.engine }).run(runInput())
   expect(a.calls[0]!.opts?.autoApprove).toBe(true)
+  // interactionMode 仍必须是 multi_turn：名单里的工具要靠弹窗问人，模型也可能主动 ask
   expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
 })
 
- test("审批姿态：ask → 不传 autoApprove（等审批桥问人）", async () => {
+test("工具审批：配了名单也仍是 autoApprove=true（拦截交给引擎的 forceApprovalFor）", async () => {
   const a = makeEngine()
-  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "ask" }).run(runInput())
-  expect(a.calls[0]!.opts?.autoApprove).toBeUndefined()
-  expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
-})
-
- test("审批姿态：auto → 显式 autoApprove=true", async () => {
-  const a = makeEngine()
-  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "auto" }).run(runInput())
+  await new EnginePersonaRunner({ engine: a.engine, askTools: ["sh", "file.delete"] }).run(runInput())
+  // 关键：**不能**靠 autoApprove 表达“部分工具要审”——它是会话级开关
   expect(a.calls[0]!.opts?.autoApprove).toBe(true)
   expect(a.calls[0]!.opts?.interactionMode).toBe("multi_turn")
 })
 
- test("**deny 必须显式传 autoApprove=false**（否则引擎的“无交互自动通过”会把它变成全放行）", async () => {
+test("名单支持热改（传函数）：同一个 runner 改了名单即生效", async () => {
+  let list: import("@gebai/persona").AskToolPattern[] = []
   const a = makeEngine()
-  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "deny" }).run(runInput())
-  expect(a.calls[0]!.opts?.autoApprove).toBe(false)
-  expect(a.calls[0]!.opts?.interactionMode).toBe("none")
-})
-
- test("旧字段 autoApprove=false 兼容：映射为 deny", async () => {
-  const b = makeEngine()
-  await new EnginePersonaRunner({ engine: b.engine, autoApprove: false }).run(runInput())
-  expect(b.calls[0]!.opts?.autoApprove).toBe(false)
-  expect(b.calls[0]!.opts?.interactionMode).toBe("none")
-})
-
- test("审批姿态支持热改（传函数）：同一个 runner 改环境即生效", async () => {
-  let mode: import("@gebai/persona").PersonaApprovalMode = "readonly"
-  const a = makeEngine()
-  const r = new EnginePersonaRunner({ engine: a.engine, approvalMode: () => mode })
+  const r = new EnginePersonaRunner({ engine: a.engine, askTools: () => list })
   await r.run(runInput())
-  expect(a.calls[0]!.opts?.autoApprove).toBe(true)
-  mode = "deny"
+  expect(r.askToolsFor("xiaoshuang","support")).toEqual([])
+  list = ["sh"]
   await r.run(runInput())
-  expect(a.calls[1]!.opts?.autoApprove).toBe(false)
+  expect(r.askToolsFor("xiaoshuang","support")).toEqual(["sh"])
+  // 两轮都走同一条引擎通道
+  expect(a.calls.map((c) => c.opts?.autoApprove)).toEqual([true, true])
 })
 
- test("提示词按姿态分岔：readonly 告诉它“动手不弹卡、发言要人点头”", async () => {
+test("名单解析抛错 → 回到空名单（不弹卡，不把人格卡死在无人值守里）", () => {
+  const r = new EnginePersonaRunner({
+    engine: makeEngine().engine,
+    askTools: () => {
+      throw new Error("boom")
+    },
+  })
+  expect(r.askToolsFor("xiaoshuang","support")).toEqual([])
+})
+
+test("提示词：空名单告诉它“动手不弹卡、发言要人点头”", async () => {
   const a = makeEngine()
-  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "readonly" }).run(runInput())
+  await new EnginePersonaRunner({ engine: a.engine, askTools: [] }).run(runInput())
   const note = String(a.calls[0]!.opts?.channelNote)
-  expect(note).toContain("动手不弹卡")
+  expect(note).toContain("动手一般不用批")
   expect(note).toContain("发言要人点头")
+  // 没有名单就不该提“会弹卡”，否则模型会等一张永远不出现的卡
+  expect(note).not.toContain("会弹卡等人点头")
 })
 
- test("提示词按姿态分岔：deny 告诉它“只读，不要反复重试”", async () => {
+test("提示词：有名单时明确告诉它会弹卡、被拒不要重试", async () => {
   const a = makeEngine()
-  await new EnginePersonaRunner({ engine: a.engine, approvalMode: "deny" }).run(runInput())
+  await new EnginePersonaRunner({ engine: a.engine, askTools: ["sh", "file.delete"] }).run(runInput())
   const note = String(a.calls[0]!.opts?.channelNote)
-  expect(note).toContain("只读")
-  expect(note).toContain("不要反复重试")
+  expect(note).toContain("2 类工具会弹卡")
+  expect(note).toContain("不要重复试同一个操作")
 })
 
  test("取消桥：signal abort → engine.cancel（调度器 cancelRunning/stop 能真正停下引擎轮）", async () => {

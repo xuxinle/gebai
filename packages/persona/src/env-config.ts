@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 部署配置面：**人格共性写代码、使用者差异写环境变量**。
  *
  * ## 为什么这些解析必须在内核里，而不是装配层
@@ -8,7 +8,7 @@
  *
  * 1. 无法用纯函数单测（要起服务端才能验一条解析规则）
  * 2. 入站收窄在 compose、出站白名单在 core/tools、身份渲染在第三个地方——三处各写一遍
- *    必然分叉（同一个 `GEBAI_PERSONA_<ID>_CHATS` 被两处按不同口径解释过，是真实踩过的坑）
+ *    必然分叉（同一个「只看这些群」的语义被两处按不同口径解释过，是真实踩过的坑）
  * 3. 换宿主（桌面形态、CLI）就得重写一遍
  *
  * 所以这里收敛成**纯函数**：输入 `Map<id, PersonaDef>` + env 视图，输出解析后的定义。
@@ -19,25 +19,30 @@
  * | 变量 | 语义 |
  * |---|---|
  * | `GEBAI_PERSONA_ENABLE` | 人格启用白名单（逗号分隔 id；非空仅启用名单内） |
- * | `GEBAI_PERSONA_<ID>_CHATS` | 该人格只监听这些群（替换其 feishu 消息订阅） |
- * | `GEBAI_PERSONA_<ID>_<DRIVER>_CHATS` | 该**分身**只监听这些群（比人格级更细） |
- * | `GEBAI_PERSONA_<ID>_OUTPUT` | 该人格的输出目标（`channel:address`，可带 `#话题`，逗号分隔） |
- * | `GEBAI_PERSONA_<ID>_<DRIVER>_OUTPUT` | 该分身的输出目标（覆盖人格级） |
- * | `GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP` | 会话映射规则（预设名 / `when=key;…` / JSON） |
+ * | `GEBAI_PERSONA_<ID>` | **该人格的全部分身配置（JSON 数组，每项一个分身）**——见 `persona-config.ts` |
  * | `GEBAI_PERSONA_SESSION_ROUTING` | 兜底规则：`driver`（缺省，一个上下文）/ `chat`（群×话题） |
  * | `GEBAI_PERSONA_APPROVAL` | 审批姿态：`ask`（缺省，相期弹窗问人）/ `auto` / `deny` |
  *
- * ## 命名歧义的处理（`<ID>_<DRIVER>_CHATS` 与 `<ID>_CHATS`）
+ * ## 为什么不再拼 `<ID>_<DRIVER>_XXX`（已删除的旧形态）
  *
  * 人格 id 与 driver id 都可能含下划线，`GEBAI_PERSONA_FIN_OPS_ALERT_CHATS` 到底是
- * 「人格 fin_ops 的分身 alert」还是「人格 fin 的分身 ops_alert」在字符串层面无解。
- * 处理方式：**按已知定义逐条比对**（我们知道有哪些 id、哪些 driver），而不是解析变量名。
+ * 「人格 fin_ops 的分身 alert」还是「人格 fin 的分身 ops_alert」在字符串层面**无解**。
+ * 旧实现靠“拿已知定义逐条比对”绕过这个问题，但那是给一个设计缺陷打补丁：
+ * 新增/改名一个分身就要重新推一遍变量名，且拼错只是静默不生效。
+ * 现在这些属性都写在 `GEBAI_PERSONA_<ID>` 数组的对应项里，歧义**不存在**。
  */
 
 import type { PersonaDef } from "./persona"
 import type { DriverDef, OutputTarget } from "./ports"
 import { parseSessionMap } from "./session-map"
 import { matchesSubscription } from "./subscription"
+import {
+  dirRefsOf,
+  mergeDriverEnv,
+  outputsFromChannels,
+  parsePersonaEnv,
+  type DriverEnvItem,
+} from "./persona-config"
 
 /** env 视图（缺省读 process.env；测试注入）。 */
 export type EnvView = Record<string, string | undefined>
@@ -52,18 +57,13 @@ const listOf = (raw: string | undefined): string[] =>
 const upper = (s: string): string => s.toUpperCase()
 
 /**
- * 解析输出目标写法。
+ * 解析 `channel:address` 形式的输出目标（**保留**，不属于已删除的拼名路径）。
  *
- * 支持三种形态（一个变量里逗号分隔多条）：
- * - `feishu:oc_xxx` —— 发到群
- * - `feishu:oc_xxx#om_yyy` —— 发到该群里的某个话题（`#` 后是话题根消息 id）
- * - `feishu:oc_xxx=训练平台支持群` —— 带标签（`=` 后是给人看的名字）
+ * 两种调用场景：
+ * 1. 代码里的人格的 `drivers[].outputs` 仍用这个类型（不是环境变量）
+ * 2. 二开代码可以直接调它把字串转成目标
  *
- * 首条默认标记为 default（模型没理由时用它）——**除非**某条显式写了 `*` 前缀：
- * `feishu:oc_a,*feishu:oc_b` 表示 oc_b 是默认目标。
- *
- * 解析失败（缺冒号、渠道名为空）**计入 errors 而不静默丢弃**：
- * 一条配错的输出目标等于「人格以为能发但发不出去」，静默丢会让部署方永远查不到原因。
+ * 环境变量侧不再产生这种字串（改用 `channels:["实例名"]`，见 `persona-config.ts`）。
  */
 export function parseOutputTargets(raw: string | undefined): { targets: OutputTarget[]; errors: string[] } {
   const targets: OutputTarget[] = []
@@ -122,41 +122,100 @@ export interface PersonaEnvReport {
   outputs: Record<string, number>
   /** 会话映射已配置的分身（`personaId/driverId` → 规则条数）。 */
   sessionMaps: Record<string, number>
+  /** 数组里配了其他分身、但没配这个的分身（不是错误，但面板要说清）。 */
+  unconfigured: string[]
+  /** 显式关掉出站审核的人格/分身（`personaId` 或 `personaId/driverId`）——缺省开，关必须显式写。 */
+  reviewDisabled: string[]
+  /** 被环境变量覆盖了 cron 的定时声明：`人格/分身` → 条数（启动时可审计）。 */
+  scheduleOverrides: Record<string, number>
   /** 解析错误（配错了但不该阻断启动——如实上报）。 */
   errors: string[]
 }
 
 /**
- * 能匹配「feishu 消息事件」的订阅（收窄时被替换掉的那几类）。
+ * 能匹配「某渠道实例的消息事件」的订阅（收窄时被替换掉的那几类）。
  *
- * 用真实订阅匹配函数判定而不是字符串枚举（`feishu` / `message` / `feishu:message` / `*`）：
- * 枚举法会在订阅语法演进（例如加了三段式、大小写、顺序无关）后**静默漏掉**一类，
- * 表现为「设置了 CHATS 但某些人格还是收到别的群」。这里用一个不可能真实存在的群 id 探测。
+ * 用真实订阅匹配函数判定而不是字符串枚举：枚举法会在订阅语法演进（三段式、
+ * 大小写、顺序无关）后**静默漏掉**一类，表现为“设了 chats 但某些人格还是收到别的群”。
+ *
+ * `channel` 必须传**实际渠道实例名**（如 `feishu_main`），不能写死 `feishu`：
+ * 渠道名就是 target 前缀与事件的 channel 字段，实例化之后它可能不是类型名。
  */
-function coversFeishuMessages(sub: string): boolean {
-  return matchesSubscription(sub, { kind: "message", channel: "feishu", chatId: "__probe__" })
+function coversChannelMessages(sub: string, channel: string): boolean {
+  return matchesSubscription(sub, { kind: "message", channel, chatId: "__probe__" })
 }
 
-/** 收窄某组订阅到指定群（替换覆盖 feishu 消息的那几条，其余原样保留）。 */
-export function narrowSubscriptions(subs: readonly string[], chats: readonly string[]): string[] {
-  const kept = subs.filter((s) => !coversFeishuMessages(s))
-  const chatSubs = chats.map((c) => `feishu:${c}:message`)
+/**
+ * 收窄某组订阅到指定群（替换覆盖**该渠道**消息的那几条，其余原样保留）。
+ *
+ * `channel` 是该群所属的**渠道实例名**：生成的逐群订阅必须是 `feishu_main:oc_x:message`
+ * 而不是 `feishu:oc_x:message`——事件里的 channel 字段就是实例名，
+ * 前缀写错的话收窄后的订阅一条也命不中，表现是“配了 chats 之后它彻底不说话了”。
+ */
+export function narrowSubscriptions(
+  subs: readonly string[],
+  chats: readonly string[],
+  channel = "feishu",
+): string[] {
+  const kept = subs.filter((s) => !coversChannelMessages(s, channel))
+  const chatSubs = chats.map((c) => `${channel}:${c}:message`)
   return [...kept, ...chatSubs.filter((s) => !kept.includes(s))]
+}
+
+/**
+ * 找出某个群属于哪个渠道实例。
+ *
+ * 判定顺序：
+ * 1. 该分身显式引用的 `channels` 里，哪个实例的白名单包含它
+ * 2. 否则在全部已知实例里找第一个包含它的
+ * 3. 都找不到 → 返回 null（**不猜**，由调用方报错）
+ *
+ * 为何不回落成 `"feishu"`：实例化之后事件的 channel 是实例名（`feishu_main`），
+ * 猜测出来的类型名前缀会生成一条**永远命不中**的订阅——
+ * 表现是“配了 chats 之后它彻底不说话了”，而日志里一个字都没有。
+ * 宁可在装配期报一条明确的错。
+ */
+function channelOfChat(
+  chat: string,
+  merged: { channels?: string[] },
+  channelChats: ReadonlyMap<string, readonly string[]>,
+): string | null {
+  for (const inst of merged.channels ?? []) {
+    if (channelChats.get(inst)?.includes(chat)) return inst
+  }
+  for (const [inst, chats] of channelChats) {
+    if (chats.includes(chat)) return inst
+  }
+  return null
 }
 
 /**
  * 把环境变量应用到人格定义上（纯函数，返回新 Map）。
  *
  * 三件事，各自独立，失败互不影响：
- * 1. 启用白名单过滤
- * 2. 入站收窄（人格级 + 分身级）
- * 3. 输出目标注入（人格级 + 分身级）
+ * 1. 启用白名单过滤（`GEBAI_PERSONA_ENABLE`）
+ * 2. 入站收窄 + 输出目标（`GEBAI_PERSONA_<ID>` 数组里的 `chats` / `channels`）
+ * 3. 会话映射（同一个数组里的 `sessionMap`）
+ *
+ * `channelChats` 是通道实例名 → 该实例允许的群（由宿主从已装配的渠道注册表取）。
+ * 宽窄引用必须拿它才能解析——否则“引用了不存在的实例”只能等到发消息那一刻才报错。
  */
 export function applyPersonaEnv(
   personas: ReadonlyMap<string, PersonaDef>,
   env: EnvView,
+  channelChats: ReadonlyMap<string, readonly string[]> = new Map(),
+  channelDirs: ReadonlyMap<string, "in" | "out"> = new Map(),
 ): { personas: Map<string, PersonaDef>; report: PersonaEnvReport } {
-  const report: PersonaEnvReport = { disabled: [], narrowed: {}, outputs: {}, sessionMaps: {}, errors: [] }
+  const report: PersonaEnvReport = {
+    disabled: [],
+    narrowed: {},
+    outputs: {},
+    sessionMaps: {},
+    unconfigured: [],
+    reviewDisabled: [],
+    scheduleOverrides: {},
+    errors: [],
+  }
   const enable = new Set(listOf(env.GEBAI_PERSONA_ENABLE))
   const out = new Map<string, PersonaDef>()
 
@@ -165,38 +224,135 @@ export function applyPersonaEnv(
       report.disabled.push(id)
       continue
     }
-    const ID = upper(id)
-    // 人格级：入站群 + 输出目标
-    const personaChats = listOf(env[`GEBAI_PERSONA_${ID}_CHATS`])
-    const personaOutputs = parseOutputTargets(env[`GEBAI_PERSONA_${ID}_OUTPUT`])
-    report.errors.push(...personaOutputs.errors.map((e) => `人格 ${id}：${e}`))
-    if (personaChats.length) report.narrowed[id] = personaChats
-    if (personaOutputs.targets.length) report.outputs[id] = personaOutputs.targets.length
+    // 一个变量装下该人格的全部分身配置（不再拼 `<ID>_<DRIVER>_XXX`）
+    const parsedEnv = parsePersonaEnv(id, env[`GEBAI_PERSONA_${upper(id)}`])
+    report.errors.push(...parsedEnv.errors.map((e) => `人格 ${id}：${e}`))
+
+    // 人格级默认：先算自己的输出目标（分身未单独配时继承）
+    const defaultsMerged = parsedEnv.personaDefaults
+    const defaultsOutputs = defaultsMerged
+      ? outputsFromChannels(defaultsMerged as DriverEnvItem, channelChats, channelDirs)
+      : { targets: [], errors: [] }
+    report.errors.push(...defaultsOutputs.errors.map((e) => `人格 ${id}：${e}`))
+    const defaultsListen = defaultsMerged ? dirRefsOf(defaultsMerged as DriverEnvItem).listen : { channels: [], chats: [] }
+    if (defaultsListen.chats.length) report.narrowed[id] = defaultsListen.chats
+    if (defaultsOutputs.targets.length) report.outputs[id] = defaultsOutputs.targets.length
 
     const drivers = (def.drivers ?? []).map((d) => {
-      const DRIVER = `${ID}_${upper(d.id)}`
-      const driverChats = listOf(env[`GEBAI_PERSONA_${DRIVER}_CHATS`])
-      const driverOutputs = parseOutputTargets(env[`GEBAI_PERSONA_${DRIVER}_OUTPUT`])
+      const own = parsedEnv.drivers.get(d.id)
+      if (own === undefined && parsedEnv.drivers.size > 0) {
+        // 数组里配了其他分身但没配这个：不是错误（其余用默认），但面板要知道
+        // 它是“没被单独配”而不是“配了但没生效”。
+        report.unconfigured.push(`${id}/${d.id}`)
+      }
+      const merged = mergeDriverEnv(parsedEnv.personaDefaults, own)
+      const driverOutputs = outputsFromChannels(merged, channelChats, channelDirs)
       report.errors.push(...driverOutputs.errors.map((e) => `人格 ${id} 分身 ${d.id}：${e}`))
 
-      const chats = driverChats.length ? driverChats : personaChats
-      // 输出目标：分身级**覆盖**人格级（分身是更具体的声明）；都空则不注入
-      const outputs = driverOutputs.targets.length ? driverOutputs.targets : personaOutputs.targets
-      if (driverChats.length) report.narrowed[`${id}/${d.id}`] = driverChats
+      const listenRef = dirRefsOf(merged).listen
+      const chats = listenRef.chats
+      // 方向校验：listen 引用出站实例 = 收不到（它没有 startListen）
+      for (const ch of listenRef.channels) {
+        if (channelDirs.get(ch) === "out") {
+          report.errors.push(
+            `人格 ${id} 分身 ${d.id}：listen 引用了出站实例「${ch}」（它只能发、不能收）——` +
+              `入站要用 GEBAI_CHANNEL_IN_<类型> 里配的实例`,
+          )
+        }
+      }
+      // 输出目标：分身级有就用自己的（覆盖人格级），都空则不注入
+      const outputs = driverOutputs.targets.length ? driverOutputs.targets : defaultsOutputs.targets
+      if (chats.length) report.narrowed[`${id}/${d.id}`] = chats
       if (driverOutputs.targets.length) report.outputs[`${id}/${d.id}`] = driverOutputs.targets.length
 
-      // 会话映射：分身级优先，其次人格级（部署差异，不需改代码）
-      const mapRaw = env[`GEBAI_PERSONA_${DRIVER}_SESSION_MAP`] ?? env[`GEBAI_PERSONA_${ID}_SESSION_MAP`]
-      const parsedMap = parseSessionMap(mapRaw)
+      // 会话映射：分身级优先，其次人格级（已在 mergeDriverEnv 里合过）
+      const parsedMap = parseSessionMap(merged.sessionMap)
       report.errors.push(...parsedMap.errors.map((e) => `人格 ${id} 分身 ${d.id}：${e}`))
       const sessionMap = parsedMap.rules.length ? parsedMap.rules : d.sessionMap
       if (parsedMap.rules.length) report.sessionMaps[`${id}/${d.id}`] = parsedMap.rules.length
 
+      // 出站审核开关：**缺省开**，只有显式写 false 才关（安全的那一侧）。
+      // 记进 report 的原因：关审核是“人格会以你名义不打招呼就发言”，启动时该看得见。
+      if (merged.reviewOutbound === false) report.reviewDisabled.push(`${id}/${d.id}`)
+
+      // 收窄订阅：**按该群所属的渠道实例名**生成逐群订阅。
+      //
+      // 为何不能统一用 `feishu`：事件里的 channel 字段是**实例名**（`feishu_main`），
+      // 实例化之后它不一定等于类型名；前缀写错会让收窄后的订阅一条也命不中——
+      // 表现是“配了 chats 之后它彻底不说话了”。
+      // 一个分身可能监多个实例的群，所以要按实例分组，而不是一次 narrow 完事。
+      const narrowedSubs = ((): string[] => {
+        if (!chats.length) return [...d.subscriptions]
+        const byChannel = new Map<string, string[]>()
+        for (const c of chats) {
+          const inst = channelOfChat(c, merged, channelChats)
+          if (!inst) {
+            // 群不属于任何已知实例：报错而不猜。否则会生成一条永远命不中的订阅。
+            report.errors.push(
+              `人格 ${id} 分身 ${d.id}：群 ${c} 不属于任何渠道实例的白名单` +
+                `（请在某个 GEBAI_CHANNEL_<类型> 实例的 chats 里加上它，或用 channels 指定实例）`,
+            )
+            continue
+          }
+          const arr = byChannel.get(inst) ?? []
+          arr.push(c)
+          byChannel.set(inst, arr)
+        }
+        let subs = [...d.subscriptions]
+        for (const [inst, group] of byChannel) subs = narrowSubscriptions(subs, group, inst)
+        return subs
+      })()
+
+      // 定时表达式覆盖：环境变量里的 `schedules` 按声明 id 覆盖代码定义里的 cron/prompt/timezone。
+      //
+      // 为何只覆盖已有声明的字段、不新增声明：声明（id、是否存在）是**代码事实**，
+      // 而“几点跑”是**部署差异**。允许环境变量新增声明会让“id 拼错”
+      // 变成一个凭空多出的定时任务（静默错），而不是一条可读的报错。
+      const schedOverrides = (() => {
+        const ov = merged.schedules
+        if (!ov || !Object.keys(ov).length) return undefined
+        const base = d.schedules ?? []
+        if (!base.length) {
+          report.errors.push(
+            `人格 ${id} 分身 ${d.id}：schedules 配了覆盖（${Object.keys(ov).join("、")}），` +
+              `但代码定义里没有任何 schedules——覆盖无处可施（检查声明 id）`,
+          )
+          return undefined
+        }
+        const known = new Set(base.map((s) => s.id))
+        for (const sid of Object.keys(ov)) {
+          if (!known.has(sid)) {
+            report.errors.push(
+              `人格 ${id} 分身 ${d.id}：schedules 覆盖引用了不存在的声明「${sid}」` +
+                `（代码定义里有：${[...known].join("、")}）`,
+            )
+          }
+        }
+        const applied = base
+          .filter((s) => ov[s.id]?.enabled !== false)
+          .map((s) => {
+            const o = ov[s.id]
+            if (!o) return s
+            return {
+              ...s,
+              ...(o.cron ? { cron: o.cron } : {}),
+              ...(o.prompt ? { prompt: o.prompt } : {}),
+              ...(o.timezone ? { timezone: o.timezone } : {}),
+            }
+          })
+        report.scheduleOverrides[`${id}/${d.id}`] = Object.entries(ov).filter(
+          ([sid, o]) => o.cron && known.has(sid),
+        ).length
+        return applied
+      })()
+
       const next: DriverDef = {
         ...d,
-        subscriptions: chats.length ? narrowSubscriptions(d.subscriptions, chats) : d.subscriptions,
+        subscriptions: narrowedSubs,
         ...(outputs.length ? { outputs } : {}),
         ...(sessionMap?.length ? { sessionMap } : {}),
+        ...(merged.maxConcurrent ? { maxConcurrent: merged.maxConcurrent } : {}),
+        ...(schedOverrides ? { schedules: schedOverrides } : {}),
       }
       return next
     })
@@ -252,50 +408,3 @@ export function chatSessionKeyOf(event: { kind: string; channel: string; context
   return thread ? `${chat}__t_${thread}` : chat
 }
 
-/**
- * 审批姿态（`GEBAI_PERSONA_APPROVAL`）。
- *
- * ## 关键区分：**工具执行** vs **对外输出**
- *
- * 这两件事被审的程度不该一样，而早期实现把它们混为一谈（每个工具调用都推卡问人）——
- * 结果是人格在无人值守场景里几乎寸步难行：查一个日志要等人点卡，而人可能在睡觉。
- *
- * | | 工具执行（读文件/跑命令/查接口） | 对外输出（以用户本人名义发消息） |
- * |---|---|---|
- * | 审什么 | 默认不审 | **总是审**（独立开关） |
- * | 为何 | 它是“自己动手查/算”，错了能改，且不改外部状态 | 发出去就是用户说的话，错发的代价由用户本人承担 |
- * | 入口 | 本函数 | `persona-outbound-review.ts` |
- *
- * 所以缺省是 `readonly`：**工具执行不弹卡，输出照旧过出站审核**。
- *
- * ## 四档
- *
- * | 值 | 工具执行 | 适用 |
- * |---|---|---|
- * | `readonly`（**缺省**） | 一律放行（不弹卡） | 生产默认：人格能干活，但发出去的话仍需人批准 |
- * | `ask` | 需审批工具才推卡问人 | 高敏环境（删除/提交单等需要人点头） |
- * | `auto` | 一律放行（旧名，等价 readonly） | 兼容旧配置 |
- * | `deny` | 一律拒绝 | 只读人格：不执行任何需审批操作 |
- */
-export type PersonaApprovalMode = "readonly" | "ask" | "auto" | "deny"
-
-/**
- * 解析审批姿态。
- *
- * 缺省 `readonly`：**工具执行不审，输出才审**（见类型注释里的区分）。
- *
- * 兼容旧值：`auto`/`off`/`true` → `auto`（与 readonly 同效）；`deny`/`false` → `deny`；
- * 只有显式 `ask` 才回到“每个需审批工具都推卡”。
- */
-export function personaApprovalMode(env: EnvView): PersonaApprovalMode {
-  const raw = (env.GEBAI_PERSONA_APPROVAL ?? "").trim().toLowerCase()
-  if (raw === "ask") return "ask"
-  if (raw === "auto" || raw === "off" || raw === "true" || raw === "1") return "auto"
-  if (raw === "readonly" || raw === "read") return "readonly"
-  if (raw === "deny" || raw === "false" || raw === "0" || raw === "no") return "deny"
-  if (raw) return "readonly"
-  // 向后兼容：旧变量 `GEBAI_PERSONA_AUTO_APPROVE` 只在**显式设为 false** 时收紧。
-  const legacy = (env.GEBAI_PERSONA_AUTO_APPROVE ?? "").trim().toLowerCase()
-  if (/^(false|0|no|off)$/.test(legacy)) return "deny"
-  return "readonly"
-}

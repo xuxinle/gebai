@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PersonaTokenStore } from "./user-token"
-import { PersonaOAuth, extractCode, extractState, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, scopesFromEnv } from "./oauth"
+import { PersonaOAuth, extractCode, extractState, mergeScopes, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES } from "./oauth"
 import { PersonaCredentials } from "./credentials"
 import type { PersonaTokenStore as PersonaTokenStoreType } from "./user-token"
 
@@ -211,30 +211,151 @@ describe("PersonaOAuth：授权链接与兑换", () => {
     expect(u.searchParams.get("scope")).not.toContain("docx")
     // 用户身份读群历史（渠道 observe 读群消息的必需权限）
     expect(u.searchParams.get("scope")).toContain("im:message.group_msg:get_as_user")
-    // offline_access 缺省不带（需应用后台先开通）
-    expect(u.searchParams.get("scope")).not.toContain(OFFLINE_ACCESS_SCOPE)
+    // offline_access **缺省就带**：默认争取长期授权，由下层自动降级（见下方用例）
+    expect(u.searchParams.get("scope")).toContain(OFFLINE_ACCESS_SCOPE)
   })
 
-  test("缺省 scopes 不含 offline_access（未开该权限的应用必须能完成授权）", () => {
-    // 飞书对 `offline_access` 要求应用后台显式开通，未开通时授权页直接报 20027
-    // 把人挡在外面——连基本授权都完不成。所以缺省不能带它。
-    expect(PERSONA_SCOPES).not.toContain(OFFLINE_ACCESS_SCOPE)
+  test("缺省 scopes **包含** offline_access（默认要长期；被拒时自动降级）", () => {
+    // 早期版本把“要不要长期授权”做成了部署方开关（默认不带），因为未开通该权限时
+    // 授权页会报 20027 把人挡在外面。现在改为**代码自适应**：默认就要，
+    // 被拒就自己退一步发短期链接——部署方不需要知道这个概念的存在。
+    expect(PERSONA_SCOPES).toContain(OFFLINE_ACCESS_SCOPE)
   })
 
-  test("scopesFromEnv：环境变量只做并集，不覆盖基础权限", () => {
+  test("mergeScopes：渠道实例声明的 scopes 只做并集，不覆盖基础权限", () => {
     // 只写一个时：基础集仍在（否则写漏一项会让拟人静默少一项能力）
-    const merged = scopesFromEnv({ GEBAI_PERSONA_SCOPES: "offline_access" })
+    const merged = mergeScopes(["offline_access"])
     expect(merged).toContain("offline_access")
     expect(merged).toContain("im:message")
     expect(merged).toContain("im:message:readonly")
     expect(merged).toContain("im:chat.members:read")
     console.log(`    实测并集: ${merged}`)
 
-    // 未设：就是基础集
-    expect(scopesFromEnv({})).toBe(PERSONA_SCOPES)
-    // 空串/空白：也当未设
-    expect(scopesFromEnv({ GEBAI_PERSONA_SCOPES: "   " })).toBe(PERSONA_SCOPES)
+    // 未写：就是基础集
+    expect(mergeScopes()).toBe(PERSONA_SCOPES)
+    expect(mergeScopes([])).toBe(PERSONA_SCOPES)
+    // 空串/空白项：也当未写
+    expect(mergeScopes(["  "])).toBe(PERSONA_SCOPES)
+    // 一个元素里写多个（空格分隔）也展开
+    expect(mergeScopes(["offline_access im:resource"])).toContain("im:resource")
   })
+
+
+describe("授权类型自适应：配置不区分长期/短期", () => {
+  test("① 默认就要长期：授权链接里带 offline_access", () => {
+    const oauth = new PersonaOAuth()
+    const t = oauth.startAuthorize({ appId: "cli_x", appSecret: "s", redirectUri: "http://localhost:3002/cb" })
+    const scope = new URL(t.url).searchParams.get("scope") ?? ""
+    console.log(`    实测 scope: ${scope}`)
+    expect(scope).toContain(OFFLINE_ACCESS_SCOPE)
+  })
+
+  test("② 被 20027 拒后 → 降级链接**不带** offline_access，其余权限一个不少", () => {
+    const logs: string[] = []
+    const store = new PersonaTokenStore({ home: mkdtempSync(join(tmpdir(), "pa-")), appId: () => "cli_x", appSecret: () => "s" })
+    const creds = new PersonaCredentials({
+      store,
+      oauth: new PersonaOAuth(),
+      redirectUri: () => "http://localhost:3002/cb",
+      appId: () => "cli_x",
+      appSecret: () => "s",
+      scopes: () => PERSONA_SCOPES,
+      log: (l, m) => logs.push(`${l}:${m}`),
+    })
+    creds.startAuthorize()
+    const t = creds.downgradeToShortLived()
+    const scope = new URL(t.url).searchParams.get("scope") ?? ""
+    console.log(`    降级后 scope: ${scope}`)
+    expect(scope).not.toContain(OFFLINE_ACCESS_SCOPE)
+    // 关键：只去掉长期授权，基础权限一个不能少（否则授权了也干不了活）
+    expect(scope).toContain("im:message")
+    expect(scope).toContain("im:message:readonly")
+    expect(scope).toContain("im:chat.members:read")
+    // 降级必须留痕：静默降级会让“为何又要授权”永远查不出来
+    console.log(`    降级日志: ${logs.filter((l) => l.startsWith("warn")).join(" | ").slice(0, 120)}`)
+    expect(logs.some((l) => l.includes("20027"))).toBe(true)
+  })
+
+  test("③ 不记住“不支持长期”：降级后再发起又回到要长期", () => {
+    // 后台随时可能开通 offline_access。若把“这个应用不支持”记住了，
+    // 开通后就永远不会再试，用户会一直每两小时重新授权一次。
+    const store = new PersonaTokenStore({ home: mkdtempSync(join(tmpdir(), "pa-")), appId: () => "cli_x", appSecret: () => "s" })
+    const creds = new PersonaCredentials({
+      store,
+      oauth: new PersonaOAuth(),
+      redirectUri: () => "http://localhost:3002/cb",
+      appId: () => "cli_x",
+      appSecret: () => "s",
+      scopes: () => PERSONA_SCOPES,
+      log: () => {},
+    })
+    creds.startAuthorize()
+    creds.downgradeToShortLived()
+    const again = creds.startAuthorize()
+    expect(new URL(again.url).searchParams.get("scope") ?? "").toContain(OFFLINE_ACCESS_SCOPE)
+  })
+
+  test("④ 以实际拿到的 refresh_token 判定长期/短期，不凭“我请求过”", async () => {
+    // 飞书可以不理 offline_access（应用未开通、管理员拒了），此时拿不到 refresh_token——
+    // 那就是短期。按“我请求了所以是长期”推断，会一直到过期才发现。
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.includes("oauth/v3/token")) {
+        return new Response(
+          JSON.stringify({ code: 0, access_token: "uat-1", expires_in: 7200, scope: "im:message" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      return new Response(JSON.stringify({ code: 0, data: { name: "张三", open_id: "ou_1" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof fetch
+    const store = new PersonaTokenStore({ home: mkdtempSync(join(tmpdir(), "pa-")), appId: () => "cli_x", appSecret: () => "s" })
+    const logs: string[] = []
+    const creds = new PersonaCredentials({
+      store,
+      oauth: new PersonaOAuth({ fetchImpl }),
+      redirectUri: () => "http://localhost:3002/cb",
+      appId: () => "cli_x",
+      appSecret: () => "s",
+      scopes: () => PERSONA_SCOPES,
+      log: (l, m) => logs.push(`${l}:${m}`),
+    })
+    const t = creds.startAuthorize()
+    await creds.complete(`http://localhost:3002/cb?code=abc&state=${t.state}`)
+    const done = logs.find((l) => l.includes("授权完成"))
+    console.log(`    实测: ${done}`)
+    expect(done).toContain("短期")
+    expect(done).not.toContain("长期")
+  })
+
+  test("⑤ 兑换阶段才报 20027 → 同样降级，并给可操作指引", async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({ code: 20027, error_description: "offline_access not enabled" }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof fetch
+    const store = new PersonaTokenStore({ home: mkdtempSync(join(tmpdir(), "pa-")), appId: () => "cli_x", appSecret: () => "s" })
+    const creds = new PersonaCredentials({
+      store,
+      oauth: new PersonaOAuth({ fetchImpl }),
+      redirectUri: () => "http://localhost:3002/cb",
+      appId: () => "cli_x",
+      appSecret: () => "s",
+      scopes: () => PERSONA_SCOPES,
+      log: () => {},
+    })
+    const t = creds.startAuthorize()
+    const err = await creds.complete(`http://localhost:3002/cb?code=abc&state=${t.state}`).catch((e) => e)
+    console.log(`    实测错误: ${err.message.slice(0, 70)}`)
+    // 文案要告诉人“已经替你降级了”+“怎么才能免重复授权”
+    expect(err.message).toContain("短期")
+    expect(err.message).toContain("持续访问已授权的数据")
+    const url = creds.authorizeUrl()
+    expect(new URL(String(url)).searchParams.get("scope") ?? "").not.toContain(OFFLINE_ACCESS_SCOPE)
+  })
+})
 
   test("兑换成功 → 返回令牌（含 refresh 与用户信息）", async () => {
     const fetchImpl = (async (url: string | URL | Request) => {

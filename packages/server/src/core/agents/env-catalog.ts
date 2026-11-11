@@ -22,10 +22,28 @@ export interface EnvCatalogGroup {
 /** 全局可配置变量（含模型相关配置）。模型相关项为任务级生效：配置后覆盖服务端启动配置（按任务重建 Provider），
  *  未配置的项沿用服务端启动配置。 */
 const GLOBAL_VARS: EnvCatalogVar[] = [
+  { name: "GEBAI_LLM_MODELS", description:
+      "模型配置清单（JSON 对象数组）：每项一份完整配置 {name?, model, url, api_key, api_kind?, max_context?, multimodal?, vision_model?, vision_api_base?, vision_api_key?}；首选生效、缺省用第一条；配置后旧 GEBAI_LLM_*/GEBAI_VISION_* 散项不再生效" },
+  // ── 渠道实例（GEBAI_CHANNEL_IN_<类型> / GEBAI_CHANNEL_OUT_<类型>）──
   {
-    name: "GEBAI_LLM_MODELS",
+    name: "GEBAI_CHANNEL_IN_FEISHU",
     description:
-      "模型配置清单（JSON 对象数组）：每项一份完整配置 {name?, model, url, api_key, api_kind?, max_context?, multimodal?, vision_model?, vision_api_base?, vision_api_key?}；首选生效、缺省用第一条；配置后旧 GEBAI_LLM_*/GEBAI_VISION_* 散项不再生效",
+      "飞书**入站**实例（JSON 数组，每项一个实例）：[{name, appId, appSecret, chats?, ignoreSelf?}]。只负责**收**（建长连接）；name 是实例名（人格用 listen.channels 引用，也是 target 前缀）；同一应用只能一条长连接，所以两个入站实例必须用不同应用",
+  },
+  {
+    name: "GEBAI_CHANNEL_OUT_FEISHU",
+    description:
+      "飞书**出站**实例（JSON 数组，每项一个实例）：[{name, appId, appSecret, chats?, ignoreSelf?}]。只负责**发/读**（不建长连接）——所以可以与入站实例、会话机器人共用同一应用；chats 是出站白名单（fail-closed，留空 = 发不出去）",
+  },
+  {
+    name: "GEBAI_CHANNEL_IN_LOCAL",
+    description:
+      "本机渠道**入站**实例（JSON 数组，可省略）：[{name, dropDir?, inboxDir?}]。配了才收文件（drop/inbox 目录）；不配则只有出站实例",
+  },
+  {
+    name: "GEBAI_CHANNEL_OUT_LOCAL",
+    description:
+      "本机渠道**出站**实例（JSON 数组，可省略）：[{name?, outboxMax?, dropDir?, inboxDir?}]。不配 = 一个缺省实例（名字 local），提供记忆读写与产物落盘",
   },
   { name: "GEBAI_LLM_CONFIG", description: "指定使用清单中的哪一条（条目 name）；由会话选择自动写入，缺省为清单第一条" },
   { name: "GEBAI_LLM_MODEL", description: "主模型名称（如 deepseek-chat）；配置后本任务使用该模型，未配置用服务端启动配置（未配置 GEBAI_LLM_MODELS 时生效）" },
@@ -49,6 +67,19 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   { name: "GEBAI_RG_PATH", description: "内置 ripgrep（grep/glob 的 rg 引擎）可执行体路径：显式覆盖内置来源（npm 包 @vscode/ripgrep 或内嵌产物；指向不存在即视为不可用，不静默改用其他来源）" },
   { name: "GEBAI_GREP_ENGINE", description: "grep 搜索引擎：auto（默认，rg 优先、失败回退内置遍历）/ rg（强制，不可用则明确报错）/ builtin（强制内置遍历）" },
   { name: "GEBAI_APPROVAL_SKIP", description: "会话级审批跳过：true/false（用户本人会话生效；非管理员仍受沙箱约束）" },
+  // ── 人格（GEBAI_PERSONA_<ID>）──
+  {
+    name: "GEBAI_PERSONA_ENABLE",
+    description: "人格启用白名单（逗号分隔人格 id；非空仅启用名单内）",
+  },
+  {
+    name: "GEBAI_PERSONA_APPROVAL_ASK_TOOLS",
+    description:
+      "人格工具调用的审批名单**全局兑底**（逗号/空白分隔；支持尾部通配 code_* 与全量 *）。" +
+      "逐分身的 `askTools`（GEBAI_PERSONA_<ID> 数组项）**优先于它**。" +
+      "缺省空 = 工具调用全部不审批（直接执行）；名单里的工具会推相期弹窗问人。" +
+      "不管对外输出（那个在 GEBAI_PERSONA_<ID> 的 reviewOutbound）",
+  },
   { name: "HTTP_PROXY", description: "HTTP 代理地址（脚本/网络工具使用）" },
   { name: "HTTPS_PROXY", description: "HTTPS 代理地址（脚本/网络工具使用）" },
   { name: "NO_PROXY", description: "不走代理的地址列表（逗号分隔）" },

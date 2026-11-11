@@ -2,7 +2,7 @@
  * 人格出站治理用例（core/tools/persona-outbound-review.ts）。
  *
  * 判定链：非 feishu / 非 send-reply 放行 → 普通会话放行 → 人格 as_user=false 拒绝 →
- * 审核关（env）放行 → 相期卡缺失拒绝 → 卡未送达拒绝 → 超时拒绝 → 驳回拒绝 → 批准放行。
+ * 审核关（JSON 里 reviewOutbound=false）放行 → 相期卡缺失拒绝 → 卡未送达拒绝 → 超时拒绝 → 驳回拒绝 → 批准放行。
  */
 import { describe, expect, test, beforeEach } from "bun:test"
 import { outboundReviewEnabled, personaOutboundGate, isAuthFailure, notifyAuthNeeded, ensureXiangqiReady, _resetXiangqiRecoveryForTest, asPlainCodeBlock } from "./persona-outbound-review"
@@ -43,17 +43,37 @@ function askCardOf(script: "deliver-approve" | "deliver-reject" | "not-delivered
   }
 }
 
-describe("outboundReviewEnabled", () => {
-  test("缺省 true（审核默认开）", () => {
-    expect(outboundReviewEnabled({})).toBe(true)
+describe("outboundReviewEnabled：从 GEBAI_PERSONA_<ID> 数组里读", () => {
+  const envOf = (item: Record<string, unknown>) => ({ GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([item]) })
+
+  test("缺省 true（审核默认开，安全的那一侧）", () => {
+    expect(outboundReviewEnabled("xiaoshuang", {})).toBe(true)
   })
-  test("off/0/false/no → false", () => {
-    expect(outboundReviewEnabled({ GEBAI_PERSONA_OUTBOUND_REVIEW: "false" })).toBe(false)
-    expect(outboundReviewEnabled({ GEBAI_PERSONA_OUTBOUND_REVIEW: "off" })).toBe(false)
-    expect(outboundReviewEnabled({ GEBAI_PERSONA_OUTBOUND_REVIEW: "0" })).toBe(false)
+  test("显式 false → 关", () => {
+    expect(outboundReviewEnabled("xiaoshuang", envOf({ reviewOutbound: false }))).toBe(false)
   })
-  test("非关闭值 → true", () => {
-    expect(outboundReviewEnabled({ GEBAI_PERSONA_OUTBOUND_REVIEW: "true" })).toBe(true)
+  test("显式 true → 开（与缺省同效，但明确写出来）", () => {
+    expect(outboundReviewEnabled("xiaoshuang", envOf({ reviewOutbound: true }))).toBe(true)
+  })
+  test("分身级优先于人格级（给了 driverId 时）", () => {
+    const env = {
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+        { reviewOutbound: true },
+        { name: "support", reviewOutbound: false },
+      ]),
+    }
+    expect(outboundReviewEnabled("xiaoshuang", env, "support")).toBe(false)
+    expect(outboundReviewEnabled("xiaoshuang", env)).toBe(true)
+  })
+  test("拿不到 driverId 时：任一分身写了 false 就生效（不默默变回开）", () => {
+    const env = { GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ name: "support", reviewOutbound: false }]) }
+    expect(outboundReviewEnabled("xiaoshuang", env)).toBe(false)
+  })
+  test("无人格归属 → true（不是人格发言，走不到审核卡这一步）", () => {
+    expect(outboundReviewEnabled(null, {})).toBe(true)
+  })
+  test("旧变量已不再生效（已删）", () => {
+    expect(outboundReviewEnabled("xiaoshuang", { GEBAI_PERSONA_OUTBOUND_REVIEW: "false" })).toBe(true)
   })
 })
 
@@ -87,15 +107,18 @@ describe("personaOutboundGate 判定链", () => {
     expect(r.reason).toContain("机器人身份")
   })
 
-  test("审核关（env）→ 放行（review=disabled）", async () => {
-    const r = await personaOutboundGate(
-      ctxWithPersona("xiaoshuang") as never,
-      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi" } },
-      { askCard: askCardOf("deliver-reject"), env: { GEBAI_PERSONA_OUTBOUND_REVIEW: "false" } },
-    )
-    expect(r.allowed).toBe(true)
-    expect(r.review).toBe("disabled")
-  })
+  test("审核关（JSON 里 reviewOutbound=false）→ 放行（review=disabled）", async () => {
+ const r = await personaOutboundGate(
+ ctxWithPersona("xiaoshuang") as never,
+ { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi" } },
+ {
+ askCard: askCardOf("deliver-reject"),
+ env: { GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ reviewOutbound: false }]) },
+ },
+ )
+ expect(r.allowed).toBe(true)
+ expect(r.review).toBe("disabled")
+})
 
   test("askCard 未装配 → 拒绝（不静默放行）", async () => {
     const r = await personaOutboundGate(ctxWithPersona("xiaoshuang") as never, { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi" } }, {})

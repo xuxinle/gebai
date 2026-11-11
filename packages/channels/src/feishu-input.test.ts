@@ -7,7 +7,7 @@
  * 2. **防自触发**：机器人自己发的消息必须忽略（否则发一条消息又会触发自己，无限循环）
  * 3. **缺实现要如实失败**：拿不到长连接注入时明确报错，而不是静默「配了但收不到」
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -77,7 +77,9 @@ function makeRegistry(
   const reg = new ChannelRegistry({
     scanDirs: { builtin: join(home, "__n1__"), custom: join(home, "__n2__") },
     home,
-    envReader: (n) => env[n],
+    // 用例仍然用「一个个变量」的方式给配置（可读），在辅助函数里翻译成新形态：
+    // 一个 `GEBAI_CHANNEL_FEISHU` JSON 数组项。这样几十个用例的业务语义一字未改。
+    envReader: (n) => feishuConfigOf(env, n),
     deps: {
       ...(opts.withConn === false
         ? {}
@@ -127,26 +129,64 @@ const CREDS = {
   GEBAI_CHANNELS_FEISHU_CHATS: "oc_support",
 }
 
+/**
+ * 把用例里的旧式「散变量」翻译成新形态的 `GEBAI_CHANNEL_IN/OUT_FEISHU` JSON。
+ *
+ * 只做测试便利，不是生产兼容层：生产只认 `GEBAI_CHANNEL_<DIR>_<TYPE>`。
+ * 这样改的好处：断言“配了凭据就能用”、“同 AppID 就拒启”这些**业务语义**全不用动。
+ *
+ * 方向选择：入站用例与出站用例共用同一份 CREDS，但**不能同时造 in 与 out**
+ * （同名 `feishu` 会被判重名）。所以由 `wantDirs` 控制要哪几组：
+ * - 入站用例（长连接/正自触发）：只需 in
+ * - 出站用例（observe/act）：只需 out
+ */
+let wantDirs: Array<"in" | "out"> = ["in"]
+
+function feishuConfigOf(env: Record<string, string>, key: string): string | undefined {
+  const m = /^GEBAI_CHANNEL_(IN|OUT)_FEISHU$/.exec(key)
+  if (!m) return env[key]
+  if (!wantDirs.includes(m[1]!.toLowerCase() as "in" | "out")) return undefined
+  const appId = env.GEBAI_CHANNELS_FEISHU_APP_ID
+  const appSecret = env.GEBAI_CHANNELS_FEISHU_APP_SECRET
+  // 两个都没配 = 该类型未配置（不发实例）
+  if (!appId && !appSecret) return undefined
+  const item: Record<string, unknown> = { name: "feishu", appId, appSecret }
+  const chats = env.GEBAI_CHANNELS_FEISHU_CHATS
+  if (chats !== undefined) {
+    item.chats = chats.split(/[,\s]+/).filter(Boolean)
+  }
+  const ignore = env.GEBAI_CHANNELS_FEISHU_IGNORE_SELF
+  if (ignore !== undefined) item.ignoreSelf = !/^(off|0|false|no)$/i.test(ignore)
+  return JSON.stringify([item])
+}
+
 // `start()` 会真实验一次 tenant_access_token（生产上这是对的：启动期就暴露凭据问题）。
 // 单测不该打外网，故整个文件统一吐牌。
 let restoreFetch: () => void = () => {}
 beforeAll(() => {
   restoreFetch = stubFeishuFetch()
 })
+// 每个用例默认回到“只造入站实例”（出站用例自己在 makeObsRegistry 里改）
+beforeEach(() => {
+  wantDirs = ["in"]
+})
 afterAll(() => {
   restoreFetch()
 })
 
 describe("凭据：独立机器人，不回落 GEBAI_FEISHU_*", () => {
-  test("只配 GEBAI_FEISHU_APP_ID 不配渠道变量 → 渠道不可用（不复用会话机器人）", async () => {
+  test("只配 GEBAI_FEISHU_APP_ID 不配渠道配置 → 不产生实例（不复用会话机器人）", async () => {
     const home = mkdtempSync(join(tmpdir(), "fs-cred-"))
     const { reg } = makeRegistry(home, { GEBAI_FEISHU_APP_ID: "cli_session_bot", GEBAI_FEISHU_APP_SECRET: "x" })
     await reg.init()
-    const st = reg.state().find((s) => s.name === "feishu")!
-    console.log(`    实测: started=${st.started} error=${st.error}`)
-    expect(st.started).toBe(false)
-    expect(st.error ?? "").toContain("GEBAI_CHANNELS_FEISHU_APP_ID")
-    expect(st.error ?? "").toContain("不回落")
+    // 新形态下“未配”的语义变了：feishu 是 requiresConfig，
+    // 没配 GEBAI_CHANNEL_IN_FEISHU / OUT_FEISHU 就**根本没有这个实例**（而不是“实例存在但起不来”）。
+    const st = reg.state().find((s) => s.name === "feishu")
+    console.log(`    实测: 实例存在=${!!st}`)
+    expect(st).toBeUndefined()
+    const errs = reg.loadErrors()
+    console.log(`    实测: loadErrors=${JSON.stringify(errs)}`)
+    expect(JSON.stringify(errs)).toContain("GEBAI_CHANNEL_IN_FEISHU")
     await reg.stop()
     rmSync(home, { recursive: true, force: true })
   })
@@ -407,8 +447,13 @@ describe("入站：消息抽取与治理", () => {
 })
 
 describe("observe 身份策略：用户身份优先，机器人回落", () => {
-  /** 造一个只对 observe 读者生效的 registry（覆盖 fetch：捕获 Authorization，返回可控消息）。 */
+  /** 造一个只对 observe 读者生效的 registry（覆盖 fetch：捕获 Authorization，返回可控消息）。
+   *
+   * **必须造出站实例**：`observe`（读历史）属于出站能力，入站实例没有它。
+   */
   function makeObsRegistry(home: string, persona: unknown, messagesData: unknown) {
+    // observe 属于出站能力：只造 out 实例
+    wantDirs = ["out"]
     const seen: string[] = []
     const real = globalThis.fetch
     ;(globalThis as { fetch: typeof fetch }).fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -430,7 +475,7 @@ describe("observe 身份策略：用户身份优先，机器人回落", () => {
     const reg = new ChannelRegistry({
       scanDirs: { builtin: join(home, "__n1__"), custom: join(home, "__n2__") },
       home,
-      envReader: (n) => CREDS[n as keyof typeof CREDS],
+      envReader: (n) => feishuConfigOf(CREDS as Record<string, string>, n),
       deps: { ...(persona !== undefined ? { personaCredentials: persona } : {}) },
       log: { info: () => {}, warn: () => {}, error: () => {} },
     })

@@ -111,11 +111,18 @@ function stampName(base: string): string {
 export const channel: ChannelDef = {
   name: "local",
   description: "本机渠道：长期记忆（memory）与产物落盘（outbox）——同一套 act/observe 面表达「自己家的事」",
-  envVars: [
-    { name: "GEBAI_CHANNELS_LOCAL_OUTBOX_MAX", description: "outbox 单目录条目上限（默认 500，超出不自动删除只提示）" },
-    { name: "GEBAI_CHANNELS_LOCAL_DROP_DIR", description: "文件投递目录（缺省 {GEBAI_HOME}/channel-drop/——与事件源 file_drop 的 persona-drop/ 刻意分离，避免双消费）" },
-    { name: "GEBAI_CHANNELS_LOCAL_INBOX_DIR", description: "收件目录（缺省 {GEBAI_HOME}/persona-inbox/）" },
-  ],
+  // 所有项都有合理缺省值：不配也能用。
+  // 能读能写、也能收（轮询目录）。
+  requiresConfig: false,
+  dirs: ["out", "in"],
+  config: {
+    outboxMax: { type: "number", description: "outbox 单目录条目上限（缺省 500，超出不自动删除只提示）" },
+    dropDir: {
+      type: "string",
+      description: "文件投递目录（缺省 {GEBAI_HOME}/channel-drop/——与事件源 file_drop 的 persona-drop/ 刻意分离，避免双消费）",
+    },
+    inboxDir: { type: "string", description: "收件目录（缺省 {GEBAI_HOME}/persona-inbox/）" },
+  },
 
   verbs: {
     append: {
@@ -211,8 +218,10 @@ export const channel: ChannelDef = {
    * 多租户），模块级变量会互相清空 `handled`/`timer`，表现为「事件偶发丢失」。
    */
   async startListen(sink, ctx) {
-    const dropDir = ctx.env("GEBAI_CHANNELS_LOCAL_DROP_DIR") || join(ctx.home, "channel-drop")
-    const inboxDir = ctx.env("GEBAI_CHANNELS_LOCAL_INBOX_DIR") || join(ctx.home, "persona-inbox")
+    const dropCfg = ctx.config.dropDir
+    const inboxCfg = ctx.config.inboxDir
+    const dropDir = (typeof dropCfg === "string" && dropCfg) || join(ctx.home, "channel-drop")
+    const inboxDir = (typeof inboxCfg === "string" && inboxCfg) || join(ctx.home, "persona-inbox")
     let stopped = false
     let timer: ReturnType<typeof setInterval> | null = null
     const handled = new Set<string>()

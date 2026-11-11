@@ -7,7 +7,7 @@
  * 「不要 @所有人、不超过 800 字、结尾署名」会得到**概率性服从**——同一个人格在
  * 第八轮上下文里就开始忘。而这里的事情是确定性的、可审计的、可单测的。
  *
- * ## 三档（`GEBAI_PERSONA_<ID>_OUTBOUND`）
+ * ## 三档（`GEBAI_PERSONA_<ID>` 数组项里的 `outbound`）
  *
  * | 值 | 行为 |
  * |---|---|
@@ -25,10 +25,13 @@
  *
  * ## 为什么 @all 要无条件删掉
  *
+/**
  * 人格以**用户本人**名义发消息。一条 `@所有人` 是这个人对全群发的通知——
  * 模型把「@all」当成排版手段用一次，代价是几百人被打扰，而用户完全不知情。
  * 这不是“措辞偏好”，是权限问题：**模型不该拥有点名整个群的能力**。
  */
+
+import { parsePersonaEnv } from "@gebai/persona"
 
 /** 渠道长度上限（超出会被飞书截断或报错，按渠道给保守值）。 */
 export const CHANNEL_TEXT_LIMIT: Record<string, number> = {
@@ -40,16 +43,51 @@ export const CHANNEL_TEXT_LIMIT: Record<string, number> = {
 /** 加工档位。 */
 export type OutboundMode = "raw" | "shape" | "polish"
 
-/** 从环境变量读加工档位（`GEBAI_PERSONA_<ID>_OUTBOUND`）。 */
-export function outboundModeOf(personaId: string, env: Record<string, string | undefined> = process.env as Record<string, string | undefined>): OutboundMode {
-  const raw = (env[`GEBAI_PERSONA_${personaId.toUpperCase()}_OUTBOUND`] ?? "").trim().toLowerCase()
+/**
+ * 从 `GEBAI_PERSONA_<ID>` 数组读加工档位。
+ *
+ * 读序：**分身级优先**（如果调用方给了 driverId），否则取人格级默认项，
+ * 再否则取数组里第一个写了 outbound 的项。为何要退一步：旧形态下一个人格
+ * 只能有一个 outbound 值，现在可以按分身分别设——调用方手里只有 personaId 时，
+ * “任意一个分身设了就生效”比“默默用 raw”更符合部署方的直觉。
+ */
+export function outboundModeOf(
+  personaId: string,
+  env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+  driverId?: string,
+): OutboundMode {
+  const raw = pickPersonaSetting(personaId, env, "outbound", driverId)?.trim().toLowerCase()
   if (raw === "shape" || raw === "polish") return raw
   return "raw"
 }
 
-/** 从环境变量读署名（`GEBAI_PERSONA_<ID>_SIGNATURE`；空 = 不署名）。 */
-export function signatureOf(personaId: string, env: Record<string, string | undefined> = process.env as Record<string, string | undefined>): string {
-  return (env[`GEBAI_PERSONA_${personaId.toUpperCase()}_SIGNATURE`] ?? "").trim()
+/** 从 `GEBAI_PERSONA_<ID>` 数组读署名（空 = 不署名）。读序同上。 */
+export function signatureOf(
+  personaId: string,
+  env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+  driverId?: string,
+): string {
+  return (pickPersonaSetting(personaId, env, "signature", driverId) ?? "").trim()
+}
+
+/** 按「分身级 → 人格级默认 → 任一项」的优先级取一项字符串配置。 */
+function pickPersonaSetting(
+  personaId: string,
+  env: Record<string, string | undefined>,
+  key: "outbound" | "signature",
+  driverId?: string,
+): string | undefined {
+  const parsed = parsePersonaEnv(personaId, env[`GEBAI_PERSONA_${personaId.toUpperCase()}`])
+  if (driverId) {
+    const own = parsed.drivers.get(driverId)?.[key]
+    if (own !== undefined) return own
+  }
+  const fromDefaults = parsed.personaDefaults?.[key]
+  if (fromDefaults !== undefined) return fromDefaults
+  for (const item of parsed.drivers.values()) {
+    if (item[key] !== undefined) return item[key]
+  }
+  return undefined
 }
 
 /**

@@ -155,15 +155,26 @@ describe("润色提示词：约束必须写死（不许增删事实）", () => {
 })
 
 describe("配置面", () => {
+  /** 造环境：「该人格的数组项写了 outbound/signature」。 */
+  const env = (item: Record<string, unknown>) => ({ GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([item]) })
+
   test("档位：缺省 raw（零意外），只认 shape/polish", () => {
     expect(outboundModeOf("xiaoshuang", {})).toBe("raw")
-    expect(outboundModeOf("xiaoshuang", { GEBAI_PERSONA_XIAOSHUANG_OUTBOUND: "shape" })).toBe("shape")
-    expect(outboundModeOf("xiaoshuang", { GEBAI_PERSONA_XIAOSHUANG_OUTBOUND: "POLISH" })).toBe("polish")
-    expect(outboundModeOf("xiaoshuang", { GEBAI_PERSONA_XIAOSHUANG_OUTBOUND: "胡说" })).toBe("raw")
+    expect(outboundModeOf("xiaoshuang", env({ outbound: "shape" }))).toBe("shape")
+    expect(outboundModeOf("xiaoshuang", env({ outbound: "POLISH" }))).toBe("polish")
+    expect(outboundModeOf("xiaoshuang", env({ outbound: "胡说" }))).toBe("raw")
+  })
+
+  test("分身级优先于人格级（给了 driverId 时）", () => {
+    const e = { GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ outbound: "raw" }, { name: "support", outbound: "shape" }]) }
+    expect(outboundModeOf("xiaoshuang", e, "support")).toBe("shape")
+    // 没指定分身（或指定的分身没配）→ 落到人格级默认
+    expect(outboundModeOf("xiaoshuang", e)).toBe("raw")
+    expect(outboundModeOf("xiaoshuang", e, "other")).toBe("raw")
   })
 
   test("署名：缺省空（不署名）", () => {
-    expect(signatureOf("p", {})).toBe("")
-    expect(signatureOf("p", { GEBAI_PERSONA_P_SIGNATURE: " ——小霜 " })).toBe("——小霜")
+    expect(signatureOf("xiaoshuang", {})).toBe("")
+    expect(signatureOf("xiaoshuang", env({ signature: " ——小霜 " }))).toBe("——小霜")
   })
 })

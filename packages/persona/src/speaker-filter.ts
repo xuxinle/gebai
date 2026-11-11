@@ -122,7 +122,15 @@ export function classifySpeaker(input: SpeakerInput): SpeakerVerdict {
   return { kind: "other", record: true, deliver: true }
 }
 
-/** 从环境读「是否回复用户本人」。缺省 **true**（用户说话就该它干活）。 */
+/**
+ * 从环境读「是否回复用户本人」（**仅全局兑底**）。
+ *
+ * @deprecated 新代码用 `behaviorParamsFor()`（它支持逐分身的 `replyToOwner`）。
+ * 保留原因：`channels` 包在**入站期**调用它——那一刻还没有会话，
+ * 拿不到具体分身，只能看全局。
+ *
+ * 缺省 **true**（用户说话就该它干活）。
+ */
 export function replyToOwnerFromEnv(env: Record<string, string | undefined>): boolean {
   const raw = (env.GEBAI_PERSONA_REPLY_TO_OWNER ?? "").trim().toLowerCase()
   // 未配置 = 开。显式写 false 才关。

@@ -96,7 +96,8 @@ export const persona: PersonaDef = {
     {
       id: "support",
       focus: "有问必答：只对疑问句回答",
-      subscriptions: ["message"],
+      // 订阅面：群消息 + 定时（`schedules` 声明了就必须订 schedule，否则到点找不到它）
+      subscriptions: ["message", "schedule"],
       // 会话映射：**飞书群的话题各一个会话**（话题内追问接得上，话题之间不串味）。
       //
       // 为何写成两条规则而不是一条 `{chat}-{thread}`：普通群的消息**没有** threadId，
@@ -109,6 +110,20 @@ export const persona: PersonaDef = {
       sessionMap: [
         { when: "feishu:message", key: "{chat}__t_{thread}" }, // 话题群：每话题一个会话
         { when: "message", key: "{chat}" }, // 其余群：每群一个会话
+      ],
+      // 定时工作面：到点在这个分身的**常驻会话**里跑一轮（与收到群消息同一条路）。
+      //
+      // 这里的 cron 只是**缺省值**：部署侧可用
+      //   GEBAI_PERSONA_XIAOSHUANG=[{"name":"support","schedules":{"morning":{"cron":"0 8 * * 1-5"}}}]
+      // 按声明 id 覆盖，不必改代码（id 拼错会报错，不会凭空多出一个任务）。
+      schedules: [
+        {
+          id: "health",
+          // 每周一 9:00：周期足够长，不会在调试时反复触发；想验证链路可临时覆盖成 @every 1m。
+          cron: "0 9 * * 1",
+          prompt: "巡检一下最近有没有值得主动汇报的事；没有就简短回一句「一切正常」。",
+          description: "每周巡检",
+        },
       ],
     },
   ],

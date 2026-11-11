@@ -19,11 +19,13 @@ import { channel as localChannel } from "./channels/local"
 
 const HOME = () => mkdtempSync(join(tmpdir(), "channels-test-"))
 
-function makeRegistry(home: string, extra: ChannelDef[] = []): ChannelRegistry {
+function makeRegistry(home: string, extra: ChannelDef[] = [], env: Record<string, string> = {}): ChannelRegistry {
   const reg = new ChannelRegistry({
     // 指向不存在的目录：只用程序化注册，测试不依赖仓库里的文件
     scanDirs: { builtin: join(home, "__no_builtin__"), custom: join(home, "__no_custom__") },
     home,
+    // 配置从 `GEBAI_CHANNEL_<TYPE>` JSON 读；测试在内存里给，不碰真实 process.env
+    envReader: (n) => env[n],
   })
   reg.register(localChannel)
   for (const c of extra) reg.register(c)

@@ -217,6 +217,49 @@
 .schedule-dot.off { color: var(--text-muted, #999); }
 .schedule-meta { color: var(--text-muted); opacity: 0.85; }
 .schedule-row button { margin-left: 2px; }
+
+/* 标签页（人格 / 通道）
+ *
+ * 为何分页：面板已经到 6 段，「找渠道开关」与「看人格状态」是两件不相关的事，
+ * 却排在同一个长页面里——要滑过凭据、飞书应用、事件源才能找到渠道。
+ * 分页后两页各管一类对象，且切换不重渲染（保留各自的 DOM 与滚动位置）。 */
+.persona-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 10px;
+  border-bottom: 1px solid var(--border, rgba(127, 127, 127, 0.22));
+}
+.persona-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  /* 底部边框压住容器那根线：选中态才看得出来「当前在哪一页」 */
+  margin-bottom: -1px;
+  padding: 7px 14px;
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.persona-tab:hover { color: var(--text, #222); background: rgba(127, 127, 127, 0.08); }
+.persona-tab-active {
+  color: var(--text, #222);
+  font-weight: 600;
+  border-bottom-color: var(--accent, #3d7eff);
+}
+.persona-tab-pane { display: none; }
+
+/* 渠道实例的操作行（监听开关 + 说明） */
+.settings-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0 2px;
+}
+.settings-row-actions .settings-row-desc { margin: 0; }
+
 .persona-pop-error {
   margin: 6px 0;
   padding: 8px 10px;
