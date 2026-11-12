@@ -1002,8 +1002,26 @@ private activeSchemas(sessionId: string) {
   /** 自动审批实时判定：任务 env 快照（含浏览器本地注入）或会话内存态 env 任一为 true 即跳过审批——会话运行中开启自动审批即时生效（关闭需下次任务；会话 env 不落盘，重启后由前端重新同步）。
    *
    * `toolName` 是新增的可选维度：宿主可以装一个**按工具名强制审批**的钩子（人格会话的
-   * 「默认全部不审批，只有名单里的工具要弹窗」就是靠它）。它优先于所有免审判断（除 deny），
-   * 因为“这个工具必须问人”是比“这个会话全免”更强的约束。
+   * 「默认全部不审批，只有名单里的工具要弹窗」就是靠它）。它优先于所有免审判断，
+   * 但**仅在“能问人”的通道上生效**——详见下节。
+   *
+   * ## 三层顺序（顺序本身就是语义）
+   *
+   * ```
+   * ① 请求级 deny      → 什么都别执行（最高优先）
+   * ② 按工具名强制审批  → 仅当通道能问人时生效
+   * ③ 其余免审来源      → 请求级 auto / 无交互通道 / 会话 env
+   * ```
+   *
+   * **②为何必须先于 ③**：人格会话的“整体不弹卡”就是经 `engine.run({ autoApprove: true })`
+   * 传入的，它落地成 `approvalPolicy: "auto"`。若先判 `auto` 并返回 true，钩子永远轮不到
+   * 执行——**整个人格名单静默失效**（名单里的 sh / file.delete 被直接执行，日志里一个字都没有）。
+   *
+   * **②为何又要限定“能问人”**：审批的前提是有人能点头。接口请求（REST 的
+   * `interactionMode: none`，还有飞书机器人等单向通道）没有审批能力——在那里把名单工具
+   * 拦下来，结果是白等 5 分钟再回一句拒绝，等于把这个工具在接口上打成不可用。
+   * 所以“这个工具必须问人”只在**真能问到人**的通道上才是更强的约束；问不到人的时候，
+   * 它退回普通免审流程（本地模式直接执行；服务模式仍有下方的无交互硬门槛兜底）。
    */
   private async isApprovalSkipped(
     sessionId: string,
@@ -1012,14 +1030,14 @@ private activeSchemas(sessionId: string) {
     toolName?: string,
   ): Promise<boolean> {
     const task = this.tasks.get(sessionId)
-    // 请求级审批策略优先（REST prompt/chat 的 autoApprove）：auto 显式自动通过（含服务模式——调用方
-    // 即用户本人，等价其自设 GEBAI_APPROVAL_SKIP）；deny 显式不跳过（配合下方无交互硬门槛直接拒绝）
-    if (task?.approvalPolicy === "auto") return true
+    // ① 请求级 deny 最优先：显式“什么都别执行”（配合下方无交互硬门槛直接拒绝）
     if (task?.approvalPolicy === "deny") return false
-    // 【按工具名强制审批】先于“会话级全免”判定：
-    // 人格会话整体不弹卡，但名单里的工具（如 sh / file.delete）必须问人。
-    // 顺序很关键——若放在下面几行之后，`GEBAI_APPROVAL_SKIP=true` 会把名单一起绕掉。
-    if (toolName && (await this.opts.forceApprovalFor?.(sessionId, toolName)) === true) return false
+    // ② 【按工具名强制审批】仅当通道能问人时生效：无人可批时拦下来只会变成“等超时后拒绝”
+    const canAskUser = task?.interactionMode !== "none"
+    if (canAskUser && toolName && (await this.opts.forceApprovalFor?.(sessionId, toolName)) === true) return false
+    // ③ 请求级审批策略（REST prompt/chat 的 autoApprove）：auto 显式自动通过（含服务模式——调用方
+    // 即用户本人，等价其自设 GEBAI_APPROVAL_SKIP）
+    if (task?.approvalPolicy === "auto") return true
     // 无交互模式（REST 等单次请求通道）：单用户本地模式无人可询问，需审批工具自动通过；
     // 多用户隔离模式下不允许自动通过——普通用户不得经 REST 免审批执行敏感工具（见审批点拒绝逻辑）
     if (task?.interactionMode === "none" && this.opts.authMode !== "server") return true
