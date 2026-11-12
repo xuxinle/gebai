@@ -1400,6 +1400,62 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
+  test("拟人专属工具（driver_* / worker_*）在普通会话的 schema 里**不存在**，人格会话才可见", async () => {
+    // 早先这组工具是「全局注册 + 执行时自检」：普通会话能看到 schema（描述带【仅人格会话可用】），
+    // 调用到执行期才被拒。你现在的要求是「拟人模式的工具都不能保留在普通会话」——即 schema 层就没收。
+    const { home, engine, store, registry } = await setup("text")
+    // 模拟 compose 的注册（真实环境里它们在 personaEnabled 时全局注册，普通会话也会看到）
+    for (const n of ["driver_list", "driver_create", "driver_retire", "worker_dispatch", "worker_list", "worker_cancel"]) {
+      registry.register({
+        name: n,
+        description: `【仅人格会话可用】${n}`,
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return { output: "should-not-run" }
+        },
+      })
+    }
+    const normal = await store.createSession("default", "普通会话")
+    const personas = await store.createSession("default", "人格会话")
+    const snap = await store.load(personas.id)
+    snap!.persona = { personaId: "xiaoshuang", driverId: "support", boundAt: Date.now() }
+    await store.save(snap!)
+
+    const namesOf = (id: string) => (engine as unknown as { activeSchemas(id: string): Array<{ name: string }> }).activeSchemas(id).map((s) => s.name)
+    // 归属预取是异步的（schemas/resolve 同步签名）：先让两边的归属完整就位，再断言
+    await (engine as unknown as { awaitPersonaOwnership(id: string): Promise<boolean> }).awaitPersonaOwnership(normal.id)
+    await (engine as unknown as { awaitPersonaOwnership(id: string): Promise<boolean> }).awaitPersonaOwnership(personas.id)
+    const personaTools = ["driver_list", "driver_create", "driver_retire", "worker_dispatch", "worker_list", "worker_cancel"]
+
+    // 普通会话：一个都不可见，且按名字硬调也 resolve 不到（防模型绕开 schema）
+    const normalNames = namesOf(normal.id)
+    for (const n of personaTools) {
+      expect(normalNames).not.toContain(n)
+      expect((engine as unknown as { sessionRegistry(id: string): { resolve(n: string): unknown } }).sessionRegistry(normal.id).resolve(n)).toBeUndefined()
+    }
+
+    // 人格会话：全量可选（能力不静默变少）
+    const personaNames = namesOf(personas.id)
+    for (const n of personaTools) expect(personaNames).toContain(n)
+    cleanup(home)
+  })
+
+  test("拟人专属工具门控：归属未知时 fail-closed（先不给，不能给错能力）", async () => {
+    const { home, engine, registry } = await setup("text")
+    registry.register({
+      name: "driver_list",
+      description: "d",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { output: "x" }
+      },
+    })
+    // 不存在的会话 id：读不到归属 → 当作普通会话 → 不暴露
+    const r = (engine as unknown as { sessionRegistry(id: string): { resolve(n: string): unknown } }).sessionRegistry("ffffffffffffffffffffffffffffffff").resolve("driver_list")
+    expect(r).toBeUndefined()
+    cleanup(home)
+  })
+
   test("消息上限裁剪：运行开始按 trimmed 计数发布一次 degraded=trim 通知，计数不增不重复播报", async () => {
   const { home, engine, store, events } = await setup("text")
   const session = await store.createSession("default", "t")

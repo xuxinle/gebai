@@ -140,10 +140,38 @@ describe("personaOutboundGate 判定链", () => {
     expect(r.allowed).toBe(true)
   })
 
-  test("普通会话放行（as_user 任意）", async () => {
+  test("普通会话：as_user=false 放行（以机器人名义发是合法用法）", async () => {
     const r = await personaOutboundGate(ctxWithPersona(null) as never, { target: "feishu:oc_x", verb: "send", args: { as_user: false } })
     expect(r.allowed).toBe(true)
     expect(r.review).toBe("not-required")
+  })
+
+  test("普通会话：as_user=true 直接拒绝（不得以用户本人名义冒名发话）", async () => {
+    // 回归：早先普通会话在 personaOwnerOf 为 null 时整段 `allowed: true` 放行——
+    // 只要部署开了拟人模式 personaCredentials 就存在，任何普通会话都能拿用户的
+    // OAuth 令牌往群里发话，群里看到的是「用户本人在说」，且不经任何审核。
+    const r = await personaOutboundGate(
+      ctxWithPersona(null) as never,
+      { target: "feishu:oc_x", verb: "send", args: { as_user: true, text: "hi" } },
+      { askCard: askCardOf("deliver-approve") },
+    )
+    expect(r.allowed).toBe(false)
+    expect(r.reason).toContain("人格会话")
+    // 必须给出可行出路，否则模型会无意义重试
+    expect(r.reason).toContain("as_user=false")
+  })
+
+  test("普通会话：as_user=true 的 reply 同样拒绝", async () => {
+    const r = await personaOutboundGate(
+      ctxWithPersona(null) as never,
+      { target: "feishu:oc_x", verb: "reply", args: { as_user: true, text: "hi", reply_to: "om_1" } },
+    )
+    expect(r.allowed).toBe(false)
+  })
+
+  test("普通会话：as_user 缺省（不传）= 机器人名义 → 放行", async () => {
+    const r = await personaOutboundGate(ctxWithPersona(null) as never, { target: "feishu:oc_x", verb: "send", args: { text: "hi" } })
+    expect(r.allowed).toBe(true)
   })
 
   test("人格 as_user=false → 拒绝（禁机器人回退）", async () => {

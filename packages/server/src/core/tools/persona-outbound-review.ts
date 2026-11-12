@@ -252,7 +252,26 @@ export async function personaOutboundGate(
   if (input.verb !== "send" && input.verb !== "reply") return { allowed: true, review: "not-required" }
 
   const personaId = await personaOwnerOf(ctx)
-  if (!personaId) return { allowed: true, review: "not-required" } // 普通会话不治理
+  if (!personaId) {
+    // 普通会话：**不以人格身份治理，但不得冒名**。
+    //
+    // 这里曾是一个真实缺口（本模块早先直接 `allowed: true` 放行）：
+    // `as_user=true` 只在渠道层要一份 `personaCredentials`，而那份凭据在
+    // 「部署开了拟人模式」时就存在——于是**任何普通会话**（Web、飞书桥接…）
+    // 都能拿用户本人的 OAuth 令牌往飞书发话，让群里看到的是「用户本人在说」，
+    // 且不经任何审核。`as_user` 的缺省是 false（机器人身份），要冒名得显式传
+    // true——那就不是“顺手发条消息”，是冒充。普通会话没有这个权力。
+    if (input.args.as_user === true) {
+      return {
+        allowed: false,
+        review: "not-required",
+        reason:
+          "以你本人名义发消息（as_user=true）只能在人格会话里做——当前会话不属于任何人格。\n" +
+          "普通会话请改用 as_user=false（以机器人名义发，群里看到的是应用头像）。",
+      }
+    }
+    return { allowed: true, review: "not-required" }
+  }
 
   const env = deps.env ?? (process.env as Record<string, string | undefined>)
 

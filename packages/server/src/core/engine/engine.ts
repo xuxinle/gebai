@@ -380,6 +380,12 @@ export class AgentEngine {
    *  定义随会话 chat.json 落盘（SessionData.dynamicTools）、run() 水合恢复，随会话删除释放；
    *  模型可见性经 sessionRegistry 覆盖层并入；执行用 Tool、持久化用 def（execute 源码序列化）。 */
   private dynamicTools = new Map<string, Map<string, { tool: Tool; def: DynamicToolDef }>>()
+
+  /** 会话归属是否为人格会话（`SessionData.persona`）。用于在 schema 层没收拟人专属工具（driver_* / worker_*），
+   *  与 `PERSONA_ONLY_TOOLS` 配套：普通会话既看不到也调不到。prefetching 是防抖：同一会话只读一次盘。 */
+  private personaSessionCache = new Map<string, boolean>()
+  /** 预取中的读盘 promise（同一会话只发一次；异步调用方 / 用例可 await 它拿到权威值）。 */
+  private personaSessionPrefetch = new Map<string, Promise<void>>()
   /** 单会话动态工具上限（防注册风暴；重启水合同限）。 */
   private static readonly DYNAMIC_TOOLS_CAP = 50
 
@@ -715,6 +721,67 @@ private activeSchemas(sessionId: string) {
   /** 会话注册表视图（全局注册表 + 本会话动态工具覆盖层 + 装载工具会话可见性过滤）：runLoop/buildContext 经此解析。
    *  {agent}_* 工具仅对本会话可见（其他会话装载不扩散，全局装载/启动预载对所有会话可见）；
    *  动态工具定义后同任务后续轮次 schema 立即可见、脚本内可直接按名调用。 */
+  /**
+   * 拟人模式的会话专属工具（driver_* / worker_*）——**普通会话一律不可见**。
+   *
+   * 这组工具按设计只服务人格会话（「一个人格能同时办多件事」「分区可重建」），
+   * 早先的做法是「全局注册 + 执行时自检」，并在描述里加【仅人格会话可用】前缀。
+   * 那个取舍被推翻了：**能力面比描述更强**——模型看得到就会试探着调，普通会话因此
+   * 多出一整套它根本用不了的工具（撑上下文、带错方向），而“用不了”只是执行期才报错。
+   * 同一个洞的另一面更严重：`act(as_user:true)` 这类**以用户本人名义对外发言**的能力
+   * 根本没被这一层挡住（只拦人格会话），普通会话可以直接冒名发飞书。
+   *
+   * 所以改成**按会话归属在 schema 层就没收**：普通会话既看不到也调不到（resolve 同样返回
+   * undefined，防模型按名字硬调），人格会话则照旧全量可用。
+   */
+  private static readonly PERSONA_ONLY_TOOLS = new Set([
+    "driver_list",
+    "driver_create",
+    "driver_retire",
+    "worker_dispatch",
+    "worker_list",
+    "worker_cancel",
+  ])
+
+  /** 本会话是否为**人格会话**（`SessionData.persona` 占用即为是）。
+   *  缓存按会话 id 存：同一会话的归属不会变（人格会话由人格侧建并落盘），
+   *  而 schemas/resolve 在同一次模型调用的前缀构建里会被调用多次，不该每次都读盘。 */
+  private personaSessionOf(sessionId: string): boolean {
+    const cached = this.personaSessionCache.get(sessionId)
+    if (cached !== undefined) return cached
+    // 首次问到：先当作普通会话（fail-closed：宁可少给能力，不给错能力），并异步预取真值；
+    // 同一会话只发一次读盘（schemas/resolve 在同一次前缀构建里会被多次调用）。
+    if (!this.personaSessionPrefetch.has(sessionId)) {
+      const p = this.opts.store
+        .load(sessionId)
+        .then((s) => {
+          // 只写未命中的值：run() 已经权威设定过就不覆盖（两者同源，但避免竞态窗口里的抖动）
+          if (!this.personaSessionCache.has(sessionId)) this.personaSessionCache.set(sessionId, !!s?.persona?.personaId)
+        })
+        .catch(() => {
+          this.personaSessionCache.set(sessionId, false)
+        })
+        .finally(() => this.personaSessionPrefetch.delete(sessionId))
+      this.personaSessionPrefetch.set(sessionId, p)
+    }
+    return false
+  }
+
+  /** 等本会话归属预取完成（异步调用点用；run() 已在开头权威设定，一般无需调）。 */
+  async awaitPersonaOwnership(sessionId: string): Promise<boolean> {
+    // 必须先 kick 一次：预取只在 personaSessionOf 首次被问到时才发起，
+    // 直接 await 一个空表会拿到 undefined —— 人格会话被误判为普通会话。
+    this.personaSessionOf(sessionId)
+    await this.personaSessionPrefetch.get(sessionId)?.catch(() => {})
+    return this.personaSessionCache.get(sessionId) ?? false
+  }
+
+  /** 从拟人专属工具集里剔除本会话不该见的（普通会话 → 全剔；人格会话 → 原样）。 */
+  private filterPersonaTools<T extends { name: string }>(sessionId: string, list: T[]): T[] {
+    if (this.personaSessionOf(sessionId)) return list
+    return list.filter((t) => !AgentEngine.PERSONA_ONLY_TOOLS.has(t.name))
+  }
+
   private sessionRegistry(sessionId: string): Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames"> {
     const base = this.opts.registry
     const self = this
@@ -739,7 +806,7 @@ private activeSchemas(sessionId: string) {
           const entry = { name: rt.name, description: rt.tool.description, parameters: rt.tool.parameters as unknown as Record<string, unknown> }
           ;(rt.agent ? agentTools : globals).push(entry)
         }
-        return [...globals, ...agentTools, ...dyn]
+        return this.filterPersonaTools(sessionId, [...globals, ...agentTools, ...dyn])
       },
       resolve: (name: string) => {
         const dyn = self.dynamicTools.get(sessionId)?.get(name.replace(/[-.:]/g, "_"))
@@ -747,6 +814,8 @@ private activeSchemas(sessionId: string) {
         const rt = base.resolve(name)
         if (!rt) return undefined
         if (rt.agent && !self.sessionVisibleAgents(sessionId).has(rt.agent)) return undefined // 本会话未装载：交路由自愈按需装载
+        // 拟人专属工具：普通会话解析不到（不能只靠 schema 过滤——模型可按名字硬调）
+        if (AgentEngine.PERSONA_ONLY_TOOLS.has(rt.name) && !self.personaSessionOf(sessionId)) return undefined
         return { name: rt.name, tool: rt.tool, agent: rt.agent, enabled: rt.enabled }
       },
       getAgentNames: () => [...self.sessionVisibleAgents(sessionId)],
@@ -1170,6 +1239,10 @@ private activeSchemas(sessionId: string) {
     try {
       const session = await this.opts.store.load(sessionId, user)
       if (!session) throw new Error(`会话不存在: ${sessionId}`)
+      // 会话归属**权威设定**（拟人专属工具的 schema 门控依据）：run() 已正规读盘，
+      // 这一轮的工具表必须用真值，不能麦异步预取的缺省 false——否则
+      // 人格会话首轮就看不到 driver_* / worker_*（能力静默变少）。
+      this.personaSessionCache.set(sessionId, !!session.persona?.personaId)
       // 会话级子Agent 装载保障（DESIGN「装载 vs 子会话运行」）：新会话按启动预载名单初始化
       // （工具注册 + 提示词 system 消息写入会话记录），恢复历史会话时按会话记录重新注册工具并补齐提示词消息
       await this.ensureSessionAgents(session)
