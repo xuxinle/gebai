@@ -2533,11 +2533,12 @@ class TextRenderer {                               // 字形 → 位图缓存（
   环境变量 `ST_FONT_LATIN` / `ST_FONT_CJK` / `ST_FONT_MONO`（及 `*_BOLD`）
   仍是最高的逐档覆盖。
 
-  链形：**平台首选 → 通用拉丁 → 通用 CJK → 符号回退**。
-  | 平台 | 正文档首选 | 等宽首选 |
-  |---|---|---|
-  | Windows | 微软雅黑（`msyh.ttc`）——**中英文同族**（它自带拉丁字形） | Consolas（`consola.ttf`） |
-  | Linux / macOS | 不指定取向（只用通用回退层） | 不指定取向 |
+  链形：**平台首选 → 通用拉丁 → 通用 CJK → emoji → 符号回退**。
+  | 平台 | 正文档首选 | 等宽首选 | emoji |
+  |---|---|---|---|
+  | Windows | 微软雅黑（`msyh.ttc`）——**中英文同族**（它自带拉丁字形） | Consolas（`consola.ttf`） | `seguiemj.ttf` |
+  | Linux | 不指定取向（只用通用回退层） | 不指定取向 | `NotoColorEmoji.ttf` → `NotoEmoji-Regular.ttf` |
+  | macOS | 不指定取向 | 不指定取向 | `Apple Color Emoji.ttc` |
 
   首选档必须在拉丁回退层**之前**：`find_face` 返回首个覆盖该码点的面，
   排在后面就会被 Segoe UI 接管英文，界面成了“中文雅黑、英文 Segoe”的两族混排。
@@ -2545,6 +2546,17 @@ class TextRenderer {                               // 字形 → 位图缓存（
   否则拉丁粗体会接管中文字（它没有汉字轮廓 → 整串豆腐块）。
   等宽链里没有汉字，`find_face(role=Monospace)` 按“等宽库 → 正文档”回退补足，
   代码注释里的中文仍可读。
+
+  **emoji 档必须在符号回退档之前**：`seguisym.ttf`（Segoe UI Symbol）同样覆盖
+  emoji 码点，但它给的是**符号化的单色轮廓**——📁 渲染成实心方块、✅ 退化成 ✓、
+  🇨🇳 退化成 “CN” 两个字母、🎉 形似乱码。那不是“字体缺失”（有字形、能画出来），
+  所以肉眼极易读成“渲染坏了”而不是“选错字体”。
+  换成 emoji 字体后字形正确但**仍是单色**：框架的光栅器只填单色轮廓，
+  `seguiemj.ttf` 的 `COLR`/`CPAL` 彩色层尚未解析（见 `docs/BACKLOG.md`）。
+  逐位同序的约束在这里有个**隐蔽来源**：某档在一侧杏如（黑体无粗体版）时，
+  它后面每一档都会整体前移一位，表现为“只在粗体里错”的选字。
+  回归：`tests/text_font_default_test.cpp` 的
+  `font_default_emoji_prefer_emoji_face_over_symbol_face`。
 
 **主题（`ThemeMode`）是真值源，不在页面里存影子状态**
 

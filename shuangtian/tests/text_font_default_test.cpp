@@ -76,6 +76,17 @@ struct Fixture {
 #endif
 }
 
+/// emoji 字体面的文件名（空 = 该平台没有可用的 emoji 字体）。
+[[nodiscard]] auto emoji_face_file() -> const char* {
+#if defined(_WIN32)
+  return "seguiemj.ttf";
+#elif defined(__APPLE__)
+  return "Apple Color Emoji.ttc";
+#else
+  return "NotoColorEmoji.ttf";
+#endif
+}
+
 }  // namespace
 
 ST_TEST(font_stack_load_is_cached_across_calls) {
@@ -272,5 +283,41 @@ ST_TEST(font_default_symbols_still_fall_back) {
   for (const char32_t codepoint : {U'\u2713', U'\u2717'}) {
     const auto* face = fixture.stack->find_face(codepoint, FontRole::Proportional);
     ST_CHECK(face != nullptr);
+  }
+}
+
+ST_TEST(font_default_emoji_prefer_emoji_face_over_symbol_face) {
+  // **emoji 不能被符号字体接管**。
+  //
+  // `seguisym.ttf`（Segoe UI Symbol）也覆盖 emoji 码点，但它给的是**符号化的单色
+  // 轮廓**：📁 退化成一块实心方块、✅ 退化成 ✓、🇨🇳 退化成 "CN" 两个字母。
+  // 那不是“字体缺失”（有字形、能画出来），所以肉眼极易读成“渲染坏了”而不是“选错字体”。
+  //
+  // 判据取**文件归属**：emoji 码点必须落到 emoji 字体面，而不是符号字体面。
+  // 这是一条纯属性面断言，不需要截图——换字体的错在文本层就能钉住。
+  Fixture fixture;
+  if (!fixture.ok) return;
+  // 平台没有 emoji 字体（精瘦的 Linux 容器）时无从谈起，跳过而不是判红。
+  const auto chain = st::platform::preferred_text_fonts();
+  const auto bold_chain = st::platform::preferred_text_fonts_bold();
+  bool has_emoji_face = false;
+  for (const auto& entry : chain) {
+    if (emoji_face_file() != nullptr && entry.path.ends_with(emoji_face_file())) has_emoji_face = true;
+  }
+  if (!has_emoji_face) return;
+  for (const char32_t codepoint : {U'\U0001F600', U'\U0001F4C1'}) {
+    const auto* regular = fixture.stack->find_face(codepoint, FontRole::Proportional);
+    ST_CHECK(regular != nullptr);
+    ST_CHECK(regular->path().ends_with(emoji_face_file()));
+    // 粗体链同理：粗体链漏了这一档时，emoji 在粗体文本里**又变回符号字体**的
+    // 单色方块（同一串文本两种字重两种字形，是那种“只在标题里坏”的缺陷）。
+    const auto* bold = fixture.stack->find_face(codepoint, FontRole::Proportional, /*bold=*/true);
+    ST_CHECK(bold != nullptr);
+    ST_CHECK(bold->path().ends_with(emoji_face_file()));
+  }
+  // 两条链的下标必须仍然对齐（emoji 档是插在中间的一档，最容易只加进常规链）。
+  const std::size_t shared = std::min(chain.size(), bold_chain.size());
+  for (std::size_t index = 0; index < shared; ++index) {
+    ST_CHECK_EQ(chain[index].cjk, bold_chain[index].cjk);
   }
 }

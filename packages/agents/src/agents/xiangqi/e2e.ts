@@ -22,9 +22,33 @@ import { AGENT_HANDSHAKE } from "../shuangtian/shuangtian_client"
 
 const exe = process.argv[2]
 if (exe === undefined) {
-  console.error("用法：bun run custom/agents/xiangqi/e2e.ts <xiangqi.exe 路径>")
+  console.error("用法：bun run packages/agents/src/agents/xiangqi/e2e.ts <xiangqi.exe 路径>")
   process.exit(2)
 }
+
+/**
+ * 相期的 UI 目录（从**本文件位置**上溯找仓库标记，不数相对层级）。
+ *
+ * 为何不能写固定相对路径：这里曾经是 `join(import.meta.dir, "..", "..", "..", "shuangtian", ...)`
+ * ——相期住在 `custom/agents/` 时代写下的三个 `..`。搬到内置域后它指向
+ * `packages/agents/shuangtian/apps/xiangqi/ui`（不存在），而**应用遇到不存在的
+ * `--ui` 会回落到内嵌 UI**（磁盘优先、内嵌兜底）：于是 e2e 一直在测
+ * 「编译进 exe 的那份 app.js」，改了磁盘文件也没反应——排障时看到的永远是“没生效”。
+ * 这类静默回退必须在这里堵死：找不到就**如实失败**，不拿内嵌版蒙混。
+ */
+function resolveUiDir(): string {
+  let dir = import.meta.dir
+  for (let level = 0; level < 8; level += 1) {
+    const candidate = join(dir, "shuangtian", "apps", "xiangqi", "ui", "main.xml")
+    if (existsSync(candidate)) return join(dir, "shuangtian", "apps", "xiangqi", "ui")
+    const parent = join(dir, "..")
+    if (parent === dir) break
+    dir = parent
+  }
+  console.error(`找不到相期 UI 目录（从 ${import.meta.dir} 上溯 8 级）`)
+  process.exit(2)
+}
+const uiDir = resolveUiDir()
 
 const home = mkdtempSync(join(tmpdir(), "xiangqi-e2e-"))
 let failures = 0
@@ -164,7 +188,7 @@ async function main(): Promise<void> {
     "--control-file", ctlFile,
     "--shots", home,
     "--home", appHome,
-    "--ui", join(import.meta.dir, "..", "..", "..", "shuangtian", "apps", "xiangqi", "ui"),
+    "--ui", uiDir,
     "--agent", url,
   ])
   app.stdout?.on("data", (chunk: Uint8Array) => appLog.push(String(chunk)))
@@ -195,9 +219,10 @@ async function main(): Promise<void> {
 
     // ③ notice：协议通不通
     //
-    // ⚠ 断言不能只查 `#card-0`：**只有一张 notice 时相期进入轻提示形态**
-    // （`#compact` 显示、主卡片区隐藏）——这是「不必每次弹出主界面」的
-    // 核心体验，不是缺陷。两种形态任一命中即可。
+    // 断言只查 `#card-0`：相期**没有轻提示形态**（早期那个「只有 notice 就缩成
+    // 小窗口」的形态已删除，窗口固定 560×720、notice 与 choice/todo 同一块面板）。
+    // 曾经这里还兼查 `#compact-title`，而那个元素根本不存在——`get` 对不存在的
+    // id 是**报错**而不是空值，于是这条验证永远红在第一步，把后面三条接缝全遮住了。
     const notice = ctl.push({
       kind: "notice",
       title: "端到端验证",
@@ -207,25 +232,23 @@ async function main(): Promise<void> {
     check(notice.delivered, "notice 推送送达（控制器→相期 WS）")
     let noticeRendered = false
     for (let attempt = 0; attempt < 80 && !noticeRendered; attempt += 1) {
-      if ((await ui.count("#card-0")) > 0) {
-        noticeRendered = true
-      } else {
-        const compact = await ui.ok("get", { id: "compact-title" })
-        const text = String(compact.value ?? compact.text ?? "")
-        noticeRendered = text.includes("端到端验证")
-      }
+      noticeRendered = (await ui.count("#card-0")) > 0
       if (!noticeRendered) await new Promise((resolve) => setTimeout(resolve, 100))
     }
-    check(noticeRendered, "notice 已渲染（轻提示或主界面）")
+    check(noticeRendered, "notice 已渲染")
 
     // ④ choice：走真实路径等答复
     const asked = ctl.push({
       kind: "choice",
       title: "选一个",
       body: "端到端验证：请在桌面上点一下",
+      // 选项标签**故意给得足够长**：短标签永远不会撑满卡片宽，于是「按钮行会不会
+      // 折行」这条行为根本没被走到——那样的断言只能看着像护栏，实际什么都拦不住
+      // （旧实现里 3 个选项 + 复制排到 x=815，而窗口只有 560；标签短的话完全无法现形）。
       options: [
-        { label: "选项甲", value: "a" },
-        { label: "选项乙", value: "b" },
+        { label: "选项甲（点它就算你选了这个）", value: "a" },
+        { label: "选项乙（选它就不会选甲）", value: "b" },
+        { label: "选项丙（第三个选项，用来把这一行撑满）", value: "c" },
       ],
     })
     check(asked.delivered, "choice 推送送达")
@@ -235,7 +258,27 @@ async function main(): Promise<void> {
       buttonReady = (await ui.count("#card-1-act-opt-0")) > 0
       if (!buttonReady) await new Promise((resolve) => setTimeout(resolve, 100))
     }
-    check(buttonReady, "选择卡的两个选项按钮已出现")
+    check(buttonReady, "选择卡的选项按钮已出现")
+
+    // ④b 卡片内容不得溢出卡片面
+    //
+    // 判据取**每个按钮自己的右缘**，不取按钮行的右缘：行是普通容器，`measure` 末尾
+    // 会把自己的宽度夹到约束内——不管子元素排到多远，行的 bounds 看着都“正常”。
+    // 超出部分被父容器裁掉，**看不见也点不到**，而属性面（label/enabled）全对，
+    // 靠 `get` 永远发现不了。本断言就是为了让「忘了开 wrap」再也不能静默通过。
+    const cardBounds = await ui.ok("get", { id: "card-1" })
+    const cardRect = cardBounds.bounds as { x: number; width: number } | undefined
+    // 卡片左右各 16 内边距（`renderCard` 的 `padding: '16'`）：内容右缘 = 卡片右缘 - 16。
+    const innerRight = cardRect === undefined ? 0 : cardRect.x + cardRect.width - 16
+    const found = await ui.ok("find", { selector: "Button" })
+    const buttons = (found.matches ?? []) as Array<{ id: string; bounds: { x: number; width: number } }>
+    const optionButtons = buttons.filter((b) => b.id.startsWith("card-1-act-opt-"))
+    const widest = optionButtons.reduce((acc, b) => Math.max(acc, b.bounds.x + b.bounds.width), 0)
+    check(
+      optionButtons.length === 3 && widest <= innerRight + 0.5,
+      "选项按钮不超出卡片内容区",
+      `最右 ${widest.toFixed(1)} > 卡片内容右缘 ${innerRight.toFixed(1)}（选项数 ${optionButtons.length}）`,
+    )
 
     // 用户真的点一下（经控制通道 invoke，与相期自己的 e2e 同一手法）
     const waiting = ctl.waitForAnswer(asked.id, 8000)

@@ -177,7 +177,17 @@
     }
 
     // ② 标题与正文：标题加重一档，正文用 muted 退后一层，层级靠色阶而不是字号堆砌。
-    $('#' + sid).append('Text', { font_size: '15', text: card.title || '（无标题）', font_weight: 'semibold' });
+    //
+    // `multiline` 必须显式开：`Text` 的缺省是**单行 + 尾部省略号**，而卡片标题
+    // 常常是一整句（「需要飞书授权：令牌属于应用 cli_xxx，与当前应用不一致…」）。
+    // 不开多行的后果不是“短一点”，而是**后半句根本看不到**——用户只能看到
+    // 一截加省略号的残句，还得靠猜（实测：窗口 496px 内容宽下标题只露出前 30 字）。
+    $('#' + sid).append('Text', {
+      font_size: '15',
+      text: card.title || '（无标题）',
+      font_weight: 'semibold',
+      multiline: 'true',
+    });
     if (card.body) {
       // 正文用 **MarkdownView** 而不是 Text：大模型生成的内容天然是 markdown
       //（列表、代码块、强调、表格）。当普通文本画的话，`**粗**`、`- 项`、
@@ -200,8 +210,14 @@
 
     // ③ 交互区：按类型分派。主操作带图标（视觉反馈：纯文字按钮显得单薄），
     // 主/轻操作间留出呼吸。
+    // `wrap` 必须显式开：`Row` 缺省是**单行**，排不下时不会折行、而是继续向右
+    // 排到容器之外——超出窗口的部分被裁掉，那些按钮**看不见也点不到**
+    //（实测：3 个选项 + 复制的行排到 x=815，而窗口只有 560 宽，后两个按钮整块丢失）。
+    //
+    // 折行需要「父宽有上界」：本行是卡片 `Column` 的子元素，拿到的是确定的内容宽
+    //（`ScrollView::arrange` 会在宽度定下来后重测内容），所以这里能真的折。
     const actId = sid + '-act';
-    $('#' + sid).append('Row', { id: actId, gap: '8', padding_y: '2' });
+    $('#' + sid).append('Row', { id: actId, gap: '8', padding_y: '2', wrap: 'true' });
 
     if (card.kind === 'choice' && card.options) {
       // 选择卡：每个选项一个按钮，**不给「忽略」**——那类的价值就是必须定夺

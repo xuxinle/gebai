@@ -107,9 +107,18 @@ void append(std::vector<FontPreference>& out, std::vector<FontPreference> more) 
 #endif
 }
 
+/// **与 `cjk_faces()` 逐位同长**：两条链靠**下标**配对字重面
+/// （`FontStack::find_face(..., bold)` 先找常规链里第一个覆盖该码点的档，
+/// 再取**同一下标**的粗体面）。常规链给了两个 CJK 回退档（`simhei` → `msjh`），
+/// 而黑体没有粗体版本——这里只写一个 `msjhbd`，后面每一档就**整体前移一位**：
+/// emoji 档（无粗体）越过符号字体、符号字体顶替 CJK 档。
+/// 后果是「只在粗体里错」的选字：常规正文的 emoji 对、标题里同样的字符变成
+/// 符号字体的单色方块。
+/// 两个 CJK 档都填 `msjhbd`：它只占位保序号，实际很少被走到（汉字在首选档就命中了）。
 [[nodiscard]] auto cjk_faces_bold() -> std::vector<FontPreference> {
 #if defined(_WIN32)
-  return existing({{"C:/Windows/Fonts/msjhbd.ttc", true}});
+  return existing({{"C:/Windows/Fonts/msjhbd.ttc", true},
+                   {"C:/Windows/Fonts/msjhbd.ttc", true}});
 #elif defined(__APPLE__)
   return existing({{"/System/Library/Fonts/PingFang.ttc", true}});
 #else
@@ -134,6 +143,25 @@ void append(std::vector<FontPreference>& out, std::vector<FontPreference> more) 
 #endif
 }
 
+/// emoji 回退：拉丁 / CJK / 符号字体都**没有**的彩色表情（😀 U+1F600、📁 U+1F4C1 …）。
+///
+/// 必须在 `symbol_faces()` **之前**：`seguisym.ttf`（Segoe UI Symbol）也带这些码点的
+/// 轮廓，于是排它前面的 emoji 字体一旦缺席，emoji 就由符号字体接管——而符号字体给的是
+/// **单色的线条/块状轮廓**（实测：📁 渲染成一块实心黑方块、✅ 退化成 ✓、🎉 形似乱码、
+/// 旗帜 🇨🇳 退化成 "CN" 两个字母）。那不是「字体缺失」，比缺失更难认出来。
+[[nodiscard]] auto emoji_faces() -> std::vector<FontPreference> {
+#if defined(_WIN32)
+  // `seguiemj.ttf` 自带 `glyf` 轮廓（😀 7 条、🎉 12 条），所以**即使框架不解析
+  // COLR/CPAL 彩色层，字形本身也是对的**——加进来就从「单色乱码」变成「单色正确图形」。
+  return existing({{"C:/Windows/Fonts/seguiemj.ttf", false}});
+#elif defined(__APPLE__)
+  return existing({{"/System/Library/Fonts/Apple Color Emoji.ttc", false}});
+#else
+  return existing({{"/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", false},
+                   {"/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf", false}});
+#endif
+}
+
 [[nodiscard]] auto mono_faces() -> std::vector<FontPreference> {
 #if defined(_WIN32)
   return existing({{"C:/Windows/Fonts/CascadiaMono.ttf", false},
@@ -154,6 +182,8 @@ auto preferred_text_fonts() -> std::vector<FontPreference> {
   std::vector<FontPreference> out = primary_text_faces();
   append(out, latin_faces());
   append(out, cjk_faces());
+  // emoji 在符号之前（符号字体也覆盖 emoji 码点，见 `emoji_faces` 的实测记录）
+  append(out, emoji_faces());
   append(out, symbol_faces());
   return out;
 }
@@ -163,6 +193,12 @@ auto preferred_text_fonts_bold() -> std::vector<FontPreference> {
   std::vector<FontPreference> out = primary_text_faces_bold();
   append(out, latin_faces_bold());
   append(out, cjk_faces_bold());
+  // 粗体链**必须与常规链逐位同序**（`find_face(..., bold)` 按下标配档）。
+  // emoji 字体没有粗体面：这里补一个**同一位**的占位，让后面的符号档位对齐。
+  // 少了这一步，粗体的「符号」档会错配到常规链的「emoji」档——`📁` 于粗体里
+  // 变成符号字体的黑方块、而常规里是对的。
+  append(out, emoji_faces());
+  append(out, symbol_faces());
   return out;
 }
 
