@@ -4361,7 +4361,8 @@ Boolean → 开关、Choice → 下拉（候选来自描述）、Text/Color → 
 | 容器要提供**成对的**增删接口 | 只能追加不能清空 → 过滤/按新数据刷新无法实现（`List::clear_items` 由此而来） |
 | 自动生成的 id 必须**稳定、唯一、无控制字符** | 选择器、协议消费方、脚本层都拿它当键。生成时用**拥有型**容器拼装（`vector<string>` 而非 `vector<string_view>`——后者会指向临时字符串，拼出垃圾字节与 NUL） |
 | 刷新数据用 `sync_items` 而非 `clear_items` + 逐个 `add_item` | 前者按 `key` 复用子元素，**id 与选中态都保持**；后者索引推倒重来，外部按 id 引用会错位、选中态静默丢失 |
-| `UiRoot` 的 `focused_`/`hovered_`/`pressed_` 必须**用前校验** | 它们是裸指针，而子树会被重建/替换。元件从树上摘下时无法通知到 root（`Element` 没有 root 反指），所以每次使用前做"仍不在树上"的检查——**只比较指针、不解引用**（指向已销毁元素时解引用即 UB）。校验点：`dispatch()`、`update_hover()`、`set_focus()`、`focused()` |
+| `UiRoot` 的 `focused_`/`hovered_`/`pressed_` 必须**用前校验** | 它们是裸指针，而子树会被重建/替换。每次使用前做"仍不在树上"的检查——**只比较指针、不解引用**（指向已销毁元素时解引用即 UB）。校验点：`dispatch()`、`update_hover()`、`set_focus()`、`focused()` |
+| **“指针还在树上”不能代替“结构没变”** | 地址会被复用：`clear_children` + 逐项重建时新元素常落在刚释放的地址上，`hovered_` 于是看起来指向一个活元素，`update_hover` 的 `hovered_ == target` 早退让新实例永远收不到 HoverIn。结构变化由挂入/摘下点主动上报（`Element::notify_structure_changed` → `HostFocus::host_structure_changed`），不靠事后猜（见 §5.0.2） |
 | 组件不得声明与 `Element` 保护成员**同名**的成员 | 遮蔽（shadowing）**编译零警告**，且症状静默：焦点写基类、读遮蔽副本时功能失效而测试全绿（`CodeEditor` 自带 `bool focused_{false}` → 光标永不绘制、括号高亮失效；而直接调 `set_focused` 的组件级单测读写落在同一侧，全体通过）。有独立语义就**改名**（`KeyValueRow` 的显示标签 `key_` → `label_`：基类 `key_` 是稳定逻辑身份、参与自动 id，不是显示文案）。守规则：lint `L13` |
 | `semantics_flags()` 覆写必须以 `Element::semantics_flags()` 起手 | 用 `SemanticsFlags flags{}` 重建会丢掉 visible/enabled/focused/hovered/pressed → 焦点经 `UiRoot::set_focus` 设置时，语义树与 `:focused` 选择器恒报 false（控制通道看到的元素状态与真实不符，`tree`/`:focused` 全不可信）。守规则：lint `L13` |
 | 焦点只能经 `UiRoot::set_focus`，且它按 `focusable()` **严格裁决** | `focusable()` 是「能否持有焦点」的契约，Tab 焦点环按它筛选；无条件赋值 →「root 焦点指向它、键盘派发给它、Tab 环跳过它」的状态分裂。不可聚焦即拒绝并返回 `false`，调用方如实上报（`input.text`/`app.focus` 目标不可聚焦直接报错——此前会静默不聚焦、**把文本送给旧焦点元素**，写错元素比报错危险） |
@@ -5701,6 +5702,7 @@ class Compositor {                                  // UI 图层 → GPU 合成
 | 窗口重新激活（无点击） | 合成 MouseMove（`GetCursorPos` 换算） | 走正常解析链：悬浮/光标立刻跟上真实位置——治"切前台但没点击过指针无变化" | Win32 `WM_ACTIVATE`(WA_ACTIVE/WA_CLICKACTIVE) |
 | 拖拽结束（MouseUp） | 帧内 `revalidate_pointer_state()` | 按松手位置重算 hover/光标（拖拽期间两路径被锁定） | UiRoot 内部 |
 | 浮层增删/内容替换 | `pointer_state_dirty_` → 下一帧帧首重算 | 指针没动但命中链变了：悬浮/光标落到新命中上 | UiRoot 内部 |
+| **任意子树结构变化**（挂入/摘下子元素） | `Element::notify_structure_changed` → `UiRoot::host_structure_changed` | 摘下时作废 `hovered_` 与 `hover_chain_`，随后置 `pointer_state_dirty_` | `add_child`/`insert_child`/`remove_child`/`clear_children` 沿父链上报 |
 
 要点：
 - **`WindowLeave` 是窗口级事件，不派发给元素**（与元素级 `HoverIn/HoverOut` 分层：
@@ -5711,6 +5713,25 @@ class Compositor {                                  // UI 图层 → GPU 合成
   叠加层刚 add 时布局还没跑，直接命中算的是旧几何；
 - 标题栏按钮级悬浮（`hovered_button`/`hovered_caption`）在最小化/关闭动作后一并复位
   （窗口即将不可见，恢复回来时不该带旧高亮）；两者暴露为只读属性供自动化断言。
+
+**结构变化必须由挂入/摘下点主动上报，不能靠“事后看指针还在不在树上”**。
+`Element` 没有 root 反指，但它知道自己挂在哪个容器下——`add_child`/`insert_child`/
+`remove_child`/`clear_children` 沿 `parent_` 走到第一个 `host_` 转调
+`HostFocus::host_structure_changed(bool removed)`（默认空实现，离屏/测试桩不必理会）。
+
+为什么这件事不能推迟到下一次用指针态时再“发现”：
+
+- **地址复用让“还在树上”失效**。`clear_children` + 逐项重建（列表刷新的标准写法）里
+  新元素常拿到刚释放的地址，`has` 判据于是判定“指针仍在树上”；
+- 而 `update_hover` 开头有 `if (hovered_ == target) return;` 早退 —— 两个条件一合，
+  新实例永远收不到 HoverIn。实测症状：卡片列表刷新后，“悬停才显示”的控件一直不出来，
+  直到鼠标动一下（屏上看着悬浮还在，实际是另一个对象的地址）。
+
+所以 `removed == true` 时把上一次命中的答案（`hovered_` 与整条 `hover_chain_`）**作废**，
+下一帧重算从新树上重建。`removed == false`（只是多挂了东西）只置脏、不作废：
+往列表里追加一张卡不该让指针下现存的悬浮抖一下（否则流式输出每次都闪）。
+
+回归：`tests/ui_pointer_rebuild_test.cpp`（去掉上报即变红）。
 
 #### 5.0.2.2 按放的归属：「点下去的是谁」在 MouseDown 那一刻就定了（2026-11-08）
 

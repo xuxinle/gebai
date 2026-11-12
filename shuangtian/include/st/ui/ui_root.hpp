@@ -262,6 +262,48 @@ class UiRoot : public Element::HostFocus {
   void set_clipboard_write_provider(std::function<bool(std::string_view)> provider) {
     clipboard_write_provider_ = std::move(provider);
   }
+
+  /// `Element::HostFocus::host_structure_changed` 的实现：内容树/浮层结构变了，
+  /// 命中链就可能变，而指针位置没动——下一帧按最后指针位置重算悬浮/光标。
+  ///
+  /// 它由 `Element::add_child`/`insert_child`/`remove_child`/`clear_children`
+  /// 沿父链上报（见 `Element::notify_structure_changed`）。
+  ///
+  /// ## 为何必须同时搞掉旧答案
+  ///
+  /// 光置 `pointer_state_dirty_` 不够：重算时 `update_hover` 开头有
+  /// `if (hovered_ == target) return;`。而 `clear_children` + 逐项重建（列表刷新
+  /// 的标准写法）里**新元素常拿到刚释放的地址**——`hovered_` 指向的旧地址
+  /// “新恰好”就是新实例，比较相等 → 提前返回 → 新实例永远不会收到 HoverIn。
+  /// 实测症状：相期的卡片刷新后，“悬停才显示”的控件一直不出来；
+  /// 屏上看起来“悬浮还在”（因为那个位置真有东西），实际是另一个对象的地址。
+  ///
+  /// 所以这里把“指针上一次命中”的答案（`hovered_` 与整条悬浮链）**作废**：
+  /// 它们描述的是旧树上的命中，结构变了就不再成立，也不能靠“还在不在树上”去辨
+  ///（地址复用让那个判据失效）。下一帧重算会从新树上重建一份。
+  void host_structure_changed(bool removed) override {
+    // 命中链可能整体作废。
+    //
+    // ## 为何光置脏不够
+    //
+    // 重算时 `update_hover` 开头有 `if (hovered_ == target) return;`。而
+    // `clear_children` + 逐项重建（列表刷新的标准写法）里**新元素常拿到刚释放的
+    // 地址**——`hovered_` 指向的旧地址“恰好”就是新实例，比较相等 → 提前返回
+    // → 新实例永远收不到 HoverIn。实测症状：相期的卡片刷新后，“悬停才显示”
+    // 的控件一直不出来；屏上看着“悬浮还在”，实际是另一个对象的地址。
+    //
+    // 所以只要**有东西被拿走**，就把“指针上一次命中”的答案（`hovered_` 与整条
+    // 悬浮链）作废——它们描述的是旧树上的命中，那个元素已经不存在，也无法靠
+    // “还在不在树上”去辨（地址复用让那个判据失效）。下一帧重算会重建一份。
+    //
+    // 只挂入（`removed == false`）不动作废：往列表里加一张卡不该让指针下现存的
+    // 悬浮抖一下（否则每次流式输出都闪一次）。那种情形只需要重算。
+    if (removed) {
+      hovered_ = nullptr;
+      hover_chain_.clear();
+    }
+    pointer_state_dirty_ = true;
+  }
   /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
   [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);

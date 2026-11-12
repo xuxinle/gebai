@@ -369,15 +369,23 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
     } else if (name == "font_size") {
       style.font_size = as_float();
     } else if (name == "font_weight") {
+      // **不能直接写 `style.font_weight`**。它是**派生值**：`Text::apply_theme` /
+      // `Button::apply_theme` 每次都用组件自己的 `weight_` 重写它，
+      // 于是直接写 `style_` 只活到下一次主题回放（实测：本行写完、下一帧就回 regular，
+      // `set` 返回 changed、读回却是 regular、像素一点没变——“报告成功但无效”）。
+      //
+      // 正确路径是 `Element::set_property`（它走 `set_text_weight`，把值存进
+      // `text_weight_override`，由 `apply_text_overrides()` 在主题回放**末尾**重新落位）。
+      // 把它从这张布局表里摘掉，名字仍由 `is_base_writable_property` 认得。
       const std::string text = st::json_as_string(value, "");
       if (text == "regular") {
-        style.font_weight = FontWeight::Regular;
+        element.set_text_weight(FontWeight::Regular);
       } else if (text == "medium") {
-        style.font_weight = FontWeight::Medium;
+        element.set_text_weight(FontWeight::Medium);
       } else if (text == "semibold" || text == "semi_bold") {
-        style.font_weight = FontWeight::SemiBold;
+        element.set_text_weight(FontWeight::SemiBold);
       } else if (text == "bold") {
-        style.font_weight = FontWeight::Bold;
+        element.set_text_weight(FontWeight::Bold);
       } else {
         return false;
       }

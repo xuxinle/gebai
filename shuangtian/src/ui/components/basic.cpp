@@ -833,7 +833,6 @@ void Button::apply_theme(const Theme& theme) {
   // 挤、发脏（尤其小字号 + 合成加粗同时存在时）。需要突出的按钮靠变体色
   // （`Primary`/`Soft`/`Danger`）表达，不靠字重。
   style_.font_weight = FontWeight::Regular;
-  style_.border_width = 0.0f;
   style_.align_items = Align::Center;
   style_.justify = Justify::Center;
   style_.direction = FlexDirection::Row;

@@ -1464,6 +1464,11 @@ void UiRoot::prune_stale_pointers() {
   // 悬浮链同治：链上的元素可能已被重建（声明式每帧重组），悬垂的不光不能
   // 解引用——还必须在下一次链比较前摘掉，否则新链里的同位新实例会被误判为
   // "新进入"（发重复 HoverIn）而旧实例的 HoverOut 永远发不出去。
+  //
+  // ⚠ 这里**不能**把“摘掉了”当成“结构变了”的信号：地址会被复用，
+  // 新元素落在刚释放的地址上时 `on_tree` 会认为旧指针仍在树上，链长不变。
+  // 结构变化走 `Element::notify_structure_changed` 主动上报（见
+  // `UiRoot::host_structure_changed`），不在本函数里猜。
   std::erase_if(hover_chain_, [&on_tree](Element* node) { return !on_tree(node); });
   // 提示的两个观察者：目标（在内容树）与气泡（在叠加层——上面的 `on_tree`
   // 也遍历 `overlays_`，所以同一条判据能用）。气泡被外部摘掉（`clear_overlays`）
@@ -1757,6 +1762,11 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
   // 帧首的裁剪栈基准（画布自带的一层）。帧末要与它对上（见那里的说明）。
   const std::size_t base_depth = canvas.clip_depth();
   // 2) 必要时重排；真跑了重排 → 保守整帧（见 `layout` 尾部说明）。
+  //
+  // **先清悬垂指针**：内容树可能在上次绘制后被重建，而指针可能还指着已销毁的元素
+  //（下面 `layout` 会读几何，悬垂指针在手上很危险）。结构变化本身由
+  // `host_structure_changed` 上报，不靠这里发现。
+  prune_stale_pointers();
   layout();
   // 2.5) 指针态重算（浮层增删/内容替换置位）：布局已出新几何，此刻按最后指针
   //      位置重算悬浮/光标才准。放这里而不是事件路径里——那些时刻几何还是旧的。

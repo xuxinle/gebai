@@ -38,6 +38,13 @@
   let peer = { connected: false, name: '' };
   /** 界面需要重画（所有变更置脏，由 tick 统一渲染）。 */
   let dirty = false;
+  /** 指针当前停在哪些卡片里（按卡片 id）：复制按钮只在悬停时出现。
+   *
+   * 为什么要记住而不是只靠元素自身的 hovered：卡片是**重建式渲染**，
+   * 数据一变整片重建，元素（连同它的悬浮态）都是新的——不记住的话，
+   * 正在看的那张卡会突然把复制按钮收掉，直到指针动一下才回来。
+   */
+  const hoveredCards = Object.create(null);
 
   // ── 工具 ────────────────────────────────────────────────────────────────
   //
@@ -99,6 +106,12 @@
     list.clear();
     cards.forEach(function (card, i) {
       renderCard(card, i);
+    });
+    // 已消失的卡片不再需要悬浮记忆（它们不会回来了：id 由 agent 侧生成）。
+    const live = Object.create(null);
+    cards.forEach(function (card) { live[card.id] = true; });
+    Object.keys(hoveredCards).forEach(function (id) {
+      if (!live[id]) delete hoveredCards[id];
     });
 
     // 内容重建后不必手动调滚动偏移：`scroll_to` 每次都会把现有 offset
@@ -279,27 +292,67 @@
 
     // ④ 「复制」：把这条内容的**纯文本**放进剪贴板。
     //
-    // ## 为何需要一个按钮（正文已经能拖选 + Ctrl+C）
+    // ## 为何需要一个入口（正文已经能拖选 + Ctrl+C）
     //
     // 那两条要求用户先知道“这里能选”，而且得先把焦点落到正文上；
     // 而“把这条提醒拷到别处”（贴给同事、存到工单、运行一条命令）
-    // 是常驻面板最高频的动作之一。按钮 == 一眼可见的入口。
+    // 是常驻面板最高频的动作之一。
     //
     // 拷的是**标题 + 正文纯文本**（含链接原地址）：给出去的东西要能独立读懂，
     // 只拷正文时对方看不到“这是什么事”。
     //
-    // 靠右摆（Spacer 隔开）：它是辅助动作，不能与“必须给结果”的主操作抢位置。
+    // ## 形态：悬停卡片才出现，且**只有图标**
+    //
+    // 它是辅助动作，不该与“必须给结果”的主操作（选项/完成了/知道了）抢注意力：
+    // 常驻显示一个「复制」文字按钮，会在每张卡上都多出一块与主操作同权的视觉重量。
+    // 收进悬停态后，静止时用户只看得到要做的事，指针停到卡片上才露出这个旁路入口。
+    // 图标按钮的语义由 `hint` 补足（悬停可见「复制这条内容的文字」）。
+    //
+    // 靠右摆（Spacer 隔开）：即使在悬停态，它也在主操作的对侧。
     {
       const copyId = actId + '-copy';
       $('#' + actId).append('Spacer', { grow: 'true' });
       $('#' + actId).append('Button', {
-        id: copyId, label: '复制', icon: 'copy', variant: 'ghost', scale: 'small',
-        hint: '把这条内容的文字拷到剪贴板（正文也可直接拖选 / Ctrl+C）',
+        id: copyId,
+        // 空 label + icon = 纯图标按钮（`Button::measure` 在无 label 时
+        // 只按图标墨迹 + 内边距算宽，并夹到不小于控件高，于是得到正方形小按钮）。
+        icon: 'copy',
+        variant: 'ghost',
+        scale: 'small',
+        hint: '复制这条内容的文字',
+        visible: hoveredCards[card.id] ? 'true' : 'false',
       });
       $('#' + copyId).on('click', function () {
         copyCard(card);
       });
+      bindCopyOnHover(card, sid, copyId);
     }
+  }
+
+  /**
+   * 让复制按钮跟随**整张卡片**的悬浮态显示/隐藏。
+   *
+   * 悬停判定必须挂在卡片本体上，不能挂在会被它自己移动的东西上：
+   * 复制按钮的出现会让操作行右侧的 `Spacer` 伸缩，若判定挂在那一带，
+   * 指针就会「触发 → 元素移开 → 离开 → 元素回来」地反复（布局反馈环，
+   * 现象是控件闪烁）。卡片本身的位置不随按钮显隐改变，是稳定的悬停锚点。
+   *
+   * 悬浮事件是**按链直达**的（链上每个元素各收一份，DOM 的 mouseenter 语义），
+   * 所以指针落在卡片的任何子元素上，卡片自己都会收到 `hover`。
+   */
+  function bindCopyOnHover(card, sid, copyId) {
+    const cardHandle = $('#' + sid);
+    const copyHandle = $('#' + copyId);
+    if (!cardHandle || !copyHandle) return;
+    cardHandle.on('hover', function () {
+      hoveredCards[card.id] = true;
+      copyHandle.set({ visible: 'true' });
+    });
+    cardHandle.on('unhover', function () {
+      if (!hoveredCards[card.id]) return;
+      hoveredCards[card.id] = false;
+      copyHandle.set({ visible: 'false' });
+    });
   }
 
   /**

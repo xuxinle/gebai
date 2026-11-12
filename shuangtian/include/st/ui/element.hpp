@@ -497,6 +497,22 @@ class Element {
     }
     /// 摘一个浮层（对应用户点击遮罩/Esc 关闭）。返回 false = 无宿主/不在场。
     virtual auto host_remove_overlay(Element* /*overlay*/) -> bool { return false; }
+
+    /// **树结构变了**（挂入/摘下子元素）：命中链可能因此改变，而指针位置没动。
+    ///
+    /// ## 为何必须主动上报、不靠“事后发现”
+    ///
+    /// 元素被摘下的那一刻指针还指着它，而它将要被销毁。宿主若只在下次用到指针态时
+    /// 用“还在不在树上”去猜，**地址复用**会把新元素认成旧元素（`clear_children` +
+    /// 逐项重建正好是这个形态：新按钮常拿到刚释放的地址）——于是“指针仍在树上”
+    /// 成立，悬浮被误判为没变（`update_hover` 的 `hovered_ == target` 早退），
+    /// 新实例永远收不到 HoverIn。实测代价：相期的卡片列表刷新后，“悬停才显示”
+    /// 的控件一直不出来，直到鼠标动一下。
+    ///
+    /// `removed` 区分“只是多了东西”与“有人被拿走了”：前者指针下的命中未必变
+    ///（多一张卡不该让现有悬浮抖动），后者必然要作废旧答案。
+    /// 默认空实现：不关心指针态的宿主（离屏/测试桩）无需理会。
+    virtual void host_structure_changed(bool /*removed*/) {}
   };
 
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }
@@ -511,6 +527,16 @@ class Element {
   ///
   /// 挂载点收敛到 `add_child`/`insert_child`，新元素随挂入自动继承父元素的宿主。
   void adopt_host();
+
+  /// **通知宿主“树结构变了”**（挂入/摘下子元素时自动调，见 `add_child`/`remove_child`）。
+  ///
+  /// 为何能从子元素的挂入/摘下点上报到宿主：元素本身不知道 root，但它知道自己
+  /// 当前挂在哪个容器下，而容器链最终都属于同一个 `UiRoot`——沿 `parent_` 走上去
+  /// 取第一个 `host_` 并转调。`add_child` 先 `adopt_host()` 再上报，所以
+  /// 新挂入的子树里也已经能拿到宿主。
+  ///
+  /// 实现在类尾（`element.cpp`）：它要读 `host_`/`parent_`，而那两个成员在下面。
+  void notify_structure_changed(bool removed);
 
   // —— 样式 ——
   [[nodiscard]] auto style() noexcept -> Style& { return style_; }

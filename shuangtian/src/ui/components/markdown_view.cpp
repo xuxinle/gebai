@@ -1714,6 +1714,14 @@ void MarkdownView::measure(const RenderContext& context, const Constraints& cons
   float height = content_height_;  // 全量内容高度（与视口无关）
   if (style_.has_explicit_height()) height = style_.height;
   if (constraints.max_height < kUnbounded) height = std::min(height, constraints.max_height);
+  // **自己的 `max_height` 必须生效**：它是“本控件最多占多高”的声明（超出自己滚）。
+  // 漏了它时作者写的 `max_height` 会被默默忽略：视图拿到全量内容高度，
+  // `viewport == content` 且 `max_scroll == 0`（**完全不滚**），
+  // 一条长正文就把整张卡片撞到屏外（实测：14 条列表 → 高 938px，与声明的 220 无关）。
+  //
+  // 顺序：先由父约束夹一刀，再由显式样式夹一刀——**显式声明优先于父级建议**
+  //（与全仓其他组件的 `std::clamp(height, style_.min_height, style_.max_height)` 同口径）。
+  height = std::clamp(height, style_.min_height, style_.max_height);
   view_height_ = std::max(height, 0.0f);
   measured_ = math::Size{width, view_height_};
   settle_scroll();

@@ -222,6 +222,16 @@ auto Element::derived_id() const -> ElementId {
   return out;
 }
 
+void Element::notify_structure_changed(bool removed) {
+  // 沿父链找宿主：元素不知道 root 是谁，但容器链最终都属于同一个 `UiRoot`。
+  HostFocus* owner = host_;
+  for (const Element* node = parent_; owner == nullptr && node != nullptr;
+       node = node->parent_) {
+    owner = node->host_;
+  }
+  if (owner != nullptr) owner->host_structure_changed(removed);
+}
+
 auto Element::add_child(std::unique_ptr<Element> child) -> Element* {
   if (child == nullptr) return nullptr;
   child->parent_ = this;
@@ -232,6 +242,7 @@ auto Element::add_child(std::unique_ptr<Element> child) -> Element* {
   // 声明式每帧新建的元素 `host_` 恒为空——“要宿主给我焦点”的组件全部失效。
   raw->adopt_host();
   mark_layout_dirty();
+  notify_structure_changed(false);
   return raw;
 }
 
@@ -244,6 +255,7 @@ auto Element::insert_child(std::size_t index, std::unique_ptr<Element> child) ->
   children_.insert(children_.begin() + static_cast<std::ptrdiff_t>(position), std::move(child));
   raw->adopt_host();   // 同 add_child：新挂入的子元素继承宿主契约
   mark_layout_dirty();
+  notify_structure_changed(false);
   return raw;
 }
 
@@ -254,6 +266,9 @@ auto Element::remove_child(Element* child) -> std::unique_ptr<Element> {
       detached->parent_ = nullptr;
       children_.erase(iterator);
       mark_layout_dirty();
+      // 必须在**返回前**上报：调用方常把返回值当场释放，那之后子树已销毁，
+      // 宿主再想按指针找回“指针现在在哪”就不可能了。
+      notify_structure_changed(true);
       return detached;
     }
   }
@@ -261,9 +276,11 @@ auto Element::remove_child(Element* child) -> std::unique_ptr<Element> {
 }
 
 void Element::clear_children() {
+  if (children_.empty()) return;
   for (auto& child : children_) child->parent_ = nullptr;
   children_.clear();
   mark_layout_dirty();
+  notify_structure_changed(true);
 }
 
 auto Element::hit_test(math::Point point) const noexcept -> bool {
@@ -440,7 +457,13 @@ auto Element::set_property(std::string_view name, std::string_view value) -> boo
     set_text_size(size);
     return true;
   }
-  if (name == "weight") {
+  if (name == "weight" || name == "font_weight") {
+    // `weight` 是读侧名（`read_property` 用），`font_weight` 是写侧名。
+    //
+    // 两个名字必须都落到 `set_text_weight`（而不是直接写 `style_`）：
+    // `style_.font_weight` 是**派生值**，`Text::apply_theme` 每次都用 `weight_` 重写它；
+    // 直接写 `style_` 会在下一次主题回放时被默默重置——实测症状正是
+    // “`set font_weight=bold` 返回 changed、读回却是 regular、字重一点没变”。
     if (!accepts("weight") && !base_accepts("weight")) return false;
     const std::string text(value);
     if (text == "regular") {
@@ -466,7 +489,7 @@ auto Element::property_names() const -> std::vector<std::string_view> {
   // 在基类元素上确实可写（值合法就落位），但它们**不下发给组件**——
   // 因为通用护欄“表里声明的名字，`set` 必须生效（填 `"测试值"`）”会对它们必败。
   // 两者分工：这张表 = “这个元素有什么”；`with_universal` = “能无条件并给所有组件的”。
-  return {"color_override", "tone_override", "color", "font_size", "weight"};
+  return {"color_override", "tone_override", "color", "font_size", "weight", "font_weight"};
 }
 
 auto Element::readonly_property_names() const -> std::vector<std::string_view> {
@@ -1048,12 +1071,56 @@ void Element::arrange(const RenderContext& context, math::Rect rect) {
 
     float cursor_y = content.y;
     for (const Line& line : lines) {
-      float cursor_x = content.x;
+      // 本行的 `grow` / `justify` 处理（`Row` 单行与它同一套语义）。
+      //
+      // 为何必须在换行分支里补：这个分支在 `grow`/`justify` 那两段**之前** `return`，
+      // 于是带 `wrap` 的行里 `grow` 子项拿 0 宽、`justify` 完全不生效。
+      // 实测：卡片操作行为让「复制」靠右而开了 `wrap`，结果 Spacer 宽从 **306 掉到 0**，
+      // 「复制」右缘从 515.6 退到 209.6（距内容右缘 306px）；把 `wrap` 关掉立刻归位。
+      // 分清两个量：`wrap` 只该决定“换不换行”，不该顺带取消主轴对齐。
+      float fixed_width = 0.0f;
+      float grow_weight = 0.0f;
+      std::size_t line_count = 0;
+      for (std::size_t index = line.begin; index < line.end; ++index) {
+        Element* child = visible[index];
+        const auto& child_style = child->style();
+        if (child_style.grow) {
+          grow_weight += 1.0f;
+        } else {
+          fixed_width += child_style.width != kAuto
+                             ? child_style.width
+                             : main_size(style_.direction, child->measured_size());
+        }
+        ++line_count;
+      }
+      const float gaps = line_count > 1 ? style_.gap * static_cast<float>(line_count - 1) : 0.0f;
+      const float leftover = std::max(0.0f, content.width - gaps - fixed_width);
+      const float grow_unit = grow_weight > 0.0f ? leftover / grow_weight : 0.0f;
+      // 没有 `grow` 子项时才由 `justify` 分配剩余空间（与单行分支同一优先级）。
+      float line_offset = 0.0f;
+      float extra_gap = 0.0f;
+      if (grow_weight == 0.0f) {
+        const float slack = std::max(0.0f, content.width - line.width);
+        switch (style_.justify) {
+          case Justify::Center: line_offset = slack * 0.5f; break;
+          case Justify::End: line_offset = slack; break;
+          case Justify::SpaceBetween:
+            extra_gap = line_count > 1 ? slack / static_cast<float>(line_count - 1) : 0.0f;
+            break;
+          case Justify::SpaceAround:
+            extra_gap = slack / static_cast<float>(line_count);
+            line_offset = extra_gap * 0.5f;
+            break;
+          case Justify::Start: break;
+        }
+      }
+      float cursor_x = content.x + line_offset;
       for (std::size_t index = line.begin; index < line.end; ++index) {
         Element* child = visible[index];
         const auto& child_style = child->style();
         float main_extent = main_size(style_.direction, child->measured_size());
         if (child_style.width != kAuto) main_extent = child_style.width;
+        if (child_style.grow) main_extent = grow_unit;
         float cross_extent = cross_size(style_.direction, child->measured_size());
         if (child_style.height != kAuto) cross_extent = child_style.height;
 
@@ -1066,7 +1133,7 @@ void Element::arrange(const RenderContext& context, math::Rect rect) {
         child->arrange(context, math::Rect{cursor_x, cursor_y + cross_offset, main_extent,
                                            cross_extent}
                                       .inset(child_style.margin));
-        cursor_x += main_extent + style_.gap;
+        cursor_x += main_extent + style_.gap + extra_gap;
       }
       cursor_y += line.height + style_.gap;
     }
@@ -1123,7 +1190,12 @@ void Element::arrange(const RenderContext& context, math::Rect rect) {
   int grow_index = 0;
 
   float cursor = row ? content.x : content.y;
-  float used = total_gap + fixed_main;
+  // **从 0 起累加**：`fixed_main` 已在上面的循环里把非 grow 子项的尺寸算过一次，
+  // 这里再从它起算会把它们算两遍——`used` 于是约等于「内容宽 × 2 + gap」，
+  // `justify` 的 `slack = main_available - used` 就永远少算一个内容宽。
+  // 实测症状：`justify="end"` 的一个 80px 按钮停在 x=384 而不是贴右缘 544，
+  // 偏差 80px **恰好等于按钮自身宽**；换成 52px 按钮时偏差也恰好变 52px。
+  float used = total_gap;
   for (auto* child : visible) {
     const auto& child_style = child->style();
     float main_extent = main_size(style_.direction, child->measured_size());
