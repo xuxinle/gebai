@@ -354,8 +354,8 @@ export const channel: ChannelDef = {
       type: "string[]",
       description:
         "以**用户本人**名义授权时要申请的额外权限（并集，基础集自动包含）。" +
-        "填 [\"offline_access\"] 才能拿到 refresh_token——否则 user_access_token 2 小时就过期、需重新授权。" +
-        "⚠ 该权限需先在飞书后台开通，未开通时授权页会报 20027。只对人恪生效；不填 = 不要长期授权",
+        "长期授权（offline_access）由代码探测应用权限清单自动决定，**不需要写在这里**。" +
+        "这里只用于申请额外业务权限（如云文档）。",
     },
   },
 

@@ -200,3 +200,6 @@ export type { AuthorizeOptions, AuthorizeTicket, ExchangeOptions, PendingAuthori
 export { extractCode, extractState, mergeScopes, ERR_OFFLINE_ACCESS_NOT_ENABLED, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, PersonaOAuth } from "./oauth"
 export type { PersonaCredentialStatus, PersonaCredentialsOptions } from "./credentials"
 export { PersonaCredentials, isOfflineAccessRejection } from "./credentials"
+// ── 长期授权探测（应用有没有开通 offline_access）──
+export type { OfflineAccessProbeResult, OfflineAccessSupport } from "./offline-access"
+export { probeOfflineAccess } from "./offline-access"

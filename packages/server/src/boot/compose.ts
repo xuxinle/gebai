@@ -670,11 +670,12 @@ const inputQueue = new SessionInputQueue()
       oauth: new PersonaOAuth(),
       appId: personaAppId,
       appSecret: personaAppSecret,
-      // 申请哪些 scopes：基础集（**已含 `offline_access`**）+ 渠道实例声明的额外权限（并集）。
+      // 申请哪些 scopes：基础集（含 `offline_access`，但**是否真带进链接由探测决定**）
+      // + 渠道实例声明的额外权限（并集）。
       //
-      // 长期/短期授权**不是配置项**：默认就要长期，应用未开通时飞书会回 20027，
-      // 那时自动改发短期链接重试（见 PersonaCredentials.downgradeToShortLived 与
-      // 回调路由的 302）。所以这里不需要任何“看应用开没开”的判断。
+      // 长期/短期授权**不是配置项**：生成链接前先探应用权限清单（`offline-access.ts`），
+      // 确认开了 offline_access 才带它——因为应用没开时飞书会在授权页直接渲染
+      // 20027 错误页、**不回跳 redirect_uri**，“先要长期再降级”根本接不住。
       scopes: personaScopes,
       // 回调走拟人专用端点（与会话级 /api/v1/oauth/feishu/callback 分开）
       redirectUri: callbackUrl,

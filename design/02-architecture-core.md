@@ -1676,14 +1676,38 @@ scope 就是会话键，优先于一切推导规则（推导只看得到单个�
 
 申请的 scopes 只要收发消息相关（`im:message` / `im:message:send_as_bot` /
 `im:message:readonly` / `im:message.group_msg:get_as_user` / `im:chat:readonly` /
-`im:chat.members:read` / `offline_access`）——
+`im:chat.members:read` / 探测通过时才加 `offline_access`）——
 **不申请云文档权限**。少要权限的好处是真实的：授权页勾选项越少，用户越愿意点同意。
 
 `im:message.group_msg:get_as_user` 是**以用户身份读群历史**所需（渠道/拟人源读历史时
 优先走用户身份，能力最大）；机器人身份读群历史需要 `im:message.group_msg`（应用后台开通），
 多数应用未开，故授权时补上用户侧权限。
 
-`offline_access` 必须有：没有它就拿不到 `refresh_token`，2 小时后就要重新授权。
+`offline_access` 决定能不能长期免重新授权：有它才拿得到 `refresh_token`；没有就只能拿
+2 小时短期令牌。它要求应用在飞书后台开通。
+
+**关键实测事实**：应用没开通时，飞书是**在授权页直接把 20027 渲染成一张错误页**
+（「当前应用权限不足」），**不会跳回 `redirect_uri`**。所以“先要长期、被拒再改发短期链接”
+这条路在授权页层面就是断的——客户端根本收不到“被拒”事件，用户只会看到死页。
+
+因此改成**事前探测**（`packages/persona/src/offline-access.ts`）：生成链接前读应用权限清单
+（`GET /open-apis/application/v6/applications/{app_id}` 的 `scopes[]`），凭结果三态决定：
+
+| 探测结论 | 触发条件 | 链接带不带 |
+|---|---|---|
+| `supported` | 清单里有 `offline_access` | 带（争取长期） |
+| `unsupported` | 清单读到了、里面没有 | **不带**（必撞死页） |
+| `unknown` | 读不到清单（99991672，应用未开 `application:application:self_manage`）/ 网络失败 | **不带**（可用优先） |
+
+探测结论缓存带保质期（`supported` 30 分钟、`unsupported`/`unknown` 5 分钟）——后台随时会开通或撤销，
+永久记住会让“刚开通却永远只得短期”没人查得出来。`supported` 时会把手上已有的短期票据
+换成长期票；探测失败**从不抛错**（探测挂掉不该连短期授权都拿不到）。
+
+只凭 `app.allow_refresh_token=true` 判不出来：实测许工二号该字段为 `true`、而 437 项权限里
+没有 `offline_access`，授权页照样 20027。**只认权限清单。**
+
+兑换后仍以**实际拿到的 `refresh_token`** 为准判定长期/短期（飞书可以不理请求）；
+回调里的 20027 降级分支保留作兜底（探测误判时接手），但不再是主路径。
 
 ##### 授权提醒：相期卡片（主）+ 网页横幅（副）
 

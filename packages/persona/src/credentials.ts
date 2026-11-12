@@ -26,8 +26,10 @@
  * `ready` 为 false 时**不是错误**——首次部署天然如此。上层据此提示用户，而不是抛错。
  */
 
-import { OFFLINE_ACCESS_SCOPE, ERR_OFFLINE_ACCESS_NOT_ENABLED } from "./oauth"
+import { OFFLINE_ACCESS_SCOPE, ERR_OFFLINE_ACCESS_NOT_ENABLED, PERSONA_SCOPES } from "./oauth"
 import type { PersonaOAuth, AuthorizeTicket } from "./oauth"
+import { probeOfflineAccess } from "./offline-access"
+import type { OfflineAccessProbeResult } from "./offline-access"
 import type { PersonaTokenStore, PersonaUserToken } from "./user-token"
 
 /** 从空格分隔的 scope 串里剔掉一个（不区分位置、不重复）。 */
@@ -100,6 +102,17 @@ export interface PersonaCredentialsOptions {
    * （现象：配了 offline_access 但授权链接里没有它，且零报错）。
    */
   scopes?: () => string
+  /**
+   * 探测「该应用开没开通 offline_access」（缺省走 `probeOfflineAccess` 真读权限清单）。
+   *
+   * 为什么必须有这一步，而不是“先要长期、被拒再降级”：飞书在应用没开通时
+   * **直接在 accounts.feishu.cn 上渲染 20027 错误页**，不回跳 `redirect_uri`——
+   * 客户端根本没有“被拒”这个事件可接，用户看到的是死页（点刷新也无效）。
+   * 详见 `offline-access.ts` 的文件头。
+   *
+   * 测试注入用：它决定链接带不带 `offline_access`。
+   */
+  probeOfflineAccess?: (appId: string, appSecret: string) => Promise<OfflineAccessProbeResult>
   log?: (level: "info" | "warn", msg: string) => void
   /** 当前时刻（测试注入；缺省 `Date.now`）。授权链接的保质期判定靠它。 */
   now?: () => number
@@ -120,9 +133,23 @@ export interface PersonaCredentialsOptions {
  */
 /** 前置提醒窗口：remainingMs 低于它即标 `expiring`（仍可用但即将失效）。 */
 const EXPIRING_WINDOW_MS = 10 * 60_000
+/** 探测结论的保质期：“支持长期”这类稳定属性判得久一点，少打无谓的接口。 */
+const SUPPORTED_TTL_MS = 30 * 60_000
+/** “不支持/读不到”判得短一点：管理员刚开通权限后要能自动跟上，不用重启。 */
+const UNSUPPORTED_TTL_MS = 5 * 60_000
 
 export class PersonaCredentials {
   private lastTicket: AuthorizeTicket | null = null
+  /**
+   * 本次进程内探测到的长期授权支持（按 appId 缓存，**带保质期**）。
+   *
+   * 为何要保质期：它缓存的是**应用属性**（后台开没开通），而属性会变——
+   * 管理员刚开了「持续访问已授权的数据」、刚撤销了它，都得能自己发现。
+   * 永久记住的后果是：开通后永远只能拿 2 小时短期令牌，且没人知道为什么。
+   */
+  private offlineSupport = new Map<string, { result: OfflineAccessProbeResult; at: number }>()
+  /** 进行中的探测（并发调用共享同一次网络请求）。 */
+  private probes = new Map<string, Promise<OfflineAccessProbeResult>>()
 
   constructor(private readonly opts: PersonaCredentialsOptions) {}
 
@@ -176,6 +203,15 @@ export class PersonaCredentials {
       }
     }
     // 缺或过期：给一个授权链接（同一时刻只保留最近一次，避免链接泛滥）
+    //
+    // 出链接前先等一小会儿探测结果：链接带不带 offline_access 取决于它，
+    // 而这张卡会直接推给用户——发一个进去就是 20027 死页的链接等于白推。
+    // 超时（3s）则先按短期发，探测继续在后台跑（结果入缓存，下次取链接就是对的）。
+    const appId = this.opts.appId()
+    const appSecret = this.opts.appSecret()
+    if (appId && appSecret && !this.knownSupport(appId)) {
+      await this.probeWithin(appId, appSecret, 3000)
+    }
     const ticket = this.ensureTicket()
     return {
       ready: false,
@@ -198,21 +234,107 @@ export class PersonaCredentials {
     if (!appId || !appSecret) {
       throw new Error("未配置飞书应用凭据（AppID/AppSecret）：无法发起授权")
     }
-    const ticket = this.mintTicket(appId, appSecret, false)
+    // 已探测到支持长期 → 直接给长期链接；未知/不支持 → 先给**不带** offline_access 的
+    // （宁可用短期，也不发一个必然撞死页的链接），探测完确认支持后会换成长期票。
+    const known = this.knownSupport(appId)
+    const ticket = this.mintTicket(appId, appSecret, known?.support !== "supported")
     this.lastTicket = ticket
     this.opts.log?.("info", `[persona:credentials] 已生成授权链接（${PENDING_HINT}）`)
+    if (known === undefined) void this.resolveOfflineSupport(appId, appSecret)
     return ticket
   }
 
+  /** 未过期的探测结果；没有/过期返回 undefined（调用方自行重探）。 */
+  private knownSupport(appId: string): OfflineAccessProbeResult | undefined {
+    const entry = this.offlineSupport.get(appId)
+    if (!entry) return undefined
+    const ttl = entry.result.support === "supported" ? SUPPORTED_TTL_MS : UNSUPPORTED_TTL_MS
+    if (this.now() - entry.at >= ttl) {
+      this.offlineSupport.delete(appId)
+      return undefined
+    }
+    return entry.result
+  }
+
   /**
-   * 飞书拒绝了长期授权（20027）→ 改用**不带 offline_access** 的链接重发。
+   * 该应用是否支持长期授权（命中缓存则直接返回）。
    *
-   * 为何需要这个方法：`offline_access` 要应用在飞书后台开通，没开通时授权页
-   * **直接报 20027 把人挡在外面**——连基本授权都完不成。部署方不该为了这个
-   * 去查后台是否开了某个权限，所以由代码自己退一步：先要长期，被拒就要短期。
+   * 探测失败/读不到清单 → `unknown`，按**不支持**处理（发短期链接）：
+   * 拿得到 2 小时令牌，总好过一个必然打不开的授权页。
+   */
+  async resolveOfflineSupport(appId: string, appSecret: string): Promise<OfflineAccessProbeResult> {
+    const cached = this.knownSupport(appId)
+    if (cached) return cached
+    const running = this.probes.get(appId)
+    if (running) return running
+    const probe =
+      this.opts.probeOfflineAccess ?? ((id: string, secret: string) => probeOfflineAccess({ appId: id, appSecret: secret }))
+    const task = probe(appId, appSecret)
+      .catch((err): OfflineAccessProbeResult => ({ support: "unknown", reason: String((err as Error)?.message || err) }))
+      .then((result) => {
+        this.offlineSupport.set(appId, { result, at: this.now() })
+        this.probes.delete(appId)
+        if (result.support === "supported") {
+          this.opts.log?.("info", `[persona:credentials] 应用已开通长期授权（offline_access），授权链接申请长期令牌`)
+        } else {
+          this.opts.log?.(
+            "warn",
+            `[persona:credentials] 按**短期授权**处理（${
+              result.support === "unsupported" ? "应用权限清单里没有 offline_access" : "无法确认应用是否开通"
+            }）：${result.reason ?? ""}\n` +
+              `  短期令牌最长 2 小时，到期前会弹卡提醒重新授权。想免重复授权：飞书开放平台 → 该应用 → 权限管理 → 开通「持续访问已授权的数据」并发布版本。`,
+          )
+        }
+        // 探测前已经发出的短期票据：确认支持长期后换成长期票
+        if (result.support === "supported") this.promoteTicket(appId, appSecret)
+        return result
+      })
+    this.probes.set(appId, task)
+    return task
+  }
+
+  /**
+   * 等探测结果最多 `ms` 毫秒（超时就先按“不确定”走，探测继续在后台跑）。
    *
-   * **不记住“这个应用不支持”**：后台随时可能开通，记住了就永远不会再试。
-   * 每次授权都重新要一遍，只在本次降级。
+   * 为何不等到底：探测是一次外部 HTTP（最坏 8 秒超时），而它在**状态查询**路径上——
+   * 让面板/启动流程为一个“能不能长期授权”的优化等 8 秒是不划算的。
+   * 超时后发出去的短期链接仍然能用，下一次取链接时探测结果已在缓存里。
+   */
+  private async probeWithin(appId: string, appSecret: string, ms: number): Promise<OfflineAccessProbeResult | undefined> {
+    const cached = this.knownSupport(appId)
+    if (cached) return cached
+    if (!this.probes.has(appId)) void this.resolveOfflineSupport(appId, appSecret)
+    const timeout = new Promise<undefined>((resolve) => {
+      const t = setTimeout(() => resolve(undefined), ms)
+      // 定时器不持有事件循环（否则进程退出要被它拖住）
+      ;(t as { unref?: () => void }).unref?.()
+    })
+    return Promise.race([this.resolveOfflineSupport(appId, appSecret), timeout])
+  }
+
+  /**
+   * 把当前短期票据换成**带** offline_access 的版本。
+   *
+   * 只在“手上这张是短期票”时换——已是长期票或没有票据就什么都不做。
+   */
+  private promoteTicket(appId: string, appSecret: string): void {
+    if (this.lastTicket !== null && !this.lastTicket.url.includes(`client_id=${appId}`)) return
+    if (this.lastTicket !== null && this.lastTicket.scopes.includes(OFFLINE_ACCESS_SCOPE)) return
+    try {
+      this.lastTicket = this.mintTicket(appId, appSecret, false)
+    } catch {
+      // 换票失败无关紧要：短期链接本身可用
+    }
+  }
+
+  /**
+   * 飞书仍因为 offline_access 拒了（20027）→ 改用**不带它**的链接重发。
+   *
+   * 主路径是**事前探测**（见 `resolveOfflineSupport`）：探测不到时本来就不带。
+   * 这里是探测误判（如清单读到了旧快照、后台刚改）与旧链接遗留的兜底：
+   * 把“本次进程内这个应用支持长期”改判为不支持，并发一张当下可用的短期链接。
+   *
+   * 只改本次进程内的判断、不落盘：后台随时可能开通，重启后重新探测。
    */
   downgradeToShortLived(): AuthorizeTicket {
     const appId = this.opts.appId()
@@ -220,11 +342,12 @@ export class PersonaCredentials {
     if (!appId || !appSecret) {
       throw new Error("未配置飞书应用凭据（AppID/AppSecret）：无法重新发起授权")
     }
+    this.offlineSupport.set(appId, { result: { support: "unsupported", reason: "授权链上被飞书拒（20027）" }, at: this.now() })
     const ticket = this.mintTicket(appId, appSecret, true)
     this.lastTicket = ticket
     this.opts.log?.(
       "warn",
-      `[persona:credentials] 该应用未开通长期授权（20027），已改为**短期授权**链接；` +
+      `[persona:credentials] 飞书拒绝了长期授权（20027），已改为**短期授权**链接；` +
         `飞书令牌最长 2 小时，到期会提醒你重新授权。想免重复授权：飞书开放平台 → 权限管理 → 开通「持续访问已授权的数据」。`,
     )
     return ticket
@@ -233,7 +356,9 @@ export class PersonaCredentials {
   /** 生成一张授权票据（`withoutOfflineAccess` 时从 scopes 里剔掉它）。 */
   private mintTicket(appId: string, appSecret: string, withoutOfflineAccess: boolean): AuthorizeTicket {
     // scopes 延迟求值：它读的是渠道实例配置（渠道在凭据对象之后才展开）
-    const declared = this.opts.scopes?.()
+    // 未注入时用基础集：否则“剔掉 offline_access”会落空（undefined 剔不了任何东西），
+    // 而 OAuth 层会在缺 scopes 时回落成**带 offline_access 的** PERSONA_SCOPES。
+    const declared = this.opts.scopes?.() ?? PERSONA_SCOPES
     const scopes = withoutOfflineAccess ? stripScope(declared, OFFLINE_ACCESS_SCOPE) : declared
     return this.opts.oauth.startAuthorize({
       appId,
@@ -358,6 +483,7 @@ export class PersonaCredentials {
    */
   private ensureTicket(): AuthorizeTicket | null {
     const appId = this.opts.appId()
+    const appSecret = this.opts.appSecret()
     if (this.lastTicket !== null) {
       // 应用换了就不能再用旧票据：票据里的 client_id / scopes 都是旧应用的，
       // 拿它去授权会得到一个属于另一个应用的令牌（或者 20027）。
@@ -365,9 +491,13 @@ export class PersonaCredentials {
       if (sameApp && !this.ticketExpired(this.lastTicket)) return this.lastTicket
       this.lastTicket = null
     }
-    if (!appId || !this.opts.appSecret()) return null
+    if (!appId || !appSecret) return null
     try {
-      return this.startAuthorize()
+      // 已探测过且确认支持长期 → 直接出长期链接；否则先出短期，探测在后台补上
+      const ticket = this.mintTicket(appId, appSecret, this.knownSupport(appId)?.support !== "supported")
+      this.lastTicket = ticket
+      if (!this.knownSupport(appId)) void this.resolveOfflineSupport(appId, appSecret)
+      return ticket
     } catch {
       return null
     }

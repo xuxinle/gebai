@@ -262,9 +262,10 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
     if (!deps.credentials) return page("拟人模式未启用", "请先配置 GEBAI_PERSONA_<人格ID> 与渠道实例，然后重启歌白。", false)
     const { code = "", state = "", error = "", error_description = "" } = c.req.query()
     if (error) {
-      // 飞书在**跳转授权页前**就把应用没开通 offline_access 挡回来了（20027）。
-      // 部署方不该为了这个去查后台权限，所以这里自己退一步：
-      // 换一张不带 offline_access 的短期授权链接，直接把人送过去（用户几乎无感）。
+      // 飞书在授权链路上拒了 offline_access（20027）。主路径是”事前探测”，
+      // 走到这里说明探测误判（清单旧快照/后台刚改）——仍退一步换短期链接。
+      // （注：应用未开通时飞书多数情况是在 accounts.feishu.cn 直接渲染错误页、
+      //  不回跳这里，所以这条分支只当兜底，不能当主路依赖。）
       if (isOfflineAccessRejection(error) || isOfflineAccessRejection(error_description)) {
         const ticket = deps.credentials.downgradeToShortLived?.()
         if (ticket) {
