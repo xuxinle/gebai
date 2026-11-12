@@ -1115,7 +1115,13 @@ const inputQueue = new SessionInputQueue()
       const sig = JSON.stringify(report)
       if (sig !== lastEnvReport) {
         lastEnvReport = sig
-        for (const id of report.disabled) log.info(`[gebai] 人格 ${id} 不在 GEBAI_PERSONA_ENABLE 名单内，未启用`)
+        for (const id of report.disabled) {
+          log.info(
+            report.enabledByEnv
+              ? `[gebai] 人格 ${id} 不在 GEBAI_PERSONA_ENABLE 名单内，未启用`
+              : `[gebai] 人格 ${id} 未启用（GEBAI_PERSONA_ENABLE 未配置——需**显式启用**：裸 message 订阅与定时任务也靠它把关）`,
+          )
+        }
         for (const [who, chats] of Object.entries(report.narrowed)) {
           log.info(`[gebai] ${who} 已收窄到群：${chats.join("、")}`)
         }
@@ -1143,6 +1149,18 @@ const inputQueue = new SessionInputQueue()
       log.warn(
         `[gebai] 已配置拟人相关变量、但未发现任何人格定义（内置 ${personaDirs.builtin} / 二开 ${personaDirs.custom}）` +
           `——入站事件将无人处理（记日志）。放一个 \`export const persona: PersonaDef\` 文件即可。`,
+      )
+    } else if (foundFiltered.size === 0) {
+      // “有人格定义但一个都没启用”必须单独说：它是**没写启用名单**，不是装配失败，
+      // 也不是“没找到定义”——三种情形要能一眼区分，否则用户只能去翻代码找默认值。
+      //
+      // 为何要警告得这么重：人格的裸 `message` 订阅与定时任务写在**代码定义**里，
+      // 一个不顺眼的默认（自动全部启用）就会让它收全部群消息、按 cron 自己跑。
+      log.warn(
+        `[gebai] 有 ${found.personas.size} 个人格定义，但**一个都没启用**` +
+          `（GEBAI_PERSONA_ENABLE 未配置或名单未命中：${[...found.personas.keys()].join("、")}）` +
+          `——人格的裸 message 订阅与定时任务写在代码定义里，不配 GEBAI_PERSONA_<ID> 也能跑，` +
+          `所以必须显式启用：写 \`GEBAI_PERSONA_ENABLE=<人格 id>\` 才生效。`,
       )
     } else {
       log.info(`[gebai] 拟人模式已启用，${foundFiltered.size} 个人格：${[...foundFiltered.keys()].join("、")}`)

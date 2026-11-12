@@ -265,16 +265,69 @@ describe("applyPersonaEnv：三个配置面 + 分身级覆盖", () => {
   }
   const map = new Map([[DEF.id, DEF]])
 
-  test("启用白名单：名单外的人格不进结果（且记录）", () => {
+  test("启用名单：名单外的人格不进结果（且记录）", () => {
     const { personas, report } = applyPersonaEnv(map, { GEBAI_PERSONA_ENABLE: "other" })
     expect(personas.size).toBe(0)
     expect(report.disabled).toEqual(["xiaoshuang"])
+    expect(report.enabledByEnv).toBe(true)
+  })
+
+  test("**没写启用名单 → 一个都不启用**（放定义文件 ≠ 授权它发言）", () => {
+    const { personas, report } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ chats: ["oc_a"] }]),
+    })
+    console.log(`    实测: personas=${personas.size} disabled=${JSON.stringify(report.disabled)}`)
+    expect(personas.size).toBe(0)
+    expect(report.disabled).toEqual(["xiaoshuang"])
+    expect(report.enabledByEnv).toBe(false)
+    // 不是配置错误——只是还没授权启用（否则面板会红一片而其实只差一行变量）
+    expect(report.errors).toEqual([])
+  })
+
+  test("写了启用名单 → 名单内的人格正常解析", () => {
+    const { personas } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_ENABLE: "xiaoshuang",
+      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ chats: ["oc_a"] }]),
+    })
+    expect(personas.has("xiaoshuang")).toBe(true)
+  })
+
+  /**
+   * 为何启用名单是**唯一开关**：人格的订阅面与定时工作面写在**代码定义**里，
+   * `GEBAI_PERSONA_<ID>` 只表达部署差异。所以一个变量都不写（除启用名单），
+   * 放进去的人格就会带着裸 `message` 订阅、按 cron 自己跑——这正是“必须显式启用”的理由。
+   */
+  test("**只写启用名单**（零分身配置）→ 裸 message 订阅与定时任务照常生效", () => {
+    const bareDef: PersonaDef = {
+      id: "xiaoshuang",
+      name: "小霜",
+      identity: "你是小霜",
+      role: "运维",
+      drivers: [
+        {
+          id: "support",
+          focus: "答疑",
+          subscriptions: ["message", "schedule"],
+          schedules: [{ id: "health", cron: "0 9 * * 1", prompt: "巡检" }],
+        },
+      ],
+    }
+    const { personas } = applyPersonaEnv(new Map([[bareDef.id, bareDef]]), { GEBAI_PERSONA_ENABLE: "xiaoshuang" })
+    const d = personas.get("xiaoshuang")!.drivers![0]!
+    console.log(`    实测: 订阅=${JSON.stringify(d.subscriptions)} 定时=${JSON.stringify((d.schedules ?? []).map((s) => s.id))}`)
+    // 裸 message：群里任何消息都会进它（没有任何群收窄）
+    expect(d.subscriptions).toEqual(["message", "schedule"])
+    // 定时任务：cron 到点自己跑
+    expect(d.schedules?.map((s) => s.id)).toEqual(["health"])
+    // 没有显式输出目标（但不影响它收/跑；回事件来源是另一条通路）
+    expect(d.outputs).toBeUndefined()
   })
 
   test("人格级 chats（无 name 的项）收窄所有分身的消息订阅（前缀 = 实例名）", () => {
     const { personas, report } = applyPersonaEnv(
       map,
       {
+        GEBAI_PERSONA_ENABLE: "xiaoshuang",
         GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ chats: ["oc_a", "oc_b"] }]),
       },
       new Map([["feishu_main", ["oc_a", "oc_b"]]]),
@@ -291,6 +344,7 @@ describe("applyPersonaEnv：三个配置面 + 分身级覆盖", () => {
     const { personas, report } = applyPersonaEnv(
       map,
       {
+        GEBAI_PERSONA_ENABLE: "xiaoshuang",
         GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
           { chats: ["oc_persona"] },
           { name: "support", chats: ["oc_driver"] },
@@ -313,6 +367,7 @@ describe("applyPersonaEnv：三个配置面 + 分身级覆盖", () => {
     const { personas, report } = applyPersonaEnv(
       map,
       {
+        GEBAI_PERSONA_ENABLE: "xiaoshuang",
         GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
           { channels: ["feishu_main"] },
           { name: "alerts", channels: ["feishu_ops"] },
@@ -331,6 +386,7 @@ describe("applyPersonaEnv：三个配置面 + 分身级覆盖", () => {
 
   test("引用不存在的通道实例 → 进 report.errors（不静默丢弃）", () => {
     const { report } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_ENABLE: "xiaoshuang",
       GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ channels: ["feishu_nope"] }]),
     })
     console.log(`    实测: ${report.errors[0]}`)
@@ -338,21 +394,26 @@ describe("applyPersonaEnv：三个配置面 + 分身级覆盖", () => {
   })
 
   test("JSON 写错 → 进 report.errors（不静默当未配置）", () => {
-    const { report } = applyPersonaEnv(map, { GEBAI_PERSONA_XIAOSHUANG: "[bad" })
+    const { report } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_ENABLE: "xiaoshuang",
+      GEBAI_PERSONA_XIAOSHUANG: "[bad",
+    })
     expect(report.errors.some((e) => e.includes("不是合法 JSON"))).toBe(true)
   })
 
   test("数组里拼错键 → 进 report.errors（不知道的键不得静默忽略）", () => {
     const { report } = applyPersonaEnv(map, {
+      GEBAI_PERSONA_ENABLE: "xiaoshuang",
       GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ name: "support", chat: ["oc_a"] }]),
     })
     expect(report.errors.some((e) => e.includes("未知键「chat」"))).toBe(true)
   })
 
-  test("未配置任何变量 → 定义原样返回（零配置不改行为）", () => {
+  test("没写启用名单 → 定义全部禁用（不返回任何人格）", () => {
     const { personas, report } = applyPersonaEnv(map, {})
-    expect(personas.get("xiaoshuang")).toEqual(DEF)
-    expect(report.disabled).toEqual([])
+    expect(personas.size).toBe(0)
+    expect(report.disabled).toEqual(["xiaoshuang"])
+    expect(report.enabledByEnv).toBe(false)
     expect(report.errors).toEqual([])
   })
 })

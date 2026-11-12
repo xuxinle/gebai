@@ -42,6 +42,7 @@
 
 import type { ToolContext } from "../base/types"
 import { parsePersonaEnv } from "@gebai/persona"
+import { isFeishuTarget, instanceTypesOf } from "./persona-outbound"
 
 /** 相期 card_ask 工具的最小执行面（注入形态；compose 从 subAgents.defOf 取）。 */
 export interface AskCardTool {
@@ -80,7 +81,7 @@ export function outboundReviewEnabled(
   return true
 }
 
-/** 会话的人格归属（缓存模块级——store.load 每会话首查后 memo；同 persona-outbound 共用逻辑的本地实现）。 */
+/** 会话的人格归属（store.load 每会话首查）。 */
 async function personaOwnerOf(
   ctx: Pick<ToolContext, "sessionId" | "user" | "sessions">,
 ): Promise<string | null> {
@@ -232,19 +233,22 @@ export function asPlainCodeBlock(text: string): string {
 }
 
 /**
- * 人格出站闸：act 发 feishu 消息（send/reply）前的三重检查。
+ * 人格出站闸：act 发飞书消息（send/reply）前的三重检查。
  *
  * @param ctx 工具上下文
  * @param input { target, verb, args }（act 的原始入参）
  * @param deps 注入面（相期卡工具 / 授权卡推送 / env）
  */
 export async function personaOutboundGate(
-  ctx: Pick<ToolContext, "sessionId" | "user" | "sessions">,
+  ctx: Pick<ToolContext, "sessionId" | "user" | "sessions" | "channels">,
   input: { target: string; verb: string; args: Record<string, unknown> },
   deps: OutboundGateDeps = {},
 ): Promise<OutboundGateResult> {
-  // 只治理 feishu 发送类动词（observe / 其它渠道不走这里）
-  if (!input.target.startsWith("feishu:")) return { allowed: true, review: "not-required" }
+  // 只治理飞书发送类动词（observe / 其它渠道不走这里）。
+  // “是不是飞书”按**渠道类型**判（实例名 → 类型）：实例名是部署方起的
+  // （`feishu_out` / `ops_bot`…），拿前缀字串比对会让治理对改名后的部署整段失效。
+  const types = instanceTypesOf(ctx)
+  if (!isFeishuTarget(input.target, types)) return { allowed: true, review: "not-required" }
   if (input.verb !== "send" && input.verb !== "reply") return { allowed: true, review: "not-required" }
 
   const personaId = await personaOwnerOf(ctx)
@@ -277,7 +281,7 @@ export async function personaOutboundGate(
   // 区分依据：这条要发的内容**是不是在回应刚刚那个群的人**。最直接的信号是
   // `reply_to`（引用回复一个具体消息）——那说明就是在回他，放行。
   // 主动发起（无 reply_to、也不是回本轮事件）才谈得上“抢话”。
-  const chatId = input.target.startsWith("feishu:") ? input.target.slice("feishu:".length).split(/[#=]/)[0]! : ""
+  const chatId = input.target.slice(input.target.indexOf(":") + 1).split(/[#=]/)[0]!
   const explicit = input.args.explicit === true || deps.isExplicitRequest?.(input.args) === true
   // 引用回复 = 在回具体某条消息：这是对话主线，永远不被让位拦。
   const isReply = input.verb === "reply" || String(input.args.reply_to ?? "").trim() !== "" || String(input.args.root ?? "").trim() !== ""

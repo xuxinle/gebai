@@ -70,7 +70,10 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   // ── 人格（GEBAI_PERSONA_<ID>）──
   {
     name: "GEBAI_PERSONA_ENABLE",
-    description: "人格启用白名单（逗号分隔人格 id；非空仅启用名单内）",
+    description:
+      "人格启用名单（逗号分隔人格 id）——**必须显式写**：未配置 = 没有任何人格启用。" +
+      "为何不能默认启用：人格的裸 `message` 订阅与定时任务写在代码定义里，**不配任何 " +
+      "GEBAI_PERSONA_<ID> 也能跑**（进名单就会收全部群消息、cron 到点自己跑）",
   },
   {
     name: "GEBAI_PERSONA_APPROVAL_ASK_TOOLS",

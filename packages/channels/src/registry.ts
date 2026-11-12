@@ -411,6 +411,15 @@ export class ChannelRegistry {
   private instanceSettings = new Map<string, Readonly<Record<string, unknown>>>()
   /** 实例名 → 方向（`in` 只收、`out` 只发/读）。 */
   private instanceDirs = new Map<string, "in" | "out">()
+  /**
+   * 实例名 → **渠道类型名**（`feishu_out` → `feishu`）。
+   *
+   * 为何必须单独存：实例名是部署方起的（`feishu_main` / `ops_bot`…），代码里
+   * 任何「这是不是飞书渠道」的判断都不能靠名字猜——猜错的形态是**按实例名配置的
+   * 治理整段静默失效**（人格出站审核、群白名单、@全体整形全部跳过），而日志里
+   * 一个字都没有。类型名来自定义文件本身，是稳定事实。
+   */
+  private instanceType = new Map<string, string>()
 
   constructor(private readonly opts: ChannelRegistryOptions) {}
 
@@ -445,6 +454,16 @@ export class ChannelRegistry {
   /** 实例名 → 方向（`in`/`out`）。人格据此报“拿输出实例配 listen”这类错。 */
   instanceDirections(): Map<string, "in" | "out"> {
     return new Map(this.instanceDirs)
+  }
+
+  /**
+   * 实例名 → 渠道类型名（`feishu_out` → `feishu`）。
+   *
+   * 供「按渠道类型做治理」的调用方使用（如人格出站治理只针对飞书，而飞书可能是
+   * `feishu` / `feishu_out` / `ops_bot` 任一个实例名）。
+   */
+  instanceTypes(): Map<string, string> {
+    return new Map(this.instanceType)
   }
 
   /** 实例名 → 该实例的原始配置项（只读快照）。 */
@@ -722,6 +741,7 @@ export class ChannelRegistry {
         this.defs.delete(name)
         this.instanceSettings.delete(name)
         this.instanceDirs.delete(name)
+        this.instanceType.delete(name)
       }
     }
     this.expandTypes([...this.types.values()])
@@ -758,6 +778,7 @@ export class ChannelRegistry {
           this.defs.set(inst.name, materializeInstance(typeDef, inst))
           this.instanceSettings.set(inst.name, Object.freeze({ ...inst.settings }))
           this.instanceDirs.set(inst.name, dir)
+          this.instanceType.set(inst.name, typeName)
           made++
         }
       }
@@ -783,6 +804,7 @@ export class ChannelRegistry {
           this.defs.set(typeName, def)
           this.instanceSettings.set(typeName, Object.freeze({}))
           this.instanceDirs.set(typeName, "out")
+          this.instanceType.set(typeName, typeName)
         }
       }
     }

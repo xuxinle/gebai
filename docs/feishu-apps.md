@@ -114,6 +114,12 @@ GEBAI_CHANNEL_IN_FEISHU=[
 
 人格侧引用实例名：`listen:{"channels":["feishu_in_main"]}`、`send:{"channels":["feishu_out"]}`。
 
+> 实例名是**你自己起的**（`feishu_out` / `ops_bot` / `main_bot` 都行）：人格出站治理（禁机器人回退、
+> 出站审核卡、群白名单、@全体整形）按**渠道类型**判定（`ChannelRegistry.instanceTypes()`
+> 给出实例名→类型名），不认名字字串。改名只需同步改人格里的 `listen.channels` / `send.channels`。
+>
+> 别忘了 `GEBAI_PERSONA_ENABLE`：**没写就没有任何人格干活**（放定义文件不等于授权它发言）。
+
 ## 当前这台机器的状态（2026-11 实测，已修好）
 
 | 角色 | 应用 | 状态 |

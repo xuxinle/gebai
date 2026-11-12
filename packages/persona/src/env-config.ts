@@ -18,7 +18,7 @@
  *
  * | 变量 | 语义 |
  * |---|---|
- * | `GEBAI_PERSONA_ENABLE` | 人格启用白名单（逗号分隔 id；非空仅启用名单内） |
+ * | `GEBAI_PERSONA_ENABLE` | **人格启用名单（必须显式写）**——未配置 = 没有任何人格启用 |
  * | `GEBAI_PERSONA_<ID>` | **该人格的全部分身配置（JSON 数组，每项一个分身）**——见 `persona-config.ts` |
  * | `GEBAI_PERSONA_SESSION_ROUTING` | 兜底规则：`driver`（缺省，一个上下文）/ `chat`（群×话题） |
  * | `GEBAI_PERSONA_APPROVAL` | 审批姿态：`ask`（缺省，相期弹窗问人）/ `auto` / `deny` |
@@ -114,8 +114,10 @@ export function parseOutputTargets(raw: string | undefined): { targets: OutputTa
 
 /** 收窄结果（诊断用：部署方要能看见「哪些群真的生效了」）。 */
 export interface PersonaEnvReport {
-  /** 被启用白名单排除的人格。 */
+  /** 未被启用的人格（名单外 + 名单为空时的全部）。 */
   disabled: string[]
+  /** 启用名单是否已配置（false = 一个都没启用，面板/日志据此把“未启用”与“装配失败”区分开）。 */
+  enabledByEnv: boolean
   /** 收窄了入站群的人格/分身（`personaId` 或 `personaId/driverId` → 群列表）。 */
   narrowed: Record<string, string[]>
   /** 输出目标（`personaId` 或 `personaId/driverId` → 条数）。 */
@@ -193,9 +195,24 @@ function channelOfChat(
  * 把环境变量应用到人格定义上（纯函数，返回新 Map）。
  *
  * 三件事，各自独立，失败互不影响：
- * 1. 启用白名单过滤（`GEBAI_PERSONA_ENABLE`）
+ * 1. 启用名单过滤（`GEBAI_PERSONA_ENABLE`，**空名单 = 一个都不启用**）
  * 2. 入站收窄 + 输出目标（`GEBAI_PERSONA_<ID>` 数组里的 `chats` / `channels`）
  * 3. 会话映射（同一个数组里的 `sessionMap`）
+ *
+ * ## 为何空名单 = 全不启用（而不是“全部启用”）
+ *
+ * **数据面的事实：不配 `GEBAI_PERSONA_<ID>` 也能跑。**
+ * 人格的订阅面与定时工作面都写在代码定义里（`drivers[].subscriptions: ["message","schedule"]`
+ * 与 `drivers[].schedules`），而 `GEBAI_PERSONA_<ID>` 只表达**部署差异**（哪个群、发到哪、
+ * 怎么分会话）。所以只要目录里有人格定义、它又进了启用名单，就足以让它
+ * 收下**全部 message 事件**并在 cron 到点时自己跑一轮——一个字的人格配置都不需要写。
+ *
+ * 于是“发现即启用”的失败方向是：把定义文件放进目录（或升级代码带进来一个内置人格）
+ * 就意味着它开始刷群、跑定时、执行工具，而且没有任何开关可查（“开关”是空集）。
+ * 反过来“没写名单就不干活”的代价是可读的：启动日志明确列出被禁用的人格与
+ * 需要写哪个变量，加上一行 `GEBAI_PERSONA_ENABLE=<id>` 就生效。
+ *
+ * 所以缺省取安全的那一侧：**能力存在 ≠ 被授权使用**。
  *
  * `channelChats` 是通道实例名 → 该实例允许的群（由宿主从已装配的渠道注册表取）。
  * 宽窄引用必须拿它才能解析——否则“引用了不存在的实例”只能等到发消息那一刻才报错。
@@ -208,6 +225,7 @@ export function applyPersonaEnv(
 ): { personas: Map<string, PersonaDef>; report: PersonaEnvReport } {
   const report: PersonaEnvReport = {
     disabled: [],
+    enabledByEnv: false,
     narrowed: {},
     outputs: {},
     sessionMaps: {},
@@ -217,10 +235,21 @@ export function applyPersonaEnv(
     errors: [],
   }
   const enable = new Set(listOf(env.GEBAI_PERSONA_ENABLE))
+  report.enabledByEnv = enable.size > 0
   const out = new Map<string, PersonaDef>()
 
+  // 名单为空：一个人格都不启用。
+  //
+  // 这里**故意不报 errors**（那不是配置错误，是“还没配”）：启动日志那边用
+  // `report.enabledByEnv=false` 与 `disabled` 一起打一条带操作指引的提示，
+  // 而不是把它当成“配错了”——后者会让面板红一片，而实际只差一行变量。
+  if (!enable.size) {
+    for (const id of personas.keys()) report.disabled.push(id)
+    return { personas: out, report }
+  }
+
   for (const [id, def] of personas) {
-    if (enable.size && !enable.has(id)) {
+    if (!enable.has(id)) {
       report.disabled.push(id)
       continue
     }

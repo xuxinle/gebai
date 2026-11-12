@@ -1,27 +1,26 @@
 /**
- * 「有配置就启用」：拟人与渠道都不再有独立开关。
+ * 「人格必须显式启用」：`GEBAI_PERSONA_ENABLE` 未配置 = 一个都不启用。
  *
  * 这套用例咬住的是**判定的边界**，因为这里判错的两个方向代价都很高：
- * - 该启用没启用 → 配了却不干活（而界面上看不到“开关”这个东西，更难查）
- * - 不该启用却启用 → 只改了一个行为参数，就凭空开起人来（会真的以用户名义发言）
+ * - 不该启用却启用 → 放个定义文件就凭空开起人来（会真的以用户名义发言）
+ * - 该装配却没装配 → 面板/日志分不清“没定义”“没启用”“装配坏了”
  *
- * 所以重点验证：**公共行为参数不算配置**。
+ * 所以重点验证：**装配（建组件、开 REST 面）与启用（谁干活）是两件事**。
  */
 import { describe, expect, test } from "bun:test"
 import { hasPersonaConfig } from "./config"
 
-describe("hasPersonaConfig：配了就启用", () => {
+describe("hasPersonaConfig：要不要装配拟人运行时", () => {
   test("没有任何配置 → false", () => {
     expect(hasPersonaConfig({})).toBe(false)
   })
 
-  test("有某个人格的配置 → true（这就是“启用”）", () => {
+  test("有某个人格的配置 → true（装出运行时，但谁干活另由 ENABLE 定）", () => {
     expect(hasPersonaConfig({ GEBAI_PERSONA_XIAOSHUANG: '[{"name":"support"}]' })).toBe(true)
   })
 
-  test("有一份空数组的人格配置 → 仍算配了（明确写了 GEBAI_PERSONA_<ID>）", () => {
-    // 这是刻意选择：写了空数组的人是在说“这个人格我配了但没加分身”，
-    // 不该被当成“没配置”——否则面板会一直说未启用。
+  test("人格定义文件放进去不等于启用（hasPersonaConfig 只回答“装不装运行时”）", () => {
+    // 真正的“谁在干活”由 applyPersonaEnv 判（空名单 = 全禁用），见 env-config.test.ts
     expect(hasPersonaConfig({ GEBAI_PERSONA_XIAOSHUANG: "[]" })).toBe(true)
   })
 

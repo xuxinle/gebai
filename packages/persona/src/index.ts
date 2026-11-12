@@ -185,7 +185,7 @@ export {
 
 // ── 声明式部署配置（`GEBAI_PERSONA_<ID>` JSON 数组，每项一个分身）──
 export type { DriverEnvItem, ParsedPersonaEnv } from "./persona-config"
-export { mergeDriverEnv, outputsFromChannels, parsePersonaEnv } from "./persona-config"
+export { dirRefsOf, mergeDriverEnv, outputsFromChannels, parsePersonaEnv } from "./persona-config"
 
 // ── 人格定义扩展规范（与事件源、子 Agent、渠道同款「丢文件即注册」）──
 export type { PersonaCatalogOptions, PersonaCatalogDiff } from "./catalog"

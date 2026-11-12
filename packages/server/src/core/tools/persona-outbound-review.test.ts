@@ -1,11 +1,38 @@
 /**
  * 人格出站治理用例（core/tools/persona-outbound-review.ts）。
  *
- * 判定链：非 feishu / 非 send-reply 放行 → 普通会话放行 → 人格 as_user=false 拒绝 →
+ * 判定链：非飞书目标 / 非 send-reply 放行 → 普通会话放行 → 人格 as_user=false 拒绝 →
  * 审核关（JSON 里 reviewOutbound=false）放行 → 相期卡缺失拒绝 → 卡未送达拒绝 → 超时拒绝 → 驳回拒绝 → 批准放行。
+ *
+ * ## 为何要清掉进程里的 GEBAI_PERSONA_<ID>
+ *
+ * `gate` 在调用方未注入 `deps.env` 时现读 `process.env`，而 bun 会自动加载仓库根的
+ * `.env`——那是**真实部署配置**（可能写着 `reviewOutbound:false`）。不清掉的话，
+ * 这些用例的结果取决于本机 .env 内容：在配了人格的机器上全部变成“审核已关”。
+ * 测试必须只看自己写的输入。
  */
-import { describe, expect, test, beforeEach } from "bun:test"
-import { outboundReviewEnabled, personaOutboundGate, isAuthFailure, notifyAuthNeeded, ensureXiangqiReady, _resetXiangqiRecoveryForTest, asPlainCodeBlock } from "./persona-outbound-review"
+import { describe, expect, test, beforeEach, afterAll } from "bun:test"
+import {
+  outboundReviewEnabled,
+  personaOutboundGate,
+  isAuthFailure,
+  notifyAuthNeeded,
+  ensureXiangqiReady,
+  _resetXiangqiRecoveryForTest,
+  asPlainCodeBlock,
+} from "./persona-outbound-review"
+
+/** 宿主的 `GEBAI_PERSONA_*`（来自 `.env`）：用例期间摘掉，事后原样还回。 */
+const savedPersonaEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([k]) => k.startsWith("GEBAI_PERSONA_")),
+) as Record<string, string>
+const isolatePersonaEnv = (): void => {
+  for (const k of Object.keys(process.env)) if (k.startsWith("GEBAI_PERSONA_")) delete process.env[k]
+}
+beforeEach(isolatePersonaEnv)
+afterAll(() => {
+  Object.assign(process.env, savedPersonaEnv)
+})
 
 function ctxWithPersona(personaId: string | null, sessionId = "s1") {
   return {
@@ -78,8 +105,33 @@ describe("outboundReviewEnabled：从 GEBAI_PERSONA_<ID> 数组里读", () => {
 })
 
 describe("personaOutboundGate 判定链", () => {
-  test("非 feishu 目标放行（jira 等）", async () => {
+  test("非飞书目标放行（jira 等）", async () => {
     const r = await personaOutboundGate(ctxWithPersona("xiaoshuang") as never, { target: "jira:PROJ", verb: "submit", args: {} })
+    expect(r.allowed).toBe(true)
+  })
+
+  test("**实例名不是 feishu 也要治理**（feishu_out / ops_bot 都算飞书）", async () => {
+    const types = new Map([
+      ["feishu_out", "feishu"],
+      ["ops_bot", "feishu"],
+    ])
+    for (const inst of ["feishu_out", "ops_bot"]) {
+      const r = await personaOutboundGate(
+        { ...ctxWithPersona("xiaoshuang"), channels: { instanceTypes: () => types } } as never,
+        { target: `${inst}:oc_x`, verb: "send", args: { as_user: false, text: "hi" } },
+      )
+      console.log(`    实测 ${inst}: ${JSON.stringify(r)}`)
+      expect(r.allowed).toBe(false)
+      expect(r.reason).toContain("机器人身份")
+    }
+  })
+
+  test("按类型判定不会扩大化：jira 实例仍不被飞书治理拦", async () => {
+    const types = new Map([["jira_main", "jira"]])
+    const r = await personaOutboundGate(
+      { ...ctxWithPersona("xiaoshuang"), channels: { instanceTypes: () => types } } as never,
+      { target: "jira_main:PROJ", verb: "submit", args: { as_user: false } },
+    )
     expect(r.allowed).toBe(true)
   })
 

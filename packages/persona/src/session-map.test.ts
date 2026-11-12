@@ -261,7 +261,8 @@ describe("部署配置：GEBAI_PERSONA_<ID> 数组里的 sessionMap", () => {
 
   test("人格级（无 name 项）生效到所有分身", () => {
     const { personas, report } = applyPersonaEnv(map, {
-      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ sessionMap: "per_thread" }]),
+      GEBAI_PERSONA_ENABLE: "xiaoshuang",
+    GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ sessionMap: "per_thread" }]),
     })
     const d = personas.get("xiaoshuang")!
     expect(d.drivers![0]!.sessionMap).toEqual(SESSION_MAP_PRESETS.per_thread!)
@@ -271,10 +272,11 @@ describe("部署配置：GEBAI_PERSONA_<ID> 数组里的 sessionMap", () => {
 
   test("分身级覆盖人格级（更具体的声明胜出）", () => {
     const { personas } = applyPersonaEnv(map, {
-      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
-        { sessionMap: "per_chat" },
-        { name: "support", sessionMap: "per_thread" },
-      ]),
+          GEBAI_PERSONA_ENABLE: "xiaoshuang",
+    GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+      { sessionMap: "per_chat" },
+      { name: "support", sessionMap: "per_thread" },
+    ]),
     })
     const d = personas.get("xiaoshuang")!
     expect(d.drivers![0]!.sessionMap).toEqual(SESSION_MAP_PRESETS.per_thread!)
@@ -283,9 +285,10 @@ describe("部署配置：GEBAI_PERSONA_<ID> 数组里的 sessionMap", () => {
 
   test("DSL 写法可用", () => {
     const { personas } = applyPersonaEnv(map, {
-      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
-        { sessionMap: "feishu:message={chat}__t_{thread};message={chat}" },
-      ]),
+          GEBAI_PERSONA_ENABLE: "xiaoshuang",
+    GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
+      { sessionMap: "feishu:message={chat}__t_{thread};message={chat}" },
+    ]),
     })
     expect(personas.get("xiaoshuang")!.drivers![0]!.sessionMap).toHaveLength(2)
   })
@@ -295,15 +298,17 @@ describe("部署配置：GEBAI_PERSONA_<ID> 数组里的 sessionMap", () => {
       ["xiaoshuang", { ...DEF, drivers: [{ ...DEF.drivers![0]!, sessionMap: SESSION_MAP_PRESETS.single }] }],
     ])
     const { personas, report } = applyPersonaEnv(withDef, {
-      GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ sessionMap: "message={thred}" }]),
+      GEBAI_PERSONA_ENABLE: "xiaoshuang",
+    GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ sessionMap: "message={thred}" }]),
     })
     expect(report.errors.some((e) => e.includes("未知占位符"))).toBe(true)
     expect(personas.get("xiaoshuang")!.drivers![0]!.sessionMap).toEqual(SESSION_MAP_PRESETS.single!)
   })
 
-  test("未配置 → 不动定义（零配置不改行为）", () => {
+  test("未配置任何变量 → 人格全部禁用（不返回定义）", () => {
     const { personas, report } = applyPersonaEnv(map, {})
-    expect(personas.get("xiaoshuang")!.drivers![0]!.sessionMap).toBeUndefined()
+    expect(personas.size).toBe(0)
+    expect(report.disabled).toEqual(["xiaoshuang"])
     expect(report.sessionMaps).toEqual({})
   })
 })

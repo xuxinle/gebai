@@ -32,7 +32,7 @@ import { ActionExecutor, ChannelRegistry } from "@gebai/channels"
 import type { ActOutcome, ObserveOutcome } from "@gebai/channels"
 import type { Tool } from "../base/types"
 import { schema, type GlobalToolEntry } from "./shared"
-import { personaOutboundBlock, personaIdOfSession } from "./persona-outbound"
+import { personaOutboundBlock, personaIdOfSession, channelTypeOf, instanceTypesOf } from "./persona-outbound"
 import { personaOutboundGate, isAuthFailure, notifyAuthNeeded } from "./persona-outbound-review"
 import type { OutboundGateDeps } from "./persona-outbound-review"
 import { outboundModeOf, polishOutbound, shapeOutbound, signatureOf, type PolishModel } from "./persona-outbound-shape"
@@ -331,12 +331,17 @@ export const globalTools: GlobalToolEntry[] = [
  * 失败方向：加工本身抛错时**发原文**（不能因为锦上添花的功能把一条正常回复卡死）。
  */
 async function shapeForPersona(
-  ctx: { sessionId?: string; user?: string; sessions?: unknown },
+  ctx: { sessionId?: string; user?: string; sessions?: unknown; channels?: ChannelRegistry },
   target: string,
   verb: string,
   payload: Record<string, unknown>,
 ): Promise<{ payload: Record<string, unknown>; notes: string[] }> {
-  if (!target.startsWith("feishu:")) return { payload, notes: [] }
+  const idx = target.indexOf(":")
+  if (idx < 0) return { payload, notes: [] }
+  // 按**渠道类型**取名（不是实例名）：长度上限与署名都是按类型定义的，
+  // 而实例名是部署方起的（`feishu_out` / `ops_bot`）——拿实例名去查表只会查不到。
+  const typeName = channelTypeOf(target.slice(0, idx), instanceTypesOf(ctx as { channels?: ChannelRegistry }))
+  if (!typeName) return { payload, notes: [] }
   if (verb !== "send" && verb !== "reply") return { payload, notes: [] }
   const text = typeof payload.text === "string" ? payload.text : ""
   if (!text.trim()) return { payload, notes: [] }
@@ -346,7 +351,7 @@ async function shapeForPersona(
     const mode = outboundModeOf(personaId)
     if (mode === "raw") return { payload, notes: [] }
 
-    const shaped = shapeOutbound({ text, channel: "feishu", mode, signature: signatureOf(personaId) })
+    const shaped = shapeOutbound({ text, channel: typeName, mode, signature: signatureOf(personaId) })
     const notes = [...shaped.changes]
     let outText = shaped.text
 

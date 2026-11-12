@@ -31,7 +31,10 @@ const CHANNEL_CHATS = new Map<string, readonly string[]>([
   ["feishu_ops", ["oc_ops"]],
 ])
 
-const envOf = (items: unknown[]) => ({ GEBAI_PERSONA_XIAOSHUANG: JSON.stringify(items) })
+const envOf = (items: unknown[]) => ({
+  GEBAI_PERSONA_ENABLE: "xiaoshuang",
+  GEBAI_PERSONA_XIAOSHUANG: JSON.stringify(items),
+})
 
 describe("收窄前缀 = 实例名（不是类型名）", () => {
   test("chats 里的群 → 订阅前缀是该群所属实例名", () => {

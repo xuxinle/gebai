@@ -122,15 +122,17 @@ export interface ServerConfig {
   /** 飞书机器人对话桥接（GEBAI_FEISHU_BOT_ENABLED=true 时启用长连接事件订阅）。 */
   feishuBotEnabled: boolean
   /**
-   * 拟人模式是否装配：**有配置就启用，没配置就不启用**（没有单独开关）。
+   * 拟人运行时是否装配（建组件 / 开 REST 面），**不**等于“有人格在干活”。
    *
-   * 判定依据（任一非空即启用）：
-   * - `GEBAI_PERSONA_ENABLE`（人格启用白名单）
+   * 判定依据（任一非空）：
+   * - `GEBAI_PERSONA_ENABLE`（人格启用名单）
    * - 任意 `GEBAI_PERSONA_<ID>`（某个人格的分身配置）
    *
-   * 为何不再提供 `GEBAI_PERSONA=true` 总开关：开关与配置两处都能说话时，“为什么它不回话”
-   * 多了一种成因（开关没开），而那个成因完全不可见（开关写在 .env 里、界面上无处确认）。
-   * 现在“配了就启用”使配置本身成为唯一事实来源：想关就把配置注释掉。
+   * 而“哪几个人格真的干活”只看 `GEBAI_PERSONA_ENABLE`：名单为空 = 一个都不启用。
+   * 为何必须显式：人格的订阅面与定时工作面写在**代码定义**里，所以**不配任何
+   * `GEBAI_PERSONA_<ID>` 也能跑**——只要它在启用名单里，就会收全部 `message` 事件、
+   * 按 cron 自己跑。若“发现即启用”，放个定义文件进目录（或升级代码带进来一个内置人格）
+   * 就等于授权它刷群。
    */
   personaEnabled: boolean
   /** 飞书机器人行为配置（GEBAI_FEISHU_BOT_*）：工具调用过程推送（滚动状态消息）。 */
@@ -204,9 +206,18 @@ function bool(name: string, fallback = false): boolean {
 }
 
 /**
- * 拟人模式是否装配：**有配置就启用**（没有 `GEBAI_PERSONA` 这样的总开关）。
+ * 拟人运行时是否装配（**决定要不要建这一套组件**，不决定谁在干活）。
  *
- * 判据：存在任意一个 `GEBAI_PERSONA_<ID>`（全大写的人格配置）或 `GEBAI_PERSONA_ENABLE`。
+ * 判据（任一非空）：`GEBAI_PERSONA_ENABLE`（启用名单）或任意 `GEBAI_PERSONA_<ID>`（分身配置）。
+ *
+ * 两个问题必须分开：“要不要装出这套运行时” vs “哪几个人格真的干活”。
+ * 后者由 `GEBAI_PERSONA_ENABLE` **显式**决定（`applyPersonaEnv` 里空名单 = 一个都不启用）：
+ * 人格的订阅面与定时工作面写在**代码定义**里，所以**零个 `GEBAI_PERSONA_<ID>` 也能跑**——
+ * 在名单里就会收全部 `message` 事件、按 cron 自己跑。“有定义”绝不能等于“它在干活”。
+ *
+ * 为何不把装配本身也压成“必须写 ENABLE”：装配好了才能在面板上把
+ * “有人格定义、但一个都没启用”这件事显示出来（否则用户只看到 404 与“未启用”，
+ * 分不清“没定义”“没启用”“装配坏了”三种情形）。
  *
  * 为何要把“公共变量”排除干净：`GEBAI_PERSONA_APPROVAL_ASK_TOOLS`、`GEBAI_PERSONA_YIELD_SECONDS`
  * 这类是**全局兑底的行为参数**，不是“我要跑人格”。若把它们也算作配置，部署方改一个审批名单

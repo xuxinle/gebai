@@ -29,7 +29,10 @@ const DEF: PersonaDef = {
 }
 
 const run = (items: unknown[]) =>
-  applyPersonaEnv(new Map([[DEF.id, DEF]]), { GEBAI_PERSONA_XIAOSHUANG: JSON.stringify(items) })
+  applyPersonaEnv(new Map([[DEF.id, DEF]]), {
+    GEBAI_PERSONA_ENABLE: "xiaoshuang",
+    GEBAI_PERSONA_XIAOSHUANG: JSON.stringify(items),
+  })
 
 const schedsOf = (personas: Map<string, PersonaDef>) => personas.get("xiaoshuang")!.drivers![0]!.schedules!
 
@@ -88,7 +91,7 @@ describe("定时表达式可被环境变量覆盖", () => {
     }
     const { report } = applyPersonaEnv(
       new Map([[noSched.id, noSched]]),
-      { GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ name: "report", schedules: { morning: { cron: "0 8 * * *" } } }]) },
+      { GEBAI_PERSONA_ENABLE: "xiaoshuang", GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ name: "report", schedules: { morning: { cron: "0 8 * * *" } } }]) },
     )
     console.log(`    实测: ${JSON.stringify(report.errors)}`)
     expect(report.errors.some((e) => e.includes("覆盖无处可施"))).toBe(true)
@@ -121,6 +124,7 @@ describe("schedules 的结构校验", () => {
     const { personas } = applyPersonaEnv(
       new Map([[DEF.id, DEF]]),
       {
+        GEBAI_PERSONA_ENABLE: "xiaoshuang",
         GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
           { schedules: { morning: { cron: "0 7 * * *" } } }, // 不带 name = 人格级默认
           { name: "report" },

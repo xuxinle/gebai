@@ -33,7 +33,7 @@ const DIRS = new Map<string, "in" | "out">([
 const run = (items: unknown[], dirs: ReadonlyMap<string, "in" | "out"> = DIRS) =>
   applyPersonaEnv(
     new Map([[DEF.id, DEF]]),
-    { GEBAI_PERSONA_XIAOSHUANG: JSON.stringify(items) },
+    { GEBAI_PERSONA_ENABLE: "xiaoshuang", GEBAI_PERSONA_XIAOSHUANG: JSON.stringify(items) },
     CHATS,
     dirs,
   )
@@ -45,6 +45,7 @@ describe("listen / send 解耦", () => {
     const { personas } = applyPersonaEnv(
       new Map([[DEF.id, DEF]]),
       {
+        GEBAI_PERSONA_ENABLE: "xiaoshuang",
         GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
           { listen: { channels: ["feishu"], chats: ["oc_a"] }, send: { channels: ["feishu"], chats: ["oc_b"] } },
         ]),
@@ -107,7 +108,7 @@ describe("listen / send 解耦", () => {
     const same = new Map([["feishu", ["oc_a"]]])
     const { personas, report } = applyPersonaEnv(
       new Map([[DEF.id, DEF]]),
-      { GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ channels: ["feishu"], chats: ["oc_a"] }]) },
+      { GEBAI_PERSONA_ENABLE: "xiaoshuang", GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([{ channels: ["feishu"], chats: ["oc_a"] }]) },
       same,
       new Map(),
     )
@@ -123,6 +124,7 @@ describe("listen / send 解耦", () => {
     const { personas } = applyPersonaEnv(
       new Map([[DEF.id, DEF]]),
       {
+        GEBAI_PERSONA_ENABLE: "xiaoshuang",
         GEBAI_PERSONA_XIAOSHUANG: JSON.stringify([
           { channels: ["feishu"], chats: ["oc_a"], send: { chats: ["oc_b"] } },
         ]),

@@ -1314,15 +1314,40 @@ refs 有 threadId 时必传 root。调度器队列本就按 sessionId 分桶，�
 
 | 变量 | 语义 |
 |---|---|
-| `GEBAI_PERSONA_ENABLE` | 人格启用白名单（逗号分隔 id；非空仅启用名单内）——与 `GEBAI_EVENT_SOURCES_ENABLE` 同口径 |
-| `GEBAI_PERSONA_<ID>_CHATS` | 该人格只监听这些群（逗号分隔 chat_id；未设 = 不限群）。**替换**（不是追加）——设置后该人格的 feishu 消息订阅（`feishu` / `feishu:message` / `message` / `*` 四类能匹配 feishu 消息的）全部换成逐群三段式订阅；其余订阅原样保留 |
+| `GEBAI_PERSONA_ENABLE` | **人格启用名单（必须显式写）**：逗号分隔人格 id；**未配置 = 一个都不启用**。为何必须显式：人格的订阅面（`drivers[].subscriptions`）与定时工作面（`drivers[].schedules`）写在**代码定义**里，`GEBAI_PERSONA_<ID>` 只表达部署差异——所以**一个分身配置都不写，人格也能跑**（裸 `message` 订阅收全部群消息、cron 到点跑）。若“发现即启用”，把定义文件放进目录（或升级带进来一个内置人格）就等于授权它刷群 |
+| `GEBAI_PERSONA_<ID>` | 该人格的**部署差异**（JSON 数组，每项一个分身）：`listen` / `send` / `chats` / `sessionMap` / `outbound` / `signature` / `reviewOutbound` / `askTools` / `schedules`（只覆盖已有声明的 cron）/ `replyToOwner` / `yieldSeconds` / `humanInterrupt` / `sessionRouting`。**不写也能跑**（订阅与定时声明在代码定义里），写了才收窄/改行为 |
+| `GEBAI_PERSONA_<ID>_CHATS` | （旧形态）该人格只监听这些群；现写法是 `GEBAI_PERSONA_<ID>` 数组项里的 `listen.chats` |
+
+**未启用的人格零行为：闸门在装配之前**。`applyPersonaEnv` 的输出直接就是 `PersonaCatalog` 的内容，
+所以“名单外”= “不在 catalog 里”，而人格的**四个行为出口全部同源于 catalog**（每个都有用例：
+`packages/persona/src/disabled-persona.test.ts`）：
+
+| 出口 | 数据来源 | 未启用时 |
+|---|---|---|
+| 收事件 | `catalog.subscribers(event)` | 广播不选它；裸 `message` 订阅也收不到 |
+| 跑定时 | `collectScheduleDeclarations(catalog.all())` → `schedule` 源的声明 | 它的 `drivers[].schedules` 不进源，cron 到点也不会被唤醒 |
+| 面板/诊断 | `catalog.ids()` / `all()` / `get()` | 不在状态快照与定时控制面里（不会显示成“在用”） |
+| 定向投递 | 事件带 `personaId` 时仍要 `catalog` 命中 | 叫不醒：`subscribers` 返回空（定向不等于绕过闸门） |
+
+热加载走同一道闸：目录重扫后同样过 `applyPersonaEnv` 再 `catalog.replace()`（`compose.ts:1213`），
+所以**中途把某人格从名单里去掉也会立即停手**，不需要重启。
+
+> 一个已知的观察面例外：`{GEBAI_HOME}/data/persona/drivers.json` 里持久化的**动态 driver** 会被
+> `DriverRegistry` 无条件加载（不按启用名单过滤）。它们不产生任何自主行为（收事件与定时都经 catalog），
+> 只影响 `driver_list` 的列表内容；人格重新启用后会恢复这些工位——那正是期望行为。
 
 **出站同样按人格收窄（入站出站对称）**：`act` / `observe` 执行时反查会话归属
-（`SessionData.persona`，经 `ctx.sessions.store.load`），若人格配置了 `GEBAI_PERSONA_<ID>_CHATS`，
-飞书群目标必须在该名单内，否则**直接拒绝**（不进审批，与渠道白名单同语义）。
+（`SessionData.persona`，经 `ctx.sessions.store.load`），若人格在 `GEBAI_PERSONA_<ID>` 里配了群
+（`listen.chats`、`send.chats` 与旧扁平 `chats` 三者**并集**），飞书群目标必须在该名单内，否则**直接拒绝**
+（不进审批，与渠道白名单同语义）。
 实现：`core/tools/persona-outbound.ts`，在 `core/tools/channels.ts` 的 act/observe/requiresApproval 接入。
-非人格会话不过滤（沿用渠道全局白名单）；未配置 CHATS 的人格不限制（与入站同语义）；
-非 feishu 目标（jira/local 等）不经过人格群约束（走渠道自身白名单）。
+非人格会话不过滤（沿用渠道全局白名单）；名单为空 = 未配置 = 不限群（与入站同语义）；
+其它渠道类型（jira/local 等）不经过人格群约束（走渠道自身白名单）。
+
+**“是不是飞书”按渠道类型判，不按实例名**：实例名是部署方起的（`feishu_in` / `feishu_out` / `ops_bot`），
+而类型是定义文件里的稳定事实。`ChannelRegistry.instanceTypes()` 给出「实例名 → 类型名」，
+人格出站治理与 @全体整形都用它：否则一旦给实例起了别名，整套治理会**静默跳过**
+（日志里一个字都没有，看起来完全像“没配审核”）。
 
 **人格出站治理三重闸**（`core/tools/persona-outbound-review.ts`，act 的 feishu send/reply 前过闸；
 普通会话全部跳过）：
@@ -1767,21 +1792,14 @@ port+token，经**长度前缀 JSON-RPC**（4 字节大端长度 + `{id,method,p
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `GEBAI_PERSONA` | false | 拟人模式总开关（关闭时 persona 组件**完全实例化**） |
-| `GEBAI_PERSONA_APPROVAL` | readonly | **工具审批**：`readonly`（不弹卡）/ `ask`（推卡问人）/ `deny`（一律拒）/ `auto`（同 readonly） |
-| `GEBAI_PERSONA_OUTBOUND_REVIEW` | true | **输出审核**（独立于上项）：人格发飞书消息前推卡，驳回/超时不发；`false` 可跳过 |
+| `GEBAI_PERSONA_ENABLE` | — | **人格启用名单（必须显式写）**：未配置 = 一个都不启用。为何：订阅面与定时工作面在**代码定义**里，一个 `GEBAI_PERSONA_<ID>` 都不写也能跑；运行时仍会装配（面板/日志能区分“没定义/没启用/装配失败”） |
+| `GEBAI_PERSONA` | — | （已移除）不存在拟人总开关 |
+| `GEBAI_PERSONA_APPROVAL_ASK_TOOLS` | — | **工具审批**名单全局兑底（逐分身 `askTools` 优先） |
 | `GEBAI_PERSONA_SESSION_ROUTING` | driver | 兜底会话规则：`driver`（一个分身一个上下文，**缺省**）/ `chat`（按群×话题） |
-| `GEBAI_PERSONA_<ID>[_<DRIVER>]_SESSION_MAP` | — | 会话映射规则表（预设名 / `when=key;…` / JSON；分身级覆盖人格级） |
-| `GEBAI_PERSONA_ENABLE` | — | 人格启用白名单 |
-| `GEBAI_PERSONA_<ID>_CHATS` | — | 该人格只监听这些群 |
-| `GEBAI_PERSONA_<ID>_<DRIVER>_CHATS` | — | 该分身只监听这些群（覆盖人格级） |
-| `GEBAI_PERSONA_<ID>[_<DRIVER>]_OUTPUT` | — | 输出目标（`channel:address[#话题][=标签]`） |
-| `GEBAI_PERSONA_<ID>_OUTBOUND` | raw | 出站加工：`raw` / `shape` / `polish` |
-| `GEBAI_PERSONA_<ID>_SIGNATURE` | — | 出站署名（如 `——小霜`） |
-| `GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL` | false | `driver_create`/`driver_retire` 是否需审批 |
+| `GEBAI_PERSONA_<ID>` | — | 该人格的全部部署差异（JSON 数组，每项一个分身：见「环境变量配置面」） |
+| `GEBAI_PERSONA_YIELD_SECONDS` | 180 | 让位窗口长度兑底（逐分身 `yieldSeconds` 优先） |
+| `GEBAI_PERSONA_REPLY_TO_OWNER` / `_HUMAN_INTERRUPT` | — | 行为参数兑底（逐分身声明优先） |
 | `GEBAI_EVENT_SOURCES_ENABLE` / `_DISABLE` | — | 事件源启停名单（先白后黑，同名机制同子 Agent） |
-| `GEBAI_PERSONA_SCOPES` | 基础集 | 授权 scopes 追加（**并集**，非替换） |
-| `GEBAI_CHANNELS_FEISHU_APP_ID` / `_APP_SECRET` | — | 拟人专用机器人凭据（**不回落** `GEBAI_FEISHU_*`） |
 | `GEBAI_PUBLIC_URL` | — | 公网基址（拼授权回调地址；缺省 `http://localhost:{port}`） |
 
 回调地址需在飞书开放平台「安全设置 → 重定向 URL」中登记：
