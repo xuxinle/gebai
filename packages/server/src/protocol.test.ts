@@ -970,7 +970,7 @@ describe("multi-user REST authorization", () => {
     // 探测端点（公开）：内置登录页据此隐藏注册入口
     const probe = await fetch(`${customBase}/api/v1/auth/signup-config`)
     expect(probe.status).toBe(200)
-    expect(await probe.json()).toEqual({ mode: "open", builtinAllowed: false })
+    expect(await probe.json()).toEqual({ mode: "open", builtinAllowed: false, localAccess: false })
     // 无来源头（内置 SDK 调用形态）→ 403
     expect((await reg({})).status).toBe(403)
     // 伪造其他值 → 同样 403
@@ -993,10 +993,10 @@ describe("multi-user REST authorization", () => {
   })
 
   test("REST register 探测端点默认形态：signupSource=any 时 builtinAllowed=true；本地模式 mode=null", async () => {
-    const probe = (await fetch(`${base(multi)}/api/v1/auth/signup-config`)).json() as Promise<{ mode: string; builtinAllowed: boolean }>
-    expect(await probe).toEqual({ mode: "open", builtinAllowed: true })
-    const local = (await fetch(`${base(single)}/api/v1/auth/signup-config`)).json() as Promise<{ mode: string | null; builtinAllowed: boolean }>
-    expect(await local).toEqual({ mode: null, builtinAllowed: false })
+    const probe = (await fetch(`${base(multi)}/api/v1/auth/signup-config`)).json() as Promise<{ mode: string; builtinAllowed: boolean; localAccess: boolean }>
+    expect(await probe).toEqual({ mode: "open", builtinAllowed: true, localAccess: false })
+    const local = (await fetch(`${base(single)}/api/v1/auth/signup-config`)).json() as Promise<{ mode: string | null; builtinAllowed: boolean; localAccess: boolean }>
+    expect(await local).toEqual({ mode: null, builtinAllowed: false, localAccess: false })
   })
 
   test("global tool enable/disable restricted to admin in multi-user mode", async () => {

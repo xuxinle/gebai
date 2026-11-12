@@ -48,6 +48,9 @@ export class AuthService {
   private tokens = new Map<string, { userId: string; exp: number }>()
   private tokensLoaded = false
   private loginFails = new Map<string, { count: number; until: number }>()
+  /** 本地模式访问口令（salt:hash，只存进程内存）：来自启动参数 GEBAI_ADMIN_PASSWORD_HASH。
+   *  不落注册表——本地模式的数据面（users/）保持与「无口令」时完全一致，删掉环境变量即回到免登录。 */
+  private localAccessHash?: { salt: string; hash: string }
 
   constructor(
     private home: string,
@@ -64,7 +67,18 @@ export class AuthService {
   }
 
   private async readRegistry(): Promise<Record<string, AuthUser>> {
-    if (this.mode === "local") return {}
+    // 本地模式无注册表：唯一的账号是 defaultUser() 的 admin。
+    // 若设置了访问口令，把 admin 条目**即时合成**出来（口令来自进程内存，不落盘）——
+    // 这样 login/verifyCredentials/authorize/userByName 的全部校验逻辑对两种模式同源，
+    // 不必在每条路径上再分叉一遍「本地要怎么查用户」。
+    if (this.mode === "local") {
+      const h = this.localAccessHash
+      if (!h) return {}
+      const admin = this.defaultUser()
+      admin.salt = h.salt
+      admin.hash = h.hash
+      return { admin }
+    }
     try {
       return JSON.parse(await readFile(this.registryPath, "utf8")) as Record<string, AuthUser>
     } catch {
@@ -253,12 +267,21 @@ export class AuthService {
   }
 
   /**
-   * 服务模式 admin 用户密码哈希引导（GEBAI_ADMIN_PASSWORD_HASH，格式 `salt:hash` 均 hex）：
-   * - 设置：admin 用户不存在则创建（role=admin），存在则覆盖哈希并启用（disabled=false）——启动参数是权威配置，每次启动重置
-   * - 未设置：注册表中已存在的 admin 用户标记为禁用（disabled=true），不创建新用户
-   * 非法格式（salt 非 16 字节 hex / hash 非 64 字节 hex）抛错，启动即失败。
+   * 访问口令哈希引导（GEBAI_ADMIN_PASSWORD_HASH，格式 `salt:hash` 均 hex）。两种形态下的语义：
+   * - **服务模式**：admin 用户不存在则创建（role=admin），存在则覆盖哈希并启用（disabled=false）——
+   *   启动参数是权威配置，每次启动重置；未设置则把已存在的 admin 标记为禁用。
+   * - **本地模式**：只把口令存入进程内存（`localAccessHash`），**不碰注册表也不建用户**——
+   *   本地模式的数据面不因“多了一道门”而变；未设置即回到原本的免登录形态。
+   * 非法格式（salt 非 16 字节 hex / hash 非 64 字节 hex）抛错，启动即失败（两种形态同口径）。
    */
   async applyAdminHash(hash: string | undefined): Promise<void> {
+    if (hash && !/^[0-9a-f]{32}:[0-9a-f]{128}$/.test(hash)) {
+      throw new Error("GEBAI_ADMIN_PASSWORD_HASH 格式非法：应为 `salt:hash`（均为 hex，salt 16 字节、hash 64 字节，与注册表 scrypt 哈希一致）；可用 `bun run --cwd packages/server hash-password` 生成")
+    }
+    if (this.mode === "local") {
+      this.localAccessHash = hash ? { salt: hash.split(":")[0], hash: hash.split(":")[1] } : undefined
+      return
+    }
     const reg = await this.readRegistry()
     const admin = reg["admin"]
     if (!hash) {
@@ -267,9 +290,6 @@ export class AuthService {
         await this.writeRegistry(reg)
       }
       return
-    }
-    if (!/^[0-9a-f]{32}:[0-9a-f]{128}$/.test(hash)) {
-      throw new Error("GEBAI_ADMIN_PASSWORD_HASH 格式非法：应为 `salt:hash`（均为 hex，salt 16 字节、hash 64 字节，与注册表 scrypt 哈希一致）；可用 `bun run --cwd packages/server hash-password` 生成")
     }
     const [salt, h] = hash.split(":")
     if (admin) {
@@ -301,8 +321,12 @@ export class AuthService {
    * 用户名经 normalizeUsername 规范化（与注册/登录同一口径）；未命中、已禁用、待审批一律 null——
    * 凭证来源只能「引用」已存在的账号，不得凭空构造身份或绕过 disabled/pending。
    */
+  /** 本地模式是否已设访问口令（= 本实例需要登录）。 */
+  accessRequired(): boolean {
+    return this.mode === "server" || !!this.localAccessHash
+  }
+
   async userByName(username: string): Promise<AuthUser | null> {
-    if (this.mode === "local") return null
     let name: string
     try {
       name = normalizeUsername(username)

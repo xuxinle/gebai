@@ -7,6 +7,7 @@ import { handleWsMessage, type WsConn, type WsSink } from "../ws"
 import { WsLanes } from "../ws-lanes"
 import { WsStateService } from "../ws-state"
 import { originAllowed } from "../core/base/origin"
+import { loginRequiredOf } from "../core/base/config"
 import type { Composed } from "./compose"
 import { log } from "@gebai/sdk/node"
 import { xiangqiController } from "@gebai/agents"
@@ -64,7 +65,10 @@ export function makeWsConn(ws: ServerWebSocket<unknown>, d: AppDeps, state: WsSt
   const existing = wsConns.get(ws)
   if (existing) return existing
   const get = (): AuthUser =>
-    d.config.auth === "local" ? d.auth.defaultUser() : ((ws.data as { user?: AuthUser } | undefined)?.user) || SERVICE_USER
+    // 本地模式免登录直接给 admin；设了访问口令时与账密模式同源，取连接上已认证的用户（未认证为 SERVICE_USER 占位）。
+    d.config.auth === "local" && !loginRequiredOf(d.config)
+      ? d.auth.defaultUser()
+      : ((ws.data as { user?: AuthUser } | undefined)?.user) || SERVICE_USER
   const userChangeCbs = new Set<() => void>()
   const conn: WsConn = {
     get,
@@ -159,8 +163,8 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
           unsub = state.subscribe(conn.get().id, (entry) => sink.send(JSON.stringify(entry)))
         })
         wsSubs.set(ws, () => unsub())
-        // 本地模式：建连即推送状态快照（服务模式在 auth.login 后推送）
-        if (config.auth === "local") {
+        // 免登录形态：建连即推送状态快照（需登录形态在 auth.login 后推送，避免把快照漏给未认证连接）
+        if (!loginRequiredOf(config)) {
           void state.pushSnapshot(sink, conn).catch(() => {})
         }
       },

@@ -3,6 +3,7 @@
 import type { AuthUser } from "./auth"
 import { SERVICE_USER, type AppDeps } from "./app"
 import { isValidSessionId } from "./core/base/paths"
+import { loginRequiredOf } from "./core/base/config"
 import type { WsHandler } from "./ws-handlers/context"
 import { authHandlers } from "./ws-handlers/auth"
 import { sessionHandlers } from "./ws-handlers/session"
@@ -62,8 +63,8 @@ export async function handleWsMessage(
   const p = (msg.payload || {}) as Record<string, unknown>
   const user = conn.get()
 
-  // 多用户模式：未登录（SERVICE_USER 兜底）的连接仅允许 auth.login
-  if (d.config.auth === "server" && user.id === SERVICE_USER.id && msg.type !== "auth.login") {
+  // 需登录形态：未登录（SERVICE_USER 兜底）的连接仅允许 auth.login
+  if (loginRequiredOf(d.config) && user.id === SERVICE_USER.id && msg.type !== "auth.login") {
     return reply(false, undefined, "unauthorized: login required")
   }
 

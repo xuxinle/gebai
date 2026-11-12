@@ -380,8 +380,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   })
 
   const auth = new AuthService(config.gebaiHome, config.auth)
-  // 服务模式 admin 引导：GEBAI_ADMIN_PASSWORD_HASH 设置则启用 admin（覆盖哈希），未设置则禁用 admin
-  if (config.auth === "server") {
+  // 访问口令引导（GEBAI_ADMIN_PASSWORD_HASH）：服务模式恒执行（未设则禁用 admin），
+  // 本地模式仅在设了口令时执行（只入内存、不碰注册表）——本地未设口令 = 原本的免登录形态。
+  if (config.auth === "server" || config.adminPasswordHash) {
     await auth.applyAdminHash(config.adminPasswordHash)
   }
   // 本地模式用户目录平滑迁移：旧版默认用户目录 users/default/ → users/admin/（仅当 admin 目录不存在）

@@ -162,7 +162,8 @@ export function bindAuth() {
     signupAllowed = false
     loginToggle.hidden = true
     setMode(false)
-    if (!loginOverlay.hidden) {
+    // 空 reason = 只关入口不在错误栏留言（本地口令形态本就不该有注册，不算异常）
+    if (reason && !loginOverlay.hidden) {
       loginErr.textContent = reason
       loginErr.hidden = false
     }
@@ -172,6 +173,14 @@ export function bindAuth() {
     .getSignupConfig()
     .then((cfg) => {
       if (cfg.builtinAllowed === false) disableSignup("本部署未开放页面注册，请联系管理员或宿主系统")
+      // 本地模式 + 访问口令：账号只有一个且不是用户可选项——固定用户名、去掉注册入口，
+      // 让登录页就是一道单口令输入（placeholder 同步告知，避免用户去猜账号）。
+      if (cfg.localAccess) {
+        loginUser.value = "admin"
+        loginUser.readOnly = true
+        loginUser.placeholder = "admin（固定）"
+        disableSignup("")
+      }
     })
     .catch(() => {
       /* 探测失败（本地模式/网络异常）：保持本地配置决策，不阻塞登录页 */

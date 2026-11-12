@@ -231,14 +231,15 @@ export class GebaiClient {
   }
 
   /**
-   * 注册策略探测：{ mode, builtinAllowed }（服务模式；本地 mode=null 且 builtinAllowed=false——本地本就不开放注册）。
-   * builtinAllowed=false（GEBAI_SIGNUP_SOURCE=custom）时内置登录页不展示「注册账号」入口，
-   * 注册只能由二开前端代码发起（直调 /api/v1/auth/register 并携带 X-GEBAI-Signup-Source: custom 头）。
-   * 注意：内置 register() 不携带该头——它是被限制方；二开代码直调 REST 时自行带头。
-   */
-  getSignupConfig(): Promise<{ mode: "open" | "approval" | null; builtinAllowed: boolean }> {
-    return this.get<{ mode: "open" | "approval" | null; builtinAllowed: boolean }>("/api/v1/auth/signup-config")
-  }
+    * 注册策略探测：{ mode, builtinAllowed, localAccess }（服务模式；本地 mode=null 且 builtinAllowed=false——本地本就不开放注册）。
+ * builtinAllowed=false（GEBAI_SIGNUP_SOURCE=custom）时内置登录页不展示「注册账号」入口，
+ * 注册只能由二开前端代码发起（直调 /api/v1/auth/register 并携带 X-GEBAI-Signup-Source: custom 头）。
+ * 注意：内置 register() 不携带该头——它是被限制方；二开代码直调 REST 时自行带头。
+ * localAccess=true：本地模式已设访问口令——登录页改为单口令输入（用户名固定 admin，无注册）。
+ */
+getSignupConfig(): Promise<{ mode: "open" | "approval" | null; builtinAllowed: boolean; localAccess?: boolean }> {
+  return this.get<{ mode: "open" | "approval" | null; builtinAllowed: boolean; localAccess?: boolean }>("/api/v1/auth/signup-config")
+}
 
   /** 环境变量配置目录（前端面板白名单）：按全局/子Agent 分组，含变量作用说明；不含启动级/安全敏感变量。 */
   getEnvCatalog(): Promise<{ groups: Array<{ group: string; label: string; vars: Array<{ name: string; description: string }> }> }> {

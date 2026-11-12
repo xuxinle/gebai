@@ -14,6 +14,7 @@ import type { EventBus } from "./core/base/event-bus"
 import type { SubAgentManager } from "./core/agents/subagents"
 import type { WebhookManager } from "./webhooks"
 import type { ServerConfig } from "./core/base/config"
+import { loginRequiredOf } from "./core/base/config"
 import { BOOT_ID } from "./core/base/boot-id"
 import { assertRouteTable, describeRouter } from "./core/base/route-guard"
 import type { RouteCtx } from "./routes/context"
@@ -126,7 +127,9 @@ export const SERVICE_USER: AuthUser = {
 }
 
 async function resolveUser(d: AppDeps, c: Context): Promise<AuthUser | null> {
-  if (d.config.auth === "local") return d.auth.defaultUser()
+  // 免登录只在「本地模式且未设访问口令」时成立：有口令就走凭证链（Bearer/Basic/cookie）验证，
+  // 与账密模式同一条链路——凭证取值与校验分离见 credential-sources.ts。
+  if (d.config.auth === "local" && !loginRequiredOf(d.config)) return d.auth.defaultUser()
   // 凭证来源链（DESIGN「凭证来源扩展点」）：Bearer / Basic / cookie 为内置缺省，
   // 部署方可经 GEBAI_CREDENTIAL_SOURCES 或 custom/auth/ 增删——见 credential-sources.ts。
   // 取值与校验分离：来源只取凭证，身份一律经 authorize/verifyCredentials/userByName 校验。
@@ -177,7 +180,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.use(async (c: Context<AppEnv>, next) => {
     c.set("deps", deps)
     const user = await resolveUser(deps, c)
-    if (!user && deps.config.auth === "server") {
+    if (!user && loginRequiredOf(deps.config)) {
       // 公开端点豁免鉴权：登录/注册/登出（服务模式首登无令牌）、健康检查（探活/负载均衡探测）
       if (
         c.req.path === "/api/v1/auth/login" ||

@@ -121,9 +121,16 @@ export function registerAuthRoutes(rc: RouteCtx): void {
   })
 
   // 注册策略探测（公开端点，Web UI 启动时读取）：mode=审批策略（open/approval）、builtinAllowed=内置登录页
-  // 是否可注册（signupSource=any 时 true；custom 时 false，前端据此隐藏「注册账号」入口）
+  // 是否可注册（signupSource=any 时 true；custom 时 false，前端据此隐藏「注册账号」入口）。
+  // localAccess：本地模式已设访问口令（= 该实例仍需登录）——前端据此把登录页锁定为单口令输入（
+  // 用户名恒为 admin，无注册入口），避免用户在一个只有一道口令的部署里纠结填什么账号。
   app.get("/api/v1/auth/signup-config", (c) => {
-    return c.json({ mode: d.config.auth === "server" ? d.config.signupMode : null, builtinAllowed: d.config.auth === "server" && d.config.signupSource !== "custom" })
+    const server = d.config.auth === "server"
+    return c.json({
+      mode: server ? d.config.signupMode : null,
+      builtinAllowed: server && d.config.signupSource !== "custom",
+      localAccess: d.config.auth === "local" && !!d.config.adminPasswordHash,
+    })
   })
 
   // 外部身份扩展点探测（Web UI 启动时读取；不泄露密钥，仅暴露启用状态与前端需要的信息）
