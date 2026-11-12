@@ -79,6 +79,9 @@ tmp/
 /data/
 audit-fs.jsonl
 feishu/
+# 登录令牌持久化（{GEBAI_HOME}/auth-tokens.json，AuthService 写入）：键是**明文会话令牌**，
+# 值为 userId + 过期时刻，重启后仍有效（7 天）。与 .env / persona 令牌同级敏感，绝不能入库。
+/auth-tokens.json
 # 拟人模式运行时数据（{GEBAI_HOME}/persona/：feishu-user-token.json 是**用户令牌凭据**、
 # drivers.json、memory.md、outbox/）。以 GEBAI_HOME=仓库根 运行时落在根下——
 # 里面是明文 access/refresh token，与 .env 同级敏感，绝不能入库。

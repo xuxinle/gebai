@@ -5,6 +5,7 @@ import { connect, createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { RestartContinuation, RestartDeps } from "./restart"
+import { dotenvDeclaredKeys } from "../base/config"
 import {
   buildLauncherScript,
   buildLauncherScriptPosix,
@@ -35,6 +36,7 @@ function makeDeps(overrides: Partial<RestartDeps> = {}): RestartDeps {
     oldPid: 1234,
     tmpDir: tmpdir(),
     env: { GEBAI_PORT: "3001", GEBAI_HOME: "/repo" },
+    dropEnv: [], // 与宿主 `.env` 隔离：用例断言的是脚本结构，不随开发机配置漂移
     platform: "win32",
     exitDelayMs: 10,
     devReload: false,
@@ -72,6 +74,7 @@ describe("restart_server（Windows 拉起器）", () => {
     expect(src).toMatchObject({ port: 3001, oldPid: 1234, binary: false, args: ["run", "/repo/packages/server/src/index.ts"], cwd: "/repo/packages/server" })
     expect(src.exePath).toBe(process.execPath)
     expect(src.env).toEqual({ GEBAI_PORT: "3001", GEBAI_HOME: "/repo" })
+    expect(src.dropEnv).toEqual([]) // 显式传入空：不被宿主机的 .env 干扰
     expect(src.stateFile.endsWith("state.json")).toBe(true)
     expect(src.launcherFile.endsWith("launcher.mjs")).toBe(true)
     const bin = winLauncherConfig(makeDeps({ binary: true }))
@@ -96,10 +99,52 @@ describe("restart_server（Windows 拉起器）", () => {
     expect(script).toContain("spawn(CFG.exePath, CFG.args")
     expect(script).toContain("AbortSignal.timeout(3000)")
     expect(script).toContain("writeFileSync(CFG.stateFile")
-    expect(script).toContain("/api/v1/sub-agents")
+    expect(script).toContain("/api/health")
+    // 就绪探针**不得**用需鉴权端点：设了访问口令的实例对 /api/v1/* 一律 401，
+    // 拿它做探针会让每次重启都被误判“就绪超时”（实际服务早就跑起来了）
+    expect(script).not.toContain("/api/v1/sub-agents")
     // 二段式中间进程分支在场
     expect(script).toContain('process.argv.includes("--mid")')
     expect(script).toContain("detached: true")
+  })
+
+  test("拉起器把 `.env` 来源的旧 env 剔除（否则 `.env` 改动重启后永不生效）", () => {
+    // 回归：旧进程把 `.env` 值读进 process.env → 拉起器 `{...process.env}` 原样继承 →
+    // 新进程认为“真 env 已给出”而跳过 `.env`。症状：改了 GEBAI_ADMIN_PASSWORD_HASH，
+    // 重启后新口令登不进、旧口令仍能用。
+    const script = buildLauncherScriptWin(makeDeps({ dropEnv: ["GEBAI_ADMIN_PASSWORD_HASH", "GEBAI_LLM_MODELS"] }))
+    expect(script).toContain('"dropEnv":["GEBAI_ADMIN_PASSWORD_HASH","GEBAI_LLM_MODELS"]')
+    const deleteLine = script.split("\n").findIndex((l) => l.includes("for (const key of CFG.dropEnv)"))
+    const mergeLine = script.split("\n").findIndex((l) => l.includes("for (const [k, v] of Object.entries(CFG.env))"))
+    expect(deleteLine).toBeGreaterThan(-1)
+    // 先剔除再注入：顺序反了会把 CFG.env 里的显式值一起删掉
+    expect(deleteLine).toBeLessThan(mergeLine)
+  })
+
+  test("拉起器：剔除按大小写不敏感匹配（Windows 环境变量名不区分大小写）", () => {
+    const script = buildLauncherScriptWin(makeDeps({ dropEnv: ["GEBAI_ADMIN_PASSWORD_HASH"] }))
+    const seg = script.slice(script.indexOf("for (const key of CFG.dropEnv)"), script.indexOf("for (const [k, v] of Object.entries(CFG.env)"))
+    expect(seg).toContain("existing.toUpperCase() === key.toUpperCase()")
+  })
+
+  test("posix 拉起器：`.env` 来源的键必须 unset（与 Windows 同口径）", () => {
+    const script = buildLauncherScriptPosix(makeDeps({ platform: "linux", dropEnv: ["GEBAI_ADMIN_PASSWORD_HASH"] }))
+    expect(script).toContain("unset GEBAI_ADMIN_PASSWORD_HASH")
+    // unset 必须在 export 之前（先把继承的旧值去掉，再写显式值）
+    expect(script.indexOf("unset GEBAI_ADMIN_PASSWORD_HASH")).toBeLessThan(script.indexOf("export GEBAI_PORT"))
+  })
+
+  test("dropEnv 缺省取 `.env` **文件声明的键**（幂等自愈），不取“本进程实际注入了哪些”", () => {
+    // 这是修好与否的分界线：用“实际注入”会**永不自愈**——被污染的父进程把值继承下来后，
+    // 新进程 loadDotEnv 一个都不注入 → 名单恒为空 → 它生成的拉起器依旧不剔除 → 脏环境代代相传。
+    // 按文件声明则幂等：无论当前环境多脏，只要 `.env` 里写着就交给新进程重读。
+    //
+    // 断言口径：测试进程不读 `.env`（bunfig test-preload 净化 + NODE_ENV=test），故名单为空；
+    // 关键是**缺省与显式同源**——不传 dropEnv 时拉起器配置就取 dotenvDeclaredKeys()。
+    const cfgDefault = winLauncherConfig(makeDeps({ dropEnv: undefined }) as RestartDeps)
+    expect(cfgDefault.dropEnv).toEqual(dotenvDeclaredKeys())
+    // 显式传入时以传入为准（用例/自定义部署可覆盖）
+    expect(winLauncherConfig(makeDeps({ dropEnv: ["A"] })).dropEnv).toEqual(["A"])
   })
 
   test("buildLauncherScriptWin：状态文件无 BOM（node:fs 写入天然无 BOM，且不存在 Set-Content/WriteAllText 路径）", () => {

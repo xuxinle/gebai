@@ -6,27 +6,48 @@ import { combinePromptExtra, loadDomainProfile, readExtraFile, type LoadedDomain
 export type AuthMode = "local" | "server"
 export type SandboxMode = "auto" | "on" | "off"
 
+/** `.env` 文件路径（二进制模式=`{GEBAI_HOME}/.env`，源码模式=仓库根 `.env`；与 loadDotEnv 同一口径）。 */
+export function dotenvFilePath(): string {
+  const base = isBinaryMode() ? resolveGebaiHome() : join(import.meta.dirname, "..", "..", "..", "..", "..")
+  return join(base, ".env")
+}
+
+/** 本进程启动时 `.env` 里声明的变量名（loadDotEnv 读文件时登记，**与是否真的注入了无关**）。 */
+const dotenvDeclared = new Set<string>()
+
 /**
- * In script-debug mode, Bun auto-loads `.env` from the process cwd, which depends
- * on how the server was launched. Load the repo-root `.env` explicitly so LLM /
- * server config works regardless of cwd. Binary mode (incl. both desktop hosts)
- * loads `{GEBAI_HOME}/.env` instead, so deployed binaries stay configurable via
- * a file next to user data. Values already present in the real env always win.
+ * `.env` 文件里声明的变量名（重启拉起器据此把继承来的旧值剥掉）。
+ *
+ * 咬住的是一个真实踩过的坑：`loadDotEnv` 把 `.env` 的值写进 `process.env`（“真 env 优先”），
+ * 拉起器 `{ ...process.env }` 原样继承给新进程，新进程看到 `process.env[K] !== undefined`
+ * 就**跳过 `.env`** —— `.env` 改动从第一次重启起永久不生效（典型症状：改了
+ * `GEBAI_ADMIN_PASSWORD_HASH`，重启后新口令登不进、旧口令仍能用；模型 Key 同理）。
+ *
+ * **为何按“文件声明了哪些键”而不是“本进程实际注入了哪些”**（这个区别是修好与否的分界线）：
+ * 用“实际注入”会**永不自愈**——被污染的父进程把值继承下来后，新进程 `loadDotEnv` 一个都不注入，
+ * 名单恒为空，它生成的拉起器依旧不剔除，脏环境代代相传。按文件声明则是**幂等且自愈**的：
+ * 无论当前进程的环境有多脏，只要 `.env` 里写着这个键，就交给新进程重新读。
+ *
+ * **系统注入的真 env 不受影响**：剔除只发生在“重启拉起器向新进程传 env”这一步；新进程启动后
+ * `loadDotEnv` 仍是“真 env 优先”，系统级注入的键会在剔除后重新由系统环境补上。
  */
+export function dotenvDeclaredKeys(): string[] {
+  return [...dotenvDeclared]
+}
+
+/** 读仓库根（或 GEBAI_HOME）`.env`，**只在真 env 未设置时**填值（真 env 优先）；同时登记文件声明的键。 */
 function loadDotEnv() {
   // 测试进程不读仓库 .env（开发者本地配置会改变断言结果，见 scripts/test-preload.ts）
   if (process.env.NODE_ENV === "test") return
-  const base = isBinaryMode()
-    ? resolveGebaiHome()
-    : join(import.meta.dirname, "..", "..", "..", "..", "..")
-  const p = join(base, ".env")
+  const p = dotenvFilePath()
   try {
     const raw = readFileSync(p, "utf8")
     for (const line of raw.split("\n")) {
       const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/)
-      if (m && process.env[m[1]] === undefined) {
-        process.env[m[1]] = m[2].replace(/^["']|["']$/g, "")
-      }
+      if (!m) continue
+      // 文件声明就登记（区别于“是否注入”：见 dotenvDeclaredKeys 的注释）
+      dotenvDeclared.add(m[1])
+      if (process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "")
     }
   } catch {
     /* no .env; fine */
@@ -36,7 +57,9 @@ function loadDotEnv() {
 export interface ServerConfig {
   host: string
   port: number
-  /** 运行形态：`local`（本地模式，默认，直接使用 admin 用户免登录）/ `server`（服务模式，账号密码登录）。 */
+  /** 运行形态：`local`（本地模式，默认，直接使用 admin 用户免登录）/ `server`（服务模式，账号密码登录）。
+   *  注意：本地模式设置了 `adminPasswordHash` 时**仍需登录**——运行形态语义不变（沙箱豁免、
+   *  restart_server、admin 特权全部照旧），只是多了一道访问门。判定统一用 `loginRequired`。 */
   auth: AuthMode
   corsOrigins: string[]
   trustProxy: boolean
@@ -75,8 +98,11 @@ export interface ServerConfig {
   gebaiHome: string
   binaryMode: boolean
   webDist: string
-  /** 服务模式 admin 用户密码哈希（GEBAI_ADMIN_PASSWORD_HASH，格式 `salt:hash` 均为 hex，与注册表 scrypt 哈希一致）；
-   *  设置则启用 admin（覆盖其哈希），不设置则禁用 admin 用户。 */
+  /** 访问口令哈希（GEBAI_ADMIN_PASSWORD_HASH，格式 `salt:hash` 均为 hex，与注册表 scrypt 哈希一致）。
+   *  两种形态下的含义：
+   *  - 服务模式：启用 admin 用户（覆盖其注册表哈希），不设置则禁用 admin；
+   *  - 本地模式：设为该实例的**访问口令**（只存进程内存，不落注册表）——本地模式本免登录，
+   *    在公网/局域网暴露时必须给一道门；口令比对与限流复用服务模式同一套（scrypt + 恒时比较 + 失败锁定）。 */
   adminPasswordHash?: string
   /** 注册审批模式（GEBAI_SIGNUP_MODE）：open=注册即用（默认）/ approval=注册待 admin 审批（disabled+pending，批准后启用）。 */
   signupMode: "open" | "approval"
@@ -348,6 +374,18 @@ export function isolationConfigConflict(config: Pick<ServerConfig, "auth" | "san
     return "GEBAI_SCRIPT_ISOLATION=off 与服务模式（GEBAI_MODE=server）互斥：服务模式默认且强制开启会话目录隔离，需降级请用 env（仅环境收敛）/ auto"
   }
   return null
+}
+
+/**
+ * 是否需要登录（唯一的鉴权闸门判据）：服务模式恒需登录；本地模式仅在设置了访问口令时需要。
+ *
+ * 为何单独成函数而不复用 `auth === "server"`：本地模式的「要不要登录」与「运行形态语义」是两件事——
+ * 设了口令的本地实例仍是本地模式（admin 豁免路径沙箱、注入 restart_server、数据目录不变），
+ * 只是把匿名可达变成需凭证可达。所有鉴权分支（REST 401、WS 未登录拒绝、快照推送时机、
+ * 前端登录页）都读这个函数，避免「REST 拦住了、WS 还能直连」的口径错位。
+ */
+export function loginRequiredOf(config: Pick<ServerConfig, "auth" | "adminPasswordHash">): boolean {
+  return config.auth === "server" || !!config.adminPasswordHash
 }
 
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {

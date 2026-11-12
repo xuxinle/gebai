@@ -26,7 +26,7 @@ import { statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Tool, ToolResult } from "../base/types"
-import { isBinaryMode } from "../base/config"
+import { isBinaryMode, dotenvDeclaredKeys } from "../base/config"
 import { schema } from "./shared"
 import { log as logger } from "@gebai/sdk/node"
 
@@ -183,6 +183,14 @@ export interface RestartDeps {
   env: Record<string, string>
   	  /** 平台（win32=自包含 JS 拉起器；其余=bash 拉起器）。 */
   platform: NodeJS.Platform
+  /**
+   * 新进程启动前须从中**剔除**的环境变量名（缺省 = `dotenvDeclaredKeys()`）。
+   *
+   * **为何不直接原样继承**（dropEnv 的动机）：这些键是 `.env` 里声明过的（见 config.ts `dotenvDeclaredKeys`）——
+   * 拉起器 `{ ...process.env }` 一旦原样继承，新进程就会认为“真 env 已给出”而跳过 `.env`，
+   * 导致 `.env` 改动（口令哈希/模型 Key…）**重启后仍然不生效**。剔除后交给新进程自己重读。
+   */
+  dropEnv?: string[]
   /** 自杀延迟（工具结果送达窗口，毫秒）。 */
   exitDelayMs: number
   /** 当前进程是否 dev-reload 模式（`--reload` 参数或 GEBAI_DEV_RELOAD=1）：**argv 参数不会被拉起器
@@ -222,6 +230,8 @@ export interface WinLauncherConfig {
   args: string[]
   cwd: string
   env: Record<string, string>
+  /** 启动前从继承 env 里剔除的变量名（见 RestartDeps.dropEnv）。 */
+  dropEnv: string[]
   stateFile: string
   logOut: string
   logErr: string
@@ -242,12 +252,16 @@ export function winLauncherConfig(deps: RestartDeps): WinLauncherConfig {
     args: deps.binary ? [] : ["run", deps.entry!],
     cwd: deps.cwd,
     env: { ...deps.env, GEBAI_PORT: String(deps.port) },
+    // 懒惰求值：确保取的是**本进程已经读过 `.env`** 之后的名单（模块/工具创建时机可能早于 loadConfig）
+    dropEnv: deps.dropEnv ?? dotenvDeclaredKeys(),
     stateFile: join(dir, "state.json"),
     logOut: join(dir, "server.log.out"),
     logErr: join(dir, "server.log.err"),
     stepLog: join(dir, "launcher.log"),
     launcherFile: join(dir, "launcher.mjs"),
-    probePath: "/api/v1/sub-agents",
+    // 就绪探针必须是**免鉴权**端点：设了访问口令（GEBAI_ADMIN_PASSWORD_HASH）的实例对
+    // /api/v1/* 一律 401，拿它做探针会让每次重启都被误判为“就绪超时”（实际服务早就跑起来了）。
+    probePath: "/api/health",
   }
 }
 
@@ -405,9 +419,15 @@ step("端口已释放")
 
 // 3) 启动新服务（拉起器已与原服务零亲缘，新进程作为拉起器子进程存活；Windows 无 job object 连坐）
 let started
-// env 合并：Windows 环境变量名大小写不敏感，同名不同大小写的旧键（如 Path 与 PATH）必须先删，
+// env 合并：先剔除 .env 来源的键（否则新进程会认为真 env 已给出而跳过 .env，使改动永不生效）；
+// Windows 环境变量名大小写不敏感，同名不同大小写的旧键（如 Path 与 PATH）也必须先删，
 // 否则子进程可能拿到旧值——拉起器注入的端口/家目录就不能生效。
 const env = { ...process.env }
+for (const key of CFG.dropEnv) {
+  for (const existing of Object.keys(env)) {
+    if (existing.toUpperCase() === key.toUpperCase()) delete env[existing]
+  }
+}
 for (const [k, v] of Object.entries(CFG.env)) {
   for (const existing of Object.keys(env)) {
     if (existing !== k && existing.toUpperCase() === k.toUpperCase()) delete env[existing]
@@ -511,6 +531,8 @@ export function buildLauncherScriptPosix(deps: RestartDeps): string {
   const envExports = Object.entries(deps.env)
     .map(([k, v]) => `export ${k}=${shq(v)}`)
     .join("\n")
+  // `.env` 来源的键必须 unset（拉起器继承的旧值会让新进程认为真 env 已给出而跳过 `.env`）
+  const envUnsets = (deps.dropEnv ?? dotenvDeclaredKeys()).map((k) => `unset ${k}`).join("\n")
   const startCmd = deps.binary
     ? `${shq(process.execPath)}`
     : `${shq(process.execPath)} run ${shq(deps.entry!)}`
@@ -555,6 +577,7 @@ export function buildLauncherScriptPosix(deps: RestartDeps): string {
     "fi",
     // 3) 启动新服务（nohup + &：脱离终端挂断信号；拉起器经 setsid 已独立会话，退出后
     //    新服务由 init 收养继续运行）
+    envUnsets,
     envExports,
     `cd ${shq(deps.cwd)} || { printf '{"ok":false,"error":"工作目录不存在"}\\n' > ${shq(stateFile)}; exit 1; }`,
     `nohup ${startCmd} > ${shq(logOut)} 2> ${shq(logErr)} &`,
@@ -565,7 +588,7 @@ export function buildLauncherScriptPosix(deps: RestartDeps): string {
     "while [ $SECONDS -lt $deadline ]; do",
     `  owner=$(ss -ltnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\\K[0-9]+' | head -1)`,
     `  if [ -n "$owner" ] && [ "$owner" != "$old_pid" ]; then`,
-    `    if curl -sf -o /dev/null -m 3 "http://127.0.0.1:$port/api/v1/sub-agents"; then`,
+    `    if curl -sf -o /dev/null -m 3 "http://127.0.0.1:$port/api/health"; then`,
     "      ready=1; new_pid=$owner; break",
     "    fi",
     "  fi",
@@ -927,6 +950,7 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
     tmpDir: tmpdir(),
     env: pickRestartEnv(),
     platform: process.platform,
+    dropEnv: dotenvDeclaredKeys(),
     exitDelayMs: 2500,
     devReload: process.argv.includes("--reload") || process.env.GEBAI_DEV_RELOAD === "1",
     exit: (code) => process.exit(code),
