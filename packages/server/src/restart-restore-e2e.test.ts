@@ -37,6 +37,8 @@ const originalTmp = {
    * 整批断言变成 “disabled”（现象像功能坏了，实际是测试污染）。
    */
   GEBAI: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("GEBAI_")).map(([k, v]) => [k, v as string])),
+  /** 访问口令（启动前快照；用例内要删掉才能走免登录路径）。 */
+  passwordHash: process.env.GEBAI_ADMIN_PASSWORD_HASH,
 }
 
 /** 让本进程的 tmpdir() 指向测试目录（restartDir 与恢复逻辑都按它定位登记文件）。 */
@@ -55,6 +57,13 @@ beforeAll(async () => {
   useTmpDir(tmp)
   // 启动期恢复只在本机模式（且非测试进程）执行——本用例要的正是那条真实路径
   process.env.NODE_ENV = "production"
+  // 访问口令：`NODE_ENV=production` 让 loadConfig 把**仓库 `.env` 整份**读进来，
+  // 若部署方在 `.env` 里设了 `GEBAI_ADMIN_PASSWORD_HASH`（本地模式=访问口令），
+  // 本实例就会真的要求登录——而本用例要验证的是「启动期会话审批姿态恢复」，
+  // 所有 REST 请求都没有凭证，会全部 401（表现为 POST /sessions 拿不到 id）。
+  // 本地模式免登录才是这个用例的前提，故在启动前显式清除；afterAll 里恢复原值。
+  originalTmp.passwordHash = process.env.GEBAI_ADMIN_PASSWORD_HASH
+  delete process.env.GEBAI_ADMIN_PASSWORD_HASH
   // 仓库 .env 可能真的配了飞书与渠道：本用例只验证启动期 env 恢复，任何对外连接都不应发生
   process.env.GEBAI_CHANNELS_DISABLE = "feishu,local"
   // 相期窗口：拟人模式已在 config 覆盖里关掉，但再显式上一道锁——该 exe 的启动器会「接管」
@@ -63,7 +72,7 @@ beforeAll(async () => {
   const { startServer } = await import("./index")
   // 测试环境隔离：本机安装可能真的开了拟人模式/渠道（会拉起相期窗口、接管用户现有实例、连铁飞书）——
   // 本用例只验证「启动期恢复会话审批姿态」，一切对外副作用一律关掉。
-  first = await startServer({ gebaiHome: home, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0, personaEnabled: false, feishuBotEnabled: false })
+  first = await startServer({ gebaiHome: home, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0, personaEnabled: false, feishuBotEnabled: false, adminPasswordHash: undefined })
   base = `http://127.0.0.1:${first.server.port}`
 })
 
@@ -79,6 +88,9 @@ afterAll(() => {
     }
   }
   process.env.NODE_ENV = originalTmp.NODE_ENV
+  // 恢复访问口令（上面为免登录路径删掉了）
+  if (originalTmp.passwordHash === undefined) delete process.env.GEBAI_ADMIN_PASSWORD_HASH
+  else process.env.GEBAI_ADMIN_PASSWORD_HASH = originalTmp.passwordHash
   // 把 loadConfig 从仓库 .env 注入的 `GEBAI_` 变量全部抹掉，再恢复本用例开工前的值——
   // 否则它们会泄漏给同分片的后续测试文件（“本地 .env 改了断言”的那类幽灵失败）。
   for (const k of Object.keys(process.env)) {
@@ -117,7 +129,7 @@ describe("重启后在运行会话的审批姿态恢复（启动期真实接线�
     first = null
 
     const { startServer } = await import("./index")
-    second = await startServer({ gebaiHome: home, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0, personaEnabled: false, feishuBotEnabled: false })
+    second = await startServer({ gebaiHome: home, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0, personaEnabled: false, feishuBotEnabled: false, adminPasswordHash: undefined })
     base = `http://127.0.0.1:${second.server.port}`
 
     // 启动期恢复是监听建立后立即 await 的（先于续跑消费），查询前缓存已就位

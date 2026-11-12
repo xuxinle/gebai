@@ -2007,10 +2007,17 @@ SessionData.persona  ──▶  personaOwnerOf(sessionId)  ──▶  { personaI
 > 普通会话多出一整套用不了的工具（撑上下文、带错方向），而“用不了”只是执行期才报错。更严重的是
 > 同一个洞延伸到 `act(as_user:true)`——**以用户本人名义对外发言**的能力根本没被拦住（详见下文「出站身份」）。
 >
-> 所以改成 **schema 层按会话归属就没收**（`AgentEngine.PERSONA_ONLY_TOOLS`，覆盖 `driver_*` 与 `worker_*`）：
+> 所以改成 **schema 层按会话归属就没收**（`AgentEngine.PERSONA_ONLY_TOOLS`）：
 > `sessionRegistry().schemas()` 过滤掉、`resolve()` 也返回 undefined（防模型按名字硬调）。
 > 归属判定 fail-closed：读不到 `SessionData.persona` 时当普通会话（**宁可少给能力，不给错能力**），
 > `run()` 开头读盘时再权威设定一次，保证人格会话首轮就看得见、能力不静默变少。
+>
+> **范围（通道路径也算拟人能力）**：除了 `driver_*` / `worker_*`，还包含 `act` / `observe` /
+> `channels_list`——它们就是「把话说出去」（飞书/工单）与「写人格长期记忆」的入口
+> （`local:memory` 落在 `data/persona/`，`local:outbox` 也一样）。普通会话的产物与落盘走
+> `write`/`read`（会话工作区），对外发送不该是一个普通对话顺手能做的事。
+> 注意这会让**普通会话失去 `local:memory` 的读写能力**（长期记忆是人格的结构，不是会话的），
+> 这是有意为之；若将来需要会话级记忆，应另立机制而不是把通道口重新开给普通会话。
 
 默认不弹审批：创建/下线都**写盘留痕 + 可随时回滚**，风险由「可见 + 可回滚」承担；逐次审批会让
 「自我组织」退化成「每步问人」。要收紧就设 `GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL=true`。

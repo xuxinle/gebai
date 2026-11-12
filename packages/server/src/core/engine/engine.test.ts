@@ -1400,12 +1400,26 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("拟人专属工具（driver_* / worker_*）在普通会话的 schema 里**不存在**，人格会话才可见", async () => {
+  test("拟人专属工具（driver_* / worker_* / act / observe / channels_list）在普通会话的 schema 里**不存在**，人格会话才可见", async () => {
     // 早先这组工具是「全局注册 + 执行时自检」：普通会话能看到 schema（描述带【仅人格会话可用】），
-    // 调用到执行期才被拒。你现在的要求是「拟人模式的工具都不能保留在普通会话」——即 schema 层就没收。
+    // 调用到执行期才被拒。要求是「拟人模式的工具都不能保留在普通会话」——即 schema 层就没收。
     const { home, engine, store, registry } = await setup("text")
     // 模拟 compose 的注册（真实环境里它们在 personaEnabled 时全局注册，普通会话也会看到）
-    for (const n of ["driver_list", "driver_create", "driver_retire", "worker_dispatch", "worker_list", "worker_cancel"]) {
+    // act/observe/channels_list 已由 setup 的 createGlobalTools() 注册，重复注册会抛错——直接复用。
+    const personaTools = [
+      "driver_list",
+      "driver_create",
+      "driver_retire",
+      "worker_dispatch",
+      "worker_list",
+      "worker_cancel",
+      // 通道路径（对外发送 + 人格记忆）也属于拟人能力
+      "act",
+      "observe",
+      "channels_list",
+    ]
+    for (const n of personaTools) {
+      if (registry.resolve(n)) continue // 已在全局表里（act/observe/channels_list）
       registry.register({
         name: n,
         description: `【仅人格会话可用】${n}`,
@@ -1425,7 +1439,6 @@ console.log("defined ok")`,
     // 归属预取是异步的（schemas/resolve 同步签名）：先让两边的归属完整就位，再断言
     await (engine as unknown as { awaitPersonaOwnership(id: string): Promise<boolean> }).awaitPersonaOwnership(normal.id)
     await (engine as unknown as { awaitPersonaOwnership(id: string): Promise<boolean> }).awaitPersonaOwnership(personas.id)
-    const personaTools = ["driver_list", "driver_create", "driver_retire", "worker_dispatch", "worker_list", "worker_cancel"]
 
     // 普通会话：一个都不可见，且按名字硬调也 resolve 不到（防模型绕开 schema）
     const normalNames = namesOf(normal.id)

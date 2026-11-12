@@ -731,16 +731,27 @@ private activeSchemas(sessionId: string) {
    * 同一个洞的另一面更严重：`act(as_user:true)` 这类**以用户本人名义对外发言**的能力
    * 根本没被这一层挡住（只拦人格会话），普通会话可以直接冒名发飞书。
    *
+   * 后来进一步抰开：**通道路径也是拟人能力**。`act`/`observe` 的写面就是「把话说出去」
+   * （飞书/工单）与「写人格式长期记忆」（`local:memory` → `data/persona/`），它并不该是
+   * 普通对话顺手能做的事。普通会话的产物与落盘需求走 write/read（会话工作区）即可。
+   *
    * 所以改成**按会话归属在 schema 层就没收**：普通会话既看不到也调不到（resolve 同样返回
    * undefined，防模型按名字硬调），人格会话则照旧全量可用。
    */
   private static readonly PERSONA_ONLY_TOOLS = new Set([
+    // 人格自组织与派活（只在人格会话里有意义）
     "driver_list",
     "driver_create",
     "driver_retire",
     "worker_dispatch",
     "worker_list",
     "worker_cancel",
+    // 对外动作面（通道路径）：act/observe 是**拟人能力**——把话说出去（飞书/工单）、
+    // 读写人格式的长期记忆（local:memory 落在 data/persona/ 下）。普通会话的产物与落盘走
+    // write/read（会话工作区），对外发送不该是一个普通对话顺手能做的事。
+    "act",
+    "observe",
+    "channels_list",
   ])
 
   /** 本会话是否为**人格会话**（`SessionData.persona` 占用即为是）。
