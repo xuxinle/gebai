@@ -1610,8 +1610,26 @@ scope 就是会话键，优先于一切推导规则（推导只看得到单个�
 #### 会话解析缓存的失效（会话被删/归档后的恢复）
 
 `PersonaRuntime` 把 `(persona, driver, sessionKey) → sessionId` 缓存住（并发也只解析一次），
-但**必须有 TTL**（缺省 30 分钟）并提供 `invalidateSession()`：会话被用户删除 / 被 GC 归档后，
-永久缓存会把死 id 钉死在这里，表现为「这个分身从此再也不回消息」而日志只有一条 warn。
+并有 TTL（缺省 30 分钟）与 `invalidateSession()`。
+
+**TTL 只是兵缓，不是自愈**：同一个死 id 在 TTL 窗口内依然会被反复投递，所以真正的康复
+必须发生在「引擎报会话不存在」那一刻：
+
+| 层 | 它持有什么 | 丢失时该做什么 |
+|---|---|---|
+| `EnginePersonaRunner` | —— | 把引擎的 `会话不存在: <id>` 归一成 `SessionLostError` 上抛 |
+| `PersonaScheduler` | 按 `sessionId` 建的桶（队列/在跑/信箱/统计） | 调 `resolveSession` 换锚，把在途与待跑事件改投新 id，**不消耗重试次数** |
+| `PersonaRuntime` | `sessionCache`（TTL 内记着死 id） | 清该键后重解一次；解出的 id 与死 id 相同则视为换不到锚 |
+| `PersonaSessionResolver` | `memo` | 无需额外动作：它每次命中 memo 都校验存活，已死则重建 |
+
+四条硬约束：
+
+1. **换不到锚就回到旧语义**（按原重试上限放弃），不静默吞、不死循环；单次运行最多换锚 3 次。
+2. **只认开启轮次时的那一种错误**（`会话不存在` / `SESSION_NOT_FOUND`）。运行中途存储层的
+   `session not found` 不归一——那时模型可能已发过消息/改过文件，重跑一轮会重复对外动作；
+   让它按普通失败处理，下一轮准备阶段再自愈。
+3. **待跑队列必须一起改键**：`QueueItem.sessionId` 只是桶键，不合并的话下一轮 pump 仍在死 id 上打。
+4. 「解出同一个 id」必须判为失败——否则换锚退化成「换到同一 id → 再抡一次」的空转。
 
 #### 引擎零改动：身份走既有 `channelNote`
 

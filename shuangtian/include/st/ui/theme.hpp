@@ -32,6 +32,20 @@ namespace st::ui {
 ///    对比度差要够（否则「同色系」退化成「一片同色」）。
 /// 3. **`surface_sunken` 在两个模式下都更暗**（凹槽/输入底/代码底）：
 ///    语义是「凹进去」，不随亮暗反转。
+///
+/// ## 从歌白 CSS 移植主题时的第四条（2026-11-12 实测）
+///
+/// 歌白的层次感有一半是**毛玻璃（`backdrop-filter`）补出来的**，所以它的
+/// `--bg-elev` 与 `--bg-elev-2` 可以只差 1.01~1.06。霜天的毛玻璃**只给弹层开**
+/// （常驻面板要逐帧重算，全窗档实测 52~60ms = 3 倍帧预算，见
+/// `tests/raster_blur_cost_test.cpp`），因此：
+///
+/// 4. **移植时不能照搬歌白的相邻色值**：`surface`/`surface_alt` 必须显式拉到 ≥1.08、
+///    `surface`/`surface_sunken` ≥1.10。否则侧栏与内容区在实机上糊成一片
+///    （实测修正前：8/8 套移植主题都不达标）。`text_faint` 同样不能照搬——
+///    歌白的小字可以更淡（有背板模糊托底），霜天要满足对四个底色 ≥4.0。
+///    回归：`ui_builtin_themes_test.cpp` 的 `builtin_themes_meet_contrast_floor`。
+///    色相与主色（含「红底白字」这类风格选择）**照搬即可**，不是这里要改的。
 struct Palette {
   math::Color bg{};
   math::Color surface{};

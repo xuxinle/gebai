@@ -299,6 +299,47 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
     expect(new EnginePersonaRunner({ engine: makeEngine({ running: false }).engine }).isRunning("s")).toBe(false)
   })
 
+  /**
+   * 会话丢失必须转成 `SessionLostError` 再上抛：调度器靠类型辨认它、
+   * 走换锚（清缓存重解、事件改投新会话）而不是当成毒事件重试三次后丢弃。
+   */
+  test("引擎报会话不存在 → 抛 SessionLostError（调度器据此换锚，不当毒事件）", async () => {
+    const { engine } = makeEngine({ throwOnRun: new Error("会话不存在: sess-gone") })
+    const r = new EnginePersonaRunner({ engine })
+    const err = await r.run(runInput()).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeTruthy()
+    expect((err as { name?: string }).name).toBe("SessionLostError")
+    expect((err as { sessionId?: string }).sessionId).toBe("sess-1")
+  })
+
+  /**
+   * 但运行**中途**的 `session not found`（存储层，跑到一半被删）不归一：
+   * 那时模型可能已发过消息/改过文件，重跑一轮会重复对外动作。
+   * 让它按普通失败处理——下一轮准备阶段报「会话不存在」时再自愈。
+   */
+  test("运行中途的 session not found 不归一（避免重跑重复对外动作）", async () => {
+    const { engine } = makeEngine({ throwOnRun: new Error("session not found: sess-1") })
+    const r = new EnginePersonaRunner({ engine })
+    const err = await r.run(runInput()).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect((err as { name?: string }).name).toBe("Error")
+  })
+
+  test("其它错误原样上抛（不把磁盘满/权限错误当会话丢失）", async () => {
+    const { engine } = makeEngine({ throwOnRun: new Error("磁盘满了") })
+    const r = new EnginePersonaRunner({ engine })
+    const err = await r.run(runInput()).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect((err as Error).message).toBe("磁盘满了")
+  })
+
 test("工具审批：缺省名单为空 → autoApprove=true（工具全部直接执行）", async () => {
   const a = makeEngine()
   await new EnginePersonaRunner({ engine: a.engine }).run(runInput())

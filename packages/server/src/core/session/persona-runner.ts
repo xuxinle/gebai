@@ -26,7 +26,7 @@
  */
 
 import type { PersonaEvent } from "@gebai/persona"
-import { renderBatch, summarizeBatch } from "@gebai/persona"
+import { renderBatch, summarizeBatch, toSessionLostError } from "@gebai/persona"
 import type { PersonaRunInput, PersonaRunner } from "@gebai/persona"
 
 /** 引擎面（只声明 runner 需要的部分，便于单测）。 */
@@ -407,12 +407,26 @@ export class EnginePersonaRunner implements PersonaRunner {
       //
       // `interactionMode` 绝不能用引擎缺省的 `realtime`：后者假定有实时前端，
       // `show` 的 html 分支 / `page_capture` 会被当成可用随后失败。
-      await this.engine.run(input.sessionId, input.user, prompt, {
-        channelNote: personaNote(input, undefined, this.askToolsFor(input.personaId, input.driver.id).length),
-        interactionMode: "multi_turn",
-        autoApprove: true,
-        ...(attachments.length ? { attachments } : {}),
-      })
+      try {
+        await this.engine.run(input.sessionId, input.user, prompt, {
+          channelNote: personaNote(input, undefined, this.askToolsFor(input.personaId, input.driver.id).length),
+          interactionMode: "multi_turn",
+          autoApprove: true,
+          ...(attachments.length ? { attachments } : {}),
+        })
+      } catch (err) {
+        // 会话丢了（删除 / GC 归档 / chat.json 丢失）→ 归一为 SessionLostError，
+        // 让调度器走换锚自愈（清缓存、重解、把在途与待跑事件改投新会话），
+        // 而不是当成毒事件重试三次后丢弃。
+        const lost = toSessionLostError(input.sessionId, err)
+        if (lost) {
+          this.log?.warn(
+            `[persona:runner] ${input.personaId}/${input.driver.id} 的会话 ${input.sessionId} 已不存在（换锚后重跑本轮）: ${lost.reason ?? ""}`,
+          )
+          throw lost
+        }
+        throw err
+      }
       // ⑦ 自动学习（只在装了册府时）：从**进来的人话**里识别值得记的东西。
       //
       // 为何放在引擎跑完之后：这一轮已经把话答出去了，写库是“事后沉淀”，

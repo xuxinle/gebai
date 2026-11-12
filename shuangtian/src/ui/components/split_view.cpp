@@ -480,24 +480,20 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
     const math::Rect line_rect{bounds_.x, center - line * 0.5f, bounds_.width, line};
     canvas.fill_rect(line_rect, raster::Paint::solid(color));
   }
-  // 拖拽把手（居中的短粗条）：hover/拖拽时出现，静态时隐藏（安静的分隔线形态）。
-  if (handle_hovered_ || dragging_) {
-    const float grip = 24.0f;
-    const float thickness = 3.0f;
-    const math::Color grip_color = dragging_ ? colors.primary : colors.border_strong;
-    if (horizontal) {
-      const math::Rect grip_rect{center - thickness * 0.5f,
-                                 bounds_.center().y - grip * 0.5f, thickness, grip};
-      canvas.fill_rect(grip_rect, raster::Paint::solid(grip_color),
-                       thickness * 0.5f);
-    } else {
-      const math::Rect grip_rect{bounds_.center().x - grip * 0.5f,
-                                 center - thickness * 0.5f, grip, thickness};
-      canvas.fill_rect(grip_rect, raster::Paint::solid(grip_color),
-                       thickness * 0.5f);
-    }
-  }
-  // 聚焦不再画环：分割线聚焦时环画在手柄位置，视觉上就是分隔线上多出一圈边框
+  // **拖拽把手不画**（2026-11-12 用户要求："分割线不要中点加粗"）。
+  //
+  // 旧实现在悬停/拖拽时于线中段叠一根 24×3px 的短粗条（圆角）——那一段比
+  // 常态线粗一倍多、颜色也更深，视觉上就是“线中间肿了一块”。但它要传达的信息
+  // （“这里可以拖”）已经由**线本身的变化**充分表达了：
+  //   常态 0.5px `border_subtle` → 悬停 2px `border_strong` → 拖拽 2px `primary`
+  // 粗细与颜色两道变化都落在同一条线上，不破坏“一条干净分隔线”的形态。
+  // 因此这里不再画 grip：**线变粗变深 = 可拖的提示**，比多一块凸起更安静。
+  //
+  // 命中区不变（`handle_size_` 12px，纯命中区不参与布局）——去掉的是视觉块，
+  // 不是可抓范围，手感完全不变。回归：`ui_split_view_test.cpp`
+  // 的 `split_view_hover_seam_only_when_pointer_on_handle`（悬停仍须有线色变化）。
+  //
+  // 聚焦不画环：分割线聚焦时环会包在手柄位置，视觉上就是分隔线上多出一圈边框
   //（用户要求分割线聚焦不显示边框）。键盘拖动（方向键）仍可用，只是无视觉环。
 }
 

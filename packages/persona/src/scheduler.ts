@@ -33,6 +33,7 @@
  */
 
 import { InterjectionMailbox } from "./mailbox"
+import { toSessionLostError } from "./session-lost"
 import type { PersonaEvent } from "./event"
 import type { PersonaLogger } from "./ports"
 
@@ -47,6 +48,9 @@ interface QueueItem {
   /** 放回重试次数（launch 失败后按原 seq 放回队首时递增；达上限放弃，防毒事件死循环）。 */
   attempts?: number
 }
+
+/** 单次运行里允许的会话换锚次数：换一次就该好；超过说明是“重建了但仍然报不存在”的循环，按真失败处理。 */
+const MAX_REANCHORS = 3
 
 /** 单个事件（含首次）的执行尝试上限：确定性失败到次数后放弃，防 restore→pump 紧循环。 */
 const MAX_LAUNCH_ATTEMPTS = 3
@@ -132,6 +136,21 @@ export interface PersonaSchedulerOptions {
    * 任何新事件入队或其它运行收尾都会触发）。
    */
   isSessionBusy?: (sessionId: string) => boolean
+  /**
+   * 会话**已不在存储中**时的换锚：把死 `sessionId` 换成当前有效的那个。
+   *
+   * 为什么需要它：调度器的桶按 `sessionId` 建，而入队时那个 id 来自上一层的解析
+   * 缓存（可能已经在 TTL 窗口内过期于真实存储——会话被删/被 GC 归档/chat.json 丢失）。
+   * 没有换锚时，引擎抛「会话不存在」只会落进通用 catch：事件按**原 id** 放回队首、
+   * 烧掉重试次数，三次之后整批丢弃——缓存刷新前的每一条事件都在同一个死 id 上死一遍。
+   *
+   * 返回新 sessionId 时，本会话的在跑批次与待跑队列里的**事件**（`QueueItem.event`，
+   * 不是 sessionId 字段）由调度器改投新 id；返回 `null` 表示换不到（宿主持久化层也
+   * 认不出这个 driver → 真错误，走原失败路径）。
+   *
+   * 不传 = 无自愈（旧行为）。
+   */
+  resolveSession?: (deadSessionId: string, event: PersonaEvent, user: string) => Promise<string | null>
   log?: PersonaLogger
 }
 
@@ -152,6 +171,7 @@ export class PersonaScheduler {
   private readonly mailboxCapacity: number
   private readonly execute: PersonaSchedulerOptions["execute"]
   private readonly isSessionBusy?: (sessionId: string) => boolean
+  private readonly resolveSession?: (deadSessionId: string, event: PersonaEvent, user: string) => Promise<string | null>
   private readonly log?: PersonaLogger
 
   /** sessionId → 该会话的待跑队列。 */
@@ -190,6 +210,7 @@ export class PersonaScheduler {
     this.maxRounds = Math.max(1, opts.maxRounds ?? DEFAULT_MAX_ROUNDS)
     this.execute = opts.execute
     this.isSessionBusy = opts.isSessionBusy
+    this.resolveSession = opts.resolveSession
     this.log = opts.log
   }
 
@@ -459,6 +480,15 @@ export class PersonaScheduler {
 
     void (async () => {
       let round = 0
+      /**
+       * 本运行实际的会话 id。
+       *
+       * 底座是 `first.sessionId`；会话丢失并被 `resolveSession` 换锚后改指新 id——
+       * 后续轮次、轮末 requeue、异常回填都用它，不再用入队时的快照。
+       */
+      let runSessionId = sessionId
+      /** 本运行已发生的换锚次数（兑底上限，防“重建了但依旧报不存在”的死循环）。 */
+      let reanchors = 0
       let pendingEvents = batch.map((b) => b.event)
       let user = batch[0]?.user ?? ""
       try {
@@ -468,25 +498,47 @@ export class PersonaScheduler {
             // 它们没被任何一轮处理过，而 runtime 层的幂等位已 admit 占位——丢了这里，
             // 源按规范重投还会被判 duplicate 静默丢弃（双保险全灭）。
             const rest = [...pendingEvents, ...mailbox.takeAll()]
-            if (rest.length) this.requeue(sessionId, user, rest)
+            if (rest.length) this.requeue(runSessionId, user, rest)
             break
           }
           if (pendingEvents.length === 0) break
           round++
           st.round = round
           st.runningEventId = pendingEvents[pendingEvents.length - 1]?.id
-          this.runningEventIds.set(sessionId, new Set(pendingEvents.map((e) => e.id)))
-          await this.execute({ sessionId, user: user || "admin", events: pendingEvents, round, mailbox, signal: ctl.signal })
+          this.runningEventIds.set(runSessionId, new Set(pendingEvents.map((e) => e.id)))
+          try {
+            await this.execute({ sessionId: runSessionId, user: user || "admin", events: pendingEvents, round, mailbox, signal: ctl.signal })
+          } catch (err) {
+            // 会话丢失 → 换锚重跑本轮（不消耗重试、不计失败）：这是缓存陈旧，
+            // 不是毒事件。换不到锚时原错上抛，走通用失败路径。
+            const lost = toSessionLostError(runSessionId, err)
+            if (!lost || !this.resolveSession) throw err
+            if (reanchors >= MAX_REANCHORS) {
+              this.log?.warn(
+                `[persona:${this.personaId}] 会话 ${runSessionId} 已换锚 ${reanchors} 次仍报不存在（疑似存储异常）——本次运行按失败处理`,
+              )
+              throw err
+            }
+            const fresh = await this.reanchor(runSessionId, pendingEvents[0]!, user, ctl.signal)
+            if (!fresh) throw err
+            reanchors++
+            runSessionId = fresh
+            round-- // 本轮未做成：换锚后同样条件重跑，轮次语义不因自愈而提前耗尽
+            // 换锚后重新指向新会话的观测表（旧 id 的表项已在 reanchor 里清掉）
+            st.runningEventId = pendingEvents[pendingEvents.length - 1]?.id
+            this.stats.set(fresh, st)
+            continue
+          }
           // 轮次边界：吸收插话
           const next = mailbox.drain()
           if (next.length === 0) break
           if (round >= this.maxRounds) {
             // 达到轮次上限：剩余插话重新入队（**绝不丢弃**）
             this.log?.warn(
-              `[persona:${this.personaId}] 会话 ${sessionId} 达到单次运行轮次上限 ${this.maxRounds}，` +
+              `[persona:${this.personaId}] 会话 ${runSessionId} 达到单次运行轮次上限 ${this.maxRounds}，` +
                 `剩余 ${next.length} 条插话重新入队`,
             )
-            this.requeue(sessionId, user, next)
+            this.requeue(runSessionId, user, next)
             break
           }
           pendingEvents = next
@@ -496,28 +548,28 @@ export class PersonaScheduler {
         st.done++
       } catch (err) {
         st.failed++
-        this.log?.warn(`[persona:${this.personaId}] 会话 ${sessionId} 运行失败: ${String((err as Error)?.message || err)}`)
+        this.log?.warn(`[persona:${this.personaId}] 会话 ${runSessionId} 运行失败: ${String((err as Error)?.message || err)}`)
         // 首批已被 shift 出队：引擎拒绝（如会话被外部任务占用的竞态）或执行异常时
         // 不能直接丢——按原 seq 放回队首重试（毒事件由尝试上限兑底，防死循环）。
-        this.restoreBatch(batch)
+        this.restoreBatch(batch, runSessionId)
         // 失败时残留插话同样重新入队
         const rest = mailbox.takeAll()
-        if (rest.length) this.requeue(sessionId, user, rest)
+        if (rest.length) this.requeue(runSessionId, user, rest)
       } finally {
         // 世代比对：表里还是自己那一代才清理（否则会把新运行的表项误删，见 launch 头注释）
-        if (this.generations.get(sessionId) === generation) {
-          this.generations.delete(sessionId)
-          this.running.delete(sessionId)
-          this.mailboxes.delete(sessionId)
-          this.runningEventIds.delete(sessionId)
+        if (this.generations.get(runSessionId) === generation) {
+          this.generations.delete(runSessionId)
+          this.running.delete(runSessionId)
+          this.mailboxes.delete(runSessionId)
+          this.runningEventIds.delete(runSessionId)
           st.runningEventId = undefined
           st.round = 0
-          if (!this.sessionQueues.get(sessionId)?.length) {
-            this.sessionQueues.delete(sessionId)
+          if (!this.sessionQueues.get(runSessionId)?.length) {
+            this.sessionQueues.delete(runSessionId)
             // 观测表随会话终结清理：否则已死会话的 threadKeys/stats 永远增长
             // （state() 本就不展示完全空闲的会话，这里只影响下次的累计计数归零）
-            this.threadKeys.delete(sessionId)
-            this.stats.delete(sessionId)
+            this.threadKeys.delete(runSessionId)
+            this.stats.delete(runSessionId)
           }
         }
         this.pump()
@@ -532,7 +584,7 @@ export class PersonaScheduler {
    * 会在 catch→finally pump→launch 之间形成紧循环。而真正的「会话被占用」冲突
    * 在下一次 pump 时会被 isSessionBusy 预检拦住（不烧尝试次数），空出后自然接起。
    */
-  private restoreBatch(batch: QueueItem[]): void {
+  private restoreBatch(batch: QueueItem[], sessionId?: string): void {
     const bySession = new Map<string, QueueItem[]>()
     for (const it of batch) {
       const attempts = (it.attempts ?? 0) + 1
@@ -542,7 +594,9 @@ export class PersonaScheduler {
         )
         continue
       }
-      bySession.set(it.sessionId, [...(bySession.get(it.sessionId) ?? []), { ...it, attempts }])
+      // 桶键以调用方给定的为准（会话换锚后要回新桶，否则重试还打在死会话上）
+      const key = sessionId ?? it.sessionId
+      bySession.set(key, [...(bySession.get(key) ?? []), { ...it, sessionId: key, attempts }])
     }
     for (const [sessionId, items] of bySession) {
       while (this.pendingTotal + items.length > this.queueLimit) {
@@ -559,6 +613,58 @@ export class PersonaScheduler {
       this.sessionQueues.set(sessionId, [...items, ...existing])
       this.pendingTotal += items.length
     }
+  }
+
+  /**
+   * 会话丢失后的换锚：请宿主重新解析出有效会话 id，并把本运行/本队列的桶整体搬过去。
+   *
+   * 三件必须一起做（缺一件就会出现“换了 id 但事件还在旧桶里”的断层）：
+   * 1. 调 `resolveSession` 拿新 id（宿主侧同时清自己的解析缓存，否则拿到的还是同一个死 id）
+   * 2. 本会话在跑的表项（running/mailboxes/generations/runningEventIds/stats/threadKeys）搬到新 id
+   * 3. **待跑队列**合并到新 id：`QueueItem.sessionId` 是桶键（launch 取的是 `event`），
+   *    下一轮 pump 按桶键辨认会话——不合并，旧桶的事件会继续用死 id 重试。
+   *
+   * 返回 null = 宿主也换不到（driver 已下线/存储不可达），由调用方按真错误处理。
+   */
+  private async reanchor(deadSessionId: string, event: PersonaEvent, user: string, signal: AbortSignal): Promise<string | null> {
+    if (!this.resolveSession) return null
+    if (signal.aborted) return null
+    let fresh: string | null = null
+    try {
+      fresh = await this.resolveSession(deadSessionId, event, user)
+    } catch (err) {
+      this.log?.warn(`[persona:${this.personaId}] 会话 ${deadSessionId} 换锚失败（解析报错）: ${String((err as Error)?.message || err)}`)
+      return null
+    }
+    if (!fresh || fresh === deadSessionId) {
+      this.log?.warn(`[persona:${this.personaId}] 会话 ${deadSessionId} 已丢失且无法换锚（宿主持久化层未给出新会话）`)
+      return null
+    }
+    // ① 在跑的表项搬过去（cancelRunning / state 靠它们定位）
+    const move = <T>(m: Map<string, T>) => {
+      const v = m.get(deadSessionId)
+      if (v === undefined) return
+      m.delete(deadSessionId)
+      m.set(fresh as string, v)
+    }
+    move(this.running)
+    move(this.mailboxes)
+    move(this.generations)
+    move(this.runningEventIds)
+    move(this.stats)
+    move(this.threadKeys)
+    // ② 待跑队列合并（只改桶键，不动事件与 seq——FIFO 不变）
+    const dead = this.sessionQueues.get(deadSessionId)
+    if (dead?.length) {
+      this.sessionQueues.delete(deadSessionId)
+      const merged = [...(this.sessionQueues.get(fresh) ?? []), ...dead.map((it) => ({ ...it, sessionId: fresh as string }))]
+      merged.sort((a, b) => a.seq - b.seq)
+      this.sessionQueues.set(fresh, merged)
+    }
+    this.log?.warn(
+      `[persona:${this.personaId}] 会话 ${deadSessionId} 已不存在（删除/归档）→ 换锚到 ${fresh}，在途与待跑事件改投新会话`,
+    )
+    return fresh
   }
 
   /** 把事件重新放回队列（不经过插入路径，避免"入信箱→再取出"的死循环）。 */

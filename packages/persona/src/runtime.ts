@@ -90,10 +90,14 @@ export interface PersonaRuntimeOptions {
    * 会话解析缓存的有效期（毫秒，缺省 30 分钟）。
    *
    * 为何必须有：缓存把 `(persona, driver, sessionKey) → sessionId` 永久记住后，
-   * 会话一旦被用户删除 / 被 GC 归档，事件就会持续投给一个死 id——引擎抛「会话不存在」
-   * → 调度器重试 3 次后丢弃。表面症状是「这个分身从此再也不回消息」，日志里只有一条 warn。
-   * 过期后重新走解析（解析器自己会校验存活并重建）。
-   */
+    * 会话一旦被用户删除 / 被 GC 归档，事件就会持续投给一个死 id——引擎抛「会话不存在」
+ * → 调度器重试 3 次后丢弃。表面症状是「这个分身从此再也不回消息」，日志里只有一条 warn。
+ * 过期后重新走解析（解析器自己会校验存活并重建）。
+ *
+ * **TTL 只是兵缓，不是自愈**：同一个死 id 在 TTL 窗口内依然会被反复投递（最长 30 分钟）。
+ * 真正的康复在引擎报「会话不存在」那一刻——见 `SessionLostError`、`driverSession`
+ * 里的缓存失效与调度器的 `resolveSession` 换锚。
+ */
   sessionCacheTtlMs?: number
 }
 
@@ -665,6 +669,41 @@ export class PersonaRuntime {
   }
 
   /**
+   * 会话已丢：清掉本层缓存与解析器 memo，重新解析出一个**活**的会话 id。
+   *
+   * 本层 `sessionCache` 缓存的是解析结果（含 TTL，30 分钟）——会话被删/归档后它仍然记着
+   * 同一个死 id。解析器自己每次都会校验存活（memo 命中时也查），所以只需清本层缓存
+   * 再问一次，就会拿到重建后的新会话。
+   *
+   * `staleSessionId` 是调用方持着的那个死 id：解析结果与它相同则视为换锚失败
+   * （解析器也认不出这个 driver 时不能把同一个 id 当新会话交回去）。
+   */
+  private async reResolveSession(
+    personaId: string,
+    driverId: string,
+    user: string,
+    event: PersonaEvent,
+    sessionKey: string,
+    staleSessionId: string,
+  ): Promise<string | null> {
+    const key = sessionDriverKey(personaId, driverId, sessionKey)
+    this.sessionCache.delete(key)
+    const r = await this.driverSession(personaId, driverId, user, event, sessionKey)
+    if (!r.sessionId) return null
+    if (r.sessionId === staleSessionId) {
+      this.log?.warn(
+        `[persona:${personaId}/${driverId}] 会话 ${staleSessionId} 已不存在，但重解得到同一个 id` +
+          `（解析器未校验存活或存储异常）——本批事件按失败处理`,
+      )
+      // 别把死 id 继续钉在缓存里：彻底清掉，下一事件再试
+      this.sessionCache.delete(key)
+      return null
+    }
+    this.driverSessions.set(baseDriverKey(personaId, driverId), r.sessionId)
+    return r.sessionId
+  }
+
+  /**
    * 使某个 driver 的会话解析缓存失效（下一事件重新解析）。
    *
    * 为何需要它：会话被删除 / 重建后，缓存里的 sessionId 就是死 id。引擎会抛
@@ -734,6 +773,15 @@ export class PersonaRuntime {
             },
           }
         : {}),
+      // 会话丢失自愈：引擎报「会话不存在」时清掉本层缓存后重解一次（解析器自己每次校验存活）。
+      //
+      // 为何要清缓存：本层 `sessionCache` 缓存的是**解析结果**（含 30 分钟 TTL），死 id
+      // 会被它一直钉在手里——不清就呈「换锚到同一个 id → 再抡一次」的死循环。
+      resolveSession: async (deadSessionId: string, event: PersonaEvent, targetUser: string) => {
+        const key = driverKey(personaId, driver.id)
+        const sessionKey = this.sessionKeyFor(key, driver, event)
+        return this.reResolveSession(personaId, driver.id, targetUser, event, sessionKey, deadSessionId)
+      },
       ...(this.log ? { log: this.log } : {}),
       execute: async ({ events, sessionId, user, signal, round, mailbox }) => {
         const identity = this.opts.lookup.get(personaId)

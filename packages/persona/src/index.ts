@@ -95,6 +95,7 @@ export type { WorkerOutcome, WorkerSpawnInput, WorkerSpawner } from "./worker"
 export { workerReportEvent } from "./worker"
 
 // ── 运行时与端口 ──
+export { SessionLostError, isSessionLostError, toSessionLostError } from "./session-lost"
 export type {
   DriverDef,
   DriverSchedule,
