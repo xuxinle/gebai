@@ -953,16 +953,18 @@ auto Terminal::selected_text() const -> std::string {
 void Terminal::send_stop() {
   TerminalSession& target = current();
   if (target.pty != nullptr && target.pty->valid()) {
-    // **PTY 模式：发 `Ctrl+C`（0x03），而不是杀 shell**。
+    // **PTY 模式：中断当前命令，而不是杀 shell**。
     //
-    // 这是真终端里“中止”的语义：把中断字符送进终端输入流，
-    // 内核行规程向**前台进程组**发 SIGINT——当前命令被打断，
-    // 而 shell 自己活着（接着给你提示符）。
-    //
+    // 这是真终端里“中止”的语义：当前命令停掉、shell 自己活着（接着给你提示符）。
     // 杀 shell（`terminate`）会把整个会话弄没：用户想着“停一下这条”，
-    // 结果终端直接死了、得重新开一个（实测踩到）。
-    // 真要把整条会话关掉，那是 `close_session` 的事。
-    send_bytes("\x03");
+    // 结果终端直接死了、得重新开一个（实测踩到）。真要把整条会话关掉，
+    // 那是 `close_session` 的事。
+    //
+    // 为何不直接在这里写 `0x03`：那在 POSIX 上是正确的，但在 **Windows 的
+    // ConPTY 里完全不起作用**（实测：命令照常跑、shell 也不回提示符）。
+    // 投递手段的平台差异封装在 `PtySession::interrupt_foreground()` 里，
+    // 那一层已实测两边都能真的停掉命令。
+    (void)target.pty->interrupt_foreground();
     return;
   }
   if (!target.running) {

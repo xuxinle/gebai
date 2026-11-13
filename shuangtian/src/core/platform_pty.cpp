@@ -31,6 +31,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <tlhelp32.h>
 
 // `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` 要 Windows SDK 10.0.17763+ 才有；
 // 它的**取值是 Win32 契约的一部分**（与 ABI 一起冻结），因此旧 SDK 下手工补上
@@ -473,6 +474,15 @@ auto PtySession::read(char* buffer, std::size_t capacity) -> std::size_t {
 #endif
 }
 
+auto PtySession::pid() const noexcept -> std::uint64_t {
+  if (impl_ == nullptr) return 0;
+#if defined(_WIN32)
+  return static_cast<std::uint64_t>(impl_->child.dwProcessId);
+#else
+  return impl_->child > 0 ? static_cast<std::uint64_t>(impl_->child) : 0;
+#endif
+}
+
 auto PtySession::write(const char* data, std::size_t length) -> std::size_t {
   if (impl_ == nullptr || length == 0) return 0;
 #if defined(_WIN32)
@@ -516,6 +526,54 @@ void PtySession::resize(PtySize size) {
   ws.ws_row = static_cast<unsigned short>(size.rows);
   (void)ioctl(impl_->master, TIOCSWINSZ, &ws);
   (void)kill(impl_->child, SIGWINCH);
+#endif
+}
+
+auto PtySession::interrupt_foreground() -> bool {
+  if (impl_ == nullptr) return false;
+#if defined(_WIN32)
+  // ── Windows：终止 shell 的直接子进程（保留 shell）──
+  //
+  // 为何不是写 `0x03`：ConPTY 的输入流里那个字节**不会**变成 `CTRL_C_EVENT`——
+  // 实测（`tools/conpty_interrupt_truth.cpp`，判据是“命令进程是否消失”）：
+  // 写完 `0x03` 后`timeout.exe` 照常跑、shell 也不回提示符；而**空闲时**写
+  // `0x03` 却正常（conhost 只在没有前台命令时处理它）。`AllocConsole` +
+  // `AttachConsole` + `GenerateConsoleCtrlEvent` 也无效：ConPTY 会话没有
+  // 可供 attach 的真实控制台（实测三项均不成立）。
+  //
+  // 而“杀掉 shell 的直接子进程”三项都成立（命令进程消失 / shell 存活 /
+  // 回提示符并能继续执行下一条命令）——实测见 `tools/conpty_interrupt_ways_probe.cpp`。
+  //
+  // 代价（已记入文档）：命令进程是被终止的，而不是收到 Ctrl+C 后自己收拾现场
+  //（所以它不会跑自己的清理逻辑）。真终端里 Ctrl+C 也是“进程被信号终止”，
+  // 对绝大多数命令而言语义一致。
+  const DWORD shell_pid = impl_->child.dwProcessId;
+  if (shell_pid == 0) return false;
+
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return false;
+  std::vector<DWORD> targets;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot, &entry) != 0) {
+    do {
+      if (entry.th32ParentProcessID == shell_pid) targets.push_back(entry.th32ProcessID);
+    } while (Process32NextW(snapshot, &entry) != 0);
+  }
+  CloseHandle(snapshot);
+
+  bool any = false;
+  for (const DWORD target : targets) {
+    HANDLE handle = OpenProcess(PROCESS_TERMINATE, FALSE, target);
+    if (handle == nullptr) continue;
+    if (TerminateProcess(handle, 1) != 0) any = true;
+    CloseHandle(handle);
+  }
+  return any;
+#else
+  // ── POSIX：写 `0x03`，由行规程向前台进程组发 `SIGINT`（标准行为，已实测可用）──
+  const char ctrl_c = '\x03';
+  return write(&ctrl_c, 1) == 1;
 #endif
 }
 

@@ -35,6 +35,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -81,6 +82,21 @@ class PtySession {
   /// 上报新的窗口尺寸（子进程收到 `SIGWINCH` / `WINDOW_BUFFER_SIZE_EVENT`）。
   void resize(PtySize size);
 
+  /// **中断当前命令**（保留 shell 会话）。返回是否真的找到并处理了目标。
+  ///
+  /// 语义与真终端里的 `Ctrl+C` 一致：当前命令停掉、shell 与你接着用。
+  /// 两平台的手段不同，但**允诺的结果一样**：
+  ///
+  /// * POSIX：向终端写入 `0x03`，内核行规程向后台进程组发 `SIGINT` —— 这是标准行为。
+  /// * Windows：**不能靠往 ConPTY 输入管道写 `0x03`**（实测：它不会变成
+  ///   `CTRL_C_EVENT`，命令照常跑、shell 也不回提示符；`AttachConsole` +
+  ///   `GenerateConsoleCtrlEvent` 同样无效，因为 ConPTY 会话没有可供 attach 的真实控制台）。
+  ///   因此这里**直接终止 shell 的直接子进程**——命令死了、shell 活着，
+  ///   实测三项都成立（命令进程消失 / shell 存活 / 回提示符并能继续执行）。
+  ///
+  /// 返回 false 表示“没找到可中断的目标”（例如 shell 会自己处理命令、没有子进程）。
+  [[nodiscard]] auto interrupt_foreground() -> bool;
+
   /// 等子进程退出并回收；返回退出码（异常终止返回 128+signal）。
   auto wait() -> int;
 
@@ -95,6 +111,14 @@ class PtySession {
   /// 子进程是否已退出（`read` 返回 0 之后可读退出码）。
   [[nodiscard]] auto exited() const noexcept -> bool;
   [[nodiscard]] auto exit_code() const noexcept -> int;
+
+  /// 子进程 pid（未打开时为 0）。
+  ///
+  /// 为何需要：**向伪控制台里的前台进程投递 Ctrl+C** 在 Windows 上要求先
+  /// `AttachConsole(pid)` 再 `GenerateConsoleCtrlEvent`（往输入流写 0x03
+  /// 在这条路上不保证能打断占住前台的命令，实测会整个会话失声）。
+  /// 这条路径需要 pid，所以它必须是公开信息，而不是藏在实现里。
+  [[nodiscard]] auto pid() const noexcept -> std::uint64_t;
 
   /// 本机是否支持伪终端（Windows 上需要 Win10 1809+）。
   ///

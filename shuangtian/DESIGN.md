@@ -4179,9 +4179,18 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
     `OSC 0/2` 标题到达后覆盖它，也可显式传 title）。
   - **面板头并入标签栏（同日二轮）**：独立面板头那 32px 删掉，动作全部住进标签栏
     尾部（Windows Terminal / VSCode 同款形态）。内置三钮：清屏（常驻）、中止
-    （busy 时；PTY 模式下 busy = shell 活着，是常态——中止发 Ctrl+C 中断当前命令）、
+    （busy 时；PTY 模式下 busy = shell 活着，是常态——中止调
+    `PtySession::interrupt_foreground()` 中断当前命令、保留 shell）、
     收起（宿主装了 `on_request_collapse` 才出现——面板收起是布局决策，归宿主）。
     动作面 `collapse` 与内置钮同链路；`add_header_action` 供宿主自挂钮。
+  - **中止的投递手段按平台分（2026-11-13）**——`PtySession::interrupt_foreground()`：
+    POSIX 写 `0x03`（行规程向后台进程组发 `SIGINT`，标准行为）；Windows **不能**写 `0x03`
+    （ConPTY 不把它变成 `CTRL_C_EVENT`：实测命令照常跑、shell 不回提示符；
+    `AttachConsole` + `GenerateConsoleCtrlEvent` 也无效——ConPTY 没有可 attach 的真实控制台），
+    改为**终止 shell 的直接子进程**（命令死、shell 活、回提示符并能继续执行，三项实测均成立）。
+    ⚠ 由此而来的语义边界：**shell 内建/cmdlet**（`Start-Sleep`、`cd`……）不起子进程，
+    对它们“中止”不适用——Windows 上真要打断 cmdlet 本身只能关会话。
+    描述见 `docs/PITFALLS.md` 场景 29（含“新字节 ≠ 被打断”那个量尺错误）。
   - **回看滚动条**：复用 `ScrollBar` 子件（拖拽/点击轨道/hover 加宽全是既有组件的事），
     组件只做「回看偏移 ↔ 滚动偏移」换算（同一状态两个视图）；备用屏（vim/htop）里隐藏。
     翻离底部时右下角「回到底部」浮钮（点击归零偏移，与滚轮路径同一状态）。

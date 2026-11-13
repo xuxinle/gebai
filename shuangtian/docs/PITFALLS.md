@@ -719,6 +719,20 @@
 | **懒建页面的接口要能报失败**〔契约〕 | “确保已建”若返回 `void`，调用方无法在失败时提前返回，只能继续往下发请求（就是上一条）。这个函数必须是 `[[nodiscard]] bool` | 同上；实测 |
 | **新增系统库要改两处，否则只有独立工程会红**〔构建〕 | `link-libs.txt`（框架自建走它）与 `src/pkg/build.cpp` 的 `kFallbackLibsWindows`（独立工程把框架 vendor 出去、仓库根文件不在时走它）是同一份数据的两种形态。只改前者：`st` 自建全绿，而 `independent_project_builds_links_and_runs` 红在 `undefined symbol: __declspec(dllimport) CoTaskMemFree`——**报错指向源码，真因在清单** | `src/pkg/build.cpp` 的 `default_system_libs`；实测 2026-11-13（加 `ole32`/`uuid`/`shlwapi` 时踩到） |
 
+## 场景 29：向「伪终端」里投递中断（Ctrl+C）
+
+> **总判据：`0x03` 进得了 POSIX 的行规程，进不了 Windows 的 ConPTY。
+> 而且前几版的“验证”根本没在量中断——它在量“屏幕还在动”。**
+
+| 坑 | 一句话 | 出处 |
+|---|---|---|
+| **写 `0x03` 在 ConPTY 里根本不中断**〔平台〕 | 实测（判据是“命令进程是否消失”）：命令跑起来后往 ConPTY 输入管道写 `0x03`，`timeout.exe` **照常跑完**、shell 也不回提示符。而**空闲时**写 `0x03` 却正常（`^C` 回显、提示符回）——conhost 只在没有前台命令时处理它 | `src/core/platform_pty.cpp` 的 `interrupt_foreground`；实测 2026-11-13 |
+| **`AttachConsole` + `GenerateConsoleCtrlEvent` 也不行**〔平台〕 | ConPTY 会话没有可供 attach 的真实控制台：`AllocConsole` 后 `AttachConsole(pid)` 仍失败；即使返回成功，事件也传不到伪控制台里的前台组（实测三项判据全不成立） | 同上；实测 |
+| **“有新字节”不等于“被打断了”**〔量尺〕 | 用“Ctrl+C 之后屏幕有新字节”当判据会得出**相反的结论**：`timeout` 每秒都在重绘倒计时，不打它也一直在出新字节。正确的判据是**命令进程是否从进程表消失**（+ shell 是否存活 + 能否执行下一条） | 前几轮就是错在这里，曾据此误判“cmd 能打断、PowerShell 不能” |
+| **PowerShell 的 cmdlet 打不断不是缺陷**〔语义〕 | `Start-Sleep` / `Write-Output` 是 **cmdlet**，跑在 PowerShell 自己进程里、不起子进程，所以“终止 shell 的子进程”对它无效。测“中止外部命令”要用真会起子进程的（如 `ping.exe`）；这也正是真终端的语义（cmdlet 的中断由 shell 自己处理） | `tests/ui_terminal_pty_test.cpp`；实测 |
+| **中止用例的“偶发红”其实是恒定红**〔诊断〕 | 它被当成环境敏感的偶发问题（历史注释还按进程模型写了“Windows 上不呈现该形态”的推断）。实测：基线二进制、空负载、多轮重复——**每次都红**，只是要等满 10 秒软超时才报，看起来像“时快时慢”。**先量红率再定性**，别按“可能不稳定”绕开 | 实测 2026-11-13 |
+| **改 `pty.hpp` 要跑独立工程用例**〔构建〕 | 主工程靠间接包含拿到了 `<cstdint>`，独立工程（`independent_project_builds_links_and_runs`）直接红在 `'uint64_t' in namespace 'std' does not name a type`。头文件新用到的类型要自己 `#include` | `include/st/core/pty.hpp`；实测 2026-11-13 |
+
 ## 怎么用这份速查
 
 **开工前**：扫一眼你**当前场景**那一节（30 秒）。

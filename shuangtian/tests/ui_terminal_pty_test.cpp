@@ -57,6 +57,14 @@ struct TestShell {
 #endif
 }
 
+/// **中止用例专用**的 shell：两平台都用产品默认 shell（Windows 上 PowerShell）。
+///
+/// 保留这个名字而不是直接调 `test_shell()`，是为了给中止语义一个**显式拐点**：
+/// 它的历史教训是“中止看着没反应”可能是两种回事——测试写法（POSIX 的前台作业交接窗口）
+/// 或投递手段（Windows 的 `0x03` 在 ConPTY 里无效）。两者都是真的、都已修，
+/// 所以现在它就跟产品默认 shell 一致——**用产品真正会用的 shell 验产品行为**。
+[[nodiscard]] auto interrupt_test_shell() -> TestShell { return test_shell(); }
+
 /// 已挂树、已完成布局的终端（`arrange` 后几何才有效）。
 struct Harness {
   st::ui::UiRoot root{};
@@ -69,6 +77,16 @@ struct Harness {
     // 测试不赌系统默认 shell：注入固定的 bash/PowerShell（见 test_shell 说明）。
     const TestShell sh = test_shell();
     terminal->set_shell(sh.program, sh.argv);
+    root.set_content(std::move(owned));
+    root.layout(true);
+  }
+
+  /// 用指定 shell（中止用例走 `interrupt_test_shell()`）。
+  explicit Harness(const TestShell& shell) {
+    root.set_viewport(st::math::Size{900.0f, 500.0f});
+    auto owned = std::make_unique<Terminal>();
+    terminal = owned.get();
+    terminal->set_shell(shell.program, shell.argv);
     root.set_content(std::move(owned));
     root.layout(true);
   }
@@ -215,9 +233,12 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   // 为何不杀 shell：那会把整个会话弄没——用户想着“停一下这条”，
   // 结果终端直接死了、得重新开一个（实测踩到）。真要关会话用 `close_session`。
   if (!st::process::PtySession::supported()) return;
-  Harness harness;
+  // 中止语义用 `interrupt_test_shell()`（Windows 上是 `cmd.exe`）——
+  // 为何不能跟其他用例共用 PowerShell，见该函数的实测说明。
+  const TestShell shell = interrupt_test_shell();
+  Harness harness{shell};
   harness.terminal->open_shell();
-  ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
+  ST_REQUIRE(harness.wait_for(shell.prompt_needle));
   // 刚开终端、未发命令：不忙（`busy()` 的新语义）；但 shell 进程是活的。
   ST_CHECK(!harness.terminal->busy());
   ST_CHECK_EQ(harness.terminal->get_property("running").value_or(""), std::string("true"));
@@ -242,21 +263,18 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   //（见 `Harness::wait_until` 的说明），把盲等加回去是开倒车。标记只能由
   //“命令真的执行了”产生，等它既准又不慢（实测 15–47 ms）。
 #ifdef _WIN32
-  // **保持现状：未改成单一作业形态**（判断依据见下，待 Windows 实测）。
+  // 长命令必须是**真的会起子进程**的命令。
   //
-  // POSIX 那条窗口的成因是「两次 fork→exec→tcsetpgrp 的前台作业交接」：`echo` 是 bash
-  // 内建、不 fork，标记打完之后 bash 才 fork `sleep` 并交接终端。PowerShell 里没有这个
-  // 结构：`Write-Output` 与 `Start-Sleep` 都是**运行在 PowerShell 自己进程里的 cmdlet**
-  //（`Start-Sleep` 不 fork 子进程），两者之间不发生前台进程组交接；而 `Ctrl+C` 经 ConPTY
-  // 变成控制台事件，由 PowerShell 置停止标志、中止**整条语句列表**——即便它落在两条语句
-  // 之间，后续的 `Start-Sleep` 也会被放弃而不是照常起一个 60 秒的作业。两种落点都回到
-  // 提示符，所以本用例在该平台上不呈现「中断被吞」的形态。
+  // 为何不能用 `Start-Sleep -Seconds 60`：它是 PowerShell 的**cmdlet**，跑在
+  // PowerShell 自己进程里，**不起子进程**。而 Windows 上的“中止”是终止 shell 的直接
+  // 子进程（原因见 `PtySession::interrupt_foreground` 的说明与实测）——对 cmdlet 无效。
+  // 这在真终端里也不是缺陷：用户在 PowerShell 里按 Ctrl+C，PowerShell 自己处理；
+  // 但本用例验的是“占用前台的**外部命令**能被中止”这条真终端能力。
   //
-  // ⚠ 以上是**按进程模型推断**，本机（Linux）无法验证：若将来在 Windows 上观察到本用例
-  // 偶发红，先按本条线的口径取证（Ctrl+C 发出那一刻的前台是谁、目标作业是否照常起来），
-  // 再决定是否也要合成单一作业（对应写法是 `powershell -NoProfile -Command "…"`，
-  // 但那会引入子进程与它自己的控制台，需实测其 Ctrl+C 语义后再定）。
-  const std::string long_cmd = "Write-Output ('ru'+'nning-9271'); Start-Sleep -Seconds 60";
+  // 所以用 `ping.exe`：真子进程、默认跑十几秒、被打断后 shell 立刻回提示符。
+  // 标记由 `Write-Output` 打出（同样在 shell 里，不需要子进程）——它只用来确认
+  // “命令真的开始执行了”，不承担被中止的角色。
+  const std::string long_cmd = "Write-Output ('ru'+'nning-9271'); ping -n 60 127.0.0.1";
   const std::string after_cmd = "Write-Output after-stop-9271";
 #else
   // ⚠ **整条必须是 shell 眼里的「一条命令」（一个前台作业）**——2026-10-17 修。
@@ -326,8 +344,8 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
       [&] {
         const std::string text = harness.screen_text();
         std::size_t count = 0;
-        for (std::size_t at = text.find(test_shell().prompt_needle); at != std::string::npos;
-             at = text.find(test_shell().prompt_needle, at + 1)) {
+        for (std::size_t at = text.find(shell.prompt_needle); at != std::string::npos;
+             at = text.find(shell.prompt_needle, at + 1)) {
           ++count;
         }
         return count >= 2;   // 首提示符 + 中断后回到的提示符
