@@ -88,6 +88,7 @@
 | 用跨编译器拓缺陷（GCC 不报的） | `BUILD_CHECK.md`；`st check --toolchain=clang` | 速查 |
 | 知道构建为什么这样隔离（多 worker 互踩） | `BUILD_ISOLATION_PLAN.md`（**方案未落地**，只分析） | 详读 |
 | 知道 SQLite 怎么内置进来的 | `sqlite_integration.md` | 详读 |
+| 用嵌入浏览器（WebView2）做界面 / 把整个前端打进 exe | `../DESIGN.md` §4.6.2；组件页 `agent-docs/components/layout/WebView.md`；坑位 `PITFALLS.md` 场景 28 续；交付状态 `WEBVIEW2_DELIVERY_20261113.md` | 速查 |
 | 知道字体渲染的像素级对齐怎么做的 | `DWRITE_PIXEL_BENCHMARK.md`（Windows 原生链路像素对照） | 详读 |
 | 知道字重曲线怎么映射（跨字号连续） | `WEIGHT_CURVE.md` | 速查 |
 
@@ -190,6 +191,7 @@
 | 文档 | 讲的是什么 | 体量 | 契约 |
 |---|---|---|---|
 | [`sqlite_integration.md`](sqlite_integration.md) | SQLite 源码内置：为什么这么接、边界划在哪 | 详读 | 记录（已落地） |
+| [`WEBVIEW2_DELIVERY_20261113.md`](WEBVIEW2_DELIVERY_20261113.md) | WebView2 可编程嵌入组件的交付状态：真窗口实测数据、门禁结果、遗留项 | 速查 | 记录（已落地） |
 | [`BUILD_CHECK.md`](BUILD_CHECK.md) | `st check` 跨编译器检查：为什么需要它 | 速查 | 记录（已落地） |
 | [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`apps/xiangqi`） | 详读 | 记录（已落地） |
 | [`TERMINAL_FIXES_20261008.md`](TERMINAL_FIXES_20261008.md) | 终端修复轮：光标错位/输入回显/多会话串台 | 速查 | 记录（已落地） |

@@ -4,7 +4,7 @@
   "kind": "static_library",
   "cxx_standard": 23,
   "include_dirs": ["include", "third_party", "third_party/sqlite",
-                   "third_party/micropython"],
+                   "third_party/micropython", "third_party/webview2"],
   "modules": ["core", "math", "codec", "geom", "raster", "text", "md", "html", "xml", "ui", "shell", "control", "app", "pkg", "ext", "edit", "lsp", "perf", "search"],
   "sources": [
     "src/core/*.cpp",
@@ -34,6 +34,7 @@
     "src/python/bpy_bridge.c"
   ],
   "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs",
+            "third_party/webview2/WebView2Loader.dll",
             "src/python/prelude.py", "src/python/bpy_data.py", "src/python/bpy_ops.py",
             "src/python/bpy_ops_ns.py", "src/python/extract.py", "src/python/bpy_module.py"],
   "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c",
@@ -78,14 +79,14 @@
     }
   },
   "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",
-  "system_libs": ["pthread", "dl", "m", "ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread"],
+  "system_libs": ["pthread", "dl", "m", "ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"],
   "toolchains": {
     "mingw": {
       "compiler": "x86_64-w64-mingw32-g++",
       "c_compiler": "x86_64-w64-mingw32-gcc",
       "platform": "windows",
       "//system_libs_note": "交叉接管用（resolve_system_libraries：声明即整体接管不追默认）。与 link-libs.txt 的 windows 节的**差异是有意的**：nanosrv 不在——它只在本机 MSYS2 MinGW 里需要（那里的 libdbghelp.a 只是转发壳）；mingw-w64 交叉包（Ubuntu 等）的 libdbghelp.a 自带真符号（实测 nm 可见 SymInitialize/SymFromAddr），再链 nanosrv 反而 cannot find -lnanosrv。",
-      "system_libs": ["ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "psapi", "secur32", "winpthread"],
+      "system_libs": ["ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"],
       "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000006"],
       "//defines_note": "NTDDI_VERSION 必须给到 RS5(0x0A000006)：ConPTY 的 HPCON/CreatePseudoConsole 在 mingw-w64 的 wincon.h 里由 #if (NTDDI_VERSION >= 0x0A000006) 门控。旧值 0x0A000000 会让 platform_pty.cpp 编不过（HPCON has not been declared）——本机 Windows MinGW 因更高默认 SDK 值而看不出来，Linux 交叉首次实编时现形。",
       "executable_suffix": ".exe",
@@ -100,7 +101,7 @@
       "target_triple": "x86_64-w64-windows-gnu",
       "platform": "windows",
       "//system_libs_note": "同上：与 link-libs.txt 的 windows 节同步。",
-      "system_libs": ["ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread"],
+      "system_libs": ["ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"],
       "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000006"],
       "//defines_note": "NTDDI_VERSION 必须给到 RS5(0x0A000006)：ConPTY 的 HPCON/CreatePseudoConsole 在 mingw-w64 的 wincon.h 里由 #if (NTDDI_VERSION >= 0x0A000006) 门控。旧值 0x0A000000 会让 platform_pty.cpp 编不过（HPCON has not been declared）——本机 Windows MinGW 因更高默认 SDK 值而看不出来，Linux 交叉首次实编时现形。",
       "//suppressions": "对 clang 的告警收敛：前三条来自 **vendored 第三方头**（sqlite3.h 用 MSVC 扩展类型 __int64、quickjs.h 用旧式转换与 NAN）——那是上游代码，不是我们要改的东西。后两条（2026-11-02 加）：工程自身的既有代码里有少量只在 gcc 诊断下验证过的内部函数/lambda 捕获形态（`scene3d_script.cpp` 的反向序列化预留、`software_scene.cpp` 的采样循环），gcc 不告警而 clang 报 `-Werror`——逐处改会有背离语义的风险，收敛到工具链级。工程自己的代码其余告警仍与 gcc 同等严格。",
@@ -1419,4 +1420,4 @@
 
 
 
-
+

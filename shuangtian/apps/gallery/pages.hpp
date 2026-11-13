@@ -17,7 +17,8 @@
 #include <memory>
 #include <string>
 
-#include "native_host_page.hpp"  // `NativeHostSource`（页面的外部窗口来源端口）
+#include "native_host_page.hpp"
+#include "webview_page.hpp"  // `NativeHostSource`（页面的外部窗口来源端口）
 #include "st/math/geometry.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/window_control.hpp"  // 窗框动作出口（`ui::WindowControl` 端口）
@@ -74,7 +75,7 @@ struct PageSpec {
   std::string_view subtitle{};  ///< 页副标题
 };
 
-inline constexpr std::size_t kPageCount = 8;
+inline constexpr std::size_t kPageCount = 9;
 
 [[nodiscard]] auto page_specs() -> const std::array<PageSpec, kPageCount>&;
 

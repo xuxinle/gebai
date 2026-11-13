@@ -5066,6 +5066,63 @@ virtual ChildViewProbe host_child_view_probe() const;            // 默认 attac
 **平台落地**：Win32 已实现（`SetParent` + 样式切换 + 宿主窗口 + 几何偏移 + 还原）；
 `headless` 如实 `Unsupported`；X11/Wayland 目前也走默认 `Unsupported`（`XReparentWindow`/XEmbed 未实现）。
 
+#### 4.6.2 可编程嵌入浏览器（`ui::WebView` + `st::shell::webview`，可选能力）
+
+`4.6.1` 的 `NativeHost` 只能**看着**网页（导航/脚本/消息都在别人的进程里）。要做“用网页做
+界面的一部分”，需要的是一块**自己拥有页面对象**的区域——这就是本能力。
+
+```
+   ui::WebView                 组件：几何机械复用 NativeHost（bounds ∩ clip）、属性面、动作面
+        │ ui::WebViewPort      窄接口（ui 侧，不能包含 shell——依赖方向）
+        ▼
+   app::WebViewPortAdapter     折接层（唯一把 shell 结构搬成 ui 结构的地方）
+        │
+        ▼
+   shell::webview::WebViewHost 平台中立接口（无 HWND / 无 COM）
+        │
+        ▼
+   platform_win32_webview.cpp  WebView2：LoadLibrary / COM / 宿主子窗口 / 虚拟 origin
+```
+
+**两种内容源，并列为一等能力**（只做 URL 等于只有半个浏览器——“整前端打进 exe”
+才是本框架最常用的形态）：
+
+| 内容源 | 入口 | 能做什么 | 不能做什么 |
+|---|---|---|---|
+| URL | `webview_navigate(url)` | 真站点、内网系统、跨域资源 | 依赖网络 |
+| 单文件 HTML | `webview_load_html(html)` | 一段自包含 HTML | **相对路径子资源 / 同源 fetch / ES module 全部不可用**（没有 origin） |
+| **内嵌资源包** | `webview_load_embedded(entry, assets)` | 相对路径、同源 `fetch`、ES module、CSS 全部可用 | 需把资源注册进表 |
+
+内嵌包的关镀是**虚拟 origin**：页面地址是一个虚构的 `https://app.st.invalid/`（`.invalid` 是
+RFC 2606 保留域，保证不与真实站点撞名），其下**所有**请求都被 `AddWebResourceRequestedFilter`
+拦下、从内存里的「路径 → 字节」表取；未注册的路径回 **404 而不回落到真网络**（回落会让
+“忘了注册”变成“偶发外部请求”，既不可预期也可能泄漏）。于是页面是一个真正的 Web 原点，
+而字节全在 exe 里——离线可用、无外部文件依赖。
+
+**共用的可编程控制面**：`navigate` / `reload` / `stop` / `go_back` / `go_forward` /
+`execute_script`（同步回读）/ `post_message`（宿主 → 页面）/ `set_zoom` /
+`set_script_enabled`；事件：`NavigationStarting` / `NavigationCompleted` / `TitleChanged` /
+`WebMessageReceived`（页面 → 宿主）/ `ProcessFailed` / `RasterizationScaleChanged`。
+对上三条通路：C++ 直接调、控制通道 `invoke`/`get`、JS 脚本层。
+
+| 关键设计点 | 做法与理由 |
+|---|---|
+| **不走“起浏览器进程 + SetParent”**（4.6.1 那条） | 那条只能看：导航/执行脚本/收消息在外部进程外拿不到。本能力要的是**拥有**页面对象 |
+| controller 挂在**自己的容器子窗口**上 | 直接继承 4.6.1 的整套几何机械（宿主窗口 = `bounds ∩ clip`）：裁剪/切页/滚出视口/隐藏全部复用，不另造一套可见性逻辑 |
+| 三种内容源共用一套控制面 | 导航历史、执行脚本、双向消息、缩放对三者一视同仁；差别只在“有没有 origin” |
+| Loader **运行时加载** + 编译期嵌入 | 上游静态 Loader 库是 MSVC 产物，MinGW 链不上（`__security_cookie` / `IID_*` 重定义）。恰好也符合 §10 第 1 条：不产生链接期依赖。嵌入的 DLL 首次使用时落盘到临时目录再加载，产物仍是单 exe |
+| DPI 必须**在事件里重下发** | `put_RasterizationScale` 在导航后被平台改回 1.0（实测 1.25 → 1.000）：高 DPI 下网页缩成一半，而属性读数全“正常”。做法：`RasterizationScaleChanged` 里重下发 + 每次导航完成后再补一次 |
+| 异步结果走**页面回推** | `ExecuteScript` 不解析 Promise（`async` 返回 `{}`），再发一次同步读取也拿不到（时序无保证，实测拿到 `"pending"`）。所以异步流程由页面 `postMessage` 回推——这条路顺带就是“页面 → 宿主”那条能力 |
+| 两层接口（`ui::WebViewPort` 与 `shell::webview::WebViewHost`） | 依赖方向是 `ui ← shell`：ui 不能包含 shell。两侧各留一份镜像结构（与 `ChildViewProbe` 同一先例），折接只在 `app` 层一处发生 |
+| 能力可用性要问两次（指针 ≠ 支持） | 端口指针非空不等于能力可用（未装 Runtime / 非 Windows 时指针在、`supported()==false`）。建设页面/导航前必须问 `webview_supported()`，否则会“看着在做事、实际什么都不会发生” |
+
+**同上硬约束**：嵌入内容的像素**不进 `framebuffer()`**，`capture` 拍不到。判据只能走属性面
+（`attached` / `shown` / `ready` / `loading` / `url` / `title` / `source` / `can_back` /
+`zoom` / `rasterization_scale` / `assets`）与事件流。
+
+**平台落地**：Windows（WebView2）已实现；`headless` 与其他平台如实 `Unsupported`
+（组件退化为占位块，每个动作如实返回失败）。
+
 **实现状态（2026-10-15 更新）**：`headless`、**`win32`、`x11`、`wayland` 四个后端都已落地**。
 X11 与 Wayland 两个新后端与 Win32 同契约、同姿态（**运行时 `dlopen`**、不产生链接期依赖、
 不支持时如实报 `Unsupported`），细节见本节末「Linux 双后端」小节。

@@ -3142,6 +3142,8 @@ auto page_specs() -> const std::array<PageSpec, kPageCount>& {
        .subtitle = "远程可驱动"},
       {.id = "native-host", .icon = "layers", .label = "原生嵌入",
        .subtitle = "外部程序窗口嵌进界面（不进 framebuffer）"},
+      {.id = "webview", .icon = "globe", .label = "嵌入浏览器",
+       .subtitle = "可编程控制：URL / 内嵌资源包 / 执行 JS"},
       {.id = "about", .icon = "info", .label = "关于",
        .subtitle = "版本与分层"},
   }};
@@ -3159,6 +3161,7 @@ auto build_page(std::size_t index, const PageHooks& hooks) -> std::unique_ptr<El
     case 4: return build_declarative_shell(hooks);
     case 5: return build_control(hooks);
     case 6: return gallery::build_native_host_page(hooks.native_host_source);
+    case 7: return gallery::build_webview_page();
     default: return build_about(hooks);
   }
 }

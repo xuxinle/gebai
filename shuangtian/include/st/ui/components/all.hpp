@@ -115,6 +115,7 @@
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/native_host.hpp"   // 原生子窗口嵌入（可选能力，降级为占位块）
+#include "st/ui/components/webview.hpp"        // 可编程嵌入浏览器（可选能力，降级为占位块）
 #include "st/ui/components/slow_content.hpp"
 #include "st/ui/components/terminal.hpp"
 #include "st/ui/components/theme_picker.hpp"

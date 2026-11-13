@@ -20,6 +20,7 @@
 #include "st/perf/frame.hpp"
 #include "st/perf/startup.hpp"
 #include "st/perf/report.hpp"
+#include "st/shell/webview.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/builtin_themes.hpp"
 #include "st/ui/theme_io.hpp"
@@ -313,9 +314,164 @@ inline constexpr std::size_t kFrameSampleCapacity = 240;
 /// 日志尾部保留行数（控制通道 `logs` 用）。
 inline constexpr std::size_t kLogLineCapacity = 512;
 
+/// 把 `shell::webview::WebViewHost` 折接成 `ui::WebViewPort`。
+///
+/// ## 为何需要这层折接（而不是让接口直接继承）
+///
+/// 依赖方向是 `core ← … ← ui ← shell ← app`：`shell` 知道 `ui`，反过来不行。
+/// 让 `shell::webview::WebViewHost` 直接继承 `ui::WebViewPort` 会把
+/// **可选依赖变成 shell 的必经依赖**，而 X11/Wayland 那边的“不支持”实现也得跟着
+/// 实现一堆纯 UI 的镜像结构（`WebViewState` / `WebViewAsset`）。
+/// 折接只在这一处发生，代价是几个字段的搬运。
+///
+/// ## 为何两个结构不合并
+///
+/// 与 `Element::ChildViewProbe` / `shell::ChildViewProbe` 同一先例：两边各留一份，
+/// 字段一一对应。合并的唯一办法是让 ui 包含 shell（方向反了）。
+class WebViewPortAdapter final : public ui::WebViewPort {
+ public:
+  void attach(shell::webview::WebViewHost* host) { host_ = host; }
+
+  [[nodiscard]] auto webview_supported() const noexcept -> bool override {
+    return host_ != nullptr && host_->webview_supported();
+  }
+  [[nodiscard]] auto webview_unsupported_reason() const -> std::string override {
+    if (host_ == nullptr) return "未创建浏览器宿主（非 Windows 或应用未启动）";
+    return host_->webview_unsupported_reason();
+  }
+
+  [[nodiscard]] auto webview_create(math::Rect bounds) -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_create(bounds);
+  }
+  void webview_destroy() override {
+    if (host_ != nullptr) host_->webview_destroy();
+  }
+  void webview_sync(math::Rect bounds, math::Rect clip) override {
+    if (host_ != nullptr) host_->webview_sync(bounds, clip);
+  }
+
+  [[nodiscard]] auto webview_navigate(std::string_view url) -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_navigate(url);
+  }
+  [[nodiscard]] auto webview_load_html(std::string_view html) -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_load_html(html);
+  }
+  [[nodiscard]] auto webview_load_embedded(std::string_view entry,
+                                           const std::vector<ui::WebViewAsset>& assets)
+      -> Status override {
+    if (host_ == nullptr) return unsupported();
+    // 折接：`ui::WebViewAsset` → `shell::webview::Asset`，并装成 `WebAssets` 表。
+    //
+    // 为何不把表缓存在适配器里跨调用复用：`load_embedded` 的语义是“这一页用这张表”，
+    // 复用上一张表会让“这次没传的资源”静默沿用旧版本——那是调试噩梦。
+    shell::webview::WebAssets table;
+    for (const auto& asset : assets) {
+      shell::webview::Asset converted;
+      converted.path = asset.path;
+      converted.mime = asset.mime;
+      converted.bytes = asset.bytes;
+      table.add(std::move(converted));
+    }
+    return host_->webview_load_embedded(entry, table);
+  }
+
+  [[nodiscard]] auto webview_reload() -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_reload();
+  }
+  [[nodiscard]] auto webview_stop() -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_stop();
+  }
+  [[nodiscard]] auto webview_go_back() -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_go_back();
+  }
+  [[nodiscard]] auto webview_go_forward() -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_go_forward();
+  }
+
+  [[nodiscard]] auto webview_execute_script(std::string_view script, std::string& result)
+      -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_execute_script(script, result);
+  }
+  [[nodiscard]] auto webview_post_message(std::string_view text) -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_post_message(text);
+  }
+  [[nodiscard]] auto webview_set_zoom(double factor) -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_set_zoom(factor);
+  }
+  [[nodiscard]] auto webview_set_script_enabled(bool enabled) -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_set_script_enabled(enabled);
+  }
+
+  [[nodiscard]] auto webview_state() const -> ui::WebViewState override {
+    if (host_ == nullptr) return {};
+    const shell::webview::State from = host_->webview_state();
+    ui::WebViewState out;
+    out.attached = from.attached;
+    out.visible = from.visible;
+    out.source = static_cast<ui::WebViewSource>(from.source);
+    out.url = from.url;
+    out.title = from.title;
+    out.loading = from.loading;
+    out.ready = from.ready;
+    out.can_go_back = from.can_go_back;
+    out.can_go_forward = from.can_go_forward;
+    out.zoom = from.zoom;
+    out.rasterization_scale = from.rasterization_scale;
+    out.asset_count = from.asset_count;
+    return out;
+  }
+
+  [[nodiscard]] auto webview_take_events() -> std::vector<ui::WebViewEvent> override {
+    if (host_ == nullptr) return {};
+    std::vector<ui::WebViewEvent> out;
+    for (auto& event : host_->webview_take_events()) {
+      ui::WebViewEvent converted;
+      // 两个 `Kind` 枚举的**顺序与含义一一对应**（两边各自定义是为了不互相包含）。
+      converted.kind = static_cast<ui::WebViewEvent::Kind>(event.kind);
+      converted.url = std::move(event.url);
+      converted.title = std::move(event.title);
+      converted.message = std::move(event.message);
+      converted.succeeded = event.outcome == shell::webview::NavigationOutcome::Completed;
+      converted.detail = std::move(event.detail);
+      out.push_back(std::move(converted));
+    }
+    return out;
+  }
+
+ private:
+  [[nodiscard]] static auto unsupported() -> Status {
+    return unexpected(ErrorCode::Unsupported, "未创建浏览器宿主（非 Windows 或应用未启动）");
+  }
+
+  shell::webview::WebViewHost* host_{nullptr};
+};
+
 struct Application::Impl {
   shell::Backend* backend{nullptr};
   std::unique_ptr<shell::Backend> backend_holder{};
+  /// 嵌入浏览器宿主（WebView2；仅 Windows 且拿到原生窗口后创建）。
+  ///
+  /// 为何住 `Impl` 而不是 `Application`：`shell::webview` 的类型不该进公共头
+  ///（`app.hpp` 已包含 `shell/shell.hpp`，再拉一份可选依赖没必要）。
+  std::unique_ptr<shell::webview::WebViewHost> webview{};
+  /// 把 `shell::webview::WebViewHost` 折接成 `ui::WebViewPort` 的适配器。
+  ///
+  /// 为何需要一层适配而不是让 `WebViewHost` 直接继承 `ui::WebViewPort`：
+  /// `shell` 依赖 `ui`（`shell.hpp` 包含 `ui/element.hpp`），让 `shell` 里的接口
+  /// 直接继承 `ui::WebViewPort` 会把**可选依赖变成必经依赖**，且 X11/Wayland 的
+  /// 实现也得跟着实现那些纯 UI 的镜像结构。折接只在这一处发生。
+  std::unique_ptr<ui::WebViewPort> webview_port{};
   /// 托盘是否真启用（后端不支持时保持 false——如实反映，不假装）。
   bool tray_ready{false};
   std::unique_ptr<st::text::FontStack> fonts{};
@@ -1028,6 +1184,22 @@ auto Application::child_view_probe() const -> shell::ChildViewProbe {
   return impl_->backend->child_view_probe();
 }
 
+auto Application::webview_supported() const -> bool {
+  // 未启动 = 没建宿主 = 不可能支持（与 `child_view_supported` 同一口径：如实报）。
+  if (impl_->webview == nullptr) return false;
+  return impl_->webview->webview_supported();
+}
+
+auto Application::webview_unsupported_reason() const -> std::string {
+  if (impl_->backend == nullptr) return "应用未启动（没有窗口）";
+  if (impl_->webview == nullptr) {
+    return "本后端无 WebView2 实现（无头 / 非 Windows）";
+  }
+  return impl_->webview->webview_unsupported_reason();
+}
+
+auto Application::webview_port() -> ui::WebViewPort* { return impl_->webview_port.get(); }
+
 auto Application::find_window_by_process(std::uint64_t process_id) -> void* {
   if (impl_->backend == nullptr || process_id == 0) return nullptr;
   return impl_->backend->find_window_by_process(process_id);
@@ -1715,6 +1887,33 @@ auto Application::start() -> Status {
           out.visible = probe.visible;
           return out;
         });
+
+    // 嵌入浏览器（WebView2）：同样**不支持就什么都不装**。
+    //
+    // ## 为何先建宿主、再装端口
+    //
+    // 端口是 `ui::WebViewPort`（`ui` 侧窄接口），而实现是 `shell::webview::WebViewHost`。
+    // 两者之间靠 `WebViewPortAdapter` 折接（见其注释：依赖方向决定的）。
+    //
+    // ## 为何在 `start()` 里而不是构造里
+    //
+    // 浏览器宿主需要**顶层窗口句柄**与真实 DPI，两者都是 `create_window` 之后才有。
+    // 而“没拿到窗口”时**不建**（而非建一个坏的）——`webview_port` 保持空，
+    // 组件会如实退化为占位块。
+    auto webview_port = std::make_unique<WebViewPortAdapter>();
+    if (auto host = shell::webview::create_win32_webview(backend_ptr->native_window(),
+                                                        backend_ptr->device_scale());
+        host != nullptr) {
+      impl_->webview = std::move(host);
+      webview_port->attach(impl_->webview.get());
+      ST_LOG_INFO("嵌入浏览器（WebView2）：{}；{}",
+                  impl_->webview->webview_supported() ? "可用" : "不可用",
+                  impl_->webview->webview_unsupported_reason());
+    } else {
+      ST_LOG_INFO("嵌入浏览器（WebView2）：本后端无实现（无头/非 Windows）");
+    }
+    impl_->webview_port = std::move(webview_port);
+    root_.set_webview_port(impl_->webview_port.get());
   }
 
   // ## `ST_NO_SCRIPT`：按需链接的编译期拆链（与 server.cpp 的 handle_script 同一套）
@@ -2363,6 +2562,26 @@ void Application::tick() {
   if (impl_->script != nullptr && impl_->script->take_repaint_request()) impl_->repaint = true;
 #endif
   if (impl_->server != nullptr) impl_->server->poll();
+  // 嵌入浏览器：把端口里攒了一帧的事件转交给界面树。
+  //
+  // ## 为何必须在帧循环里做（而不是在 COM 回调里直接改组件）
+  //
+  // 回调跑在 WebView2 的 STA 消息派发中，那一刻界面树可能正处在排版/绘制中途；
+  // 直接改它 = 在遍历时改容器。而 `UiRoot::dispatch_webview_events` 是
+  // “攒一帧、按帧消费”，与 `poll_event` 同一姿态。
+  //
+  // ## 为何不需要“有事件才请求下一帧”
+  //
+  // 事件带来的变化（标题/地址/就绪状态）都由组件在消费时自己标脏（`mark_dirty`），
+  // 于是下一帧自然到来。而“现在有没有新事件”只能靠泵消息得知——那已经是
+  // `poll_event` 做的事了（`pump_events` 每帧都在跑）。
+  if (impl_->webview_port != nullptr) {
+    auto events = impl_->webview_port->webview_take_events();
+    if (!events.empty()) {
+      root_.dispatch_webview_events(events);
+      impl_->repaint = true;
+    }
+  }
   // 排空后端事件。**指针移动走合并**（见 `input_coalescer.hpp`）：拖动时
   // `WM_MOUSEMOVE` 可达 125~1000 次/秒，逐个派发会让绘制类应用在一帧里改几百次文档
   //（并推几百条撤销记录）。合并在**这里**（帧循环）而不是 `UiRoot::dispatch`：

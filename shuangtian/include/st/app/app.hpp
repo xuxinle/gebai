@@ -482,6 +482,25 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 为何必须能读：嵌入内容的像素**不进 framebuffer**，`capture` 拍不到。
   /// 没有这组读数，“嵌入物死掉了”会静默通过所有像素回归。
   [[nodiscard]] auto child_view_probe() const -> shell::ChildViewProbe;
+
+  /// 本应用能否嵌入**可编程浏览器**（WebView2，Windows）。
+  ///
+  /// 与 `child_view_supported` 是两个不同能力：那个是“把别人的窗口摆进来”，
+  /// 这个是自己**拥有**一个可以导航/执行脚本/双向消息的浏览器。
+  /// 无头 / 非 Windows / 未装 Runtime 时为 `false`（**如实上报**）。
+  [[nodiscard]] auto webview_supported() const -> bool;
+  /// 不支持时的**人话原因**（“没装 WebView2 Runtime” / “非 Windows” / “应用未启动”）。
+  ///
+  /// 为何必须能读：`webview_supported()==false` 只说明“不行”，而“到底缺什么”
+  /// 决定了用户该装 Runtime 还是该换平台。让调用方自己猜是这类可选能力最常见的折磨。
+  [[nodiscard]] auto webview_unsupported_reason() const -> std::string;
+
+  /// 嵌入浏览器端口（给 `ui::WebView` 用）。
+  ///
+  /// 返回 `nullptr` = 本应用没有这个能力（组件据此退化为占位块）。
+  /// 为何暴露它而不是把十几条能力平铺到 `Application`：与 `HostFocus` 侧同一个理由
+  ///（见 `st/ui/webview_port.hpp`）——组件只需要一个能力面，不需要知道应用存在。
+  [[nodiscard]] auto webview_port() -> ui::WebViewPort*;
   /// 字体栈（只读）：给需要**独立缓存域**的离屏排版用
   /// （见 `st::app::OffscreenTextPort`——后台排版若复用主线程的 `TextRenderer`，
   /// 会把它 32k 条的宽度 LRU 刷爆，主线程随后每段文字都要重新整形）。

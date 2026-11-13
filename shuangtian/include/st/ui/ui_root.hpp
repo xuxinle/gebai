@@ -298,6 +298,33 @@ class UiRoot : public Element::HostFocus {
     child_view_probe_ = std::move(probe);
   }
 
+  // ── 嵌入浏览器：转给端口（`Application` 装的）──
+  //
+  // 比原生子窗口更简单：因为它是一个**接口指针**而不是五个回调。
+  // 没装时为 `nullptr`，组件的每个动作都走默认降级（`Unsupported`）。
+
+  [[nodiscard]] auto host_webview_port() const -> WebViewPort* override {
+    return webview_port_;
+  }
+
+  /// 装嵌入浏览器端口（`Application` 在拿到后端后接上）；传 `nullptr` 即卸载。
+  ///
+  /// **不拥有**它：生命周期由 `Application` 管（它比 `UiRoot` 活得长）。
+  void set_webview_port(WebViewPort* port) { webview_port_ = port; }
+
+  /// 把一批页面事件派给树里所有 `WebView` 组件（由 `Application` 在帧循环里调）。
+  ///
+  /// ## 为何事件需要过 `UiRoot` 而不是直接从端口推给组件
+  ///
+  /// 一个端口可能被**多个** `WebView` 组件共用（同一个窗口里两个嵌入区），而
+  /// 当前实现只有一个页面对象（`WebView2` 一个 controller 对一个页面）。
+  /// 事件本身不带“属于哪个组件”的信息，所以策略是：**派给全部活着的 `WebView`**，
+  /// 由组件自己用 `state().url` 等判据决定要不要理会（它们的 `ready/title` 都读自同一源，
+  /// 所以多派一份不会造成不一致；而漏派会让“标题变了但界面不动”）。
+  ///
+  /// 实现在 `ui_root.cpp`（需要遍历树，而元素类型在实现里）。
+  void dispatch_webview_events(const std::vector<WebViewEvent>& events);
+
   /// `Element::HostFocus::host_structure_changed` 的实现：内容树/浮层结构变了，
   /// 命中链就可能变，而指针位置没动——下一帧按最后指针位置重算悬浮/光标。
   ///
@@ -767,6 +794,8 @@ class UiRoot : public Element::HostFocus {
   std::function<void(void*, math::Rect, math::Rect)> child_view_sync_{};
   std::function<void(void*)> child_view_dismiss_{};
   std::function<Element::ChildViewProbe()> child_view_probe_{};
+  /// 嵌入浏览器端口（`set_webview_port` 装入；`nullptr` = 该能力不可用）。非拥有。
+  WebViewPort* webview_port_{nullptr};
   /// 已登记的声明式树推进回调（见 `register_declarative_host`）。
   /// 回调返回 true 表示“本帧真的重组了”（用于统计重组次数）。
   std::vector<std::function<bool()>> declarative_hosts_{};

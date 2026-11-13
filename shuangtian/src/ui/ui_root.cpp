@@ -14,6 +14,7 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"   // `now_ns`（悬停提示计时的单调钟）
 #include "st/ui/components/feedback.hpp"   // Tooltip（共享悬停提示气泡）
+#include "st/ui/components/webview.hpp"    // 事件派发要按类型识别 WebView
 
 namespace st::ui {
 
@@ -117,6 +118,36 @@ auto UiRoot::take_content() -> std::unique_ptr<Element> {
 void UiRoot::set_theme(Theme theme) {
   theme_ = std::move(theme);
   mark_dirty_all();
+}
+
+void UiRoot::dispatch_webview_events(const std::vector<WebViewEvent>& events) {
+  if (events.empty()) return;
+  // 遍历内容树 + 每个覆盖层，把事件派给所有 `WebView`。
+  //
+  // ## 为何按类型 `dynamic_cast` 而不是登记表
+  //
+  // 登记表要求“组件上树时自己报到、下树时自己注销”，而任何一条遗漏的注销路径
+  //（`clear_children` / 整棵内容替换 / 覆盖层移除）都会留下悬垂指针。
+  // 一次树遍历的代价远低于这个风险面，而事件派发本来就极稀疏（导航/标题变化才发生）。
+  //
+  // ## 为何不跳过不可见子树
+  //
+  // 隐藏页里的 `WebView` 仍然需要知道“导航完成了”——它在切回来时要能立刻显示
+  // 真实状态（`ready`/`title`），而不是一片“未加载”。
+  // 递归 lambda 指向自身时，`auto` 推导还没完成（即便写了 `-> void`，变量本身仍是
+  // 推导类型）。用显式 `std::function` 把它钉住——代价是一次间接调用，而事件派发
+  // 本来就极稀疏（导航/标题变化才发生）。
+  const std::function<void(Element*)> visit = [&events, &visit](Element* node) -> void {
+    if (node == nullptr) return;
+    if (auto* webview = dynamic_cast<WebView*>(node); webview != nullptr) {
+      for (const auto& event : events) webview->handle_webview_event(event);
+    }
+    for (auto& child : node->children()) visit(child.get());
+  };
+  visit(content_.get());
+  for (auto& overlay : overlays_) {
+    if (overlay != nullptr) visit(overlay.get());
+  }
 }
 
 void UiRoot::set_text_port(const TextPort* port) {

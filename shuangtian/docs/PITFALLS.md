@@ -703,6 +703,22 @@
 | **解除嵌入只还原样式、不还原几何**〔资源生命周期〕 | 嵌入期为把外部窗口的自绘标题栏退到宿主之外，它的矩形被改过：上移一个标题栏高度、高度再补同样多。只恢复样式，它就带着那个上移量留在原处——变成顶层窗口后上移量直接变成**屏幕坐标**：Chrome 实测矩形 `(0, -107)-(1955, 525)`，标题栏整条在屏外，窗口看得见、拖不动（真鼠标拖拽位移 **0**）。变通说法“反正窗口看得见”是错的：**看见的是内容，拖的是标题栏**。做法：`adopt` 时先记下嵌入前矩形（`SetParent` 之后 `GetWindowRect` 给的是相对宿主坐标，原值再也取不回来），`dismiss` 时还原 + `SWP_FRAMECHANGED`（刚恢复的 `WS_CAPTION` 不过 `WM_NCCALCSIZE` 就不算真非客户区） | `src/shell/platform_win32.cpp`、`src/shell/child_view_geometry.hpp`；实测 2026-11-13 |
 | **判“窗口还能用吗”要看标题栏，不是看面积**〔判据〕 | “窗口还有一部分在屏内”不等于“用户能操作它”：标题栏在屏外就拖不动，而内容照样看得见。准确判据是**顶边中点是否落在某块工作区内**（用工作区而非显示器矩形：缩到任务栏底下同样拖不动）。多显示器下夹取要选**相交面积最大**的那块，固定在主屏会把副屏窗口搬走 | `src/shell/child_view_geometry.hpp`；实测 |
 
+### 场景 28 续：换成「自己拥有页面对象」（WebView2）之后新踩的坑
+
+> **总判据：平台自己会改你设过的值（DPI），且它的异步接口也不会给你可等的结果。
+> 两者都不报错——属性面会显示“一切正常”，而画面尺寸或内容就是不对。**
+
+| 坑 | 一句话 | 出处 |
+|---|---|---|
+| **`RasterizationScale` 会被导航重置**〔DPI〕 | `put_RasterizationScale(1.25)` 之后页面一导航，读回变 `1.000`（实测）。高 DPI 下网页缩成一半，而所有属性读数都“正常”。必须在 `RasterizationScaleChanged` 事件里**重新下发**，并在每次导航完成后再补一次 | `src/shell/platform_win32_webview.cpp`；实测 2026-11-13 |
+| **`ExecuteScript` 不解析 Promise**〔异步〕 | 直接执行 `async` 函数，回来的是 `{}`（Promise 序列化成空对象）。也**不能**再发一次同步 `ExecuteScript` 去读全局：两段之间没有时序保证，实测拿到 `"pending"`。异步结果只能由页面 `postMessage` 回推 | 同上；实测 |
+| **上游静态 Loader 库在 MinGW 下不可用**〔链接〕 | `WebView2LoaderStatic.lib` 是 MSVC 编译产物：报 `multiple definition of IID_ICoreWebView2*`（自带 `selectany` IID 定义）与 `undefined reference to '__security_cookie' / '_Init_thread_epoch'`。只能运行时 `LoadLibrary`（也正好是 `CONVENTIONS.md` §10 第 1 条的要求）。另外还得额外链 `uuid`（`IID_IUnknown` 在 MinGW 的 libuuid）与 `shlwapi`（`SHCreateMemStream`） | `third_party/SOURCES.md`；实测 2026-11-13 |
+| **`WebView2.h` 在 `-Werror` 下红**〔第三方头〕 | 三类：`#pragma warning(...)`（GCC 不认）、每个 COM 接口「有虚函数但无虚析构」、C 风格转换。包一层 `#pragma GCC diagnostic ignored` 只盖**包头**，盖不住「我们继承它的接口」——那个告警在**模板体**里报，所以模板那个类定义得再包一次 | `src/shell/platform_win32_webview.cpp`；实测 |
+| **内嵌资源没虚拟 origin 就只能单文件**〔设计〕 | 用 `NavigateToString` 加载一段 HTML，**相对路径子资源、同源 `fetch`、ES module 全部失效**（没有 origin）。要“整前端打进 exe”就必须给一个虚构 origin（如 `https://app.st.invalid/`）并用 `WebResourceRequested` 把所有请求拦下从内存取——实测 CSS/fetch/`import()` 三类全部可用 | `src/shell/platform_win32_webview.cpp`；实测 2026-11-13 |
+| **“端口存在”与“端口支持”是两件事**〔判据〕 | 端口指针非空不等于能力可用（没装 Runtime / 非 Windows 时指针在、`supported()==false`）。组件只判前者就会把请求发给一个做不了的端口：**看着在做事、实际什么都不会发生**（测试实测红：`stub.navigated.empty()` 断言失败）。建设页面/导航前必须先问 `webview_supported()` | `src/ui/components/webview.cpp`；实测 |
+| **懒建页面的接口要能报失败**〔契约〕 | “确保已建”若返回 `void`，调用方无法在失败时提前返回，只能继续往下发请求（就是上一条）。这个函数必须是 `[[nodiscard]] bool` | 同上；实测 |
+| **新增系统库要改两处，否则只有独立工程会红**〔构建〕 | `link-libs.txt`（框架自建走它）与 `src/pkg/build.cpp` 的 `kFallbackLibsWindows`（独立工程把框架 vendor 出去、仓库根文件不在时走它）是同一份数据的两种形态。只改前者：`st` 自建全绿，而 `independent_project_builds_links_and_runs` 红在 `undefined symbol: __declspec(dllimport) CoTaskMemFree`——**报错指向源码，真因在清单** | `src/pkg/build.cpp` 的 `default_system_libs`；实测 2026-11-13（加 `ole32`/`uuid`/`shlwapi` 时踩到） |
+
 ## 怎么用这份速查
 
 **开工前**：扫一眼你**当前场景**那一节（30 秒）。

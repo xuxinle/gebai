@@ -25,6 +25,12 @@
 #   psapi       进程/模块枚举（崩溃报告与资源诊断）
 #   secur32     Schannel TLS 的 SSPI 系（src/net/platform_tls_schannel.cpp）
 #   winpthread  MinGW 的 std::thread 运行库（C++20 <thread> 在 winpthreads 上）
+#   ole32       COM 初始化/内存（CoInitializeEx / CoTaskMemFree）——WebView2 的承载基础
+#               （src/shell/platform_win32_webview.cpp）
+#   uuid        `IID_IUnknown` 等 COM 接口 IID 常量（MinGW 的 libuuid）
+#               （src/shell/platform_win32_webview.cpp 的 COM 回调 QueryInterface）
+#   shlwapi     SHCreateMemStream（把字节包成 COM IStream，内嵌资源响应用）
+#               （src/shell/platform_win32_webview.cpp）
 #   pthread/dl/m POSIX 线程 / dlopen（TLS 的运行时 OpenSSL 加载）/ 数学库
 
 windows:
@@ -38,6 +44,9 @@ nanosrv
 psapi
 secur32
 winpthread
+ole32
+uuid
+shlwapi
 
 posix:
 pthread

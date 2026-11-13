@@ -83,6 +83,8 @@ FAMILY: dict[str, str] = {
     "ThemePicker": "layout", "WindowFrame": "layout", "TitleBar": "layout",
     # 原生子窗口宿主（可选能力，不可用时退化为占位块）
     "NativeHost": "layout",
+    # 可编程嵌入浏览器（可选能力，不可用时退化为占位块）
+    "WebView": "layout",
 }
 
 FAMILY_TITLE = {

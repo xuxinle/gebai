@@ -775,9 +775,17 @@ struct PchContext {
   // 兑底（与 link-libs.txt 同步维护；独立工程场景）。
   // Windows：`nanosrv` 是 MinGW 里 dbghelp 的真身存根（壳库只转发）；
   // POSIX：dl 供 TLS 的运行时 dlopen OpenSSL。
+  //
+  // ⚠ **改 link-libs.txt 时必须同步改这里**。二者是同一份数据的两种形态
+  //（文件 + 内置常量），而只有前者会在构建日志里被看到——后者只在“独立工程
+  // 把框架 vendor 出去、仓库根文件不在了”时生效。实测代价（2026-11-13）：
+  // 给 WebView2 加了 ole32/uuid/shlwapi 却只改了文件，于是 `st` 自建没问题，
+  // 而 `independent_project_builds_links_and_runs` 红在
+  // `undefined symbol: __declspec(dllimport) CoTaskMemFree`——报错指向源码，
+  // 而真因在这份清单。
   if (platform == "windows") {
-    return {"ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi",
-            "secur32", "winpthread"};
+    return {"ws2_32", "user32",  "gdi32",  "dwmapi", "shell32", "dbghelp", "nanosrv",
+            "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"};
   }
   return {"pthread", "dl", "m"};
 }

@@ -20,6 +20,7 @@
 #include "st/ui/styling.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
+#include "st/ui/webview_port.hpp"
 
 namespace st::ui {
 
@@ -571,6 +572,16 @@ class Element {
     ///（依赖方向：`shell.hpp` 已包含 ui 头，反向包含会成环）。两者字段一致，
     /// 在 `Application` 那一层直接折（字段名/含义相同，不需要转换函数）。
     [[nodiscard]] virtual auto host_child_view_probe() const -> ChildViewProbe { return {}; }
+
+    /// 嵌入浏览器端口（`ui::WebView` 唯一的能力来源）。
+    ///
+    /// 为何返回指针而不是把十几条能力平铺成虚函数：能力有十几条（三种内容源 +
+    /// 五种导航 + 三种控制 + 状态 + 事件），平铺会让 `HostFocus` 变成杂物间，
+    /// 而**每个实现（含每个测试桩）都得跟着加**。返回 `nullptr` = 本宿主没有这个能力
+    /// ——组件自己退化为占位块，界面其余部分完全不受影响（与 `NativeHost` 同一契约）。
+    ///
+    /// 契约与折接见 `st/ui/webview_port.hpp`。
+    [[nodiscard]] virtual auto host_webview_port() const -> WebViewPort* { return nullptr; }
   };
 
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }

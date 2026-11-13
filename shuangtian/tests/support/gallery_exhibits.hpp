@@ -56,7 +56,7 @@ namespace gallery {
 /// 与 apps/gallery/{pages,main}.cpp 的实例化点一一对应。
 /// 「直接实例化」含两种形态：建卡时实例化，以及懒创建组件经按钮触发构造后挂
 /// 叠加层（后者另列 kGalleryLazy；树自检时两类都在场断言里放行）。
-inline constexpr std::array<std::string_view, 71> kGalleryExhibits{
+inline constexpr std::array<std::string_view, 72> kGalleryExhibits{
     "Panel",       "Text",       "Heading",     "Icon",        "Button",
     "Card",        "Divider",    "KeyValueRow", "Input",       "TextArea",
     "Checkbox",    "Radio",      "Switch",      "Slider",      "Select",
@@ -84,6 +84,9 @@ inline constexpr std::array<std::string_view, 71> kGalleryExhibits{
       // 2026-11-13 · 原生子窗口嵌入（可选能力；展位在「原生嵌入」页，
       // 展示的只是占位块——嵌入内容的像素不进 framebuffer，本就不在 capture 的判据里）
       "NativeHost",
+      // 2026-11-13 · 可编程嵌入浏览器（可选能力；展位在「嵌入浏览器」页）。
+      // 与 NativeHost 同一个道理：页面像素不进 framebuffer，判据只能读属性面。
+      "WebView",
   };
 
 /// gallery 懒创建展示集：交互时才构造、挂 UiRoot 叠加层的展示卡组件。
