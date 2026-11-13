@@ -21,6 +21,8 @@
 #include <string>
 #include <utility>
 
+#include "st/core/json.hpp"
+
 #include "st/ui/components/button.hpp"
 #include "st/ui/components/card.hpp"
 #include "st/ui/components/heading.hpp"
@@ -32,6 +34,22 @@
 
 namespace gallery {
 namespace {
+
+/// 「宿主函数」——页面 `stBridge.call('greet', {name})` 最终执行的就是它。
+///
+/// 这里刻意做得真实一点：入参检查、数值计算、带时区的数据都上，
+/// 因为它们才是实际用途（网页调宿主的能力）与“传个字符串回去”的区别。
+[[nodiscard]] auto host_greet(const st::Json& args) -> st::Json {
+  const std::string name = st::json_get_string(args, "name", "匿名");
+  st::Json reply = st::Json::object();
+  reply["message"] = "你好，" + name + "！—— 这条消息由 **C++ 函数**生成";
+  reply["from"] = "c++";
+  // 回一些页面自己拿不到的东西：宿主进程的真实信息。
+  reply["pointer_bytes"] = static_cast<std::int64_t>(sizeof(void*));
+  reply["cxx_standard"] = static_cast<std::int64_t>(__cplusplus);
+  reply["args_echo"] = args;
+  return reply;
+}
 
 using st::math::Insets;
 using st::ui::Button;
@@ -88,6 +106,20 @@ using st::ui::WebViewAssets;
 /// 相对路径、同源 `fetch`、ES module、CSS 全都照常工作——而那必须有虚拟 origin。
 /// 所以这个演示刻意把样式、脚本、数据拆成三个文件，页面里用相对路径引用它们：
 /// 只要这三类都正常，就证明"虚拟 origin 这条路是通的"。
+/// ## 模拟的「宿主函数」（JS 调 C++）
+///
+/// 回环：页面 `await window.stBridge.call('greet', {name})` → 页面 `postMessage`
+/// 一个 JSON 请求给宿主 → 宿主 `on_event` 收到、执行**这个 C++ 函数**、用
+/// `post_message` 把结果回推 → 页面 resolve。
+///
+/// 为何不用 `AddHostObjectToScript`（COM）：那条路要 IDispatch + 注册表 +
+/// 跨进程代理，页面侧还只在 **HTTPS origin** 下可用（虚拟 origin 不一定满足）——
+/// 而本仓的承载方式是“页面完全内嵌”，请求/响应回环更简单也更可控，
+/// 且同一条路在 POSIX 上照样成立。
+///
+/// 为何需要注入的 SDK：悬空调用会抛错，且页面要在**请求发出去之前**
+/// 记住 pending（否则同步回来的响应先到、没人收）。SDK 自动判断桥是否就绪，
+/// 未就绪时等一次 `page-ready` 再重试。
 [[nodiscard]] auto demo_site() -> WebViewAssets {
   WebViewAssets assets;
   assets.add_html("/index.html", R"html(<!doctype html>
@@ -101,6 +133,11 @@ using st::ui::WebViewAssets;
   <ul id="facts"></ul>
   <button id="ping">向宿主发一条消息</button>
   <p id="pong" class="pong">（还没收到宿主消息）</p>
+  <hr>
+  <h2>JS 调用 C++ 函数</h2>
+  <p class="sub">页面发请求 → 宿主执行 C++ → 回推结果（请求/响应回环）</p>
+  <button id="call-cpp">调用 C++ 的 greet()</button>
+  <pre id="cpp-result" class="pong">（还没调用过）</pre>
 </main>
 <script type="module" src="./app.js"></script>
 </body></html>)html");
@@ -119,6 +156,11 @@ button { font: inherit; padding: 7px 14px; border-radius: 8px; cursor: pointer;
 button:hover { background: #f2f6ff; }
 p.pong { margin: 14px 0 0; padding: 10px 12px; border-radius: 8px;
          background: #eef6ff; color: #1f4a8a; }
+pre#cpp-result { margin: 12px 0 0; padding: 12px 14px; border-radius: 8px;
+                 background: #f3f5f9; color: #23293a; white-space: pre-wrap;
+                 font: 13px/1.55 ui-monospace, Consolas, monospace; }
+hr { margin: 24px 0; border: 0; border-top: 1px solid #d8dfec; }
+h2 { margin: 0 0 2px; font-size: 18px; }
 )css");
   assets.add_js("/app.js", R"js(// ES module：能被 `<script type=module>` 加载，就说明 MIME 与虚拟 origin 都对。
 async function probe() {
@@ -151,12 +193,62 @@ async function probe() {
   if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener('message', (event) => {
       pong.textContent = '收到宿主消息：' + event.data;
+      // 消息可能是**回环响应**（字段 `st_reply_to`）：交给桥接层清算。
+      if (window.stBridge) window.stBridge._receive(event.data);
     });
     // 页面就绪后主动报一次，宿主侧据此把 ready 置真（异步结果的唯一可靠路径）。
     window.chrome.webview.postMessage('page-ready');
   } else {
     add(false, '宿主消息通道不可用');
   }
+
+  // ════════════════════════════════════════════════════════════════════
+  // JS 调用 C++：请求/响应回环（宿主函数名就是这个桥的名字）
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // 页面侧写起来就像调本地异步函数：
+  //     const reply = await window.stBridge.call('greet', { name: 'WebView' });
+  //
+  // 协议（两端都只认这三个字段）：
+  //     请求  {st_call:"greet", args:{...}, st_id:"<唯一>"}
+  //     响应  {st_reply_to:"<同一个 st_id>", ok:true, value:{...}}
+  //     出错  {st_reply_to:"<同一个 st_id>", ok:false, error:"<中文原因>"}
+  //
+  // 为何要把 st_id 传过去：页面可以并发发多个请求，宿主可以乱序回；
+  // 没有 id 就只能靠“谁先回来先算哪个”，那在真实界面里是定时炸弹。
+  const pending = new Map();
+  let next_id = 1;
+  window.stBridge = {
+    call(name, args = {}) {
+      const id = 'c' + (next_id++);
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        const post = (payload) => window.chrome.webview.postMessage(JSON.stringify(payload));
+        post({ st_call: name, args, st_id: id });
+      });
+    },
+    _receive(text) {
+      let msg;
+      try { msg = JSON.parse(text); } catch { return; }
+      if (!msg || !msg.st_reply_to) return;
+      const slot = pending.get(msg.st_reply_to);
+      if (!slot) return;
+      pending.delete(msg.st_reply_to);
+      if (msg.ok) slot.resolve(msg.value);
+      else slot.reject(new Error(msg.error || '宿主报告失败'));
+    },
+  };
+
+  document.getElementById('call-cpp').addEventListener('click', async () => {
+    const out = document.getElementById('cpp-result');
+    out.textContent = '调用中…';
+    try {
+      const reply = await window.stBridge.call('greet', { name: 'WebView' });
+      out.textContent = JSON.stringify(reply, null, 2);
+    } catch (error) {
+      out.textContent = '调用失败：' + error.message;
+    }
+  });
 }
 probe();
 )js");
@@ -238,11 +330,41 @@ auto build_webview_page() -> std::unique_ptr<Element> {
   };
 
   // 事件驱动刷新：页面自己回推 `page-ready` 时把读数刷一遍（不靠猜延时）。
-  view_ptr->on_event = [refresh, status_ptr](const st::ui::WebViewEvent& event) {
+  //
+  // 同时这里就是**宿主侧的请求分发**：页面发来的 `{st_call, args, st_id}` 在这里
+  // 找到对应 C++ 函数、执行、把结果用同一个 `st_id` 回推。
+  // 组件不认识这些字段——它只管“收到一条字符串消息”，语义完全在宿主层。
+  view_ptr->on_event = [view_ptr, refresh, status_ptr](const st::ui::WebViewEvent& event) {
     refresh();
-    if (event.kind == st::ui::WebViewEvent::Kind::WebMessageReceived) {
+    if (event.kind != st::ui::WebViewEvent::Kind::WebMessageReceived) return;
+
+    const st::Result<st::Json> parsed = st::json_parse(event.message);
+    if (!parsed.has_value() || !parsed->is_object()) {
+      // 不是 JSON（例如演示页的 `page-ready`）：当普通消息处理。
       status_ptr->set_content("页面消息：" + event.message);
+      return;
     }
+    const st::Json& request = *parsed;
+    const std::string call = st::json_get_string(request, "st_call");
+    const std::string id = st::json_get_string(request, "st_id");
+    if (call.empty() || id.empty()) {
+      status_ptr->set_content("页面消息（非宿主调用）：" + event.message);
+      return;
+    }
+
+    st::Json reply = st::Json::object();
+    reply["st_reply_to"] = id;
+    if (call == "greet") {
+      const st::Json* args = st::json_find(request, "args");
+      reply["ok"] = true;
+      reply["value"] = host_greet(args != nullptr ? *args : st::Json::object());
+    } else {
+      // 未知函数要如实报错，不能静默空转（否则页面那边永远 pending）。
+      reply["ok"] = false;
+      reply["error"] = "宿主没有这个函数：" + call;
+    }
+    (void)view_ptr->post_message(st::json_dump(reply));
+    status_ptr->set_content("已处理宿主调用：" + call);
   };
 
   // —— 操作 ——
