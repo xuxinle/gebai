@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 
+#include "native_host_page.hpp"  // `NativeHostSource`（页面的外部窗口来源端口）
 #include "st/math/geometry.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/window_control.hpp"  // 窗框动作出口（`ui::WindowControl` 端口）
@@ -51,6 +52,18 @@ struct PageHooks {
   /// 为什么走 hooks 而不是让页面自己去找：与 `add_overlay` 同理——页面不该知道
   /// `Application`/后端的存在（依赖方向），而"窗口动作"只有应用側做得了。
   st::ui::WindowControl* window_control{nullptr};
+
+  /// 原生子窗口嵌入的外部窗口来源（页面用它判断“能不能嵌” + 取窗口 + 读状态）。
+  ///
+  /// 为何直接给一个接口指针而不散成几个 `std::function`：它有状态——一个长驻
+  /// 子进程、一个窗口句柄、“还在不在跑”的判定。散成回调后页面得自己拼
+  /// “进程死了但句柄还在”这种组合，很容易拼漏。
+  ///
+  /// 为何不让页面直接问后端：与 `window_control` 同理——页面不该知道
+  /// `Application`/`shell::Backend` 的存在（依赖方向）。而且这个能力在无头/
+  /// 未实现平台上是**不存在的**，页面必须能分辨“没能力”与“嵌失败”。
+  /// `nullptr` = 应用没提供（页面如实显示“没有可用的外部窗口来源”）。
+  NativeHostSource* native_host_source{nullptr};
 };
 
 /// 页面清单（导航、切页、自动验证共用同一份，避免"两处各写一遍"走偏）。
@@ -61,7 +74,7 @@ struct PageSpec {
   std::string_view subtitle{};  ///< 页副标题
 };
 
-inline constexpr std::size_t kPageCount = 7;
+inline constexpr std::size_t kPageCount = 8;
 
 [[nodiscard]] auto page_specs() -> const std::array<PageSpec, kPageCount>&;
 

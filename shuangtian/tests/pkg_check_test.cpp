@@ -170,7 +170,9 @@ ST_TEST(check_only_finds_broken_source) {
   (void)st::fs::remove_all(project->dir);
 }
 
-ST_TEST(check_only_incremental_skips_unchanged_units) {
+// 软超时：本条要**真编译多次**（一次 build + 三次 check，其中一次 `--force` 全量）。
+// 耗时由编译器与本机负载决定：实测单跑 3.4s，16 路分片满载时 10.9s 就报软超时。
+ST_TEST_WITH_TIMEOUT(check_only_incremental_skips_unchanged_units, 60000) {
   // 检查模式**增量判定**：源+依赖哈希与上次记录一致 → 跳过（不查）。
   //
   // 旧语义是每次全量查（"恒绿哨兵"），155 单元实测 ~59 s；

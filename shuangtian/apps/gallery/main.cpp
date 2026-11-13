@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <format>
 #include <memory>
+#include <optional>
 #include <ranges>     // std::ranges::sort/unique/binary_search（树自检集合运算）
 #include <string>
 #include <thread>
@@ -29,6 +30,7 @@
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/process.hpp"   // 长驻子进程（演示用浏览器）：StreamHandle::process_id
 #include "st/core/string.hpp"   // `parse_f64` / `parse_i64`（参数取值校验）
 #include "st/core/time.hpp"
 #include "st/core/log.hpp"
@@ -260,6 +262,200 @@ struct Options {
                                                  : st::ui::ThemeMode::Dark;
   return std::make_pair(std::move(options), std::move(app));
 }
+
+/// 浏览器位置：从几个常见安装位置里找第一个存在的。
+///
+/// 为何不读注册表：注册表项名随浏览器版本/发行版（Stable/Beta/Chrome SxS）变化，
+/// 而且每一家都不同；常见安装目录是**跨机器最稳**的那一条。找不到就如实报找不到。
+[[nodiscard]] auto find_browser_executable() -> std::optional<std::string> {
+#if defined(_WIN32)
+  const auto env = [](std::string_view name) {
+    const auto value = st::fs::read_env(name);
+    return value.has_value() && !value->empty() ? std::optional<std::string>(*value)
+                                                : std::nullopt;
+  };
+  std::vector<std::string> candidates;
+  // 先看显式指定（自动化/别的机器上用得上）
+  for (std::string_view name : {"GEBAI_DEMO_BROWSER", "ST_DEMO_BROWSER"}) {
+    if (auto explicit_path = env(name); explicit_path.has_value()) {
+      candidates.push_back(*explicit_path);
+    }
+  }
+  for (std::string_view root : {"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"}) {
+    const auto base = env(root);
+    if (!base.has_value()) continue;
+    for (std::string_view relative : {
+             "\\Microsoft\\Edge\\Application\\msedge.exe",
+             "\\Google\\Chrome\\Application\\chrome.exe",
+         }) {
+      candidates.push_back(*base + std::string(relative));
+    }
+  }
+  for (const auto& candidate : candidates) {
+    if (st::fs::is_regular_file(candidate)) return candidate;
+  }
+  return std::nullopt;
+#else
+  return std::nullopt;
+#endif
+}
+
+/// gallery 的“原生嵌入”演示窗口来源。
+///
+/// ## 它做什么
+///
+/// 起一个**长驻**浏览器子进程（独立的用户数据目录，不碰用户自己的浏览器配置），
+/// 再按 pid 找它的主窗口句柄交给页面嵌入。
+///
+/// ## 为何用独立用户数据目录
+///
+/// 浏览器已在运行时，新起的进程只会**往已有实例里开一个标签页然后自己退出**——
+/// 那样拿到的 pid 立刻石。独立目录 + `--no-first-run` 才能拿到一个真正常驻的进程。
+///
+/// ## 进程活着但窗口没了怎么办
+///
+/// `acquire()` 按需一次：子进程已退出 → 重启；窗口句柄失效 → 重新按 pid 找。
+/// 它**不拥有**窗口的生命周期（那是组件/调用方的事）。
+class GalleryNativeHostSource final : public gallery::NativeHostSource {
+ public:
+  explicit GalleryNativeHostSource(st::app::Application& app) : app_(app) {}
+
+  ~GalleryNativeHostSource() override {
+    // 顺序：**先把窗口摘回桌面，再杀进程**。
+    //
+    // 为何不能反过来：本对象声明得**比 `app` 晚**（C++ 逆序析构 ⇒ 它先死），
+    // 而界面树里还持着那个句柄。先杀进程 → 子窗口被连带销毁 → 之后界面树
+    // 析构时的 `dismiss_child_view` 拿到的是已失效的 HWND（不可预期）。
+    if (window_ != nullptr) {
+      app_.dismiss_child_view(window_);
+      window_ = nullptr;
+    }
+    // 结束演示浏览器进程：它是本次演示的**副产物**，不退会在后台常驻。
+    if (process_.valid() && process_.still_running()) {
+      process_.terminate();
+      (void)process_.finish();
+    }
+  }
+
+  [[nodiscard]] auto supported() const -> bool override {
+    // 两个条件都满足才叫“能做”：后端有宿主能力 + 本机找得到浏览器。
+    return app_.child_view_supported() && find_browser_executable().has_value();
+  }
+
+  [[nodiscard]] auto acquire() -> void* override {
+    if (!app_.child_view_supported()) {
+      status_ = "当前后端不支持嵌入（无头/未实现平台）";
+      return nullptr;
+    }
+    // 已有窗口且进程还活着：直接给（重复点“嵌入”应当幂等）。
+    if (window_ != nullptr && process_.valid() && process_.still_running()) {
+      status_ = "已就绪";
+      return window_;
+    }
+    // 进程在但窗口没了（关掉了）：重新按 pid 找一次。
+    if (process_.valid() && process_.still_running()) {
+      window_ = app_.find_window_by_process(process_.process_id());
+      if (window_ != nullptr) {
+        status_ = "已就绪（重新定位窗口）";
+        return window_;
+      }
+    }
+    if (!launch()) return nullptr;
+    status_ = "浏览器已启动，等待窗口…";
+    // 窗口不是 CreateProcess 返回就能用的：浏览器还要建窗口、加载页面。
+    //
+    // ⚠ 这里是**主线程**（按钮回调中）——探测循环的上限直接就是“界面冻结多久”。
+    // 所以上限给得很小（0.8s）：换一个“稍后再点一次”的诚实提示，而不是把界面
+    // 冻上几秒假装在忙。实测浏览器冷启动窗口通常 1~2s 才出来，第二次点击
+    //（`acquire` 会再被调）就命中缓存。
+    for (int attempt = 0; attempt < 8; ++attempt) {
+      if (!process_.still_running()) break;
+      window_ = app_.find_window_by_process(process_.process_id());
+      if (window_ != nullptr) {
+        status_ = "已就绪";
+        return window_;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    status_ = process_.still_running() ? "没等到窗口（稍后再点一次）" : "浏览器进程已退出";
+    return nullptr;
+  }
+
+  [[nodiscard]] auto status_text() const -> std::string override { return status_; }
+
+ private:
+  /// 演示页（`data:` URL，不依赖网络也不依赖本地文件）。
+  [[nodiscard]] static auto demo_page_url() -> std::string {
+    // 只用 ASCII：命令行参数过 `CreateProcessW` 的窄转宽先前，非 ASCII 内容
+    // 在旧控制台上容易被代码页搞坏。
+    static constexpr std::string_view kHtml =
+        "<!doctype html><meta charset=utf-8>"
+        "<style>body{margin:0;font:15px/1.6 system-ui,sans-serif;color:#1d2330;"
+        "background:linear-gradient(135deg,#eef2ff,#f8fafc 45%,#eefcf6)}"
+        ".wrap{padding:44px 48px}h1{margin:0 0 6px;font-size:30px;letter-spacing:-.5px}"
+        "p.sub{margin:0 0 28px;color:#5b6478}"
+        ".cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;max-width:760px}"
+        ".card{background:#fff;border:1px solid #e3e8f2;border-radius:12px;padding:18px;"
+        "box-shadow:0 2px 10px rgba(30,50,90,.06)}"
+        ".card b{display:block;font-size:13px;color:#3b5bdb;margin-bottom:6px}"
+        "code{background:#f1f3f9;border-radius:5px;padding:2px 6px;font-size:12px}"
+        "</style><div class=wrap><h1>这是真网页</h1>"
+        "<p class=sub>由系统浏览器渲染，经平台合成器直接上屏——霜天的 framebuffer 里没有它。</p>"
+        "<div class=cards>"
+        "<div class=card><b>不进 framebuffer</b>capture 在这块区域拍到的是占位层，不是本页</div>"
+        "<div class=card><b>看属性面</b><code>get native-host-demo</code> 读 attached / content_y</div>"
+        "<div class=card><b>真实交互</b>网页里的滚动、选择、输入都是浏览器自己的能力</div>"
+        "</div></div>";
+    std::string url = "data:text/html,";
+    for (const char ch : kHtml) {
+      // `data:` URL 里空格与特殊字符要转义；这里只保留非保留字符，其余百分号编码。
+      const auto byte = static_cast<unsigned char>(ch);
+      const bool safe = (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+                        (byte >= '0' && byte <= '9') || byte == '-' || byte == '_' ||
+                        byte == '.' || byte == '~';
+      if (safe) {
+        url.push_back(ch);
+      } else {
+        url += std::format("%{:02X}", byte);
+      }
+    }
+    return url;
+  }
+  /// 起一个演示浏览器。返回 false = 没起来（`status_` 已写明原因）。
+  [[nodiscard]] auto launch() -> bool {
+    const auto browser = find_browser_executable();
+    if (!browser.has_value()) {
+      status_ = "没找到浏览器（msedge/chrome）";
+      return false;
+    }
+    // 独立用户数据目录：不碰用户自己的浏览器配置，也能让新进程**真的常驻**
+    //（否则浏览器会把请求转给已有实例然后自己退出）。
+    const std::string profile = st::fs::join(st::fs::temp_dir(), "shuangtian-nh-demo-profile");
+    (void)st::fs::create_directories(profile);
+    const std::vector<std::string> arguments{
+        "--no-first-run", "--no-default-browser-check", "--disable-features=Translate",
+        // 演示专用 profile 每次都是“新装的”，而上一轮常是被 terminate 结束的——
+        // 不加这个就会先弹一条“Chrome 未正确关闭”的恢复提示，看着像出错。
+        "--disable-session-crashed-bubble", "--noerrdialogs",
+        "--user-data-dir=" + profile, "--window-size=1000,700",
+        // 展示一个有内容的页面而不是 about:blank：演示要能看出“真的是网页”
+        //（空页面与白色占位块在截图上无法区分）。
+        demo_page_url(),
+    };
+    window_ = nullptr;
+    process_.open(*browser, arguments, "");
+    if (!process_.valid()) {
+      status_ = "启动浏览器失败：" + std::string(process_.error());
+      return false;
+    }
+    return true;
+  }
+
+  st::app::Application& app_;
+  st::process::StreamHandle process_{};
+  void* window_{nullptr};
+  std::string status_{"未启动"};
+};
 
 /// 导航项：图标 + 文字，左对齐（选中态由切页逻辑切 variant）。
 [[nodiscard]] auto make_nav_item(std::string_view icon, const std::string& label)
@@ -604,6 +800,11 @@ auto run_app(int argc, char** argv) -> int {
       [&runtime_fields](std::string_view field, std::function<void(std::string)> setter) {
         runtime_fields.emplace_back(std::string(field), std::move(setter));
       };
+  // 原生嵌入页的外部窗口来源（起浏览器 + 按 pid 找窗口）。
+  // 同理必须在**建页之前**接上（页面按值捕获 `PageHooks`）。
+  // 生命周期：比页面长——页面回调里会用到它，所以它得活到 run_app 结束。
+  GalleryNativeHostSource native_host_source(app);
+  hooks.native_host_source = &native_host_source;
 
   for (std::size_t index = 0; index < gallery::kPageCount; ++index) {
     auto page = gallery::build_page(index, hooks);

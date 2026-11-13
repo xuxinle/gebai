@@ -70,7 +70,10 @@ namespace {
 
 }  // namespace
 
-ST_TEST(pkg_debug_info_separation_shrinks_artifact_and_keeps_symbols) {
+// 软超时：本文件两条用例都要**真编译一个探针程序**再跑 objcopy（外部工具耗时，
+// 与框架快慢无关）。默认 10s 在并行分片（16 路）下会被邻居推过线：
+// 实测单跑 2.3s、满负载时 11.2s 就报软超时——那是环境，不是被测对象。
+ST_TEST_WITH_TIMEOUT(pkg_debug_info_separation_shrinks_artifact_and_keeps_symbols, 60000) {
   const std::string compiler = find_compiler();
   if (compiler.empty()) return;   // 无编译器：本用例不适用（同其它集成用例口径）
   const std::string dir = st::fs::join(st::fs::temp_dir(), "st-debug-sep-test");
@@ -108,7 +111,7 @@ ST_TEST(pkg_debug_info_separation_shrinks_artifact_and_keeps_symbols) {
   }
 }
 
-ST_TEST(pkg_debug_info_separation_is_idempotent) {
+ST_TEST_WITH_TIMEOUT(pkg_debug_info_separation_is_idempotent, 60000) {
   // 第二次调用必须**不重复做事**（幂等）：`.debug` 已存在且产物里查不到调试段时直接返回。
   //
   // 这条护栏的价值在于"每次改了源码重链都会走到这里"——大产物上三遍 objcopy 是秒级，

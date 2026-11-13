@@ -59,6 +59,7 @@ ST_TEST(real_asset_box_without_texture_loads) {
   const std::string path = asset_path("box.glb");
   if (!st::fs::exists(path)) {
     ST_SKIP("真实素材不存在（设置 ST_REAL_ASSETS 或运行 tools/fetch_assets.ps1）");
+    return;
   }
   const auto scene = st::raster::gltf_read_file(path);
   ST_REQUIRE(scene.has_value());
@@ -71,6 +72,7 @@ ST_TEST(real_asset_box_textured_decodes_texture) {
   const std::string path = asset_path("boxtextured.glb");
   if (!st::fs::exists(path)) {
     ST_SKIP("真实素材不存在");
+    return;
   }
   const auto scene = st::raster::gltf_read_file(path);
   ST_REQUIRE(scene.has_value());
@@ -94,6 +96,7 @@ ST_TEST(real_asset_helmet_large_textured_model) {
   const std::string path = asset_path("helmet.glb");
   if (!st::fs::exists(path)) {
     ST_SKIP("真实素材不存在");
+    return;
   }
   const auto scene = st::raster::gltf_read_file(path);
   ST_REQUIRE(scene.has_value());
@@ -117,6 +120,7 @@ ST_TEST(real_asset_rigged_has_skeleton_and_animation) {
   const std::string path = asset_path("rigged.glb");
   if (!st::fs::exists(path)) {
     ST_SKIP("真实素材不存在");
+    return;
   }
   const auto scene = st::raster::gltf_read_file(path);
   ST_REQUIRE(scene.has_value());
@@ -138,6 +142,7 @@ ST_TEST(real_asset_draco_is_rejected_with_actionable_message) {
   const std::string path = asset_path("Box.gltf");
   if (!st::fs::exists(path)) {
     ST_SKIP("真实素材不存在");
+    return;
   }
   const auto scene = st::raster::gltf_read_file(path);
   ST_REQUIRE(!scene.has_value());
@@ -162,6 +167,7 @@ ST_TEST(real_asset_scales_span_orders_of_magnitude) {
   const std::string large_path = asset_path("AntiqueCamera.glb");
   if (!st::fs::exists(small_path) || !st::fs::exists(large_path)) {
     ST_SKIP("真实素材不存在");
+    return;
   }
   const auto small_scene = st::raster::gltf_read_file(small_path);
   const auto large_scene = st::raster::gltf_read_file(large_path);

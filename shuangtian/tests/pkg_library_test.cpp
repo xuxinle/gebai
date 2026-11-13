@@ -233,7 +233,10 @@ ST_TEST(manifest_parses_group_kind) {
 ///
 /// 为何这条重要：`all` 的存在意义是“一个应用都不漏”。若成员名写错就静默跳过，
 /// `st build all` 会开心地返回 0，而少编了一个应用——那正是这个目标要防的事。
-ST_TEST(group_rejects_unknown_member) {
+// 软超时：本条要解析清单并**尝试构建**（`all` 组里含不存在的成员，失败在构建入口）。
+// 它看似只读，实际会走到框架/工具链自举与工程扫描：实测单跑 2.4s，
+// 16 路分片满载时 12.6s 就报软超时——耗时由自举与本机负载决定，不是断言失败。
+ST_TEST_WITH_TIMEOUT(group_rejects_unknown_member, 60000) {
   TempDir temp("st_group_bad_member");
   const std::string root = temp.path();
   ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src")).has_value());

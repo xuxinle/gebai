@@ -263,6 +263,41 @@ class UiRoot : public Element::HostFocus {
     clipboard_write_provider_ = std::move(provider);
   }
 
+  // ── 原生子窗口嵌入：转给 provider（`Application` 装的）──
+  //
+  // 与剪贴板同一手法：`UiRoot` 不认识 `shell::Backend`，只持三个
+  // `std::function`。没装时全部**如实降级**（`false` / 空操作），于是
+  // 离屏渲染、无头测试、桩宿主都不需要任何额外装配。
+
+  [[nodiscard]] auto host_supports_child_view() const -> bool override {
+    return child_view_supported_ ? child_view_supported_() : false;
+  }
+  auto host_adopt_child_view(void* child, math::Rect bounds) -> bool override {
+    return child_view_adopt_ ? child_view_adopt_(child, bounds) : false;
+  }
+  void host_sync_child_view(void* child, math::Rect bounds, math::Rect clip) override {
+    if (child_view_sync_) child_view_sync_(child, bounds, clip);
+  }
+  void host_dismiss_child_view(void* child) override {
+    if (child_view_dismiss_) child_view_dismiss_(child);
+  }
+  [[nodiscard]] auto host_child_view_probe() const -> Element::ChildViewProbe override {
+    return child_view_probe_ ? child_view_probe_() : Element::ChildViewProbe{};
+  }
+
+  /// 装原生子窗口 provider（`Application` 在拿到 backend 后接上）。
+  void set_child_view_providers(std::function<bool()> supported,
+                                std::function<bool(void*, math::Rect)> adopt,
+                                std::function<void(void*, math::Rect, math::Rect)> sync,
+                                std::function<void(void*)> dismiss,
+                                std::function<Element::ChildViewProbe()> probe) {
+    child_view_supported_ = std::move(supported);
+    child_view_adopt_ = std::move(adopt);
+    child_view_sync_ = std::move(sync);
+    child_view_dismiss_ = std::move(dismiss);
+    child_view_probe_ = std::move(probe);
+  }
+
   /// `Element::HostFocus::host_structure_changed` 的实现：内容树/浮层结构变了，
   /// 命中链就可能变，而指针位置没动——下一帧按最后指针位置重算悬浮/光标。
   ///
@@ -726,6 +761,12 @@ class UiRoot : public Element::HostFocus {
   std::function<std::string()> clipboard_provider_{};
   /// 剪贴板**写** provider（`set_clipboard_write_provider` 装入；空 = 无写能力）。
   std::function<bool(std::string_view)> clipboard_write_provider_{};
+  /// 原生子窗口 provider（`set_child_view_providers` 装入；空 = 该能力不可用）。
+  std::function<bool()> child_view_supported_{};
+  std::function<bool(void*, math::Rect)> child_view_adopt_{};
+  std::function<void(void*, math::Rect, math::Rect)> child_view_sync_{};
+  std::function<void(void*)> child_view_dismiss_{};
+  std::function<Element::ChildViewProbe()> child_view_probe_{};
   /// 已登记的声明式树推进回调（见 `register_declarative_host`）。
   /// 回调返回 true 表示“本帧真的重组了”（用于统计重组次数）。
   std::vector<std::function<bool()>> declarative_hosts_{};

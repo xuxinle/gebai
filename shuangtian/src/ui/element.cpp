@@ -303,6 +303,31 @@ void Element::adopt_host() {
   }
 }
 
+auto Element::visible_rect() const noexcept -> math::Rect {
+  // 口径与**绘制链**逐条对齐（`paint()` 的 `if (!visible_) return;` + `paint_impl()`
+  // 的 `if (style_.clip_children) push_clip(bounds_)`）：
+  //   · 自己或任一祖先不可见 ⇒ 空矩形（整棵子树都不上屏）；
+  //   · `clip_children` 的祖先额外裁一道（滚动容器、声明式视口）；
+  //   · **不裁剪的祖先不限制**子元素超出自己的矩形——巨出边框/阴影/凸出标签
+  //     都是合法用法，拿祖先矩形硬裁会把它们误切。
+  if (!visible_) return math::Rect{};
+  math::Rect result = bounds_;
+  for (const Element* node = parent_; node != nullptr; node = node->parent_) {
+    if (!node->visible_) return math::Rect{};
+    if (node->style_.clip_children) result = result.intersect(node->bounds_);
+    if (result.is_empty()) return math::Rect{};
+  }
+  return result.is_empty() ? math::Rect{} : result;
+}
+
+void Element::notify_visibility_changed() {
+  on_visibility_changed();
+  for (const auto& child : children_) {
+    if (child != nullptr) child->notify_visibility_changed();
+  }
+}
+
+
 auto Element::semantics_flags() const -> SemanticsFlags {
   SemanticsFlags flags;
   flags.visible = visible_;

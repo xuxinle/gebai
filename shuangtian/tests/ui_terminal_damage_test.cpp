@@ -22,6 +22,8 @@
 
 #include "st/test/test.hpp"
 
+#include <chrono>
+#include <format>
 #include <memory>
 #include <string>
 
@@ -80,6 +82,28 @@ void expect(bool ok, std::string message) {
   if (!ok) ::st::test::Registry::instance().record_failure(__FILE__, __LINE__, std::move(message));
 }
 
+/// 屏幕文本里是否已经有「shell 真的在打印」的证据（出现任何非空白字符）。
+///
+/// ## 为何不能只看“文本非空”
+///
+/// shell 启动即发 `ESC[2J`（清屏）+ `ESC[H`（光标归位），屏幕模型那一刻就有
+/// 一整屏空白行（`session_text(0)` = N 个 `\n`）——“非空”**当场成立**，而提示符
+/// 一个字符都还没打印、shell 还没开始读输入。旧夹具把这个状态当成了就绪，
+/// 接着敲的字符全落进空洞：屏幕从头到尾只有空白，最终上报整屏
+///（实测 rect 高 434px = 24×18+2，正是一次清屏的量），用例报“损坏区覆盖了多行”。
+///
+/// ## 为何不匹配具体提示符字符串
+///
+/// 本文件不绑死 shell（`GEBAI_TERMINAL_SHELL` / pwsh / powershell / bash 都行），
+/// 提示符不可预测（`PS D:\…> `、`user@host:~$ `…）。“有没有非空白字符”在它们
+/// 之间都等价于“shell 已经开始打印了”——这正是本文件需要的前提。
+[[nodiscard]] auto screen_has_ink(std::string_view text) -> bool {
+  for (const char c : text) {
+    if (c != ' ' && c != '\n' && c != '\r' && c != '\t') return true;
+  }
+  return false;
+}
+
 /// 夹具：真 PTY（`open_shell`）+ 已画过一帧（几何/格宽就位）。
 ///
 /// 用真 shell 而不是桩：这条契约的输入就是「真终端吐出的字节让屏幕模型标脏了哪几行」，
@@ -115,6 +139,34 @@ struct Fixture {
 
   /// 取走内容根基上累积的损坏区（`paint_frame` 帧首会消费它，所以要单独取）。
   [[nodiscard]] auto pending() -> Terminal::DamageReport { return root.content()->take_damage(); }
+
+  /// 等 shell 真的打出**提示符**（而不是“屏幕非空”）。
+  ///
+  /// ## 为何不能等“屏幕文本非空”（旧写法，实测是假就绪）
+  ///
+  /// shell 启动即发 `ESC[2J`（清屏）+ `ESC[H`（光标归位），屏幕模型那一刻就有
+  /// 24 行空白（`session_text(0)` = 24 个 `\n`）。于是“非空”**当场成立**，
+  /// 而提示符一个字符都还没打印、shell 还没开始读输入——接下来敲的字符全都
+  /// 落进那个空洞：屏幕从头到尾只有空白，最终上报整屏（实测 434px = 24×18+2，
+  /// 正是一次清屏的量），用例报“损坏区覆盖了多行”。
+  ///
+  /// ## 判据用“有没有非空白字符”而不是某个具体提示符字符串
+  ///
+  /// 本用例不绑死 shell（`GEBAI_TERMINAL_SHELL` / pwsh / powershell 都行），
+  /// 而提示符本身不可预测（pwsh `PS D:\…> `、powershell `PS …> `、
+  /// POSIX `user@host:~$ `）。**“屏幕上出现了任何非空白字符”**在三种情况下
+  /// 都等价于“shell 已经在打印了”——而这正是本用例需要的前提。
+  [[nodiscard]] auto wait_for_prompt(int timeout_ms = 8000) -> bool {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      terminal->pump();
+      draw();
+      if (screen_has_ink(terminal->session_text(0))) return true;
+      st::platform::sleep_ms(20);
+    }
+    return false;
+  }
 };
 
 }  // namespace
@@ -132,13 +184,15 @@ ST_TEST(terminal_single_line_output_reports_row_band_not_whole_bounds) {
   const st::math::Rect bounds = fixture.terminal->bounds();
   expect(!bounds.is_empty(), "终端几何为空（夹具没排上布局）");
 
-  // 让提示符先出来，并把累积的整屏变化消费掉。
-  for (int i = 0; i < 80; ++i) {
-    fixture.terminal->pump();
-    fixture.draw();
-    if (!fixture.terminal->session_text(0).empty()) break;
-    st::platform::sleep_ms(20);
-  }
+  // 等**真提示符**出现，并把累积的整屏变化消费掉。
+  //
+  // ⚠ 判据必须是「屏幕上出现了提示符」，不能是「屏幕文本非空」：
+  // shell 一启动就发 `ESC[2J`（清屏）+ `ESC[H`（光标归位），屏幕模型那一刻
+  // 就有 24 行空白（`plain_text()` = 24 个换行）——"非空"当场成立，而提示符
+  // 一个字符都还没打印。旧判据因此**立刻放行**，接着敲的字符落在了 shell
+  // 还没开始读输入的窗口里：屏幕从头到尾只有那 24 行空白，最终上报整屏
+  //（实测 rect 高 434px = 24×18+2，正是一次清屏的量）。
+  expect(fixture.wait_for_prompt(), "shell 没在 8s 内打出提示符（环境问题，非被测缺陷）");
   // ⚠ 先等**布局/PTY 尺寸稳定**：面板首次排布会把 PTY resize（`resize` 会
   // `mark_all_dirty`）——那是“真的整屏变”，不该混进本用例的“单行变化”里。
   // 判据：连续两次 pump 都没有上报（`pending()` 会消掉标记，所以每次都要重新累积）。
@@ -206,4 +260,28 @@ ST_TEST(terminal_single_line_output_reports_row_band_not_whole_bounds) {
                      report.rect.height, bounds.y, bounds.bottom()));
 
   fixture.terminal->send_stop();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 夹具就绪判据（“屏幕非空”≠“shell 已就绪”）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 本文件上一条用例曾经用 `session_text(0)` **非空**当“提示符到了”，而 shell 启动
+// 即发 `ESC[2J`：那一刻屏幕就是一整屏空白（N 个 `\n`），于是“非空”当场成立，
+// 接着敲的字符全落进 shell 还没开始读输入的窗口——屏幕从头到尾只有空白，
+// 最终上报整屏 434px（24×18+2），用例报“损坏区覆盖了多行”。
+//
+// 下面直接钉住那个判据本身（不需要真 shell，因此结果是确定的）：
+ST_TEST(terminal_damage_readiness_requires_ink_not_just_nonempty) {
+  using st::test::Registry;
+  // ① 清屏后的真实形态：一整屏空白行 —— 必须判为**未就绪**。
+  ST_CHECK(!screen_has_ink(std::string(24, '\n')));
+  ST_CHECK(!screen_has_ink("\n\n\n"));
+  ST_CHECK(!screen_has_ink(""));
+  ST_CHECK(!screen_has_ink("   \t\r\n "));
+  // ② 真打印了才就绪（三种 shell 的提示符形态）。
+  ST_CHECK(screen_has_ink("PS D:\\code> "));
+  ST_CHECK(screen_has_ink("user@host:~$ "));
+  ST_CHECK(screen_has_ink("st-test# "));
+  (void)Registry::instance();
 }

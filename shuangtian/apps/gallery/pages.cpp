@@ -1,5 +1,7 @@
 ﻿#include "pages.hpp"
 
+#include "native_host_page.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -3138,6 +3140,8 @@ auto page_specs() -> const std::array<PageSpec, kPageCount>& {
        .subtitle = "状态驱动（Compose / ArkTS 风）"},
       {.id = "control", .icon = "cpu", .label = "控制通道",
        .subtitle = "远程可驱动"},
+      {.id = "native-host", .icon = "layers", .label = "原生嵌入",
+       .subtitle = "外部程序窗口嵌进界面（不进 framebuffer）"},
       {.id = "about", .icon = "info", .label = "关于",
        .subtitle = "版本与分层"},
   }};
@@ -3154,6 +3158,7 @@ auto build_page(std::size_t index, const PageHooks& hooks) -> std::unique_ptr<El
     // 两者边界清楚：页面模块管「页里有什么」，应用管「声明式宿主接在哪」。
     case 4: return build_declarative_shell(hooks);
     case 5: return build_control(hooks);
+    case 6: return gallery::build_native_host_page(hooks.native_host_source);
     default: return build_about(hooks);
   }
 }

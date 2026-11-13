@@ -450,6 +450,23 @@ class Element {
   /// 为什么只放“焦点”这一个能力、不把 `UiRoot` 整个暴露成接口：界面越窄越好
   /// （消费者只有一个：`CommandPalette::grab_focus`）。将来真需要更多宿主能力时，
   /// 应**继续往这个界面加纯虚函数**，而不要退回 `void*`。
+  /// 嵌入式子视图的自检读数（`HostFocus::host_child_view_probe` 的返回）。
+  ///
+  /// 与 `shell::ChildViewProbe` 字段一一对应；`ui` 层不能包含 `shell` 头
+  ///（依赖方向），所以两边各留一份、在 `Application` 处折。
+  struct ChildViewProbe {
+    bool attached{false};
+    float title_bar_height{0.0f};
+    float content_x{0.0f};
+    float content_y{0.0f};
+    float content_width{0.0f};
+    float content_height{0.0f};
+    float host_width{0.0f};
+    float host_height{0.0f};
+    /// 嵌入物当前是否**真的看得到**（被可见区裁空时为假；见 `shell::ChildViewProbe`）。
+    bool visible{false};
+  };
+
   class HostFocus {
    public:
     virtual ~HostFocus() = default;
@@ -513,10 +530,59 @@ class Element {
     ///（多一张卡不该让现有悬浮抖动），后者必然要作废旧答案。
     /// 默认空实现：不关心指针态的宿主（离屏/测试桩）无需理会。
     virtual void host_structure_changed(bool /*removed*/) {}
+
+    // ── 原生子窗口嵌入（可选能力）──
+    //
+    // 供 `NativeHost` 组件使用：把外部程序的窗口嵌进界面里（典型：内嵌浏览器）。
+    // 三个方法**全部默认降级**（`false` / 空操作），因此：
+    //   · 不支持这个能力的后端（无头/未实现平台）上，组件退化为占位块；
+    //   · 已有的桩宿主、离屏渲染、测试代码**一行不用改**；
+    //   · 基础功能（布局/主题/事件/其余组件）**完全不受影响**。
+    //
+    // 这就是“WebView 不可用时不影响基础功能”的结构保证：降级是**默认路径**，
+    // 而不是每个后端各自去写一遍 `if (不支持) return;`。
+
+    /// 宿主是否能把外部窗口嵌进来。`false` 时组件不应尝试嵌入（也不会报错）。
+    [[nodiscard]] virtual auto host_supports_child_view() const -> bool { return false; }
+
+    /// 把外部窗口 `child` 嵌到当前布局里的 `bounds`（**逻辑像素**）。
+    /// 返回 `false` = 无此能力 / 失败（调用方如实回落，不假装成功）。
+    virtual auto host_adopt_child_view([[maybe_unused]] void* child,
+                                       [[maybe_unused]] math::Rect bounds) -> bool {
+      return false;
+    }
+    /// 布局变化时同步位置。未嵌入时为空操作（**不报错**：重排是常态）。
+    ///
+    /// `clip` = 从根到本组件**所有祖先的矩形与裁剪区的交集**（由 UI 层算好）。
+    /// 为何必须传：平台子窗口由合成器直接上屏，**不遵守 `visible()` 也不遵守
+    /// 祖先的 `clip_children`**——切页后它会盖在新页面上，滚出视口也不会消失
+    ///（两条都实测到过）。语义：与 `bounds` 无交集 ⇒ 隐藏；否则只露交集。
+    virtual void host_sync_child_view([[maybe_unused]] void* child,
+                                      [[maybe_unused]] math::Rect bounds,
+                                      [[maybe_unused]] math::Rect clip) {}
+    /// 解除嵌入（**必须**把外部窗口还原成独立顶层窗口）。
+    virtual void host_dismiss_child_view([[maybe_unused]] void* child) {}
+    /// 嵌入物的自检读数（属性面与测试的数据源）。
+    ///
+    /// 为何需要：嵌入内容**不进 `capture`**，像素回归看不见它。
+    /// 没有这组读数，“网页死掉了”会静默通过所有像素回归。
+    ///
+    /// 为何另定义一份而不是用 `shell::ChildViewProbe`：`ui` 层不能依赖 `shell`
+    ///（依赖方向：`shell.hpp` 已包含 ui 头，反向包含会成环）。两者字段一致，
+    /// 在 `Application` 那一层直接折（字段名/含义相同，不需要转换函数）。
+    [[nodiscard]] virtual auto host_child_view_probe() const -> ChildViewProbe { return {}; }
   };
 
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }
   void set_host(HostFocus* host) noexcept { host_ = host; }
+
+  /// 本元素在屏幕上的**可见矩形**（逻辑像素）：从根到自己的全部祖先矩形、
+  /// 加上所有 `clip_children` 祖先的裁剪，逐层取交集；自身或任一祖先不可见时为空矩形。
+  ///
+  /// 为何需要它：绘制侧靠 `paint` 里的 clip 栈裁剪，而**平台子窗口不经过那条路**
+  ///（`NativeHost` 的嵌入物由合成器上屏）。所以它必须自己问一句“我到屏幕上的哪块”。
+  /// 语义与绘制链一致：隐藏页里的元素得空，滚动容器外的部分被裁掉。
+  [[nodiscard]] auto visible_rect() const noexcept -> math::Rect;
 
   /// 把宿主契约**转发到整棵子树**（新挂入的子元素也能拿到宿主）。
   ///
@@ -527,6 +593,13 @@ class Element {
   ///
   /// 挂载点收敛到 `add_child`/`insert_child`，新元素随挂入自动继承父元素的宿主。
   void adopt_host();
+
+  /// 可见性广播的**递归体**（自身 + 整棵子树）。
+  ///
+  /// 为何不把递归写进虚函数 `on_visibility_changed` 里：那样每个覆写都得记得转调
+  /// 基类，漏一个就静默断链（本仓已有 72 个覆写里 65 个忘了转调的教训）。
+  /// 递归固定在这里，组件只覆那个叶子钩子。
+  void notify_visibility_changed();
 
   /// **通知宿主“树结构变了”**（挂入/摘下子元素时自动调，见 `add_child`/`remove_child`）。
   ///
@@ -563,7 +636,21 @@ class Element {
     // 空态隐了卡片区，空态却仍在半屏内居中，看起来“没居中”）。
     // 这里用 `mark_layout_dirty()` 而不是仅 `mark_dirty()`：前者会连带重测父级。
     mark_layout_dirty();
+    // **可见性广播**：隐藏子树的 `measure`/`arrange`/`paint` 全部被跳过，所以
+    // “我刚被藏起来了”这件事必须靠广播传到子树里——否则依赖「被摆过」来收尾的
+    // 组件（如 `NativeHost`：它的外部窗口不经过 paint，不主动藏就盖在别人身上）
+    // 会永远停在上一帧的状态。
+    // 递归整棵子树（不是只发直接子元素）：否则三层嵌套里的内层永远收不到。
+    notify_visibility_changed();
   }
+
+  /// 自身或任一祖先的可见性变了（**含变成不可见时**）。
+  ///
+  /// 为何要有它：隐藏子树的 `measure`/`arrange`/`paint` 全不调，于是任何“靠布局
+  /// 回调收尾”的逻辑在隐藏时**一次也不会跑**。平台子窗口、系统集成类资源需要
+  /// 在这里主动收尾（如 `NativeHost` 把外部窗口藏起来）。
+  /// 默认空实现：绝大多数组件不需要关心（它们的可见性已经由绘制链处理）。
+  virtual void on_visibility_changed() {}
 
   /// **悬停提示**（提示气泡文本；空串 = 不提示）。
   ///

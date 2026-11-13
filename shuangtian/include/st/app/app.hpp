@@ -460,6 +460,28 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto work_area_logical() const -> math::Size;
   /// 这台显示器能给的最小逻辑视口（低于它三栏布局会互相挤压）。
   [[nodiscard]] auto min_logical_size() const -> math::Size;
+
+  /// 本应用能否把外部窗口嵌进来（原生子窗口宿主能力）。
+  /// 无头 / 未实现平台 / 应用尚未 `start()` 时为 `false`（**如实上报，不假装**）。
+  [[nodiscard]] auto child_view_supported() const -> bool;
+  /// 按子进程 pid 找它的主顶层窗口句柄（找不到/平台不支持 → `nullptr`）。
+  ///
+  /// 为何放在 `Application` 而不是让调用方自己调后端：句柄类型要**平台无关**地
+  /// 交待给上层（`void*`），而后端是私有的（`Impl` 里）。这层转发是必要的窄接口。
+  [[nodiscard]] auto find_window_by_process(std::uint64_t process_id) -> void*;
+
+  /// 强制解除某个已嵌入窗口（后端层；`NativeHost::detach` 之外的第二道口）。
+  ///
+  /// 为何需要它：外部窗口的所有者（起子进程的那一方）**先于**界面树被销毁是常态
+  ///（它声明得更晚），那时如果直接杀进程，子窗口会被连带销毁，而界面树里还持着
+  /// 它的句柄——后续析构走 `dismiss_child_view` 时碰到的是**已失效的 HWND**。
+  /// 有了这个口，销毁顺序就可以是“先摘回桌面，再杀进程”。
+  void dismiss_child_view(void* child);
+  /// 取嵌入物的自检读数（未嵌入时 `attached = false`）。
+  ///
+  /// 为何必须能读：嵌入内容的像素**不进 framebuffer**，`capture` 拍不到。
+  /// 没有这组读数，“嵌入物死掉了”会静默通过所有像素回归。
+  [[nodiscard]] auto child_view_probe() const -> shell::ChildViewProbe;
   /// 字体栈（只读）：给需要**独立缓存域**的离屏排版用
   /// （见 `st::app::OffscreenTextPort`——后台排版若复用主线程的 `TextRenderer`，
   /// 会把它 32k 条的宽度 LRU 刷爆，主线程随后每段文字都要重新整形）。

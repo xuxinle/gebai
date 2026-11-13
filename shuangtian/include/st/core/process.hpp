@@ -105,6 +105,24 @@ struct RunResult {
     [[nodiscard]] auto valid() const noexcept -> bool;
     [[nodiscard]] auto error() const -> std::string_view;
 
+    /// 子进程的系统 pid（未 open / 已回收 → 0）。
+    ///
+    /// 为何需要暴露：有些能力只能**按 pid** 作用到子进程上——典型是"把它起的
+    /// 窗口嵌进来"（Windows `EnumWindows` + 按 `GetWindowThreadProcessId` 圈定候选）。
+    /// 没有 pid 就只能猜类名/标题（同系统里可能开着别的同类窗口），或者被迫
+    /// 换个不带 pid 的启动接口重写一遍管道逻辑。
+    ///
+    /// 语义：**open 成功后立即可用**（在 `finish()` 之前的整个生命周期内有效）。
+    /// 进程退出后 pid 可能被系统复用——需要长期作用时要配 `still_running()` 判断。
+    [[nodiscard]] auto process_id() const noexcept -> std::uint64_t;
+
+    /// 子进程是否**仍在运行**（非阻塞探测；未 open → false）。
+    ///
+    /// 为什么不能用 `finish()` 代替：`finish()` 是**阻塞等待**（它的用途就是收尾）。
+    /// 探测型用法（“这个嵌入物的源进程还活着吗”）必须是非阻塞的，否则一次健康检查
+    /// 会把 GUI 主线程卡到子进程退出。
+    [[nodiscard]] auto still_running() -> bool;
+
    private:
     // `Impl` 的**定义在实现文件里**，但析构/移动必须能看到完整类型。
     // 做法：在头里把 unique_ptr 的非删除析构器声明出来，实现在 `Impl` 之后——

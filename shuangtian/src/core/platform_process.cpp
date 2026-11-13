@@ -860,6 +860,38 @@ void StreamHandle::terminate() {
 
 auto StreamHandle::valid() const noexcept -> bool { return impl_ != nullptr; }
 
+auto StreamHandle::process_id() const noexcept -> std::uint64_t {
+  if (!impl_ || impl_->finished) return 0;
+#if defined(_WIN32)
+  return static_cast<std::uint64_t>(::GetProcessId(impl_->process.get()));
+#else
+  return impl_->child > 0 ? static_cast<std::uint64_t>(impl_->child) : 0;
+#endif
+}
+
+auto StreamHandle::still_running() -> bool {
+  if (!impl_ || impl_->finished) return false;
+#if defined(_WIN32)
+  // 零超时等待：`WAIT_TIMEOUT` = 还活着；`WAIT_OBJECT_0` = 已退出（未回收）。
+  return ::WaitForSingleObject(impl_->process.get(), 0) == WAIT_TIMEOUT;
+#else
+  if (impl_->child <= 0) return false;
+  // `WNOHANG` 探测：
+  // 返回 0 = 有子进程但尚未退出（还活着）；
+  // 返回 child = 已退出（**此时已顺手回收**，必须置 `finished`，否则后续 `finish()`
+  // 会对同一个 pid 再 `waitpid` 一次，拿到 ECHILD 并写脏退出码——与 `terminate()`
+  // 里那段注释是同一个坑）。
+  int status = 0;
+  const pid_t reaped = ::waitpid(impl_->child, &status, WNOHANG);
+  if (reaped == impl_->child) {
+    impl_->finished = true;
+    impl_->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WIFSIGNALED(status);
+    return false;
+  }
+  return reaped == 0;
+#endif
+}
+
 auto StreamHandle::error() const -> std::string_view { return error_; }
 
 auto which(std::string_view program) -> std::optional<std::string> {

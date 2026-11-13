@@ -161,7 +161,9 @@ ST_TEST_SLOW(git_service_groups_by_xy_matrix) {
   }
 }
 
-ST_TEST(git_service_reads_branch_and_upstream) {
+// 软超时：本条要起**七次 git 子进程**建仓库（init/config×2/add/commit + 读快照/分支）。
+// 耗时由 git 与文件系统决定：实测单跑 2.4s，16 路分片满载时 11.8s 就报软超时。
+ST_TEST_WITH_TIMEOUT(git_service_reads_branch_and_upstream, 60000) {
   if (!git_available()) {
     std::cout << "[git] git 未安装，跳过" << '\n';
     return;

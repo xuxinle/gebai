@@ -44,6 +44,8 @@
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
 
+#include "child_view_geometry.hpp"
+
 #include "click_gesture.hpp"   // 连击计数（三个后端共用一份，见头文件里的实测代价）
 
 namespace st::shell {
@@ -1438,6 +1440,347 @@ class Win32Backend final : public Backend {
 
   // ── 系统托盘 ──
 
+  // ── 原生子窗口宿主（路线 B：把外部窗口嵌进来）──
+  //
+  // 外部程序（典型：浏览器在 `--app` 模式下自绘标题栏）的客户区里除了真内容还有
+  // **它自己的标题栏**（图标/标题/关闭按钮，实测高 37px @120DPI）。要让内容顶到
+  // 目标矩形，必须给外部窗口一个**负的 y 偏移**把标题栏顶出去。
+  //
+  // 而负偏移会把外部窗口画到目标矩形**之外**。宿主窗口（`WS_CLIPCHILDREN`）是
+  // 白送的裁剪：子窗口超出宿主客户区的部分不参与绘制，于是圆角/边框/相邻控件
+  // 天然安全，不必再 `SetWindowRgn`。
+  //
+  // ## 为什么用 `WS_EX_NOACTIVATE` 宿主
+  //
+  // 宿主是**纯容器**，不应抢焦点：点了宿主空白处应当什么都不发生（跟没嵌入时
+  // 一样），而不是把焦点从界面控件上抢走。
+
+  [[nodiscard]] auto native_window() -> void* override { return window_; }
+
+  [[nodiscard]] auto supports_child_view() const noexcept -> bool override {
+    return window_ != nullptr;
+  }
+
+  /// 嵌入外部窗口。
+  ///
+  /// ## 失败时不能留半嵌入状态
+  ///
+  /// `SetParent` 成功、但后续拿不到真视口偏移（外部程序可能还没建好渲染子窗口）
+  /// 也是可能的。那时**必须反手 reparent 回桌面**（`SetParent(child, nullptr)`），
+  /// 否则那个外部窗口会变成一个看不见/点不到的 `WS_CHILD`——比嵌入失败本身更糟。
+  [[nodiscard]] auto adopt_child_view(void* child, math::Rect bounds) -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    if (child == nullptr) return unexpected(ErrorCode::Invalid, "子窗口句柄为空");
+    HWND child_window = static_cast<HWND>(child);
+
+    // 已经嵌过同一个句柄：当作“重新落位”，不重复建宿主
+    if (child_host_ != nullptr && child_view_ == child_window) {
+      sync_child_view(child, bounds, bounds);
+      return ok();
+    }
+    // 已经嵌了**别的**窗口：先把旧的还原（一个后端只维护一个嵌入位，
+    // 多个独立嵌入物用多个 `NativeHost` 时各自走自己的后端调用——
+    // 目前一个窗口只有一个宿主槽，第二个会覆盖并用显式错误告知）
+    if (child_view_ != nullptr && child_view_ != child_window) {
+      return unexpected(ErrorCode::Invalid,
+                        "该窗口已嵌入另一个子视图，请先 dismiss_child_view");
+    }
+
+    const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
+    const RECT host_rect = to_client_rect(bounds, safe_scale);
+
+    // 先确保父窗口带 WS_CLIPCHILDREN：少了它子窗口会画到父窗口的绘制区外面去
+    // （自绘窗框/圆角会被盖住）。
+    const LONG_PTR parent_style = ::GetWindowLongPtrW(window_, GWL_STYLE);
+    if ((parent_style & WS_CLIPCHILDREN) == 0) {
+      ::SetWindowLongPtrW(window_, GWL_STYLE, parent_style | WS_CLIPCHILDREN);
+    }
+
+    // 宿主窗口：纯容器，不抢焦点、不画背景（真背景由子窗口填）
+    HWND host = ::CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, kChildHostClass(), L"",
+                                  WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, host_rect.left,
+                                  host_rect.top, host_rect.right - host_rect.left,
+                                  host_rect.bottom - host_rect.top, window_, nullptr,
+                                  ::GetModuleHandleW(nullptr), nullptr);
+    if (host == nullptr) {
+      return unexpected(ErrorCode::Io,
+                        std::format("建子视图宿主失败（GetLastError={}）", ::GetLastError()));
+    }
+
+    // 切成子窗口样式：保留原样式里除顶层标志以外的全部位（窗口类/滚动条/边框标志
+    // 都有意义），只把 WS_POPUP 换掉并补 WS_CHILD。
+    //
+    // **先记下嵌入前的屏幕矩形**：`SetParent` 之后 `GetWindowRect` 给的是相对宿主的
+    // 坐标，原值就再也拿不回来了。而解除嵌入必须把窗口送回用户记得的那个位置
+    //（否则标题栏可能落在屏幕上方之外——见 `dismiss_child_view` 的说明）。
+    RECT saved_rect{};
+    if (::GetWindowRect(child_window, &saved_rect) != 0) {
+      child_rect_saved_.emplace(detail::PixelRect{saved_rect.left, saved_rect.top,
+                                                  saved_rect.right, saved_rect.bottom});
+    } else {
+      child_rect_saved_.reset();
+    }
+    const LONG_PTR child_style = ::GetWindowLongPtrW(child_window, GWL_STYLE);
+    child_style_saved_ = child_style;
+    const LONG_PTR new_style =
+        (child_style & ~static_cast<LONG_PTR>(WS_POPUP)) |
+        static_cast<LONG_PTR>(WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS);
+    ::SetWindowLongPtrW(child_window, GWL_STYLE, new_style);
+    const LONG_PTR child_ex = ::GetWindowLongPtrW(child_window, GWL_EXSTYLE);
+    child_ex_style_saved_ = child_ex;
+    ::SetWindowLongPtrW(child_window, GWL_EXSTYLE,
+                        child_ex & ~static_cast<LONG_PTR>(WS_EX_APPWINDOW));
+
+    ::SetParent(child_window, host);
+
+    // 落位到最终尺寸并显示。
+    //
+    // **不在这里量标题栏偏移**：刚 reparent 的外部窗口还没按最终尺寸重排，
+    // 此时量到的是旧布局的值（实测：量到 107，重排后的真值是 0）。
+    // 首帧按“无标题栏”落位（内容从客户区顶部开始，比猜一个数安全），
+    // 后续帧由组件侧 `NativeHost::refine_bounds` 的短收敛重测修正。
+    const int host_w = std::max(1, static_cast<int>(host_rect.right - host_rect.left));
+    const int host_h = std::max(1, static_cast<int>(host_rect.bottom - host_rect.top));
+    // 子窗口相对宿主先按 (0,0) 对齐，宿主自己正落在 `host_rect` 上（客户区坐标
+    // 即父窗口客户区坐标），两者相加才是屏幕位置——不在这里补 "宿主偏移"。
+    title_bar_height_ = 0;
+    ::SetWindowPos(child_window, HWND_TOP, 0, 0, host_w, host_h,
+                   SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+    ::ShowWindow(child_window, SW_SHOW);
+    // 子窗口在宿主里也带 WS_CLIPCHILDREN，防它自己的子窗口溢出到我们界面上
+    ::ShowWindow(host, SW_SHOWNA);
+
+    child_host_ = host;
+    child_view_ = child_window;
+    return ok();
+  }
+
+  void sync_child_view(void* child, math::Rect bounds, math::Rect clip) override {
+    if (child_host_ == nullptr || child_view_ == nullptr || child != child_view_) return;
+    const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
+    const RECT view_rect = to_client_rect(bounds, safe_scale);
+    // 只露出 `bounds ∩ clip`：平台子窗口**只能被父窗口矩形裁剪**，所以宿主窗口
+    // 本身就是那块交汇区。这是“切页/滚出视口时嵌入物必须一起消失”的唯一手段
+    //（它不走 UI 的 paint clip 栈，`WS_CLIPCHILDREN` 只裁溢出、裁不掉一部分）。
+    const RECT clip_rect = to_client_rect(clip, safe_scale);
+    RECT show{};
+    show.left = std::max(view_rect.left, clip_rect.left);
+    show.top = std::max(view_rect.top, clip_rect.top);
+    show.right = std::min(view_rect.right, clip_rect.right);
+    show.bottom = std::min(view_rect.bottom, clip_rect.bottom);
+    if (show.right <= show.left || show.bottom <= show.top) {
+      // 完全看不见：隐藏（而不是缩成 1px，那会留一条缝）。
+      if (!hidden_by_clip_) {
+        hidden_by_clip_ = true;
+        ::ShowWindow(child_host_, SW_HIDE);
+      }
+      return;
+    }
+    ::SetWindowPos(child_host_, HWND_TOP, show.left, show.top, show.right - show.left,
+                   show.bottom - show.top, SWP_NOACTIVATE | SWP_NOZORDER);
+    if (hidden_by_clip_) {
+      hidden_by_clip_ = false;
+      ::ShowWindow(child_host_, SW_SHOWNA);
+    }
+    // 子窗口相对**宿主**落位：宿主被裁小了，偏移要补回来（否则内容会整体位移）。
+    const int offset_x = view_rect.left - show.left;
+    const int offset_y = view_rect.top - show.top;
+    const int view_w = std::max(1, static_cast<int>(view_rect.right - view_rect.left));
+    const int view_h = std::max(1, static_cast<int>(view_rect.bottom - view_rect.top));
+    // **不先动子窗口位置**：只在尺寸真的变了时落位（避免每帧 `SetWindowPos` 引发
+    // 闪烁与额外重绘），然后重测标题栏。尺寸没变时只重测——重排可能是
+    // 上一帧的 resize 引起的，位置仍需要跟着标题栏修正。
+    RECT child_rect{};
+    ::GetWindowRect(child_view_, &child_rect);
+    const int child_w = static_cast<int>(child_rect.right - child_rect.left);
+    const int child_h = static_cast<int>(child_rect.bottom - child_rect.top);
+    if (child_w != view_w || child_h != view_h + title_bar_height_) {
+      // 先按新尺寸落位（不顶偏移），重排稳定后下一帧才量得准。
+      ::SetWindowPos(child_view_, HWND_TOP, offset_x, offset_y, view_w, view_h,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+      title_bar_height_ = 0;   // 旧值已失效（尺寸变了，布局重来）
+      return;
+    }
+    const int measured = detect_title_bar_height(child_view_);
+    if (measured == title_bar_height_) return;   // 已到位，不动
+    title_bar_height_ = measured;
+    ::SetWindowPos(child_view_, HWND_TOP, offset_x, offset_y - title_bar_height_, view_w,
+                   std::max(1, view_h + title_bar_height_), SWP_NOACTIVATE | SWP_NOZORDER);
+  }
+
+  /// 解除嵌入：**必须真的 reparent 回桌面**，并**把几何还原成嵌入前的样子**。
+  ///
+  /// ## 为何不能只解除父子关系
+  ///
+  /// 只销毁宿主是不够的：子窗口会被 Windows 连带销毁（`WS_CHILD` 的父销毁时
+  /// 子窗口随之销毁），于是外部进程的主窗口就没了——下次再用就再也找不到窗口。
+  /// 所以顺序是：先 `SetParent(child, nullptr)` 把它拉回顶层 → 恢复原样式 →
+  /// 再销毁宿主。
+  ///
+  /// ## 为何还要还原矩形（实测缺陷）
+  ///
+  /// 嵌入期为把外部窗口的自绘标题栏退到宿主之外，它的矩形被改过：上移一个
+  /// 标题栏高度、高度再补上同样多。解除嵌入若只恢复**样式**不恢复**矩形**，
+  /// 它就带着那个上移量留在原处——变成顶层窗口后，那个上移量直接变成屏幕坐标，
+  /// 于是标题栏正好落在屏幕上方之外：窗口看得见、拖不动。
+  ///
+  /// 实测数据（Chrome，1.25x）：解除后矩形 `(0, -107)-(1955, 525)`，
+  /// 而标题栏就在 `y ∈ [-107, 0)` 那一带——完全在屏幕外。
+  void dismiss_child_view(void* child) override {
+    if (child_view_ == nullptr || child == child_view_) {
+      HWND child_window = child_view_;
+      HWND host_window = child_host_;
+      child_view_ = nullptr;
+      child_host_ = nullptr;
+      title_bar_height_ = 0;
+      hidden_by_clip_ = false;
+      if (child_window != nullptr) {
+        ::SetParent(child_window, nullptr);
+        // 恢复嵌入前的样式（否则它会永久保持 WS_CHILD，桌面看不见也点不到）
+        if (child_style_saved_ != 0) {
+          ::SetWindowLongPtrW(child_window, GWL_STYLE, child_style_saved_);
+        }
+        if (child_ex_style_saved_ != 0) {
+          ::SetWindowLongPtrW(child_window, GWL_EXSTYLE, child_ex_style_saved_);
+        }
+        restore_child_rect(child_window);
+      }
+      if (host_window != nullptr) ::DestroyWindow(host_window);
+      child_style_saved_ = 0;
+      child_ex_style_saved_ = 0;
+      child_rect_saved_.reset();
+      return;
+    }
+    (void)child;
+  }
+
+  /// 把外部窗口送回**嵌入前**的屏幕矩形。
+  ///
+  /// 嵌入前的位置就是用户记得的位置，所以默认原样送回。但那个位置可能已经不可达
+  /// （换了显示器、缩放变了、嵌入期间屏幕配置变了），那时夹回**它所在那块**工作区：
+  /// 夹取只改位置、不改尺寸，且不搬到主屏（多显示器下“程序乱跑到另一块屏”
+  /// 最容易被当成缺陷）。决策本身在 `child_view_geometry.hpp`，可单测。
+  ///
+  /// 注意：`SWP_FRAMECHANGED` 是必须的——刚恢复的样式位（`WS_CAPTION` /
+  /// `WS_THICKFRAME`）只有过了 `WM_NCCALCSIZE` 才会真的变成非客户区；
+  /// 不加它，“还原了样式但边框/标题栏尺寸还是子窗口那套”。
+  void restore_child_rect(HWND child) {
+    RECT current{};
+    if (::GetWindowRect(child, &current) == 0) return;
+    const detail::PixelRect now{current.left, current.top, current.right, current.bottom};
+    std::vector<detail::PixelRect> work_areas = monitor_work_areas();
+    const detail::PixelRect target =
+        detail::plan_detach_placement(child_rect_saved_, now, work_areas);
+    if (!target.is_valid()) return;
+    ::SetWindowPos(child, HWND_TOP, target.left, target.top, target.width(), target.height(),
+                   SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+  }
+
+  /// 枚举所有显示器的**工作区**（已扣任务栏），屏幕像素。
+  ///
+  /// 为何不用 `SPI_GETWORKAREA`：它只给主屏，多显示器下会把窗口夹到错的屏幕。
+  [[nodiscard]] static auto monitor_work_areas() -> std::vector<detail::PixelRect> {
+    struct Ctx {
+      std::vector<detail::PixelRect>* out;
+    } ctx{nullptr};
+    std::vector<detail::PixelRect> areas;
+    ctx.out = &areas;
+    ::EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+          auto* state = reinterpret_cast<Ctx*>(data);
+          MONITORINFO info{};
+          info.cbSize = sizeof(info);
+          if (::GetMonitorInfoW(monitor, &info) == 0) return TRUE;
+          state->out->push_back(detail::PixelRect{info.rcWork.left, info.rcWork.top,
+                                                  info.rcWork.right, info.rcWork.bottom});
+          return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+    return areas;
+  }
+
+  /// 嵌入式子视图的自检信息（组件属性面的数据源）。
+  ///
+  /// 为何需要它：嵌入内容的像素**不进 framebuffer**，`capture` 拍不到。
+  /// 没有这组读数，嵌入物静默死掉（外部进程崩了/窗口没了/内容没在跑）时
+  /// 所有像素回归仍然全绿。
+  [[nodiscard]] auto child_view_probe() const -> ChildViewProbe override {
+    ChildViewProbe probe;
+    if (child_view_ == nullptr) return probe;
+    probe.attached = true;
+    probe.title_bar_height = static_cast<float>(title_bar_height_);
+    probe.visible = !hidden_by_clip_;
+    // 内容子窗口在宿主客户区里的矩形：正常应当是 (0,0) 起、填满宿主
+    HWND content = detect_content_window(child_view_);
+    if (content != nullptr && child_host_ != nullptr) {
+      RECT content_rect{};
+      ::GetWindowRect(content, &content_rect);
+      POINT top_left{content_rect.left, content_rect.top};
+      ::ScreenToClient(child_host_, &top_left);
+      probe.content_x = static_cast<float>(top_left.x);
+      probe.content_y = static_cast<float>(top_left.y);
+      probe.content_width = static_cast<float>(content_rect.right - content_rect.left);
+      probe.content_height = static_cast<float>(content_rect.bottom - content_rect.top);
+    }
+    // 宿主客户区尺寸（与上面合起来就能判断“内容是否真的填满了”而不是被裁了一半）
+    if (child_host_ != nullptr) {
+      RECT host_client{};
+      ::GetClientRect(child_host_, &host_client);
+      probe.host_width = static_cast<float>(host_client.right - host_client.left);
+      probe.host_height = static_cast<float>(host_client.bottom - host_client.top);
+    }
+    return probe;
+  }
+
+  /// 按 pid 找它的主顶层窗口。
+  ///
+  /// 为何要用 pid 而不是类名/标题：同一台机器上可能开着多个同类窗口（多个 Chrome
+  /// 窗口、用户自己的浏览器），按类名抓会嵌错到别人的窗口上。pid 是唯一能把
+  /// “我刚起的那个进程”圈出来的依据。
+  ///
+  /// 筛选口径见基类注释。要点：**排除 `Chrome_WidgetWin_0`**——它是浏览器的外层
+  /// 宿主，真正渲染网页内容的是它的子窗口；嵌错层会得到一片空白（实测）。
+  [[nodiscard]] auto find_window_by_process(std::uint64_t process_id) -> void* override {
+    if (process_id == 0) return nullptr;
+    struct Search {
+      DWORD pid{0};
+      HWND best{nullptr};
+      long long best_area{0};
+    } search{static_cast<DWORD>(process_id), nullptr, 0};
+
+    ::EnumWindows(
+        [](HWND candidate, LPARAM context) -> BOOL {
+          auto* state = reinterpret_cast<Search*>(context);
+          DWORD owner_pid = 0;
+          (void)::GetWindowThreadProcessId(candidate, &owner_pid);
+          if (owner_pid != state->pid) return TRUE;
+          if (::IsWindowVisible(candidate) == 0) return TRUE;
+          // 有 owner = 工具窗/对话框（主窗口没有 owner）。
+          if (::GetWindow(candidate, GW_OWNER) != nullptr) return TRUE;
+          if (::GetWindowTextLengthW(candidate) == 0) return TRUE;
+          // 类的中间层：Chrome/Edge 的外层宿主窗口不画内容，嵌它等于嵌一张白板。
+          wchar_t class_name[128]{};
+          if (::GetClassNameW(candidate, class_name, 128) > 0) {
+            if (std::wstring_view(class_name) == L"Chrome_WidgetWin_0") return TRUE;
+          }
+          RECT bounds{};
+          if (::GetWindowRect(candidate, &bounds) == 0) return TRUE;
+          const long long width = bounds.right - bounds.left;
+          const long long height = bounds.bottom - bounds.top;
+          if (width <= 0 || height <= 0) return TRUE;
+          const long long area = width * height;
+          do {
+            if (area <= state->best_area) break;
+            state->best_area = area;
+            state->best = candidate;
+          } while (false);
+          return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.best;
+  }
+
   [[nodiscard]] auto supports_tray_icon() const noexcept -> bool override {
     return window_ != nullptr;
   }
@@ -1750,6 +2093,102 @@ class Win32Backend final : public Backend {
   void set_present_region(math::IntRect region) override { present_region_ = region; }
 
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
+
+  // ── 原生子窗口宿主的几何工具 ──
+
+  /// 逻辑像素矩形 → 父窗口客户区物理矩形。
+  ///
+  /// `SetWindowPos(child, ..., parent)` 的坐标**已经是相对父客户区**的，所以只需
+  /// 逻辑 `× scale` 一步；不需要 `ClientToScreen`（多了会把窗口位置算进去两次，
+  /// 现象是嵌入物整体偏一个窗口位置）。
+  [[nodiscard]] static auto to_client_rect(math::Rect bounds, float safe_scale) -> RECT {
+    RECT rect{};
+    rect.left = static_cast<LONG>(std::lround(bounds.x * safe_scale));
+    rect.top = static_cast<LONG>(std::lround(bounds.y * safe_scale));
+    rect.right = static_cast<LONG>(std::lround((bounds.x + bounds.width) * safe_scale));
+    rect.bottom = static_cast<LONG>(std::lround((bounds.y + bounds.height) * safe_scale));
+    return rect;
+  }
+
+  /// 找外部窗口里的**真内容子窗口**（典型：浏览器的渲染视口）。
+  ///
+  /// 为什么要找它而不是直接用外部窗口的客户区：目标程序（浏览器）把标题栏画在
+  /// **客户区内部**，所以客户区顶部 ≠ 真内容顶部。只有拿到内容子窗口的矩形才能对齐。
+  ///
+  /// ## 为什么不能只取“面积最大的子窗口”
+  ///
+  /// 实测（Chrome/Edge）：两个子窗口面积几乎一样大——
+  ///
+  /// | 类名 | 位置 | 意义 |
+  /// |---|---|---|
+  /// | `Intermediate D3D Window` | 从**窗口顶端**开始（含标题栏那块） | 合成层载体，不是内容 |
+  /// | `Chrome_RenderWidgetHostHWND` | 从**标题栏下方**开始 | 真渲染视口 |
+  ///
+  /// 取面积最大的会拿到 D3D 层：它的 top 相对客户区是负的（正好是标题栏高度），
+  /// 于是“量出来的偏移”永远是窗口顶端而不是内容顶端 —— 表现为内容被多顶了一截、
+  /// 底边溢出。而**所有属性面读数看着都正常**（都读的是同一个错窗口）。
+  ///
+  /// ## 判据
+  ///
+  /// 真内容必须在窗口客户区的**顶边之下**（标题栏是它上面的东西）。所以：
+  /// 只在“top 严格大于客户区 top”的可见子窗口里取面积最大的。
+  /// 一个都没有（无标题栏的应用）时，退回“取面积最大的”——那种情况下
+  /// 整个客户区就是内容，面积最大者对。
+  [[nodiscard]] static auto detect_content_window(HWND parent) -> HWND {
+    if (parent == nullptr) return nullptr;
+    struct Ctx {
+      HWND below_bar;
+      long long below_area;
+      HWND largest;
+      long long largest_area;
+      LONG client_top;
+    } ctx{nullptr, 0, nullptr, 0, 0};
+    POINT client_top_left{0, 0};
+    ::ClientToScreen(parent, &client_top_left);
+    ctx.client_top = client_top_left.y;
+    ::EnumChildWindows(
+        parent,
+        [](HWND hwnd, LPARAM param) -> BOOL {
+          auto* c = reinterpret_cast<Ctx*>(param);
+          if (::IsWindowVisible(hwnd) == 0) return TRUE;
+          RECT rc{};
+          ::GetWindowRect(hwnd, &rc);
+          const long long area = static_cast<long long>(rc.right - rc.left) *
+                                 static_cast<long long>(rc.bottom - rc.top);
+          if (area > c->largest_area) {
+            c->largest_area = area;
+            c->largest = hwnd;
+          }
+          // 真内容在标题栏下方：top 严格大于客户区顶边。
+          if (rc.top > c->client_top && area > c->below_area) {
+            c->below_area = area;
+            c->below_bar = hwnd;
+          }
+          return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+    return ctx.below_bar != nullptr ? ctx.below_bar : ctx.largest;
+  }
+
+  /// 外部窗口客户区内，真内容顶边的偏移 = 它自绘标题栏的高度。
+  ///
+  /// **只读几何，不读像素**。实测教训（见报告 §9.3）：像素判据在标题栏上四种
+  /// 写法全部不准——标题栏内部有图标/白字/亮线，不是一种纯色；而且探针若
+  /// DPI-unaware，同一标题栏会在不同位置量出 38/44/49/58/66 五个值。
+  /// 几何矩形与位置无关，是唯一稳定通道。
+  [[nodiscard]] auto detect_title_bar_height(HWND child) const -> int {
+    if (child == nullptr) return 0;
+    HWND content = detect_content_window(child);
+    if (content == nullptr) return 0;
+    RECT content_rect{};
+    ::GetWindowRect(content, &content_rect);
+    POINT top_left{content_rect.left, content_rect.top};
+    ::ScreenToClient(child, &top_left);
+    // 只信非负值：负偏移意味着内容窗口跑到客户区外（异常形态），
+    // 那时当作“无标题栏”处理，比拿个负数当偏移安全。
+    return top_left.y > 0 ? static_cast<int>(top_left.y) : 0;
+  }
+
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
     // 用**精确**值（物理 / scale）而不是取整后的整数：布局按它排布，
     // 取整会让右侧/底部留下 1px 的空隙或溢出，与画布实际可绘区域不符。
@@ -2647,6 +3086,28 @@ class Win32Backend final : public Backend {
     return position > 0 ? static_cast<int>(position) : 0;
   }
 
+  /// 宿主窗口类名（惰性注册）。
+  ///
+  /// 为何单独注册一个类而不是用内置的 `STATIC`：`STATIC` 会把 `WM_ERASEBKGND`
+  /// 交给系统画灰底，嵌入物 resize 的瞬间会闪一下灰。自建类里直接返回 1
+  ///（“背景已画好”）就能避开。
+  [[nodiscard]] static auto kChildHostClass() -> const wchar_t* {
+    static const wchar_t* const kName = [] {
+      const wchar_t* name = L"StChildViewHost";
+      WNDCLASSEXW cls{};
+      cls.cbSize = sizeof(cls);
+      cls.lpfnWndProc = ::DefWindowProcW;
+      cls.hInstance = ::GetModuleHandleW(nullptr);
+      cls.hCursor = ::LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+      cls.lpszClassName = name;
+      // 已注册（第二次建实例）时 `RegisterClassExW` 返回 0 / ERROR_CLASS_ALREADY_EXISTS，
+      // 这不是错误——类名已可用。
+      ::RegisterClassExW(&cls);
+      return name;
+    }();
+    return kName;
+  }
+
   /// 把插入点告诉 IME：组合窗与候选窗都贴在光标所在行。
   ///
   /// 坐标转换两步：逻辑像素 `× scale_` 得物理/客户区像素，再 `ClientToScreen`
@@ -3404,6 +3865,25 @@ class Win32Backend final : public Backend {
   /// 它们是本进程创建的内核对象，不随窗口销毁释放。
   HICON icon_large_{nullptr};
   HICON icon_small_{nullptr};
+
+  // ── 原生子窗口宿主（路线 B）──
+
+  /// 宿主窗口（`WS_CHILD | WS_CLIPCHILDREN`）：外部窗口挂它下面，溢出部分被裁掉。
+  HWND child_host_{nullptr};
+  /// 当前嵌入的外部窗口（`nullptr` = 没嵌）。
+  HWND child_view_{nullptr};
+  /// 外部窗口客户区内真内容顶边的偏移（它的自绘标题栏高）。
+  /// 靠**几何**测得（读渲染子窗口矩形），不靠像素判据——见 `detect_title_bar_height`。
+  int title_bar_height_{0};
+  /// 当前是否因为“与可见区无交集”而把宿主藏了起来。
+  bool hidden_by_clip_{false};  /// 嵌入前的原样式（`dismiss` 时**必须**恢复，否则外部窗口永久变成`WS_CHILD`）。
+  LONG_PTR child_style_saved_{0};
+  LONG_PTR child_ex_style_saved_{0};
+  /// **嵌入前**外部窗口的屏幕矩形（`dismiss` 时还原它，否则标题栏可能落在屏外）。
+  ///
+  /// 为何必须自己记：`SetParent` 之后 `GetWindowRect` 给的是相对宿主的坐标，
+  /// 原值已经无从恢复；而嵌入期又会把窗口上移一个标题栏高度来藏标题栏。
+  std::optional<detail::PixelRect> child_rect_saved_{};
 
   /// 托盘图标自定义消息（`WM_APP + 1`；见 `set_tray_icon` 说明）。
   static constexpr UINT kTrayMessage = WM_APP + 1;

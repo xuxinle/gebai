@@ -129,6 +129,40 @@ using ui::WindowEdge;
 /// 缩放命中带（逻辑像素）：与 UI 层同一常量（见 `ui::kWindowResizeBorder`）。
 inline constexpr float k_resize_border = ui::kWindowResizeBorder;
 
+/// 嵌入式子视图的自检读数（`Backend::child_view_probe` 的返回）。
+///
+/// ## 为何单独搞一个结构，而不是几个分散的 getter
+///
+/// 这组数只有**合在一起读**才有意义：“内容是否真的落在宿主的 (0,0) 并填满它”
+/// 需要 `content_*` 与 `host_*` 两组值相减才能判断。分散成六个函数会让调用方
+/// 自己拼口径，而口径一错（比如忘了乘 scale）就会得出相反的结论。
+///
+/// ## 为何这组读数不能被 `capture` 取代
+///
+/// 嵌入内容的像素**不进 `framebuffer()`**（由平台合成器直上屏），`capture` 在那块
+/// 矩形上拍到的是本框架自己画的内容。所以“嵌入物是否真的在跑/对位”只能从这里读。
+struct ChildViewProbe {
+  /// 是否有嵌入物。为 `false` 时其余字段均无意义。
+  bool attached{false};
+  /// 外部窗口自绘标题栏高度（物理像素）：为把内容顶到目标矩形而施加的负偏移量。
+  float title_bar_height{0.0f};
+  /// 真内容子窗口在**宿主客户区**里的矩形（物理像素）。
+  /// 正常应当是 `x = 0`、`y = 0`、尺寸等于 `host_*`。
+  float content_x{0.0f};
+  float content_y{0.0f};
+  float content_width{0.0f};
+  float content_height{0.0f};
+  /// 宿主客户区尺寸（物理像素）。
+  float host_width{0.0f};
+  float host_height{0.0f};
+  /// 嵌入物在宿主里是否**真的看得到**（`false` = 被可见区裁空，宿主已隐藏）。
+  ///
+  /// 为何必须单独一个位：“已嵌入”与“看得见”是两件事——切到别的页/滚出视口时
+  /// 它仍嵌着（外部窗口没被还原），但屏幕上看不到。没有这个位，
+  /// “切页后网页还盖在别的页上”这类缺陷在属性面上完全无迹可循。
+  bool visible{false};
+};
+
 class Backend {
  public:
   virtual ~Backend() = default;
@@ -292,6 +326,96 @@ class Backend {
   /// 为何用"计数"而不是事件流：托盘点击的语义极简（就是"把我叫回来"），
   /// 没必要为它引入一套事件类型。宿主每帧取一次，>0 就做对应的窗口操作。
   [[nodiscard]] virtual auto take_tray_clicks() noexcept -> std::uint32_t { return 0; }
+
+  // ── 原生子窗口宿主（可选能力，默认不支持）──
+  //
+  // 给“把外部程序的窗口嵌进来”这件事一条**框架内的**通路（典型用法：内嵌浏览器）。
+  // 与系统托盘同一姿态：**未实现就如实返回 Unsupported**，不假装成功；
+  // 全是**默认实现**，既有后端一行不用改（这是"降级不伤主体"的结构保证）。
+  //
+  // ## 为什么必须有这一层，而不是让应用自己调平台 API
+  //
+  // 平台差异只能住 `platform_*`（`CONVENTIONS.md` §10 第 1 条）：`SetParent` /
+  // `XReparentWindow` / `XEmbed` 是三套机制，让应用自己写就把可移植性丢光了。
+  // 而且子窗口的**生命周期必须跟主窗口绑定**——主窗口销毁时还挂着的子窗口会变成
+  // 孤儿（或把外部进程一起带走），这正是后端的职责。
+  //
+  // ## 嵌入后的像素去哪了（能力表必须写清）
+  //
+  // **子窗口的像素不进 `framebuffer()`**：它由平台合成器直接上屏，而 `capture` 只读
+  // 软件光栅器。所以 `capture` 在那块矩形上拍到的是**本框架自己画的内容**，与嵌入的
+  // 真内容无关。任何以 `capture` / `visual_diff` 为判据的回归都看不到嵌入内容。
+  // 需要确认"嵌入物真的在跑"时，只能靠组件暴露的属性面（几何/帧计数）。
+
+  /// 顶层窗口的原生句柄（**不透明**）；不支持时为 `nullptr`。
+  ///
+  /// 为什么返回 `void*` 而不是 `HWND`：`shell.hpp` 是平台中立的，出现 `HWND`
+  /// 就把它绑死在 Windows 上了。`void*` 在这里是 ABI 边界上的不透明值，
+  /// 解引用只发生在 `platform_*` 内。
+  [[nodiscard]] virtual auto native_window() -> void* { return nullptr; }
+
+  /// 后端是否支持嵌入原生子窗口。
+  [[nodiscard]] virtual auto supports_child_view() const noexcept -> bool { return false; }
+
+  /// 按子进程 pid 找它的**主顶层窗口**句柄（没找到返回 `nullptr`）。
+  ///
+  /// 为何把这个能力放在后端而不是上层：候选枚举是纯平台操作（Windows 靠
+  /// `EnumWindows` + `GetWindowThreadProcessId`），而上层不该出现 `HWND`/`XID`
+  /// 这类平台类型。上层只要“给我那个进程的窗口”。
+  ///
+  /// 筛选口径（按**可嵌套**为准则，而不是“看起来像主窗口”）：
+  /// - 属于该 pid、`IsWindowVisible`、无 owner（`GW_OWNER` 为空 = 不是工具/弹窗）；
+  /// - 有非空标题（无标题的窗口通常是隐藏的消息窗/中间层）；
+  /// - 窗口类名不含已知的浏览器**中间层**（`Chrome_WidgetWin_0` 是 Chrome 的
+  ///   父宿主层，真正渲染内容是它的子窗口——嵌错层会得到一片空白）；
+  /// 多个候选时取**面积最大**的（主窗口总比对话框大）。
+  ///
+  /// 默认 `nullptr`：不支持的后端（无头 / X11 / Wayland）如实报“找不到”。
+  [[nodiscard]] virtual auto find_window_by_process(
+      [[maybe_unused]] std::uint64_t process_id) -> void* {
+    return nullptr;
+  }
+
+  /// 把外部窗口 `child` 嵌进来，占据客户区里的 `bounds`（**逻辑像素**）。
+  ///
+  /// `child` 是外部程序顶层窗口的原生句柄（同一个 `void*` 口径）。
+  /// 实现要做的事：切成 `WS_CHILD` / reparent / 落位 / 裁掉溢出（`WS_CLIPCHILDREN`
+  /// 宿主或等效手段）。失败时**不得留下半嵌入状态**（要么完整嵌好，要么还原）。
+  /// 默认 `Unsupported`。
+  [[nodiscard]] virtual auto adopt_child_view([[maybe_unused]] void* child,
+                                              [[maybe_unused]] math::Rect bounds) -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持嵌入原生子窗口");
+  }
+
+  /// 布局变了：把已嵌入的 `child` 移到新的 `bounds`（逻辑像素），并且**只显示
+  /// `clip` 这一块有交集的部分**。
+  ///
+  /// 未嵌入时为空操作（**不报错**：组件重排是常态，不该因此弹错）。
+  ///
+  /// ## 为什么必须带 `clip`（不是可选的优化）
+  ///
+  /// 平台子窗口由合成器直接上屏，**完全不遵守 UI 树的可见性与裁剪**：
+  /// 祖先 `set_visible(false)`、外层 `clip_children`（滚动容器）都管不到它。
+  /// 实测两条：切到别的页面后嵌入的网页仍盖在新页面上；把它滚出视口它也不消失。
+  ///
+  /// `clip` = 从根到本组件**所有祖先的矩形与裁剪区的交集**，由 UI 层算好
+  ///（平台侧不该去猜 UI 树长什么样）。语义：
+  /// - 与 `bounds` 的交集为空 / 宽度或高度为零 ⇒ **隐藏**（不是缩小到 1px）；
+  /// - 否则只露出交集那一块（`bounds` 之外的像素必须不可见）。
+  virtual void sync_child_view([[maybe_unused]] void* child, [[maybe_unused]] math::Rect bounds,
+                               [[maybe_unused]] math::Rect clip) {}
+
+  /// 解除嵌入：把 `child` **还原成独立的顶层窗口**并摘下。
+  ///
+  /// 必须真的 reparent 回去（而不是只从内部表里删掉）：否则那个外部窗口会跟着
+  /// 本框架的窗口一起被销毁，或变成一个画不出来的 `WS_CHILD`。
+  /// 未嵌入/不认识的句柄为空操作（同上，不报错）。
+  virtual void dismiss_child_view([[maybe_unused]] void* child) {}
+
+  /// 嵌入式子视图的自检读数（组件属性面的数据源）。
+  /// 未嵌入时返回 `attached = false` 的空结构。默认实现即空结构（不支持的后端共用一个答案）。
+  [[nodiscard]] virtual auto child_view_probe() const -> ChildViewProbe { return {}; }
+
   [[nodiscard]] virtual auto clipboard_text() -> Result<std::string> = 0;
   [[nodiscard]] virtual auto set_clipboard_text(std::string_view text) -> Status = 0;
   /// 目标帧缓冲（应用直接绘制到这里）。

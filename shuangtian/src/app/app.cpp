@@ -1017,6 +1017,27 @@ auto Application::min_logical_size() const -> math::Size {
   return impl_->backend->min_logical_size();
 }
 
+auto Application::child_view_supported() const -> bool {
+  // 未启动 = 无后端 = 不可能支持（与 `font_stack()` 同一个道理：如实报“还没有”）。
+  if (impl_->backend == nullptr) return false;
+  return impl_->backend->supports_child_view();
+}
+
+auto Application::child_view_probe() const -> shell::ChildViewProbe {
+  if (impl_->backend == nullptr) return {};
+  return impl_->backend->child_view_probe();
+}
+
+auto Application::find_window_by_process(std::uint64_t process_id) -> void* {
+  if (impl_->backend == nullptr || process_id == 0) return nullptr;
+  return impl_->backend->find_window_by_process(process_id);
+}
+
+void Application::dismiss_child_view(void* child) {
+  if (impl_->backend == nullptr || child == nullptr) return;
+  impl_->backend->dismiss_child_view(child);
+}
+
 auto Application::set_device_scale(float scale) -> Status {
   if (impl_->backend == nullptr) return unexpected(ErrorCode::Invalid, "应用未启动");
   if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
@@ -1664,6 +1685,36 @@ auto Application::start() -> Status {
     root_.set_clipboard_write_provider([backend_ptr](std::string_view text) -> bool {
       return backend_ptr->set_clipboard_text(text).has_value();
     });
+
+    // 原生子窗口嵌入：同样只装 provider。
+    //
+    // **不支持的后端什么都不做**（`supports_child_view()` 为 false 时组件自
+    // 己退化为占位块），所以这里不需要任何分支——这就是“不可用不影响基础
+    // 功能”的落点：不装 provider 的后端，组件拿到的就是默认的
+    // `false`/空操作，布局/主题/事件一切如常。
+    root_.set_child_view_providers(
+        [backend_ptr]() -> bool { return backend_ptr->supports_child_view(); },
+        [backend_ptr](void* child, math::Rect bounds) -> bool {
+          return backend_ptr->adopt_child_view(child, bounds).has_value();
+        },
+        [backend_ptr](void* child, math::Rect bounds, math::Rect clip) {
+          backend_ptr->sync_child_view(child, bounds, clip);
+        },
+        [backend_ptr](void* child) { backend_ptr->dismiss_child_view(child); },
+        [backend_ptr]() -> ui::Element::ChildViewProbe {
+          const shell::ChildViewProbe probe = backend_ptr->child_view_probe();
+          ui::Element::ChildViewProbe out;
+          out.attached = probe.attached;
+          out.title_bar_height = probe.title_bar_height;
+          out.content_x = probe.content_x;
+          out.content_y = probe.content_y;
+          out.content_width = probe.content_width;
+          out.content_height = probe.content_height;
+          out.host_width = probe.host_width;
+          out.host_height = probe.host_height;
+          out.visible = probe.visible;
+          return out;
+        });
   }
 
   // ## `ST_NO_SCRIPT`：按需链接的编译期拆链（与 server.cpp 的 handle_script 同一套）

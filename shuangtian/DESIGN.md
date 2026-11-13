@@ -5013,10 +5013,58 @@ class Backend {                                   // 纯抽象
   virtual bool maximized() const;                 // 窗框据此切换按钮形态
 };
 Result<std::unique_ptr<Backend>> create_backend(std::string_view name);   // 自动选择：非 headless 时逐个尝试
-}
+};
 ```
 - `headless`：**默认在无 DISPLAY/WAYLAND_DISPLAY 时自动选择**；离屏 Framebuffer，输入事件由控制通道注入。
 - 平台后端：运行时探测（`dlopen`/`LoadLibrary`），不产生链接期依赖；缺失或未实现时如实报 `Unsupported`。
+
+#### 4.6.1 原生子窗口宿主（`NativeHost`，可选能力）
+
+把**外部程序的窗口**嵌进界面一块矩形（典型用途：内嵌真网页）。框架**不渲染**它，只负责
+“给正确的屏幕矩形 + 裁在范围内 + 销毁时还原”；像素由平台合成器直接上屏。
+
+```cpp
+// shell 层：五个**默认降级**的虚函数（既有后端零改动）
+virtual void* native_window();                                   // 顶层句柄，默认 nullptr
+virtual bool supports_child_view() const;                       // 默认 false
+virtual Status adopt_child_view(void* child, math::Rect bounds); // 默认 Unsupported
+virtual void sync_child_view(void* child, math::Rect bounds, math::Rect clip);  // 默认空操作
+virtual void dismiss_child_view(void* child);                    // 默认空操作
+virtual ChildViewProbe child_view_probe() const;                 // 默认 attached=false
+
+// ui 层：组件经 HostFocus 申请（与剪贴板同一手法，均为默认降级）
+virtual bool host_supports_child_view() const;                   // 默认 false
+virtual bool host_adopt_child_view(void*, math::Rect);           // 默认 false
+virtual void host_sync_child_view(void*, math::Rect, math::Rect); // 默认空
+virtual void host_dismiss_child_view(void*);                     // 默认空
+virtual ChildViewProbe host_child_view_probe() const;            // 默认 attached=false
+```
+
+**降级是默认路径**（“不可用不影响基础功能”的结构保证）：五个能力方法全部有默认实现，
+所以无头后端、未实现平台、旧桩宿主、离屏渲染都不需要改一行，`NativeHost` 自动退化为
+占位块；界面排版/主题/事件/其余组件完全不受影响。
+
+| 关键设计点 | 做法与理由 |
+|---|---|
+| 宿主窗口（不是直接 reparent 到主窗口） | `WS_CHILD \| WS_CLIPCHILDREN` 的中间层：嵌入物要施加**负 y 偏移**才能把它自绘标题栏顶出去，而负偏移会把它的像素画到目标矩形**之外**——`WS_CLIPCHILDREN` 是白送的裁剪（免去 `SetWindowRgn`，圆角/边框/相邻控件天然安全） |
+| 标题栏偏移只能读**几何** | 读真内容子窗口（`Chrome_RenderWidgetHostHWND` 这类）的矩形。**像素判据四种写法均不可靠**（实测）：`PrintWindow` 自抓得 38（真值 37）、整行同色判据得 0（父窗背景也满足）、主导色跳变得白字线、两点标定斜率算出 1.25（真值 1） |
+| 探针/组件必须 DPI-aware | 不声明时 Win32 虚拟化坐标（`physical / 1.25`），取整误差随位置漂移：同一标题栏在不同位置量出 **38/44/49/58/66** 五个值。声明 `PER_MONITOR_AWARE_V2` 后五个位置恒为 **38** |
+| `dismiss` 必须真的 reparent 回桌面 | 只销毁宿主不行：`WS_CHILD` 的父销殁时子窗口随之被销毁，**外部进程的主窗口就没了**。必须 `SetParent(child, nullptr)` + 恢复原样式 |
+| **`dismiss` 必须还原几何**（不只是样式） | 嵌入期为把外部窗口的自绘标题栏退到宿主之外，它的矩形被改过：上移一个标题栏高度、高度再补上同样多。只恢复样式不恢复矩形，它就带着那个上移量留在原处——变成顶层窗口后上移量直接变成**屏幕坐标**，于是标题栏正好落在屏幕上方之外：窗口看得见、拖不动。实测（Chrome 1.25x）：解除后矩形 `(0, -107)-(1955, 525)`，标题栏在 `y ∈ [-107, 0)` 完全在屏外，真鼠标拖拽位移 **0**。做法：`adopt` 时先记下嵌入前的屏幕矩形（`SetParent` 之后就取不回来了），`dismiss` 时还原；还原时用 `SWP_FRAMECHANGED`（刚恢复的 `WS_CAPTION`/`WS_THICKFRAME` 只有过了 `WM_NCCALCSIZE` 才真变成非客户区）。位置可达性以**标题栏**为准（顶边中点落在某块工作区内），不可达则夹回相交面积最大的那块工作区、只平移不改尺寸——决策在 `src/shell/child_view_geometry.hpp`（纯几何、可单测） |
+| 一个后端只维护一个嵌入位 | 换句柄需先 dismiss 旧的（否则旧窗口永久挂在宿主下）；同句柄重复 attach 是幂等的 |
+| 矩形未变就不下发 `sync` | `SetWindowPos` 会触发外部窗口重绘，每帧无谓地摆一次会让嵌入内容**持续闪** |
+| **标题栏偏移不能“嵌完立刻量”** | 外部窗口 reparent/resize 后的内部重排是**异步的**：刚 `SetParent` 就去量内容子窗口，拿到的是重排前的旧值。实测：量到 107、重排后真值是 0——内容被顶出去 107px、底部溢出近百像素，而所有属性面读数看起来都“正常”。做法：首帧按“无标题栏”落位，之后由 `NativeHost` 的**短收敛**（`refine_frames_`，上限 20 帧，就位即停）逐帧重测重摆 |
+| 真内容窗口不能只按“面积最大”选 | 同一外部进程下两个子窗口面积几乎一样：`Intermediate D3D Window`（从**窗口顶端**起，含标题栏那块）与 `Chrome_RenderWidgetHostHWND`（从**标题栏下方**起，真渲染视口）。取面积最大的会拿到 D3D 层，于是“量出来的偏移”永远是窗口顶端而不是内容顶端。判据：只在“top 严格大于客户区顶边”的候选里取面积最大；一个都没有（无标题栏的应用）才退回面积最大 |
+| **自检读数**（`ChildViewProbe`） | `capture` 拍不到嵌入内容（见下），所以“它冻了/白了/外部进程崩了”只能靠 `attached` / `content_*` / `host_*` 发现；没有这组数，所有像素回归会**静默全绿**。这组数同时经属性面暴露（`attached` / `shown` / `title_bar_height` / `content_x,y,width,height` / `host_width,height`，均为只读），`get <id>` 与控制通道同一口径 |
+| **嵌入物必须遵守可见性与裁剪**（`clip` 参数） | 平台子窗口由合成器直接上屏，**既不看 `visible()` 也不走 `paint` 的 clip 栈**。实测两条：切到别的页面后嵌入的网页仍盖在新页面上；把嵌入区滚出视口它也不消失。做法：`Element::visible_rect()` 算出“自身矩形 ∩ 所有 `clip_children` 祖先”（任一祖先不可见即空），`sync_child_view` 带它下发；后端把宿主裁到 `bounds ∩ clip`、无交集时 `SW_HIDE`。此外隐藏子树的 `arrange`/`paint` 全跳过，所以新增 `on_visibility_changed` 广播（`set_visible` 递归整棵子树）让组件能主动收尾 |
+
+**能力表必须写清的一条（硬约束）**：嵌入内容的像素**不进 `framebuffer()`**，`capture` 只读软件光栅器
+（`src/app/app.cpp` 的 `capture_pixels`）。所以 `capture` 在那块矩形上拍到的是**本框架自己画的占位底色**，
+与真实内容无关。推论：**任何以 `capture` / `visual_diff` 为判据的回归都看不见嵌入内容**。
+本能力**不改变** `capture`（不引入平台截图退路），因此 `DESIGN.md` §1「软件光栅器是唯一真相源」不被破坏。
+
+**平台落地**：Win32 已实现（`SetParent` + 样式切换 + 宿主窗口 + 几何偏移 + 还原）；
+`headless` 如实 `Unsupported`；X11/Wayland 目前也走默认 `Unsupported`（`XReparentWindow`/XEmbed 未实现）。
 
 **实现状态（2026-10-15 更新）**：`headless`、**`win32`、`x11`、`wayland` 四个后端都已落地**。
 X11 与 Wayland 两个新后端与 Win32 同契约、同姿态（**运行时 `dlopen`**、不产生链接期依赖、

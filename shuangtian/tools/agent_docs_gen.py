@@ -81,6 +81,8 @@ FAMILY: dict[str, str] = {
     # 布局与窗口
     "SplitView": "layout", "Viewport": "layout", "SlowContent": "layout",
     "ThemePicker": "layout", "WindowFrame": "layout", "TitleBar": "layout",
+    # 原生子窗口宿主（可选能力，不可用时退化为占位块）
+    "NativeHost": "layout",
 }
 
 FAMILY_TITLE = {
