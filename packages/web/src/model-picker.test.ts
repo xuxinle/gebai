@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { configCtxWindow, configMenuDetail, resolveConfigName } from "./model-picker-core"
+import { configCtxWindow, configMenuDetail, draftConfigToWrite, resolveConfigName } from "./model-picker-core"
 
 const LIST = [
   { name: "deepseek", model: "deepseek-flash", apiKind: "openai", apiBase: "https://api.deepseek.com", maxContextTokens: 512000, multimodal: true },
@@ -38,5 +38,16 @@ describe("模型配置选择器（纯逻辑）", () => {
     // 非法/相对地址：去协议头后原样给出
     expect(configMenuDetail({ ...LIST[0], apiBase: "http://localhost:8000/v1" })).toBe("deepseek-flash · 支持图片 · localhost:8000")
     expect(configMenuDetail({ ...LIST[0], apiBase: "not a url" })).toBe("deepseek-flash · 支持图片 · not a url")
+  })
+
+  test("草稿页选择 → 新会话要写入的配置名：选默认项不写字段（默认跟着清单顺序走）", () => {
+    expect(draftConfigToWrite(LIST, "glm")).toBe("glm")
+    // 未选 / 选的正是默认（清单第一条）：不写名字
+    expect(draftConfigToWrite(LIST, "")).toBeUndefined()
+    expect(draftConfigToWrite(LIST, "deepseek")).toBeUndefined()
+    // 选的名字已不在清单（清单改过）：回落默认，同样不写
+    expect(draftConfigToWrite(LIST, "removed")).toBeUndefined()
+    // 清单空：什么也不写
+    expect(draftConfigToWrite([], "glm")).toBeUndefined()
   })
 })

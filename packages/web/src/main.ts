@@ -36,7 +36,7 @@ import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, enterSessionView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
-import { initModelPicker } from "./model-picker"
+import { createSessionWithDraftModel, initModelPicker } from "./model-picker"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
 import { noteMerge } from "./subsessions"
@@ -86,10 +86,11 @@ composer.addEventListener("submit", async (e) => {
   if (cur) {
     sessionId = cur.id
   } else {
-    // 草稿态（空白页）：首条消息发送时才创建会话（新会话懒创建，避免落盘空会话堆积）
+    // 草稿态（空白页）：首条消息发送时才创建会话（新会话懒创建，避免落盘空会话堆积）；
+    // 创建即带上草稿页选中的模型配置（无选择时按清单默认）
     let s
     try {
-      s = await client.createSession()
+      s = await createSessionWithDraftModel()
     } catch (err) {
       setConn(`创建会话失败: ${(err as Error).message}`, false)
       return
@@ -507,7 +508,7 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
       {
         findSession: (id) => sessions.find((s) => s.id === id),
         isRunning: (id) => runs.has(id),
-        createSession: () => client.createSession(),
+        createSession: () => createSessionWithDraftModel(),
         openSession: async (s) => {
           const info = sessions.find((x) => x.id === s.id) ?? (s as SessionInfo)
           setCurrentSession(info)

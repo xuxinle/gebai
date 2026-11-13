@@ -223,8 +223,9 @@ describe("附图消息发送即上屏（不等上传回流）", () => {
 describe("草稿页首条消息上屏（消息视图必须先于上屏就位）", () => {
   test("main.ts 创建会话后立即建并激活消息容器，才能容纳随后 appendMsg 的上屏", () => {
     const s = src("main.ts")
-    // 草稿态首条消息：会话刚由 createSession 建出，页面上还没有任何消息容器
-    const create = s.indexOf("s = await client.createSession()")
+    // 草稿态首条消息：会话刚建出（createSessionWithDraftModel 内部建会话并写入草稿页选中的模型配置），
+    // 页面上还没有任何消息容器
+    const create = s.indexOf("s = await createSessionWithDraftModel()")
     const view = s.indexOf("enterSessionView(sessionId)")
     // 首个上屏点（渲染目标必须是当前会话的活动容器）
     const onScreen = s.indexOf("userMsgEl = appendMsg(")

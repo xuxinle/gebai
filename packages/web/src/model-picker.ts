@@ -9,13 +9,16 @@
  * 点条目直接切换——**清单本身就是悬浮提示**，不必先点开一个下拉再选。触屏没有悬停，
  * 改为点击展开同一份清单。
  *
+ * 草稿页（新会话尚未落盘）没有会话可存选择：它在内存里暂存，首条消息建会话时写入
+ * （`createSessionWithDraftModel`）——选择仍然只存会话一处。
+ *
  * 未配置清单（没有可选条目）时整组隐藏：那时只有一份启动配置，没有可切换的东西。
  */
-import type { ModelConfigSummary } from "@gebai/sdk"
+import type { ModelConfigSummary, SessionInfo } from "@gebai/sdk"
 import { client, el, getCurrentSession, setSessionCtxWindow } from "./state"
 import { popKeyScope, pushEscScope } from "./keymap"
 import { toast } from "./ui"
-import { configCtxWindow, configMenuDetail, resolveConfigName } from "./model-picker-core"
+import { configCtxWindow, configMenuDetail, draftConfigToWrite, resolveConfigName } from "./model-picker-core"
 
 /** 悬停展开/收起的延迟（毫秒）：展开留一点余量避免划过标题栏就弹；收起留余量让光标移进清单。 */
 const HOVER_OPEN_MS = 120
@@ -33,6 +36,9 @@ let menuScope: string | null = null
 let configs: ModelConfigSummary[] = []
 /** 当前生效的配置名（入口文字与清单高亮共用一处）。 */
 let current = ""
+/** 草稿页（新会话尚未创建）暂存的选择：此时没有会话可存，选择只在内存里等着——
+ *  首条消息经 `createSessionWithDraftModel()` 建会话时写进该会话。空串 = 未选（用默认配置）。 */
+let draftChoice = ""
 let openTimer: ReturnType<typeof setTimeout> | null = null
 let closeTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -158,15 +164,41 @@ const onOutside = (e: Event): void => {
   closeMenu()
 }
 
+/**
+ * 新建会话并把草稿页选中的模型配置写进去。
+ *
+ * 建会话的入口（输入框首条消息、URL 携带提示词自动运行）都走它：写入**先于**任务启动，
+ * 服务端才能按会话的 `modelConfig` 解析 Provider（WS 同连接按序，请求先后即生效先后）。
+ * 写入失败只提示并放弃本次选择，不让配置写入拦住建会话与发送（会话随后按清单默认配置跑）。
+ */
+export async function createSessionWithDraftModel(): Promise<SessionInfo> {
+  const name = draftConfigToWrite(configs, draftChoice)
+  draftChoice = ""
+  const s = await client.createSession()
+  if (!name) return s
+  try {
+    await client.setSessionModelConfig(s.id, name)
+    s.modelConfig = name
+  } catch (err) {
+    toast(`模型配置写入失败：${(err as Error).message}（本次按默认配置运行）`, "error")
+  }
+  return s
+}
+
 /** 下拉对齐当前会话（切换会话/新建会话后调用）。 */
 export function syncModelPicker(): void {
   if (!host || !trigger) return
   const cur = getCurrentSession()
-  // 草稿态（还没有会话）：选择无处可存，隐藏入口而不是给一个按了不生效的入口
+  // 草稿态（会话尚未创建）：选择还没有会话可存，但不该就此不让人选——标着「新会话」的页面
+  // 恰恰是最该先定模型的地方。改为内存暂存（draftChoice），首条消息建出会话时写进去。
   if (!cur) {
+    current = resolveConfigName(configs, draftChoice)
     closeMenu()
-    host.hidden = true
-    setSessionCtxWindow(0)
+    renderTrigger()
+    applyCtxWindow(current)
+    markActive()
+    // 能走到这里说明清单非空（空清单在 initModelPicker 就隐藏了整组、也不会建入口）
+    host.hidden = false
     return
   }
   current = resolveConfigName(configs, cur.modelConfig)
@@ -181,7 +213,16 @@ export function syncModelPicker(): void {
 /** 用户切换：写回会话（服务端持久化），失败则把入口恢复成服务端的实际值。 */
 async function applyChoice(name: string): Promise<void> {
   const cur = getCurrentSession()
-  if (!cur || name === current) return
+  if (name === current) return
+  // 草稿态：没有会话可写，先记在内存里（随首条消息落到新会话）
+  if (!cur) {
+    draftChoice = name
+    current = name
+    renderTrigger()
+    applyCtxWindow(name)
+    markActive()
+    return
+  }
   try {
     // 默认配置不写名字：清单顺序变了「默认」跟着走，会话不必因为写在里面的旧名字失配
     await client.setSessionModelConfig(cur.id, name === defaultName() ? null : name)
@@ -248,6 +289,7 @@ export function __resetModelPickerForTest(): void {
   trigger = null
   configs = []
   current = ""
+  draftChoice = ""
 }
 
 /** 供测试注入清单（不触网）。 */

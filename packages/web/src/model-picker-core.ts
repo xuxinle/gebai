@@ -16,6 +16,18 @@ export function resolveConfigName(list: ModelConfigSummary[], sessionModelConfig
   return list[0]?.name ?? ""
 }
 
+/**
+ * 草稿页（新会话尚未创建）暂存的选择 → 新会话创建时要写入的配置名。
+ *
+ * 草稿页没有会话可存选择，它在内存里暂存；首条消息创建会话时按这个结果写进 chat.json，
+ * 服务端的会话选择仍是唯一真相。**默认配置返回 undefined**——不写名字，清单顺序变了
+ * 「默认」跟着走，会话不必因为写进里面的旧名字失配（与切到默认项时清除字段同一口径）。
+ */
+export function draftConfigToWrite(list: ModelConfigSummary[], draft: string): string | undefined {
+  const name = resolveConfigName(list, draft)
+  return name && name !== list[0]?.name ? name : undefined
+}
+
 /** 上下文窗口：命中配置声明则用它，否则 0（不覆盖，由服务端快照给默认窗口）。 */
 export function configCtxWindow(list: ModelConfigSummary[], name: string): number {
   return list.find((c) => c.name === name)?.maxContextTokens ?? 0
