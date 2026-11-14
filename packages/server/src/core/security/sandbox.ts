@@ -168,16 +168,19 @@ const PS_PREAMBLE = [
  *  `-Command` 的既定行为是把原生命令的退出码归一成 0/1，故必须显式 `exit`。判定顺序不能反过来：
  *
  *  ① **先看 `$LASTEXITCODE`**（原生命令的唯一可靠信号）：非 0 直接带出。
- *  ② 再看 `$Error[0]`：`NativeCommandError` 表示“原生进程往 stderr 写了东西”，**不等于失败**。
- *     PS 5.1 在 `cmd 2>&1 | Out-String` 这类写法下会把 stderr 包装成 ErrorRecord（`$?` 因此变
- *     False），而进程实际成功——`git push`/`git status` 的进度与状态行、编译器的警告输出全都
- *     走 stderr，按 `$?` 判会把它们一律判成失败（`git push` 明明推送成功却报退出码 1）。
+ *  ② 再看 `$Error`：`NativeCommandError*` 表示“原生进程往 stderr 写了东西”，**不等于失败**。
+ *     PS 5.1 在 `原生命令 2>&1 | Out-String` 这类写法下会把 stderr 包装成 ErrorRecord（`$?` 因此
+ *     变 False），而进程实际成功——`git push`/`git status` 的进度与状态行、编译器的警告输出
+ *     全都走 stderr，按 `$?` 判会把它们一律判成失败（`git push` 明明推送成功却报退出码 1）。
+ *     **判据取 `-like 'NativeCommandError*'`**：stderr 多行时 `$Error[0]` 的 id 是
+ *     `NativeCommandErrorMessage`（`NativeCommandError` 只占 `$Error[1]`），只比对精确名会在
+ *     多行 stderr 时漏判（单行恰好命中）。
  *  ③ 其余 `$?` 为 False 的情形（PowerShell 语句层失败，如 `Get-Content` 读不存在的文件）归一为 1。
  *
  *  逐行拼接：用户命令以 `#` 注释结尾时不会被吞掉。 */
 const PS_EPILOGUE = [
   "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-  "if ($Error[0] -and $Error[0].FullyQualifiedErrorId -eq 'NativeCommandError') { exit 0 }",
+  "if ($Error.Count -gt 0 -and $Error[0].FullyQualifiedErrorId -like 'NativeCommandError*') { exit 0 }",
   "if (-not $?) { exit 1 }",
   "exit 0",
 ].join("\n")

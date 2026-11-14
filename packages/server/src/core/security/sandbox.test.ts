@@ -189,8 +189,9 @@ describe("Windows 命令解释器（PowerShell）", () => {
     // ① 原生命令退出码优先（真失败带真实码，不归一到 1）
     expect(epilogue[0]).toContain("$LASTEXITCODE")
     expect(epilogue[0]).toContain("exit $LASTEXITCODE")
-    // ② NativeCommandError = 原生往 stderr 写了东西（不等于失败）：直接判成功
-    expect(epilogue.join("\n")).toContain("FullyQualifiedErrorId -eq 'NativeCommandError'")
+    // ② NativeCommandError* = 原生往 stderr 写了东西（不等于失败）：直接判成功
+    //    多行 stderr 时 `$Error[0]` 是 `NativeCommandErrorMessage`，故用 `-like` 前缀匹配
+    expect(epilogue.join("\n")).toContain("FullyQualifiedErrorId -like 'NativeCommandError*'")
     // ③ 其余 $? 为假才是 PowerShell 语句层失败（归一 1）
     expect(epilogue.join("\n")).toContain("if (-not $?) { exit 1 }")
     // ④ `$?` 不得先于 $LASTEXITCODE 判定（顺序反过来就是那个 bug）
@@ -369,11 +370,14 @@ describe("Windows 命令解释器（PowerShell）", () => {
       // PS 侧命令统一用 cmd /c 造原生进程：两种解释器下行为一致
       // ① 原生进程成功但往 stderr 写了东西（即那个 bug 的形态）
       expect(await runShell(`cmd /c "echo noise 1>&2 & exit /b 0" 2>&1 | Out-String | Out-Null`)).toBe(0)
+      // ①b **多行** stderr：`$Error[0]` 变成 NativeCommandErrorMessage（单行时才是 NativeCommandError）
+      //     ——只比对精确 id 会在多行时漏判；真实 `git push` 正是多行（进度 + 状态行）
+      expect(await runShell(`cmd /c "echo a 1>&2 & echo b 1>&2 & exit /b 0" 2>&1 | Out-String | Out-Null`)).toBe(0)
       // ② 原生进程成功、无 stderr（基线：不得因修复而退化）
       expect(await runShell(`cmd /c "echo ok & exit /b 0" | Out-Null`)).toBe(0)
       // ③ 原生真失败：带出真实码（不被归一到 1）
       expect(await runShell(`cmd /c "exit /b 3" | Out-Null`)).toBe(3)
-      expect(await runShell(`cmd /c "echo e 1>&2 & exit /b 3" 2>&1 | Out-String | Out-Null`)).toBe(3)
+      expect(await runShell(`cmd /c "echo e 1>&2 & echo f 1>&2 & exit /b 3" 2>&1 | Out-String | Out-Null`)).toBe(3)
       // ④ PowerShell 语句层失败（非原生命令）归一为 1
       expect(await runShell(`Get-Content -LiteralPath 'C:\\__gebai_nope__.txt' 2>$null`)).toBe(1)
     })
