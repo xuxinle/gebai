@@ -7,6 +7,7 @@
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
+#include "st/ui/svg.hpp"
 
 namespace st::ui {
 namespace {
@@ -56,6 +57,18 @@ void WindowFrame::set_window_control(WindowControl* control) noexcept {
   control_ = control;
   // 标题栏的窗口动作也经同一端口：一处注入，三按钮与边缘同源。
   if (bar_ != nullptr) bar_->set_window_control(control);
+}
+
+void WindowFrame::set_frame_color(std::optional<math::Color> color) {
+  if (frame_color_.has_value() == color.has_value() &&
+      (!color.has_value() || *frame_color_ == *color)) {
+    return;
+  }
+  frame_color_ = color;
+  // 标题栏条带同色（一处设置、两处生效；不转发的话“窗框色”只改了底，
+  // 标题栏仍是另一色，视觉上还是两张皮）。
+  if (bar_ != nullptr) bar_->set_surface_color(color);
+  mark_dirty();
 }
 
 auto WindowFrame::resolve_control() const -> WindowControl* { return control_; }
@@ -131,7 +144,7 @@ void WindowFrame::apply_theme(const Theme& theme) {
   const Palette& colors = theme.colors();
   // 窗框自身不画底（标题栏与内容区各自有底）：它只是**容器**。
   // 但给一条边框：没有系统边界之后，这是"窗口到哪里为止"的视觉依据。
-  style_.background = colors.bg;
+  style_.background = frame_color_.value_or(colors.bg);
   style_.border_width = 0.0f;
   style_.border_color = colors.border;
   style_.radius = 0.0f;
@@ -237,6 +250,11 @@ auto WindowFrame::get_property(std::string_view name) const -> std::optional<std
   if (name == "show_title_bar") return std::string(show_title_bar_ ? "true" : "false");
   if (name == "show_resize_edges") return std::string(show_resize_edges_ ? "true" : "false");
   if (name == "edge_band") return std::format("{}", static_cast<double>(edge_thickness()));
+  if (name == "frame_color") {
+    if (!frame_color_.has_value()) return std::string{"none"};
+    const math::Color color = *frame_color_;
+    return std::format("#{:02x}{:02x}{:02x}{:02x}", color.r, color.g, color.b, color.a);
+  }
   return Element::get_property(name);
 }
 
@@ -254,11 +272,23 @@ auto WindowFrame::set_property(std::string_view name, std::string_view value) ->
     set_show_resize_edges(value == "true" || value == "1" || value == "on");
     return true;
   }
+  if (name == "frame_color") {
+    if (value.empty() || value == "none") {
+      set_frame_color(std::nullopt);
+      return true;
+    }
+    if (const auto parsed = svg::parse_color(value)) {
+      set_frame_color(parsed);
+      return true;
+    }
+    return false;
+  }
   return Element::set_property(name, value);
 }
 
 auto WindowFrame::property_names() const -> std::vector<std::string_view> {
-  return Element::with_universal({"title", "text", "show_title_bar", "show_resize_edges", "edge_band"});
+  return Element::with_universal({"title", "text", "show_title_bar", "show_resize_edges", "edge_band",
+          "frame_color"});
 }
 
 auto WindowFrame::invoke_action(std::string_view action, std::string_view argument) -> bool {

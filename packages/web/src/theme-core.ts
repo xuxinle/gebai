@@ -66,6 +66,63 @@ const SCHEME_KEY = "gebai.ui.cnyScheme"
 const ACRYLIC_LT_KEY = "gebai.ui.acrylicLt"
 const GLOBAL_KEY = "__GEBAI_UI_STYLE__"
 
+/* ---------- 桌面宿主（gebai-desktop）主题联动 ---------- */
+
+/**
+ * 各主题给桌面窗框（标题栏/窗口底色）的建议色。
+ *
+ * 取自各主题 CSS 的 `--bg`（去掉透明度：窗框不能半透明——背后没有可毛玻璃的内容，
+ * 半透明只会露出桌面）。亮度归入明暗两档：宿主据此同步框架主题（文字/按钮前景色），
+ * 保证标题栏文字与底色的对比度。
+ */
+const DESKTOP_FRAME_COLORS: Record<ThemeId, string> = {
+  acrylic: "#0c0c0f", // 亮色模式另有覆盖（见 desktopThemeInfo）
+  matrix: "#000000",
+  "tokyo-night": "#1a1b26",
+  cyberpunk: "#0a0a14",
+  synthwave: "#1a0a2e",
+  aether: "#06060e",
+  aurora: "#050a14",
+  ink: "#f5f0e6", // 宣纸米白（亮色档）
+  cny: "#150d10",
+  qinhan: "#171009",
+}
+
+/**
+ * 当前生效主题 → 桌面宿主需要的全部信息（窗框色 + 明暗档）。
+ * 导出供测试与宿主侧协议文档引用。
+ */
+export function desktopThemeInfo(): { theme: ThemeId; frameColor: string; light: boolean } {
+  const theme = resolveTheme()
+  let frameColor = DESKTOP_FRAME_COLORS[theme]
+  let light = theme === "ink"
+  if (theme === "acrylic") {
+    // 黑白切换只作用于默认主题（data-acrylic-lt；null = 暗色默认）。
+    light = resolveAcrylicLt() === "light"
+    if (light) frameColor = "#fafafa" // 亮色亚克力 --bg：rgba(250,250,252,0.9) 去透明
+  }
+  return { theme, frameColor, light }
+}
+
+/**
+ * 把主题信息发给桌面宿主（WebView2 `postMessage`）。
+ *
+ * 只在桌面形态（宿主注入的 `window.__GEBAI_DESKTOP__`）且浏览器环境提供
+ * `chrome.webview`（WebView2 的宿主消息通道）时发送——普通浏览器里调它是 no-op，
+ * 与现有“桌面形态标记”同一探测口径，不新增配置。
+ */
+function notifyDesktopHost(): void {
+  if (!(window as unknown as Record<string, unknown>).__GEBAI_DESKTOP__) return
+  const wv = (window as unknown as { chrome?: { webview?: { postMessage(text: string): void } } })
+    .chrome?.webview
+  if (!wv) return
+  try {
+    wv.postMessage(JSON.stringify({ gebaiDesktop: true, type: "theme", ...desktopThemeInfo() }))
+  } catch {
+    /* 宿主通道异常不影响网页自身 */
+  }
+}
+
 let userOverride: ThemeId | null = null
 /** 三态：CnySchemeId=已选；"reset"=用户显式重置（覆盖 URL 参数）；null=从未选择 */
 let userCnyScheme: CnySchemeId | "reset" | null = null
@@ -237,6 +294,7 @@ export async function setTheme(id: ThemeId): Promise<void> {
  */
 function notifyThemeChange(): void {
   document.dispatchEvent(new CustomEvent("gebai:theme-change", { detail: { theme: document.documentElement.dataset.theme } }))
+  notifyDesktopHost()
 }
 
 /** 应用人民币面额配色：设置/移除根元素 data-cny-scheme（cny.css 中的配色变量块据此生效）。 */
@@ -289,7 +347,7 @@ export function initTheme(opts: { urlPrefs?: boolean } = {}): void {
   if (urlPrefsEnabled) applyCustomVars(new URLSearchParams(location.search).get("gb_vars"))
   applyCnyScheme(resolveCnyScheme())
   applyAcrylicLt(resolveAcrylicLt())
-  void applyTheme(resolveTheme())
+  void applyTheme(resolveTheme()).then(() => notifyDesktopHost())
   bindStorageSync()
 }
 

@@ -5125,6 +5125,7 @@ RFC 2606 保留域，保证不与真实站点撞名），其下**所有**请求�
 | **页面启动前就要在的标记**走 `add_init_script` | 前端常在模块体里读宿主标记（`const isDesktop = !!window.__X__`）。`ExecuteScript` 要到导航完成后才能跑，那时模块早已求值（读到的永远是 `undefined`，而返回值断言看起来“成功”）。正确通路是 `AddScriptToExecuteOnDocumentCreated`（本层封装为 `webview_add_init_script`），必须在首次导航**之前**注册 |
 | **COM 套间必须自己调入** | `CreateCoreWebView2EnvironmentWithOptions` 要求当前线程已调入套间，否则回 `0x800401F0`（`CO_E_NOTINITIALIZED`），而外层只看到“建环境失败”。症状阴：`supported=true`、窗口正常，**只有页面永远不出现**（gallery 因进程里已有其它路径调过而没暴露）。做法：`ensure_com_apartment()`——`COINIT_APARTMENTTHREADED`，`RPC_E_CHANGED_MODE` 不算失败 |
 | 两层接口（`ui::WebViewPort` 与 `shell::webview::WebViewHost`） | 依赖方向是 `ui ← shell`：ui 不能包含 shell。两侧各留一份镜像结构（与 `ChildViewProbe` 同一先例），折接只在 `app` 层一处发生 |
+| **子窗口几何必须边缘取整（cover_span）** | 分数 DPI（1.5×）下对尺寸 `static_cast` 截断必丢小数（1247×1.5=1870.5→1870），而客户区是按边缘取整算的（1922）→ 子窗口底边差 1 物理像素，露出背景色缝（实测：歌白桌面端底部一条白线，浅色主题下不可见、深色页面上刺眼）。决策在 `src/shell/child_view_geometry.hpp` 的 `cover_span`（左/上 floor、右/下 ceil，浮点容差 ±0.001），宿主子窗口与页面 `put_Bounds` 同一口径；与 `to_client_rect`（`sync_child_view`）同一决策。可单测钉住（`tests/shell_child_view_geometry_test.cpp` 第六组，回退成截断断言必红） |
 | 能力可用性要问两次（指针 ≠ 支持） | 端口指针非空不等于能力可用（未装 Runtime / 非 Windows 时指针在、`supported()==false`）。建设页面/导航前必须问 `webview_supported()`，否则会“看着在做事、实际什么都不会发生” |
 
 **同上硬约束**：嵌入内容的像素**不进 `framebuffer()`**，`capture` 拍不到。判据只能走属性面

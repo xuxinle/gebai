@@ -13,12 +13,15 @@
 #include "st/test/test.hpp"
 
 #include <array>
+#include <cmath>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "../src/shell/child_view_geometry.hpp"
 
 using st::shell::detail::PixelRect;
+using st::shell::detail::cover_span;
 using st::shell::detail::plan_detach_placement;
 using st::shell::detail::title_bar_reachable;
 
@@ -161,4 +164,41 @@ ST_TEST(child_view_geometry_handles_empty_and_invalid_inputs) {
   const PixelRect placed = plan_detach_placement(degenerate, degenerate, work);
   ST_CHECK(placed.width() <= 0);
   ST_CHECK(!placed.is_valid());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 第六组：cover_span——分数 DPI 下的子窗口覆盖取整（实测缺陷：底部白线）
+// ─────────────────────────────────────────────────────────────────────────────
+
+ST_TEST(cover_span_no_gap_at_fractional_scale) {
+  // **实测缺陷形态**：1.5× DPI，WebView 逻辑底 = 窗口逻辑底（1247+34=1281），
+  // 而物理客户区高 1922 = ceil(1281.33×1.5)——边缘截断算出 1870.5→1870，
+  // 子窗口底边到 51+1870=1921，底部 1 物理像素露出背景色（那条白线）。
+  // cover_span 必须：ceil 后的底边 ≥ ceil(逻辑底×scale)。
+  const auto [y, bottom] = cover_span(34.0f, 1247.0f, 1.5f);
+  ST_CHECK(y == 51);            // floor(51.0)
+  ST_CHECK(bottom == 1922);     // ceil(1870.5 + 51) = ceil(1921.5) = 1922
+  // 与客户区底对齐：客户区高 1922 = ceil(1281.333×1.5)，子窗口必须盖到 1922。
+  const int client_bottom = static_cast<int>(std::ceil(1281.3333f * 1.5f - 0.001f));
+  ST_CHECK(bottom >= client_bottom);
+}
+
+ST_TEST(cover_span_covers_full_logical_area) {
+  // 整数边界不变（整倍 DPI 不该凭空多 1px）：
+  const auto [a1, a2] = cover_span(0.0f, 100.0f, 2.0f);
+  ST_CHECK(a1 == 0 && a2 == 200);
+  // 非零起点同样覆盖到逻辑终点：
+  const auto [b1, b2] = cover_span(10.0f, 90.0f, 1.0f);
+  ST_CHECK(b1 == 10 && b2 == 100);
+  // 浮点累积误差容差（+0.001 的用途）：1.5×下 34+1247=1281，1281×1.5=1921.5，
+  // 但逐边算时 1281.0001 之类的值不应把底边多推到 1923。
+  const auto [c1, c2] = cover_span(34.0f, 1247.0001f, 1.5f);
+  ST_CHECK(c1 == 51 && c2 == 1922);
+}
+
+ST_TEST(cover_span_never_inverts) {
+  // 极小跨度（浮点下界接近上界）：至少 1px，不产生倒置（右<左）。
+  const auto [first, last] = cover_span(5.0f, 0.0f, 1.5f);
+  ST_CHECK(last > first);
+  ST_CHECK(last - first >= 1);
 }

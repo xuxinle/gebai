@@ -88,6 +88,8 @@
 #include "st/core/fs.hpp"
 #include "st/core/log.hpp"
 
+#include "child_view_geometry.hpp"
+
 namespace st::shell::webview {
 namespace {
 
@@ -1049,23 +1051,32 @@ void Win32WebView::webview_sync(math::Rect bounds, math::Rect clip) {
     }
     return;
   }
-  const int x = static_cast<int>(left * safe);
-  const int y = static_cast<int>(top * safe);
-  const int width = std::max(1, static_cast<int>((right - left) * safe));
-  const int height = std::max(1, static_cast<int>((bottom - top) * safe));
-  ::SetWindowPos(host_, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+  // 边缘取整（floor/ceil）而不是对尺寸截断：分数 DPI（1.5×）下截断必丢小数部分
+  //（1247×1.5=1870.5→1870），子窗口盖不到客户区底边 → 底部一条背景色缝（实测白线）。
+  // 左/上 floor、右/下 ceil 保证**覆盖**全部逻辑区域；超出部分被宿主客户区裁掉。
+  // 与 `to_client_rect`（`sync_child_view`）同一决策，口径只有一份：`cover_span`。
+  const auto [host_x, host_right] = shell::detail::cover_span(left, right - left, safe);
+  const auto [host_y, host_bottom] = shell::detail::cover_span(top, bottom - top, safe);
+  const int width = std::max(1, host_right - host_x);
+  const int height = std::max(1, host_bottom - host_y);
+  ::SetWindowPos(host_, HWND_TOP, host_x, host_y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
   if (hidden_by_clip_) {
     hidden_by_clip_ = false;
     ::ShowWindow(host_, SW_SHOWNA);
   }
   // 宿主被裁小了，页面要按**完整矩形**布局再把偏移补回来，否则内容会整体位移。
+  // 页面 Bounds 同样用 `cover_span`（与宿主子窗口同一口径：宿主窗口盖到的物理范围
+  // 与页面布局范围必须一致，否则窗口边缘会“裁在页面像素中间”——页面按完整矩形
+  // 排、宿主裁掉溢出，两边才能严丝合缝）。
   if (controller_.valid()) {
-    const int view_w = std::max(1, static_cast<int>(bounds.width * safe));
-    const int view_h = std::max(1, static_cast<int>(bounds.height * safe));
-    RECT page{static_cast<LONG>(std::lround((bounds.x - left) * safe)),
-              static_cast<LONG>(std::lround((bounds.y - top) * safe)),
-              static_cast<LONG>(std::lround((bounds.x - left) * safe)) + view_w,
-              static_cast<LONG>(std::lround((bounds.y - top) * safe)) + view_h};
+    const auto [page_x, page_right] = shell::detail::cover_span(bounds.x, bounds.width, safe);
+    const auto [page_y, page_bottom] = shell::detail::cover_span(bounds.y, bounds.height, safe);
+    const int view_w = std::max(1, page_right - page_x);
+    const int view_h = std::max(1, page_bottom - page_y);
+    RECT page{static_cast<LONG>(page_x - host_x),
+              static_cast<LONG>(page_y - host_y),
+              static_cast<LONG>(page_x - host_x) + view_w,
+              static_cast<LONG>(page_y - host_y) + view_h};
     controller_->put_Bounds(page);
   }
 }

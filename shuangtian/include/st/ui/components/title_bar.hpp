@@ -98,6 +98,20 @@ class TitleBar : public Element {
   void set_show_controls(bool show);
   [[nodiscard]] auto show_controls() const noexcept -> bool { return show_controls_; }
 
+  /// 标题栏条带底色覆盖（`nullopt` = 主题默认的 `surface_alt`）。
+  ///
+  /// 为何需要它（2026-11-14，歌白桌面端）：宿主的整体界面是嵌入式网页（`WebView`），
+  /// 窗框与网页各自管各自的配色——网页切主题（暗色/亮色/品牌色）时，若标题栏
+  /// 仍停在框架主题色上，会出现“暗色网页顶着一条亮色标题栏”的割裂感。
+  /// 宿主收到网页的主题通知后，用它把标题栏条带染成与网页同源的颜色。
+  ///
+  /// 覆盖**只改底色**：文字/按钮/图标色仍随框架主题（`set_theme_mode` 同步切明暗），
+  /// 这是“联动但不失控”的平衡点——底色跟网页，前景对比度跟框架主题体系。
+  void set_surface_color(std::optional<math::Color> color);
+  [[nodiscard]] auto surface_color() const noexcept -> std::optional<math::Color> {
+    return surface_color_;
+  }
+
   /// —— 标题栏命令按钮（窗口控制按钮的通用扩展位）——
   ///
   /// 与控制按钮**同形同规格**（46px 宽、hover 高亮块、点击语义）但动作由宿主定义。
@@ -107,6 +121,13 @@ class TitleBar : public Element {
   /// 为什么进框架而不是每个应用自己摆：主题切换是**窗口级能力**（相期/xmlapp/
   /// gallery 全都要），按钮位置应与控制按钮同组（右上角）——若由应用在 trailing
   /// 槽自摆，位置/间距/观感各自为政，还会被应用误删。
+  ///
+  /// `set_show_theme_button(false)`：隐藏框架自带的主题按钮（不影响 `add_caption_button`
+  /// 加的宿主按钮）。为何需要它：宿主界面整体是网页的形态（歌白桌面端）里，主题由
+  /// 网页自己的面板管、窗框色跟随网页主题通知——框架主题按钮在那儿既重复又割裂
+  ///（它切的是框架主题，与网页主题是两套状态）。
+  void set_show_theme_button(bool show);
+  [[nodiscard]] auto show_theme_button() const noexcept -> bool { return show_theme_button_; }
   struct CaptionButtonSpec {
     std::string icon{};               ///< 图标名（icon 表）
     std::string hint{};               ///< 语义提示（状态栏/无障碍；不占布局）
@@ -233,6 +254,10 @@ class TitleBar : public Element {
   /// 品牌区右缘（`arrange` 时实测文字宽后算定；也是 `leading` 槽与标题文字的起点）。
   float brand_right_{0.0f};
   bool show_controls_{true};
+  /// 条带底色覆盖（空 = 主题 `surface_alt`）：见 `set_surface_color` 的说明。
+  std::optional<math::Color> surface_color_{};
+  /// 框架主题按钮是否显示（默认 true）：见 `set_show_theme_button`。
+  bool show_theme_button_{true};
   WindowControl* control_{nullptr};
   std::function<void()> on_double_click_{};
   /// 附属槽（非拥有；同时作为 `Element::children()` 的一部分，见 `content_child_count`）。

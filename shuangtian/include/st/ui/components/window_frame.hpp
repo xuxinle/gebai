@@ -74,6 +74,20 @@ class WindowFrame : public Element {
   /// 显式绑定的端口（为空时回落到宿主）。
   [[nodiscard]] auto window_control() const noexcept -> WindowControl* { return control_; }
 
+  /// 窗框整体底色覆盖（`nullopt` = 主题默认）。
+  ///
+  /// 一句概括：标题栏条带与内容槽底色一起染成同一色（不拆两个 API——“窗框与
+  /// 标题栏不同色”这种矛盾状态不该成为可写出来的状态）。
+  ///
+  /// 为何需要它：嵌入式网页做整体界面的宿主（歌白桌面端）里，窗框与网页各自管配色，
+  /// 网页切主题时窗框需要跟随——详见 `TitleBar::set_surface_color`。
+  /// 覆盖后：标题栏条带画该色（转发给标题栏）、窗框底色画该色（WebView 盖不满的
+  /// 边缘与失败占位块不再露出框架默认底色）。
+  void set_frame_color(std::optional<math::Color> color);
+  [[nodiscard]] auto frame_color() const noexcept -> std::optional<math::Color> {
+    return frame_color_;
+  }
+
   /// 边缘条厚度（逻辑像素）：与后端判定带**同一常量**（判定只有一份）。
   [[nodiscard]] static constexpr auto edge_thickness() noexcept -> float {
     return kWindowResizeBorder;
@@ -128,6 +142,8 @@ class WindowFrame : public Element {
   bool show_title_bar_{true};
   bool show_resize_edges_{true};
   WindowControl* control_{nullptr};
+  /// 整体底色覆盖（空 = 主题默认）：见 `set_frame_color`。
+  std::optional<math::Color> frame_color_{};
   /// 当前按下的边缘（`WindowEdge::None` = 无）：按压期间给条一点反馈色。
   WindowEdge pressed_edge_{WindowEdge::None};
   /// 悬浮的边缘（同上）。

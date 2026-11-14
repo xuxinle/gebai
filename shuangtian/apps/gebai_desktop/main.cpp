@@ -49,12 +49,15 @@
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/hash.hpp"
+#include "st/core/json.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/core/time.hpp"
 #include "st/ui/components/panel.hpp"
 #include "st/ui/components/text.hpp"
 #include "st/ui/components/webview.hpp"
+#include "st/ui/components/window_frame.hpp"
+#include "st/ui/svg.hpp"
 
 namespace {
 
@@ -310,8 +313,22 @@ auto run_app(int argc, char** argv) -> int {
 
   // ② 界面：整窗一块 WebView（网页就是界面本身）。占位块保留——服务端起不来时
   // 它是唯一能显示原因的出口（网页像素不进 framebuffer）。
+  // 外壳：`WindowFrame`（自绘标题栏 + 内容槽 + 八向缩放边缘），与其他霜天应用同形态。
+  //
+  // 为什么整窗 WebView 不能直接当根：窗口装饰一律自绘（CONVENTIONS.md §10 第 7 条），
+  // 无边框窗口的拖动/缩放/最小化/最大化/关闭**只能**由界面自己提供；而网页像素不进
+  // UI 树（平台合成器直接上屏），纯 WebView 根等于整个窗口没有任何窗口控制区——
+  // 用户只剩 Alt+F4 一条路。
+  auto frame = std::make_unique<st::ui::WindowFrame>(kAppTitle);
+  frame->set_id("gebai-root");
+  frame->set_window_control(&app);  // 三控制按钮 + 八向边缘条接真实后端（无头如实拒绝）
+  // 框架自带的主题按钮关掉：主题由网页自己的 🎨 面板管（窗框色已随网页主题联动），
+  // 框架主题按钮在这里既重复又割裂（两套主题状态各切各的）。
+  if (frame->title_bar() != nullptr) frame->title_bar()->set_show_theme_button(false);
+
+  // 内容主体（WebView + 状态行）进窗框的**内容槽**：标题栏占顶部一条，其余全是它。
   auto root = std::make_unique<Panel>(st::ui::FlexDirection::Column);
-  root->set_id("gebai-root");
+  root->set_id("gebai-content");
   root->style().grow = true;
 
   auto view = std::make_unique<WebView>();
@@ -330,7 +347,38 @@ auto run_app(int argc, char** argv) -> int {
   auto* status_ptr = status.get();
   root->add_child(std::move(status));
 
-  app.set_content(std::move(root));
+  frame->content()->add_child(std::move(root));
+  app.set_content(std::move(frame));
+
+  // ②.4 窗框随网页主题联动：网页侧 `theme-core.ts` 在主题变化（切主题/换面额/黑白切换）
+  // 时经 `chrome.webview.postMessage` 推 `{gebaiDesktop:true,type:"theme",theme,frameColor,light}`。
+  // 这里解析后：明暗档切框架主题（标题栏文字/按钮前景自适应对比度），frameColor 染窗框
+  //（标题栏条带 + 窗口底色，WebView 盖不满的边缘不再露出框架默认底色）。
+  //
+  // 为何放在 `on_event`：`WebMessageReceived` 是页面→宿主的唯一推送通路（导航完成后
+  // 主动查询拿不到“变化时机”）；回调在 UI 线程派发，直接改组件安全。
+  // 侧车未起/页面未导航时消息不会来，窗框保持框架默认——不额外发查询。
+  st::ui::WindowFrame* frame_ptr_for_theme =
+      dynamic_cast<st::ui::WindowFrame*>(app.root().find("gebai-root"));
+  view_ptr->on_event = [frame_ptr_for_theme, &app](const st::ui::WebViewEvent& event) {
+    if (event.kind != st::ui::WebViewEvent::Kind::WebMessageReceived) return;
+    if (event.message.find("\"gebaiDesktop\"") == std::string::npos) return;  // 快速巷选
+    const auto parsed = st::json_parse(event.message);
+    if (!parsed) return;
+    const st::Json& info = *parsed;
+    if (!info.contains("type") || info["type"] != "theme") return;
+    // 明暗档：切框架主题，标题栏文字/按钮色随主题体系（底色跟网页、前景跟框架）。
+    if (info.contains("light")) {
+      app.set_theme_mode(info["light"] == true ? st::ui::ThemeMode::Light : st::ui::ThemeMode::Dark);
+    }
+    // 窗框色：`#rrggbb` 染标题栏与窗口底色。
+    if (info.contains("frameColor") && frame_ptr_for_theme != nullptr) {
+      const std::string color = info.value("frameColor", std::string{});
+      if (const auto parsed_color = st::ui::svg::parse_color(color)) {
+        frame_ptr_for_theme->set_frame_color(parsed_color);
+      }
+    }
+  };
 
   if (auto started = app.start(); !started) {
     std::fprintf(stderr, "启动失败：%s\n", started.error().message.c_str());

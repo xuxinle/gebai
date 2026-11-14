@@ -9,6 +9,7 @@
 #include "st/math/path.hpp"
 #include "st/ui/components/theme_picker.hpp"
 #include "st/ui/icon.hpp"
+#include "st/ui/svg.hpp"
 #include "st/ui/text_port.hpp"
 
 #include "components_internal.hpp"
@@ -215,6 +216,27 @@ void TitleBar::set_brand(std::string text) {
 void TitleBar::set_show_controls(bool show) {
   if (show_controls_ == show) return;
   show_controls_ = show;
+  mark_layout_dirty();
+}
+
+void TitleBar::set_show_theme_button(bool show) {
+  if (show == show_theme_button_) return;
+  show_theme_button_ = show;
+  // **关闭 = 从按钮表移除**（不是“建了再隐藏”）：表里有什么，序号就是什么，
+  // 排位/绘制/命中循环全部零改动——不存在“序号 0 在表里但矩形为空”的怪状态，
+  // 自动化也不会踩到它。恢复时插回序号 0（宿主按钮序号整体 +1，文档化的代价，
+  // 运行时恢复是罕见路径；ThemePicker 对象留在树上不可见，恢复时直接复用）。
+  if (!show && !caption_buttons_.empty()) {
+    caption_buttons_.erase(caption_buttons_.begin());
+  } else if (show && theme_picker_ != nullptr) {
+    caption_buttons_.insert(caption_buttons_.begin(), CaptionButtonSpec{
+        .icon = "brush",
+        .hint = "主题",
+        .on_click = [this] {
+          if (theme_picker_->is_open()) theme_picker_->close();
+          else (void)theme_picker_->open();
+        }});
+  }
   mark_layout_dirty();
 }
 
@@ -496,10 +518,19 @@ auto TitleBar::run_window_action(std::string_view action) -> bool {
   return false;
 }
 
+void TitleBar::set_surface_color(std::optional<math::Color> color) {
+  if (surface_color_.has_value() == color.has_value() &&
+      (!color.has_value() || *surface_color_ == *color)) {
+    return;
+  }
+  surface_color_ = color;
+  mark_dirty();
+}
+
 void TitleBar::apply_theme(const Theme& theme) {
   const Palette& colors = theme.colors();
   const Metrics& metrics = theme.metrics();
-  style_.background = colors.surface_alt;
+  style_.background = surface_color_.value_or(colors.surface_alt);
   // **不画边框**（用户 2026-10-08 要求“标题栏的边框线去掉”）。
   //
   // 原设计在这里给了一条 1px 分界线（“窗框与内容之间的视觉依据”）。实测下它
@@ -638,7 +669,7 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
   }
 
   // —— 2.5 命令按钮（默认：主题选择；与控制按钮同规格的 hover/press 块）——
-  for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
+for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
     const math::Rect rect = caption_button_rect(index);
     if (rect.is_empty()) continue;
     const bool hovered = hovered_caption_ == static_cast<int>(index);
@@ -647,8 +678,10 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
                            std::max(0.0f, rect.height - k_control_hover_inset_y * 2.0f)};
     math::Color tone = style_.color;
     // 主题按钮激活态：弹窗开着时主题色（与普通按钮区分——“现在能切的就是我”）。
-    const bool active =
-        index == 0 && theme_picker_ != nullptr && theme_picker_->is_open();
+    // 判据用图标名而不是序号：主题按钮可被 `set_show_theme_button(false)` 移除，
+    // 移除后序号 0 是宿主按钮，不该拿到主题激活态。
+    const bool is_theme = caption_buttons_[index].icon == "brush" && theme_picker_ != nullptr;
+    const bool active = is_theme && theme_picker_->is_open();
     if (!block.is_empty() && (hovered || pressed || active)) {
       math::Color fill = active ? colors.primary : neutral_hover_tint(colors);
       if (pressed) {
@@ -680,8 +713,8 @@ auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
             return true;
           }
         }
-        // ①′ 命令按钮（主题等）：同款“按下高亮、松开触发”。
-        for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
+          // ①′ 命令按钮（主题等）：同款“按下高亮、松开触发”。
+  for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
           if (caption_button_rect(index).contains(event.position)) {
             pressed_caption_ = static_cast<int>(index);
             mark_dirty();
@@ -787,10 +820,10 @@ auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
         hovered_button_ = hovered;
         mark_dirty();
       }
-      // 命令按钮悬浮（单独记；与控制按钮互斥不冲突）。
-      int hovered_caption = -1;
-      if (show_controls_) {
-        for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
+        // 命令按钮悬浮（单独记；与控制按钮互斥不冲突）。
+  int hovered_caption = -1;
+  if (show_controls_) {
+    for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
           if (caption_button_rect(index).contains(event.position)) {
             hovered_caption = static_cast<int>(index);
             break;
@@ -824,6 +857,12 @@ auto TitleBar::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "title" || name == "text") return title_;
   if (name == "icon") return icon_;
   if (name == "show_controls") return std::string(show_controls_ ? "true" : "false");
+  if (name == "show_theme_button") return std::string(show_theme_button_ ? "true" : "false");
+  if (name == "surface_color") {
+    if (!surface_color_.has_value()) return std::string{"none"};
+    const math::Color color = *surface_color_;
+    return std::format("#{:02x}{:02x}{:02x}{:02x}", color.r, color.g, color.b, color.a);
+  }
   // 悬浮态是"只能看像素、看不出状态"的那类量（按钮级高亮不在元素级 hovered 里）：
   // 自动化验证「操作后高亮已清」「悬浮高亮随指针切换」都需要直接读到它。
   // -1 = 无悬浮，0..n = 对应序号（控制按钮：0最小化 1最大化 2关闭；命令按钮从 0 起）。
@@ -854,12 +893,28 @@ auto TitleBar::set_property(std::string_view name, std::string_view value) -> bo
     set_show_controls(value == "true" || value == "1" || value == "on");
     return true;
   }
+  if (name == "show_theme_button") {
+    set_show_theme_button(value == "true" || value == "1" || value == "on");
+    return true;
+  }
+  if (name == "surface_color") {
+    // `#rrggbb` / `#rrggbbaa` 覆盖；空串或 "none" 清除（回主题默认）。
+    if (value.empty() || value == "none") {
+      set_surface_color(std::nullopt);
+      return true;
+    }
+    if (const auto parsed = st::ui::svg::parse_color(value)) {
+      set_surface_color(parsed);
+      return true;
+    }
+    return false;
+  }
   return Element::set_property(name, value);
 }
 
 auto TitleBar::property_names() const -> std::vector<std::string_view> {
-  return Element::with_universal({"title", "text", "icon", "show_controls", "maximized", "window_control_available",
-          "hovered_button", "hovered_caption"});
+  return Element::with_universal({"title", "text", "icon", "show_controls", "show_theme_button", "maximized", "window_control_available",
+          "hovered_button", "hovered_caption", "surface_color"});
 }
 
 auto TitleBar::invoke_action(std::string_view action, std::string_view argument) -> bool {

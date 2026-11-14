@@ -957,3 +957,124 @@ ST_TEST(title_bar_icon_and_leading_slot_coexist) {
   st::log::out("[brand] 前置图标盒内墨迹 {} px（槽左缘 x={:.1f}）\n", ink, slot_rect.x);
   ST_CHECK(ink > 20U);
 }
+
+// ───────────────────────── 窗框色覆盖（歌白桌面端主题联动） ─────────────────────────
+
+/// 标题栏条带底色覆盖：`set_surface_color` 后像素必须真的变（不是只改属性），
+/// 清除后回到主题默认。
+/// 背景：嵌入式网页做整体界面的宿主（歌白桌面端）里，网页切主题时窗框要跟随——
+/// 这条测试钉住“覆盖生效 + 清除回退”两个方向。
+ST_TEST(title_bar_surface_color_override_paints_and_clears) {
+  BarFixture fixture;
+  const Color theme_default = fixture.root.theme().colors().surface_alt;
+
+  // 像素探针：标题栏条带中间（避开图标/文字/按钮）。
+  const auto sample_bar_pixel = [&]() {
+    st::raster::Canvas canvas{1280, 120, 1.0f};
+    canvas.clear(theme_default);
+    fixture.root.paint(canvas);
+    return canvas.pixel_at(640, static_cast<int>(fixture.bar->bounds().height) / 2);
+  };
+
+  // 初始：主题默认色（覆盖未设置时行为不变——老代码不受影响的断言）。
+  const Color before = sample_bar_pixel();
+  ST_CHECK(before == theme_default);
+
+  // 覆盖成与主题色差异明显的颜色（纯红）。
+  fixture.bar->set_surface_color(Color{255, 0, 0, 255});
+  const Color overridden = sample_bar_pixel();
+  ST_CHECK(std::abs(static_cast<int>(overridden.r) - 255) <= 1);
+  ST_CHECK(overridden.g <= 1);
+  ST_CHECK(overridden.b <= 1);
+
+  // 属性面：能读回覆盖值。
+  const auto prop = fixture.bar->get_property("surface_color");
+  ST_REQUIRE(prop.has_value());
+  ST_CHECK(prop->rfind("#ff0000", 0) == 0);
+
+  // 清除：回到主题默认。
+  fixture.bar->set_surface_color(std::nullopt);
+  const Color restored = sample_bar_pixel();
+  ST_CHECK(restored == theme_default);
+}
+
+/// 窗框整体底色：`set_frame_color` 同时染标题栏与窗框底，且转发给标题栏
+///（不转发的话“窗框色”只改了底，标题栏仍是另一色——两张皮）。
+ST_TEST(window_frame_frame_color_dyes_bar_and_body_together) {
+  FrameFixture fixture;
+
+  const Color theme_bg = fixture.root.theme().colors().bg;
+  const Color theme_bar = fixture.root.theme().colors().surface_alt;
+
+  const auto sample = [&](int x, int y) {
+    st::raster::Canvas canvas{1280, 800, 1.0f};
+    canvas.clear(Color{0, 255, 0, 255});
+    fixture.root.paint(canvas);
+    return canvas.pixel_at(x, y);
+  };
+
+  // 覆盖前：标题栏与底各自主题色（默认行为不变——老代码不受影响的断言）。
+  ST_CHECK(sample(640, 10) == theme_bar);
+  ST_CHECK(sample(640, 400) == theme_bg);
+
+  // 覆盖后：两处同色。
+  fixture.frame->set_frame_color(Color{255, 0, 0, 255});
+  const Color bar_px = sample(640, 10);
+  const Color body_px = sample(640, 400);
+  ST_CHECK(std::abs(static_cast<int>(bar_px.r) - 255) <= 1 && bar_px.g <= 1 && bar_px.b <= 1);
+  ST_CHECK(std::abs(static_cast<int>(body_px.r) - 255) <= 1 && body_px.g <= 1 && body_px.b <= 1);
+
+  // 清除回退：两处都回主题色。
+  fixture.frame->set_frame_color(std::nullopt);
+  ST_CHECK(sample(640, 10) == theme_bar);
+  ST_CHECK(sample(640, 400) == theme_bg);
+}
+
+/// 隐藏框架主题按钮（`set_show_theme_button(false)`，语义 = 从按钮表移除）：
+/// ① 按钮总数减少（自动化不会踩到“序号在表里但矩形为空”的怪状态）；
+/// ② 宿主按钮仍紧贴最小化（按钮从右往左排，移除更靠左的主题按钮不影响它），
+///    主题按钮那格不再有按钮；
+/// ③ 属性面可读；恢复显示时主题按钮回到序号 0。
+/// 背景：歌白桌面端主题由网页面板管，框架主题按钮重复且割裂（两套状态）。
+ST_TEST(title_bar_theme_button_hidden_releases_slot) {
+  BarFixture fixture;
+  TitleBar* bar = fixture.bar;
+
+  // 加一个宿主命令按钮（序号 1；序号 0 是框架主题按钮）。
+  const std::size_t host_added = bar->add_caption_button({.icon = "settings", .hint = "设置"});
+  ST_CHECK(host_added == 1);
+  fixture.root.layout(true);
+  const std::size_t count_before = bar->caption_button_count();   // 2（主题 + 宿主）
+
+  // 隐藏前：主题按钮序号 0 有矩形（紧贴最小化左侧）。
+  const Rect theme_before = bar->caption_button_rect(0);
+  ST_REQUIRE(!theme_before.is_empty());
+
+  // 隐藏（语义 = 从按钮表移除）。
+  bar->set_show_theme_button(false);
+  fixture.root.layout(true);
+
+  // ② 移除式：总数减一，序号 0 现在是宿主按钮。
+  ST_CHECK(bar->caption_button_count() == count_before - 1);
+  // ① 宿主按钮（现序号 0）仍紧贴最小化（按钮从右往左排，它在主题按钮右侧，
+  // 移除主题按钮不影响它的位置）。
+  const Rect host_after = bar->caption_button_rect(0);
+  ST_CHECK(!host_after.is_empty());
+  const Rect minimize = bar->control_button_rect(0);
+  ST_CHECK(std::abs(host_after.right() - minimize.x) < 0.01f);
+  // 主题按钮原来那格（更靠左的 46px）不再有按钮：序号 1 越界为空矩形。
+  ST_CHECK(bar->caption_button_rect(1).is_empty());
+  // ③ 属性面。
+  const auto prop = bar->get_property("show_theme_button");
+  ST_REQUIRE(prop.has_value());
+  ST_CHECK(*prop == "false");
+
+  // 恢复显示：主题按钮回到序号 0（原位），宿主按钮退到序号 1。
+  bar->set_show_theme_button(true);
+  fixture.root.layout(true);
+  ST_CHECK(bar->caption_button_count() == count_before);
+  const Rect theme_back = bar->caption_button_rect(0);
+  ST_CHECK(!theme_back.is_empty());
+  ST_CHECK(std::abs(theme_back.x - theme_before.x) < 0.01f);
+  ST_CHECK(std::abs(bar->caption_button_rect(1).right() - minimize.x) < 0.01f);
+}

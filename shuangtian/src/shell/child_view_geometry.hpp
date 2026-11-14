@@ -23,11 +23,31 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <span>
 
 namespace st::shell::detail {
+
+/// 逻辑像素跨度 → 覆盖它的整数像素跨度（floor / ceil 边缘取整）。
+///
+/// ## 为什么必须边缘取整、不能对尺寸截断
+///
+/// 子窗口尺寸若用 `static_cast<int>(size * scale)` 截断，在分数 DPI（1.5×）下
+/// 每次都会丢掉小数部分（1247×1.5=1870.5 → 1870），而宿主客户区是按边缘取整
+/// 算出来的（1922）。于是子窗口底边盖不到客户区底边，**底部一条背景色缝**
+/// （实测：1 物理像素的白线，浅色背景下看不见、深色页面上刺眼）。
+/// 边缘取整（左/上 floor、右/下 ceil）保证子窗口**覆盖**全部逻辑区域，
+/// 超出的部分会被宿主客户区裁掉，不会溢出到窗外。
+[[nodiscard]] inline auto cover_span(float logical_pos, float logical_size, float scale) noexcept
+    -> std::pair<int, int> {
+  const float begin = logical_pos * scale;
+  const float end = (logical_pos + logical_size) * scale;
+  const int first = static_cast<int>(std::floor(begin + 0.001f));
+  const int last = static_cast<int>(std::ceil(end - 0.001f));
+  return {first, std::max(first + 1, last)};
+}
 
 /// 屏幕像素矩形（与 Win32 `RECT` 同一口径：右/下开区间，`right - left` 即宽）。
 ///
