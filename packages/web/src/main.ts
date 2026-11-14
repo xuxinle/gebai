@@ -37,6 +37,7 @@ import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, enterSessionView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
 import { createSessionWithDraftModel, initModelPicker } from "./model-picker"
+import { createSubmitQueue } from "./submit-queue"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
 import { noteMerge } from "./subsessions"
@@ -76,8 +77,12 @@ exportBtn.onclick = async () => {
 
 /** 排队输入的排队条展示（服务端队列镜像）：快照与 event.queue.update 都走同一入口。 */
 
-composer.addEventListener("submit", async (e) => {
-  e.preventDefault()
+/**
+ * 提交串行化（单飞 + 尾随合并）：草稿页首条消息要 await 建会话，而建会话结果回来前当前会话仍是空——
+ * 这段空窗里到达的第二次提交会走同一条建会话分支，同一条提示词于是落进两个新会话。重复来源都是
+ * 正常输入形态：按住回车的键盘自动重复、软键盘发送键、连点发送按钮。见 submit-queue.ts。
+ */
+const submitOnce = createSubmitQueue(async () => {
   const interrupt = takeInterruptNext() // Ctrl+Enter：中断插入（运行中取消当前循环后立即执行）
   const cur = getCurrentSession()
   const text = input.value.trim()
@@ -193,6 +198,11 @@ composer.addEventListener("submit", async (e) => {
     }
     throw err
   }
+})
+
+composer.addEventListener("submit", (e) => {
+  e.preventDefault()
+  void submitOnce()
 })
 
 

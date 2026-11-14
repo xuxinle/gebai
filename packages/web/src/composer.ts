@@ -194,6 +194,12 @@ export function bindInputBehavior() {
   })
 
   input.addEventListener("keydown", (e) => {
+    // 长按回车的键盘自动重复不是新的发送意图：按住不放会在建会话/上传附件期间反复触发提交
+    // （首条消息未落地前反复提交 = 同一句提示词落进多个新会话）
+    if (e.key === "Enter" && e.repeat) {
+      e.preventDefault()
+      return
+    }
     // Ctrl+Enter = 中断插入提交（运行中取消当前循环后立即执行；空闲等同普通发送）
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) {
       e.preventDefault()
