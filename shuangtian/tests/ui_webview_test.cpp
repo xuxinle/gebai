@@ -88,6 +88,9 @@ struct PortStub final : WebViewPort {
   std::vector<std::string> embedded_entries{};
   std::vector<std::size_t> embedded_asset_counts{};
   std::vector<std::string> scripts{};
+  std::vector<std::string> init_scripts{};
+  /// 初始化脚本注册是否失败（模拟“页面尚未建/不支持”）。
+  bool init_script_ok{true};
   std::vector<std::string> posted{};
   std::vector<double> zooms{};
   int destroyed{0};
@@ -158,6 +161,11 @@ struct PortStub final : WebViewPort {
   [[nodiscard]] auto webview_go_back() -> st::Status override { return st::ok(); }
   [[nodiscard]] auto webview_go_forward() -> st::Status override { return st::ok(); }
 
+  [[nodiscard]] auto webview_add_init_script(std::string_view script) -> st::Status override {
+    if (!init_script_ok) return st::unexpected(st::ErrorCode::Unsupported, "页面尚未就绪");
+    init_scripts.emplace_back(script);
+    return st::ok();
+  }
   [[nodiscard]] auto webview_execute_script(std::string_view script, std::string& result)
       -> st::Status override {
     scripts.emplace_back(script);
@@ -443,6 +451,24 @@ ST_TEST(webview_events_reach_component_callback) {
   ST_CHECK(seen.front().message == "page-ready");
   // 状态行也该反映出"收到了消息"（否则界面上看不出页面主动说话了）。
   ST_CHECK(fx.view->status_text().find("页面消息") != std::string::npos);
+}
+
+ST_TEST(webview_add_init_script_reaches_port_without_creating_page) {
+  // 文档初始化脚本的两个硬契约：
+  // ① **不建页面也不导航**——它必须能比首次导航更早注册（宿主在建页面之前就调用它）；
+  // ② 失败必须如实返回 false（否则“页面就绪后生效”会变成“什么也没做但看着成功”）。
+  Fixture fx(/*supported=*/true);
+  ST_CHECK(fx.view->add_init_script("window.__HOST__=1"));
+  ST_CHECK(fx.stub.init_scripts.size() == 1);
+  ST_CHECK(fx.stub.init_scripts.front() == "window.__HOST__=1");
+  // 只登记，不触发导航（导航留给宿主在端口就绪后做）。
+  ST_CHECK(fx.stub.navigated.empty());
+
+  // 端口拒绝（如页面未就绪）时如实报失败，且不留“已注册”的假象。
+  fx.stub.init_script_ok = false;
+  ST_CHECK(!fx.view->add_init_script("window.__B__=1"));
+  ST_CHECK(fx.stub.init_scripts.size() == 1);
+  ST_CHECK(fx.view->status_text().find("页面尚未就绪") != std::string::npos);
 }
 
 ST_TEST(webview_assets_guess_mime_from_extension) {

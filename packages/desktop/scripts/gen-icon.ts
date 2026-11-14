@@ -1,11 +1,11 @@
 /**
  * 图标生成：canonical 源 `packages/web/public/favicon.svg`（大脑）→
  * ① 多尺寸 PNG 打包 Windows ICO（16-128 无压缩 BMP + 256 PNG）→ `packages/desktop/icons/icon.ico`
- *    （供 bun build --compile --icon 与 launcher winresource 嵌入 exe）
+ *    （bun build --compile --icon 不用（改像素）；exe 图标由 embed-icon.ts 与霜天 st.pkg 的 "icon" 分别嵌入）
  * ② 回写 `packages/web/index.html` 的 favicon data URI（与 canonical 源单一来源，basePath 免疫）。
  * 依赖 @resvg/resvg-js（desktop devDependency）。幂等，构建链 server:build 前置调用。
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { Resvg } from "@resvg/resvg-js"
 
@@ -77,8 +77,19 @@ mkdirSync(join(root, "icons"), { recursive: true })
 const entries = new Map<number, { rgba: Uint8Array; png: Uint8Array }>()
 for (const size of [16, 24, 32, 48, 64, 128, 256]) entries.set(size, { rgba: renderRgba(size), png: renderPng(size) })
 writeFileSync(icoPath, buildIco(entries))
-// 32px 原始 RGBA：tao 窗口图标（任务栏/标题栏）用，launcher include_bytes 内嵌
+// 32px 原始 RGBA：霜天宿主窗口图标（任务栏/标题栏，b::embed 后现编 PNG）用，
+// 拷入 shuangtian/apps/gebai_desktop/assets/gebai-icon32.rgba 后嵌入
 writeFileSync(join(root, "icons", "icon32.rgba"), Buffer.from(entries.get(32)!.rgba))
+
+// 同步给霜天宿主：`shuangtian/apps/gebai_desktop/assets/`。
+//
+// 为何要拷：霜天工程只能 `b::embed` **自己根下**的文件（路径由 st.pkg 声明，跨工程引用不受支持）。
+// 拷贝点只有这里一处，不会漂；霜天工程不在时静默跳过（如在只装了桌面包的环境里跑本脚本）。
+const hostAssets = join(root, "..", "..", "shuangtian", "apps", "gebai_desktop", "assets")
+if (existsSync(hostAssets)) {
+  copyFileSync(icoPath, join(hostAssets, "gebai.ico"))
+  copyFileSync(join(root, "icons", "icon32.rgba"), join(hostAssets, "gebai-icon32.rgba"))
+}
 console.log(`[gen-icon] icon.ico (${entries.size} sizes) -> ${icoPath}; icon32.rgba 已生成`)
 
 // 回写 index.html favicon data URI（保持内联：basePath/反代场景零依赖）

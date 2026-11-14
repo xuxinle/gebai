@@ -554,7 +554,8 @@ StreamHandle::StreamHandle(StreamHandle&&) noexcept = default;
 auto StreamHandle::operator=(StreamHandle&&) noexcept -> StreamHandle& = default;
 
 void StreamHandle::open(std::string_view program, const std::vector<std::string>& args,
-                        std::string_view cwd, bool merge_stderr) {
+                        std::string_view cwd, bool merge_stderr,
+                        const std::map<std::string, std::string>& env) {
   (void)merge_stderr;   // 两个平台都合并：终端要的是时间顺序
   impl_ = std::make_unique<Impl>();
   error_.clear();
@@ -591,8 +592,18 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
   startup.hStdInput = in_read != nullptr ? in_read : ::GetStdHandle(STD_INPUT_HANDLE);
   PROCESS_INFORMATION child{};
   const std::wstring working_directory = to_wide(std::string(cwd));
+  // 环境块：与 `run()` 同一构造（同名键只留覆盖值、按名排序、双 NUL 结尾）。
+  // 空表时传 nullptr = 原样继承父进程环境。
+  std::vector<wchar_t> environment_block;
+  LPVOID environment = nullptr;
+  DWORD creation_flags = CREATE_NO_WINDOW;
+  if (!env.empty()) {
+    environment_block = build_environment(env);
+    environment = environment_block.data();
+    creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+  }
   const BOOL created = ::CreateProcessW(
-      nullptr, command_line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+      nullptr, command_line.data(), nullptr, nullptr, TRUE, creation_flags, environment,
       working_directory.empty() ? nullptr : working_directory.c_str(), &startup, &child);
   const DWORD create_error = ::GetLastError();
   write_handle.reset(nullptr);   // 父进程立刻关写端：子进程退出后读端才 EOF
@@ -638,6 +649,25 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
   argv.reserve(storage.size() + 1);
   for (auto& item : storage) argv.push_back(item.data());
   argv.push_back(nullptr);
+  // 环境（覆盖表为空时直接用父进程 environ；非空则按“同名只留一份、覆盖优先”合并——
+  // 与 Windows 侧 `build_environment` 同一语义契约，见 `src/core/process_env.hpp`）。
+  std::vector<std::string> environment_storage;
+  std::vector<char*> environment_pointers;
+  char** child_environment = environ;
+  if (!env.empty()) {
+    const std::vector<std::string> base = [&] {
+      std::vector<std::string> collected;
+      for (char** item = environ; item != nullptr && *item != nullptr; ++item) {
+        collected.emplace_back(*item);
+      }
+      return collected;
+    }();
+    environment_storage = merge_environment(base, env, false);
+    environment_pointers.reserve(environment_storage.size() + 1);
+    for (auto& item : environment_storage) environment_pointers.push_back(item.data());
+    environment_pointers.push_back(nullptr);
+    child_environment = environment_pointers.data();
+  }
   pid_t child = -1;
   // **让子进程自成进程组**（`SETPGROUP` + pgid 0）：这样 `terminate()` 的
   // `kill(-pid)` 能一次带走整组（含它 spawn 的孙进程）。
@@ -649,7 +679,8 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
   (void)posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
   (void)posix_spawnattr_setpgroup(&attributes, 0);   // 0 = 以子进程 pid 建新组
   const int spawn_result =
-      posix_spawnp(&child, program_text.c_str(), &actions, &attributes, argv.data(), environ);
+      posix_spawnp(&child, program_text.c_str(), &actions, &attributes, argv.data(),
+                   child_environment);
   posix_spawnattr_destroy(&attributes);
   posix_spawn_file_actions_destroy(&actions);
   (void)::close(write_fd);

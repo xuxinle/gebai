@@ -115,8 +115,7 @@ keqing/**/driver.ilk
 keqing/**/driver.exp
 keqing/**/driver.lib
 keqing/rust/target/
-# 客卿 Rust workspace 的锁文件（子代理 sidecar）。**只限该 workspace**：
-# packages/desktop/launcher/Cargo.lock 是桌面启动器的依赖锁（随二进制构建入库），不属本规则。
+# 客卿 Rust workspace 的锁文件（子代理 sidecar）。
 keqing/rust/Cargo.lock
 
 # OS
@@ -154,9 +153,6 @@ packages/server/src/core/rg.embedded.generated.json
 packages/web/public/vendor/
 # 构建时从 favicon.svg 生成的大脑图标 ICO（由 scripts/gen-icon.ts 生成）
 packages/desktop/icons/
-
-# 原生 WebView 启动器 Rust 构建产物（cargo target）
-packages/desktop/launcher/target/
 
 # bun build 编译临时文件
 *.bun-build

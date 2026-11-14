@@ -718,6 +718,8 @@
 | **“端口存在”与“端口支持”是两件事**〔判据〕 | 端口指针非空不等于能力可用（没装 Runtime / 非 Windows 时指针在、`supported()==false`）。组件只判前者就会把请求发给一个做不了的端口：**看着在做事、实际什么都不会发生**（测试实测红：`stub.navigated.empty()` 断言失败）。建设页面/导航前必须先问 `webview_supported()` | `src/ui/components/webview.cpp`；实测 |
 | **懒建页面的接口要能报失败**〔契约〕 | “确保已建”若返回 `void`，调用方无法在失败时提前返回，只能继续往下发请求（就是上一条）。这个函数必须是 `[[nodiscard]] bool` | 同上；实测 |
 | **新增系统库要改两处，否则只有独立工程会红**〔构建〕 | `link-libs.txt`（框架自建走它）与 `src/pkg/build.cpp` 的 `kFallbackLibsWindows`（独立工程把框架 vendor 出去、仓库根文件不在时走它）是同一份数据的两种形态。只改前者：`st` 自建全绿，而 `independent_project_builds_links_and_runs` 红在 `undefined symbol: __declspec(dllimport) CoTaskMemFree`——**报错指向源码，真因在清单** | `src/pkg/build.cpp` 的 `default_system_libs`；实测 2026-11-13（加 `ole32`/`uuid`/`shlwapi` 时踩到） |
+| **没调 `CoInitializeEx` 也能“成功”，只是页面永远不出现**〔COM〕 | `CreateCoreWebView2EnvironmentWithOptions` 在未调入套间的线程上返回 `0x800401F0`（`CO_E_NOTINITIALIZED`），而本层只看到“建环境失败”一句。症状极阴：`supported=true`（Loader 能加载、Runtime 版本查得到）、窗口正常，**只有导航与页面永远不出现**。必须 `CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)`（`RPC_E_CHANGED_MODE` 不算失败）。gallery 没暴露它——它进页面时进程里已另有路径调过；换一个“窗口一建就导航”的宿主立即现形 | `src/shell/platform_win32_webview.cpp` 的 `ensure_com_apartment`；实测 2026-11-14 |
+| **`ExecuteScript` 注不进“页面启动前就该在”的标记**〔时序〕 | 前端常在**模块体**里读宿主标记（`const isDesktop = !!window.__X__`）。等 `NavigationCompleted` 再 `ExecuteScript` 已经晚了一步：模块早跑完，读到的永远是 `undefined`——而返回值断言看起来“成功”（`typeof` 是 `number`、`===1` 在外层判时才成立）。正确通路是 `AddScriptToExecuteOnDocumentCreated`（本仓包为 `webview_add_init_script`），且必须在首次导航**之前**注册 | `src/shell/platform_win32_webview.cpp`；实测 2026-11-14 |
 
 ## 场景 29：向「伪终端」里投递中断（Ctrl+C）
 

@@ -67,8 +67,8 @@ Its core invariant is "**capabilities may be externalized, authority stays insid
 
 ### 环境要求 | Prerequisites
 
-- [Bun](https://bun.sh) ≥ 1.2（仓库 `packageManager: bun@1.2.0`；桌面端启动器另需 Rust 工具链，仅构建启动器时需要）
-- **English.** [Bun](https://bun.sh) ≥ 1.2 — that's the only requirement (a Rust toolchain is needed only to build the desktop launcher).
+- [Bun](https://bun.sh) ≥ 1.2（仓库 `packageManager: bun@1.2.0`；桌面端宿主（霜天 gebai_desktop）另需 C++ 工具链（MinGW g++ ≥ 13），仅构建 `launcher:build` 时需要——先跑一次 `shuangtian/bootstrap.ps1` 自举）
+- **English.** [Bun](https://bun.sh) ≥ 1.2 — that's the only requirement (building the desktop host `launcher:build` additionally needs a C++ toolchain; bootstrap Shuangtian once via `shuangtian/bootstrap.ps1`).
 
 可选能力按需补充（不装则相关工具不可用，引擎与其余能力不受影响）：`py` 工具需要 Python；`playwright`/`reverse_site` 的浏览器桥需要宿主机 `node` 与浏览器；客卿子Agent（vision/imgproc/disk，以及 nsight/torch 的原生加速后端）需要对应语言的边车构建（Python/C++/Go/Rust）。
 
@@ -120,8 +120,7 @@ docker/build.sh --print-plan --profile code                    # 只打印裁剪
                                                                 # Print the trimming/customisation plan only
 ```
 
-- 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
-- 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
+- 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（霜天原生宿主：自绘窗口 + 整窗 WebView2，服务端二进制挂在 exe 尾部，启动时物化后拉起，关窗回收）
 - 纯服务端 / Server-only: `packages/desktop/dist/gebai.exe`（Bun `--compile` 单文件，零运行时依赖——Bun 已内嵌；`--server` 切服务模式）
 - 容器镜像 / Container image: `docker/build.sh`（Windows 用 `pwsh -File docker/build.ps1`）——多阶段构建，构建阶段完成上述构建链后 `--compile` 出 Linux 单文件，运行阶段不含 node_modules 与 bun；**能力、前端资源、系统包与镜像本体（基础镜像/用户/数据根/端口/时区/标签/源）均可由一份 JSON 档案（`--profile`）一次声明**；浏览器与 bun/node 运行时均支持**零网络预置**（`--export-browsers` / `--export-runtimes` 导出，内网放入 `docker/browsers`、`docker/bun`、`docker/node` 即自动识别）；用法与矩阵见 `docker/README.md`
 
@@ -211,13 +210,13 @@ Agent 通过**修改自身代码**持续改进自己——子 Agent 定义、工
 
 `bun build --compile` 产出单个可执行文件，**零运行时依赖**（Bun 已内嵌）：
 
-- **桌面应用**：`gebai-desktop.exe`——tao/wry 原生 WebView 启动器（Windows WebView2 / macOS WKWebView / Linux WebKitGTK），内嵌服务端二进制，固定端口 47896，关窗回收侧车
+- **桌面应用**：`gebai-desktop.exe`——**霜天原生宿主**（自绘窗口 + 整窗 WebView2），服务端二进制挂在 exe 尾部、启动时物化到 `%LOCALAPPDATA%\gebai\` 后拉起，固定端口 47896，关窗回收侧车
 - **本地浏览器**：`gebai.exe` 开箱即用，自动打开系统默认浏览器（本地模式免登录，以 admin 身份工作）
 - **服务端部署**：`--server` 服务模式，同一端口承载静态 Web UI、WebSocket（`/ws`）与 REST（`/api/*`）
 
 Web UI、全部子 Agent、tree-sitter 语法、图表引擎（Mermaid/PlantUML/D2/ECharts）、playwright 驱动、内置 ripgrep 全部内嵌；`GEBAI_BUILD_SUBAGENTS=a,b` 按需裁剪二进制体积。
 
-**English.** `bun build --compile` produces a single executable with **zero runtime dependencies** (Bun is embedded): a native-WebView desktop app (`gebai-desktop.exe`, tao/wry launcher with the server embedded, fixed port 47896), a local-browser binary (`gebai.exe`, no login in local mode), and a multi-user server (`--server`) serving the static UI, WebSocket and REST on one port. The Web UI, all sub-agents, tree-sitter grammars, diagram engines, the playwright driver and an embedded ripgrep are all bundled; `GEBAI_BUILD_SUBAGENTS=a,b` trims the binary on demand.
+**English.** `bun build --compile` produces a single executable with **zero runtime dependencies** (Bun is embedded): a native-WebView desktop app (`gebai-desktop.exe`, a Shuangtian native host with the server payload appended to the exe, fixed port 47896), a local-browser binary (`gebai.exe`, no login in local mode), and a multi-user server (`--server`) serving the static UI, WebSocket and REST on one port. The Web UI, all sub-agents, tree-sitter grammars, diagram engines, the playwright driver and an embedded ripgrep are all bundled; `GEBAI_BUILD_SUBAGENTS=a,b` trims the binary on demand.
 
 ### 🛡️ 多用户隔离与安全
 
@@ -284,13 +283,13 @@ Web UI、全部子 Agent、tree-sitter 语法、图表引擎（Mermaid/PlantUML/
 | `@gebai/agents`（`packages/agents`） | TS 子 Agent 包：`src/agents/`（定义）+ `src/core/`（共享基建，零 `import @gebai/server`） |
 | `@gebai/sdk`（`packages/sdk`） | 客户端 SDK：WS/REST 连接管理、类型定义、API 契约（双入口 `.` / `./node`） |
 | `@gebai/web`（`packages/web`） | Web UI：Vite 构建，打包进二进制作为内置前端（多入口 `/` 与 `/files`） |
-| `@gebai/desktop`（`packages/desktop`） | 桌面宿主：`dist/gebai.exe`（Bun `--compile` 单文件）+ `launcher/`（tao/wry 原生 WebView） |
+| `@gebai/desktop`（`packages/desktop`） | 桌面宿主：`dist/gebai.exe`（Bun `--compile` 单文件）+ 霜天原生宿主 `shuangtian/apps/gebai_desktop/`（打包为 `dist/gebai-desktop.exe`） |
 | `custom/` | 二开域（与 `packages/` 平级）：放置自定义子 Agent 与扩展 |
 | `keqing/{python,cpp,rust,go}/` | 客卿子 Agent（多语言边车）与各语言基础框架 |
 
 Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖注入，可独立实例化测试。
 
-**English.** Monorepo (Bun workspaces + Turborepo) with five packages — `@gebai/server` (engine + single-port service), `@gebai/agents` (TS sub-agent definitions + shared infra, zero imports from the server package), `@gebai/sdk`, `@gebai/web` (multi-entry UI bundled into the binary) and `@gebai/desktop` (compiled server + tao/wry launcher) — plus a `custom/` extension area and multi-language sidecar sub-agents under `keqing/`. All core modules are interface-first with dependency injection, so each can be instantiated and tested in isolation.
+**English.** Monorepo (Bun workspaces + Turborepo) with five packages — `@gebai/server` (engine + single-port service), `@gebai/agents` (TS sub-agent definitions + shared infra, zero imports from the server package), `@gebai/sdk`, `@gebai/web` (multi-entry UI bundled into the binary) and `@gebai/desktop` (compiled server + Shuangtian native host packed as `dist/gebai-desktop.exe`) — plus a `custom/` extension area and multi-language sidecar sub-agents under `keqing/`. All core modules are interface-first with dependency injection, so each can be instantiated and tested in isolation.
 
 ### 主循环与关键机制 | Core Loop & Key Mechanisms
 

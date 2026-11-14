@@ -45,6 +45,9 @@
 // 会以「C2589 非法标记」报错，与真正原因相隔很远。
 #define NOMINMAX 1
 #include <windows.h>
+// `CoInitializeEx`（套间初始化）与 `CoTaskMemFree` 在 objbase.h。
+// WebView2 的头只带 objidl/oaidl，不保证带出这一个。
+#include <objbase.h>
 
 // `SHCreateMemStream`（把字节包成 COM `IStream`）：头在 shlwapi.h，库是 shlwapi
 //（核对 link-libs.txt 的 windows 节，**新增系统库要同步那份单一数据源**）。
@@ -110,6 +113,43 @@ auto narrow(const wchar_t* text) -> std::string {
   std::string out(static_cast<std::size_t>(size - 1), '\0');
   ::WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), size, nullptr, nullptr);
   return out;
+}
+
+/// 本线程的 COM 套间初始化（**WebView2 的硬前提**）。
+///
+/// ## 为什么必须自己调（实测代价）
+///
+/// WebView2 的每个接口都是 COM 对象，而 `CreateCoreWebView2EnvironmentWithOptions`
+/// 要求**当前线程已调入套间**。没调时它的真实返回值是
+/// `0x800401F0`（`CO_E_NOTINITIALIZED`，“CoInitialize has not been called”），
+/// 而本层只看到“建环境失败”这一句。
+///
+/// 症状很阴：**界面一切正常、属性面 `supported=true`**（Loader 能加载、Runtime 版本
+/// 查得到），只有导航与页面永远不出现。gallery 之所以没暴露，是因为它进页面时
+/// 进程里已另有路径调过；换一个“窗口一建就导般”的宿主（桌面端就是这样）立刻现形。
+///
+/// ## 为何是 STA + 只调一次
+///
+/// WebView2 要求 `COINIT_APARTMENTTHREADED`（同 `docs/PITFALLS.md` 里那条）。
+/// `RPC_E_CHANGED_MODE`（套间已被别人按 MTA 调过）**不算失败**：那时进程已在
+/// 一个套间里，COM 可用，只是模式不是我们想要的——如实记一笔，继续走。
+///
+/// 返回值仅用于日志：真失败时后续 `create_environment` 会给出更具体的原因。
+void ensure_com_apartment() {
+  static const bool initialized = [] {
+    const HRESULT hr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(hr)) {
+      ST_LOG_INFO("webview：COM 套间已初始化（STA）");
+      return true;
+    }
+    if (hr == RPC_E_CHANGED_MODE) {
+      ST_LOG_INFO("webview：COM 套间已是其它模式（RPC_E_CHANGED_MODE），继续");
+      return true;
+    }
+    ST_LOG_INFO("webview：CoInitializeEx 失败（HRESULT=0x{:08X}）", static_cast<unsigned>(hr));
+    return false;
+  }();
+  (void)initialized;
 }
 
 /// COM 接口的 RAII 包装（只做 AddRef/Release，不做别的）。
@@ -481,6 +521,7 @@ class Win32WebView final : public WebViewHost {
   [[nodiscard]] auto webview_go_back() -> Status override;
   [[nodiscard]] auto webview_go_forward() -> Status override;
 
+  [[nodiscard]] auto webview_add_init_script(std::string_view script) -> Status override;
   [[nodiscard]] auto webview_execute_script(std::string_view script, std::string& result)
       -> Status override;
   [[nodiscard]] auto webview_post_message(std::string_view text) -> Status override;
@@ -513,6 +554,8 @@ class Win32WebView final : public WebViewHost {
 
   void push_event(Event event);
   void sync_bounds_to_host();
+  /// 把一段脚本注册为“每次新文档创建时执行”（`AddScriptToExecuteOnDocumentCreated`）。
+  auto apply_init_script(const std::string& script) -> HRESULT;
 
   HWND parent_{nullptr};
   HWND host_{nullptr};
@@ -538,6 +581,8 @@ class Win32WebView final : public WebViewHost {
   std::string title_{};
   bool loading_{false};
   bool script_enabled_{true};
+  /// 文档初始化脚本（注册顺序即执行顺序；页面就绪时逐条下发）。
+  std::vector<std::string> init_scripts_{};
   std::size_t asset_count_{0};
   /// 虚拟 origin 的资源表副本（拦截器在 COM 回调里跑，不能引用调用方的临时对象）。
   WebAssets assets_{};
@@ -684,6 +729,8 @@ void Win32WebView::begin_create() {
   creating_ = true;
   ready_ = false;
   failure_.clear();
+  // COM 套间必须是调入状态，否则建环境直接回 `CO_E_NOTINITIALIZED`（见 ensure_com_apartment）。
+  ensure_com_apartment();
 
   ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler* env_handler =
       make_handler<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
@@ -789,6 +836,18 @@ void Win32WebView::on_controller_ready() {
     settings_->put_IsWebMessageEnabled(TRUE);
     settings_->put_AreDefaultScriptDialogsEnabled(TRUE);
     settings_->put_IsScriptEnabled(script_enabled_ ? TRUE : FALSE);
+  }
+  // 文档初始化脚本：**必须在任何导航之前落地**。
+  //
+  // 为何不能等导航完成再 `ExecuteScript`：页面的模块体在文档解析阶段就求值了，
+  // 那时全局标记必须已经存在（注入晚一步的症状是“返回值对、行为不生效”）。
+  // 建页面时没有导航发生，这里就是最早的可下发点。
+  for (const auto& script : init_scripts_) {
+    const HRESULT applied = apply_init_script(script);
+    if (FAILED(applied)) {
+      ST_LOG_INFO("webview：文档初始化脚本下发失败（HRESULT=0x{:08X}）",
+                  static_cast<unsigned>(applied));
+    }
   }
   // DPI 变化：**重新下发**（导航/显示器切换都会重置它，见文件头第 1 条）。
   if (controller3_.valid()) {
@@ -915,6 +974,29 @@ void Win32WebView::apply_rasterization_scale() {
   target_scale_ = target_rasterization_scale();
   if (!controller3_.valid()) return;
   controller3_->put_RasterizationScale(target_scale_);
+}
+
+auto Win32WebView::apply_init_script(const std::string& script) -> HRESULT {
+  if (!webview_.valid()) return E_UNEXPECTED;
+  // 这个接口是异步的（完成时有回调），但**不需等回执**：注册与导航进同一条
+  // WebView2 内部队列（按调用顺序处理）——先注册后导航，就是先注入后加载。
+  ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler* handler =
+      make_handler<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+                   &IID_ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+                   HRESULT(HRESULT, LPCWSTR)>(
+          [](HRESULT result, LPCWSTR id) -> HRESULT {
+            if (FAILED(result)) {
+              ST_LOG_INFO("webview：文档初始化脚本注册失败（HRESULT=0x{:08X}）",
+                          static_cast<unsigned>(result));
+            } else if (id != nullptr) {
+              ST_LOG_INFO("webview：文档初始化脚本已注册（id={}）", narrow(id));
+            }
+            return S_OK;
+          });
+  const HRESULT issued =
+      webview_->AddScriptToExecuteOnDocumentCreated(widen(script).c_str(), handler);
+  handler->Release();   // COM 已持有自己的引用
+  return issued;
 }
 
 void Win32WebView::webview_destroy() {
@@ -1223,6 +1305,23 @@ auto Win32WebView::webview_go_forward() -> Status {
   }
   const HRESULT hr = webview_->GoForward();
   if (FAILED(hr)) return unexpected(ErrorCode::Io, "前进失败");
+  return ok();
+}
+
+auto Win32WebView::webview_add_init_script(std::string_view script) -> Status {
+  if (script.empty()) return unexpected(ErrorCode::Invalid, "脚本为空");
+  // 两件事：存起来（页面还没建时也能注册）+ 页面已在则立即下发。
+  //
+  // 为何要存：调用方通常在**建页面之前**就要标记身份（前端模块体在文档解析时就读它）。
+  // WebView2 的接口只能在拿到 `ICoreWebView2` 之后调，所以“先登记、后落地”。
+  init_scripts_.emplace_back(script);
+  if (!webview_.valid()) return ok();   // 页面就绪时由 on_controller_ready 统一落地
+  const HRESULT hr = apply_init_script(init_scripts_.back());
+  if (FAILED(hr)) {
+    return unexpected(ErrorCode::Io,
+                      std::format("注册文档初始化脚本失败（HRESULT=0x{:08X}）",
+                                  static_cast<unsigned>(hr)));
+  }
   return ok();
 }
 

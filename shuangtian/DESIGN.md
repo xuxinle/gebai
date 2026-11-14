@@ -5109,7 +5109,7 @@ RFC 2606 保留域，保证不与真实站点撞名），其下**所有**请求�
 而字节全在 exe 里——离线可用、无外部文件依赖。
 
 **共用的可编程控制面**：`navigate` / `reload` / `stop` / `go_back` / `go_forward` /
-`execute_script`（同步回读）/ `post_message`（宿主 → 页面）/ `set_zoom` /
+`execute_script`（同步回读）/ `add_init_script`（**文档创建时**执行的脚本）/ `post_message`（宿主 → 页面）/ `set_zoom` /
 `set_script_enabled`；事件：`NavigationStarting` / `NavigationCompleted` / `TitleChanged` /
 `WebMessageReceived`（页面 → 宿主）/ `ProcessFailed` / `RasterizationScaleChanged`。
 对上三条通路：C++ 直接调、控制通道 `invoke`/`get`、JS 脚本层。
@@ -5122,6 +5122,8 @@ RFC 2606 保留域，保证不与真实站点撞名），其下**所有**请求�
 | Loader **运行时加载** + 编译期嵌入 | 上游静态 Loader 库是 MSVC 产物，MinGW 链不上（`__security_cookie` / `IID_*` 重定义）。恰好也符合 §10 第 1 条：不产生链接期依赖。嵌入的 DLL 首次使用时落盘到临时目录再加载，产物仍是单 exe |
 | DPI 必须**在事件里重下发** | `put_RasterizationScale` 在导航后被平台改回 1.0（实测 1.25 → 1.000）：高 DPI 下网页缩成一半，而属性读数全“正常”。做法：`RasterizationScaleChanged` 里重下发 + 每次导航完成后再补一次 |
 | 异步结果走**页面回推** | `ExecuteScript` 不解析 Promise（`async` 返回 `{}`），再发一次同步读取也拿不到（时序无保证，实测拿到 `"pending"`）。所以异步流程由页面 `postMessage` 回推——这条路顺带就是“页面 → 宿主”那条能力 |
+| **页面启动前就要在的标记**走 `add_init_script` | 前端常在模块体里读宿主标记（`const isDesktop = !!window.__X__`）。`ExecuteScript` 要到导航完成后才能跑，那时模块早已求值（读到的永远是 `undefined`，而返回值断言看起来“成功”）。正确通路是 `AddScriptToExecuteOnDocumentCreated`（本层封装为 `webview_add_init_script`），必须在首次导航**之前**注册 |
+| **COM 套间必须自己调入** | `CreateCoreWebView2EnvironmentWithOptions` 要求当前线程已调入套间，否则回 `0x800401F0`（`CO_E_NOTINITIALIZED`），而外层只看到“建环境失败”。症状阴：`supported=true`、窗口正常，**只有页面永远不出现**（gallery 因进程里已有其它路径调过而没暴露）。做法：`ensure_com_apartment()`——`COINIT_APARTMENTTHREADED`，`RPC_E_CHANGED_MODE` 不算失败 |
 | 两层接口（`ui::WebViewPort` 与 `shell::webview::WebViewHost`） | 依赖方向是 `ui ← shell`：ui 不能包含 shell。两侧各留一份镜像结构（与 `ChildViewProbe` 同一先例），折接只在 `app` 层一处发生 |
 | 能力可用性要问两次（指针 ≠ 支持） | 端口指针非空不等于能力可用（未装 Runtime / 非 Windows 时指针在、`supported()==false`）。建设页面/导航前必须问 `webview_supported()`，否则会“看着在做事、实际什么都不会发生” |
 

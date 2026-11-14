@@ -10,8 +10,8 @@ const DESKTOP_PORT = 47896
 
 /**
  * 桌面端宿主（浏览器形态）：同进程启动服务端并自动打开系统默认浏览器；
- * 原生窗口形态见 launcher/（tao/wry 启动器，spawn 本二进制并连接 WebView，
- * 以 GEBAI_NO_OPEN=1 走此入口时不打开浏览器）。
+ * 原生窗口形态见 shuangtian/apps/gebai_desktop/（霜天原生宿主：自绘窗口 + 整窗 WebView2，
+ * spawn 本二进制并导航，以 GEBAI_NO_OPEN=1 走此入口时不打开浏览器）。
  */
 export async function runDesktop(overrides: Parameters<typeof startServer>[0] = {}) {
   // 固定端口（见 DESKTOP_PORT 注释）；显式 GEBAI_PORT 或调用方 overrides.port 优先

@@ -65,8 +65,16 @@ struct RunResult {
     auto operator=(StreamHandle&&) noexcept -> StreamHandle&;
 
     /// 启动子进程。失败时**不抛异常**：调完用 `valid()` 判定，`error()` 拿原因。
+    ///
+    /// `env` 是**附加/覆盖**的环境变量（同名键只保留本表的值；未列的键继承父进程）。
+    ///
+    /// 为何需要它：一件事必须由**子进程**看到、而不能改父进程环境——典型是
+    /// 「别让服务端自己开浏览器」（`GEBAI_NO_OPEN=1`）与「给它指定固定端口」。
+    /// 改父进程环境是可行的替代，但它会**传染给之后父进程拉起的每一个子进程**
+    /// （宿主可能还要起别的工具），而 `open` 的作用域就只有这一个。
     void open(std::string_view program, const std::vector<std::string>& args, std::string_view cwd,
-              bool merge_stderr = true);
+              bool merge_stderr = true,
+              const std::map<std::string, std::string>& env = {});
 
     /// 读一行（不含行尾）。返回 false = 流已结束（EOF/出错）。
     /// **会阻塞**——这是给工作线程用的，不要在 GUI 主线里调。

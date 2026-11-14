@@ -308,6 +308,22 @@ auto WebView::go_forward() -> bool {
   return true;
 }
 
+auto WebView::add_init_script(std::string_view script) -> bool {
+  WebViewPort* owner = port();
+  if (owner == nullptr) {
+    set_status("宿主没有浏览器能力（无头 / 非 Windows）");
+    return false;
+  }
+  // **不在这里建页面**：初始化脚本的语义是“下一次文档创建时生效”，
+  // 它比页面更早——端口会先存起来，建页面时统一下发。
+  const Status done = owner->webview_add_init_script(script);
+  if (!done) {
+    set_status(done.error().message);
+    return false;
+  }
+  return true;
+}
+
 auto WebView::execute_script(std::string_view script, std::string& result) -> bool {
   WebViewPort* owner = port();
   if (owner == nullptr) {

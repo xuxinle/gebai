@@ -291,6 +291,23 @@ class WebViewHost {
 
   // ── 编程控制（这是本能力存在的理由）──
 
+  /// 注册一段**文档创建时**执行的脚本（每次新文档都跑，在任何页面脚本之前）。
+  ///
+  /// ## 为何不能用 `execute_script` 代替（实测代价）
+  ///
+  /// 页面的模块体在**文档解析阶段**求值——前端常在那里读全局标记
+  ///（典型：`const isDesktop = !!window.__SOME_HOST__`）。等
+  /// `NavigationCompleted` 再 `execute_script` 已经晚了：那个模块体早已跑完，
+  /// 读到的永远是 `undefined`。实测症状：注入脚本返回 `window.__X__ === 1` 为真，
+  /// 而依赖它的界面行为（下载提示等）完全不生效——两边都是“成功”，只有结果不对。
+  ///
+  /// 平台语义：WebView2 的 `AddScriptToExecuteOnDocumentCreated`（对**之后**的每个文档生效）。
+  /// 必须在首次 `webview_navigate` **之前**注册。
+  [[nodiscard]] virtual auto webview_add_init_script([[maybe_unused]] std::string_view script)
+      -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持嵌入浏览器");
+  }
+
   /// 执行一段 JS，**同步**回读其求值结果的 JSON 表示。
   ///
   /// ⚠ **不解析 Promise**（见文件头第 2 条）：`async` 函数的返回值是 `{}`。

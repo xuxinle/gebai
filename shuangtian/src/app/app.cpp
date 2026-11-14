@@ -395,6 +395,10 @@ class WebViewPortAdapter final : public ui::WebViewPort {
     return host_->webview_go_forward();
   }
 
+  [[nodiscard]] auto webview_add_init_script(std::string_view script) -> Status override {
+    if (host_ == nullptr) return unsupported();
+    return host_->webview_add_init_script(script);
+  }
   [[nodiscard]] auto webview_execute_script(std::string_view script, std::string& result)
       -> Status override {
     if (host_ == nullptr) return unsupported();

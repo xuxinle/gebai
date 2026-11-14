@@ -11,12 +11,14 @@
       "inputs": [
         "src/**",
         "scripts/**",
-        "launcher/**",
         "package.json",
         "../../keqing/**",
         "../../custom/**",
         "../../packages/*/src/**",
-        "../../packages/*/package.json"
+        "../../packages/*/package.json",
+        "../../shuangtian/apps/gebai_desktop/**",
+        "../../shuangtian/src/**",
+        "../../shuangtian/include/**"
       ]
     },
     "dev": {

@@ -143,6 +143,15 @@ class WebView : public Element {
   /// ⚠ **不解析 Promise**：`async` 函数的返回是 `{}`。异步流程用 `post_message`
   /// 让页面回推，并在 `on_message` 里收。
   auto execute_script(std::string_view script, std::string& result) -> bool;
+  /// 注册**文档创建时**执行的脚本（每次新文档都跑，且先于页面自己的脚本）。
+  ///
+  /// ## 为何需要它（与 `execute_script` 的分工）
+  ///
+  /// 页面的模块体在**文档解析阶段**求值，常在那里读宿主标记
+  ///（`const isDesktop = !!window.__X__`）。等导航完成再 `execute_script` 已经晚了：
+  /// 模块早就跑完，读到的永远是 `undefined`——而两边都回报成功。
+  /// 需要“页面一启动就知道宿主是谁”时用本方法；它必须在首次导航**之前**注册。
+  auto add_init_script(std::string_view script) -> bool;
   /// 宿主 → 页面：发一条字符串消息。
   auto post_message(std::string_view text) -> bool;
   auto set_zoom(double factor) -> bool;

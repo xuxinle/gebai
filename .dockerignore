@@ -12,7 +12,6 @@ node_modules
 **/*.exe
 **/*.bun-build
 packages/web/public/vendor
-packages/desktop/launcher/target
 # 构建期生成的注册表/内嵌产物：逐个列出（不能整类排除——env-embedded.generated.ts 与
 # tools-excluded.generated.ts 是**入库源码**，见 .gitignore 的反例说明），且 Windows 上生成的
 # rg.embedded.generated.json 内嵌的是 rg.exe，带进 Linux 构建会嵌错二进制

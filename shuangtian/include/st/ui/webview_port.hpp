@@ -161,6 +161,16 @@ class WebViewPort {
     return unexpected(ErrorCode::Unsupported, "该宿主不支持嵌入浏览器");
   }
 
+  /// 注册一段**文档创建时**执行的脚本（每次新文档都跑，且**先于页面自己的脚本**）。
+  ///
+  /// 为何单独一条、而不是复用 `webview_execute_script`：页面的模块体在文档解析阶段
+  /// 就求值了（典型写法 `const isDesktop = !!window.__HOST_MARK__`）。等导航完成后
+  /// 再执行已经晚了一步——读到的永远是 `undefined`，而两边都回报成功。
+  [[nodiscard]] virtual auto webview_add_init_script([[maybe_unused]] std::string_view script)
+      -> Status {
+    return unexpected(ErrorCode::Unsupported, "该宿主不支持嵌入浏览器");
+  }
+
   /// 执行 JS 并**同步**回读结果（不解析 Promise——异步结果由页面 `post_message` 回推）。
   [[nodiscard]] virtual auto webview_execute_script([[maybe_unused]] std::string_view script,
                                                     [[maybe_unused]] std::string& result) -> Status {
