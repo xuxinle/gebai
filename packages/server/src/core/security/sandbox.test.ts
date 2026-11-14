@@ -174,10 +174,32 @@ describe("Windows 命令解释器（PowerShell）", () => {
     expect(wrapped).toContain("[Console]::OutputEncoding = [Text.Encoding]::UTF8")
     expect(wrapped).toContain("$ProgressPreference = 'SilentlyContinue'")
     // 收尾段：原生命令退出码带出（-Command 默认把退出码归一成 0/1）+ 失败兜底 1
-    expect(wrapped).toContain("if ($LASTEXITCODE) { exit $LASTEXITCODE }")
-    expect(lines[lines.length - 1]).toBe("exit 1")
+    expect(wrapped).toContain("exit $LASTEXITCODE")
+    expect(lines[lines.length - 1]).toBe("exit 0")
     // 用户命令自占一行：以 # 注释结尾时不吞收尾段
-    expect(lines[lines.indexOf("echo hi") + 1]).toBe("if ($?) { exit 0 }")
+    expect(lines[lines.indexOf("echo hi") + 1]).toContain("$LASTEXITCODE")
+  })
+
+  // 收尾段判定顺序是**回归钉子**：PS 5.1 下 `原生命令 2>&1 | Out-String` 会把原生进程的 stderr
+  // 包装成 ErrorRecord（`$?` 因此变 False），而进程本身成功。`git push`/`git status` 的进度与
+  // 状态行、编译器警告全都走 stderr——若按 `$?` 先判，这些命令会被一律报成退出码 1。
+  test("wrapPowerShellCommand：收尾段以 $LASTEXITCODE 为准，stderr 噪声不算失败", () => {
+    const lines = wrapPowerShellCommand("echo hi").split("\n")
+    const epilogue = lines.slice(lines.indexOf("echo hi") + 1)
+    // ① 原生命令退出码优先（真失败带真实码，不归一到 1）
+    expect(epilogue[0]).toContain("$LASTEXITCODE")
+    expect(epilogue[0]).toContain("exit $LASTEXITCODE")
+    // ② NativeCommandError = 原生往 stderr 写了东西（不等于失败）：直接判成功
+    expect(epilogue.join("\n")).toContain("FullyQualifiedErrorId -eq 'NativeCommandError'")
+    // ③ 其余 $? 为假才是 PowerShell 语句层失败（归一 1）
+    expect(epilogue.join("\n")).toContain("if (-not $?) { exit 1 }")
+    // ④ `$?` 不得先于 $LASTEXITCODE 判定（顺序反过来就是那个 bug）
+    const qAt = epilogue.findIndex((l) => l.includes("if ($?) { exit 0 }"))
+    expect(qAt).toBe(-1)
+    const lastAt = epilogue.findIndex((l) => l.includes("$LASTEXITCODE -ne 0"))
+    const notQAt = epilogue.findIndex((l) => l.includes("if (-not $?)"))
+    expect(lastAt).toBeGreaterThanOrEqual(0)
+    expect(lastAt).toBeLessThan(notQAt)
   })
 
   // UTF-8 引导段是**四条独立通道**，每条都要单独钉住——只测一条会让另三条静默退化。
@@ -327,6 +349,33 @@ describe("Windows 命令解释器（PowerShell）", () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
+    })
+
+    // 收尾段的退出码口径（**回归钉子**）：PS 5.1 下 `原生命令 2>&1 | Out-String` 会把 stderr
+    // 包装成 ErrorRecord（`$?` 因此变 False），而进程本身成功——`git push` / `git status` 的进度
+    // 与状态行、编译器警告全都走 stderr，若按 `$?` 先判就会把它们一律报成退出码 1
+    // （实测：推送成功却报 `[exit 1]`）。这里跑真实解释器，同时钉住两种解释器。
+    test(`真实执行（${label}）：成功写 stderr 不算失败，真失败带真实码`, async () => {
+      const runShell = async (command: string) => {
+        const child = spawn(
+          shellFile,
+          ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", wrapPowerShellCommand(command)],
+          { stdio: ["pipe", "pipe", "pipe"] },
+        )
+        child.stdout.resume()
+        child.stderr.resume()
+        return await new Promise<number>((res) => child.on("close", (c) => res(c ?? 1)))
+      }
+      // PS 侧命令统一用 cmd /c 造原生进程：两种解释器下行为一致
+      // ① 原生进程成功但往 stderr 写了东西（即那个 bug 的形态）
+      expect(await runShell(`cmd /c "echo noise 1>&2 & exit /b 0" 2>&1 | Out-String | Out-Null`)).toBe(0)
+      // ② 原生进程成功、无 stderr（基线：不得因修复而退化）
+      expect(await runShell(`cmd /c "echo ok & exit /b 0" | Out-Null`)).toBe(0)
+      // ③ 原生真失败：带出真实码（不被归一到 1）
+      expect(await runShell(`cmd /c "exit /b 3" | Out-Null`)).toBe(3)
+      expect(await runShell(`cmd /c "echo e 1>&2 & exit /b 3" 2>&1 | Out-String | Out-Null`)).toBe(3)
+      // ④ PowerShell 语句层失败（非原生命令）归一为 1
+      expect(await runShell(`Get-Content -LiteralPath 'C:\\__gebai_nope__.txt' 2>$null`)).toBe(1)
     })
   }
 })
