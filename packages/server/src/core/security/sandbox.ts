@@ -153,7 +153,15 @@ const PS_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", 
  *  ——传对象会**绑定失败并静默回落到默认 UTF-16**（实测写出 `ff fe` 开头）。
  *  代价是 PS 5.1 下 `'utf8'` 会**带 BOM**（`ef bb bf`），而 pwsh 7 下 `'utf8'` 无 BOM。
  *  两者取了“编码对”而不是“无 BOM”：读侧（`st::fs::read_text`）已剥 BOM，
- *  而乱码是不可接受的（前者只是丑一拍，后者是根本读不出来）。 */
+ *  而乱码是不可接受的（前者只是丑一拍，后者是根本读不出来）。
+ *
+ *  ⚠ **PS 5.1 的 `'utf8'` 必带 BOM，覆写 `Out-File` 也修不了**（实测两条都试过，均不可行）：
+ *  ① 写对象 `[Text.UTF8Encoding]::new($false)` → 绑定失败静默回落 UTF-16（写出 `ff fe`）；
+ *  ② 用函数覆盖 `Out-File` 自写无 BOM 实现 → **`>` 重定向当场静默失效**（重定向编辑器依赖 cmdlet 元数据，
+ *     被函数顶掉后既无报错也无输出）。故本段取“编码对”而不是“无 BOM”，BOM 由写入口径与
+ *     `check:bom` 闸门在**仓库侧**把关（不指望 PowerShell 自身）。
+ *  真正的根因级修法在 `resolveWinShell`：**默认优先 pwsh 7**（它的 `'utf8'` 无 BOM），
+ *  而它的探测依赖 `which()` 能认出 WindowsApps 的应用执行别名（见 `core/exec/which.ts`）。 */
 const PS_PREAMBLE = [
   "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }",
   "try { [Console]::InputEncoding = [Text.Encoding]::UTF8 } catch { }",

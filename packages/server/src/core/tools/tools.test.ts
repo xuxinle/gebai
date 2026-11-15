@@ -623,32 +623,37 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("BOM 感知：read 显示去 BOM、edit/write 保留回写（首行匹配不再静默失败）", async () => {
+  test("BOM 策略：read 显示去 BOM；edit/write 一律按无 BOM 写回（UTF-16 的 BOM 另存保留）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-bom-"))
     const c = ctx(home)
     const BOM = "\uFEFF"
     // 校验读取用 node utf8（Bun.file().text() 会剥 BOM，测不出文件头是否保留）
     const rawText = async (p: string) => (await import("node:fs/promises")).readFile(p, "utf8")
+    const rawBytes = async (p: string) => new Uint8Array(await (await import("node:fs/promises")).readFile(p))
+    const hasBom = (b: Uint8Array) => b.length >= 3 && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf
     // read：BOM 不进输出（首行行号干净）
     await c.writeFile(join(c.workdir, "b1.ts"), BOM + "const a = 1\nconst b = 2\n")
     const r = await readTool.execute({ path: "b1.ts", line_numbers: false }, c)
     expect(r.output.startsWith("const a = 1")).toBe(true)
-    // edit：old_string 无需含 BOM 即可命中首行；写回后文件仍保留 BOM
-    await editTool.execute({ path: "b1.ts", edits: [{ old_string: "const a = 1", new_string: "const A = 1" }] }, c)
+    // edit：old_string 无需含 BOM 即可命中首行；**写回后 BOM 被清掉**（UTF-8 的 BOM 是可选的，且会污染首行）
+    const e1 = await editTool.execute({ path: "b1.ts", edits: [{ old_string: "const a = 1", new_string: "const A = 1" }] }, c)
+    expect(e1.output).toContain("已按无 BOM 写回")
+    expect(hasBom(await rawBytes(join(c.workdir, "b1.ts")))).toBe(false)
     const afterEdit = await rawText(join(c.workdir, "b1.ts"))
-    expect(afterEdit.startsWith(BOM)).toBe(true)
-    expect(afterEdit).toContain("const A = 1")
-    // edit：第二处修改同样去 BOM 匹配、写回补 BOM（多次编辑不丢文件头）
+    expect(afterEdit).toBe("const A = 1\nconst b = 2\n")
+    // edit 第二次：已无 BOM 的文件照常工作（不再出现「补 BOM」路径）
     const e2 = await editTool.execute({ path: "b1.ts", edits: [{ old_string: "const b = 2", new_string: "const b = 22" }] }, c)
     expect(e2.output).toContain("已对 b1.ts")
-    const afterEdit2 = await rawText(join(c.workdir, "b1.ts"))
-    expect(afterEdit2.startsWith(BOM)).toBe(true)
-    expect(afterEdit2).toContain("const b = 22")
-    // write 覆盖：原 BOM 文件覆盖写后 BOM 保留（内容前缀 BOM 不重复）
-    await readTool.execute({ path: "b1.ts" }, c)
-    await writeTool.execute({ path: "b1.ts", content: "const x = 9\n" }, c)
-    const afterWrite = await rawText(join(c.workdir, "b1.ts"))
-    expect(afterWrite).toBe(BOM + "const x = 9\n")
+    expect(await rawText(join(c.workdir, "b1.ts"))).toBe("const A = 1\nconst b = 22\n")
+    // write 覆盖：即使原文件带 BOM，落盘也不带（并且不重复 BOM）
+    await c.writeFile(join(c.workdir, "b2.ts"), BOM + "old\n")
+    await readTool.execute({ path: "b2.ts" }, c)
+    const w = await writeTool.execute({ path: "b2.ts", content: "const x = 9\n" }, c)
+    expect(w.output).toContain("原文件的 UTF-8 BOM 已清掉")
+    expect(await rawText(join(c.workdir, "b2.ts"))).toBe("const x = 9\n")
+    // write 新建：从不主动加 BOM
+    await writeTool.execute({ path: "b3.ts", content: "fresh\n" }, c)
+    expect(hasBom(await rawBytes(join(c.workdir, "b3.ts")))).toBe(false)
     cleanup(home)
   })
 
@@ -3752,13 +3757,13 @@ test("edit 行尾自适应：CRLF 文件 × LF old_string——匹配成功、�
   const r4 = await editTool.execute({ path: "lf.txt", edits: [{ old_string: "a\nb", new_string: "A\nB" }] }, c)
   expect(r4.output).toContain("已对 lf.txt")
   expect(await rawText(join(c.workdir, "lf.txt"))).toBe("A\nB\n")
-  // BOM + CRLF 叠加：两者同时保留
+  // BOM + CRLF 叠加：行尾保留（CRLF 是用户的换行风格），BOM 则按写入口径清掉
   writeFileSync(join(c.workdir, "bom-crlf.txt"), "\uFEFFheader\r\nbody\r\n")
   await readTool.execute({ path: "bom-crlf.txt" }, c)
   const r5 = await editTool.execute({ path: "bom-crlf.txt", edits: [{ old_string: "header\nbody", new_string: "HEADER\nBODY" }] }, c)
   expect(r5.output).toContain("已对 bom-crlf.txt")
   const after5 = await rawText(join(c.workdir, "bom-crlf.txt"))
-  expect(after5).toBe("\uFEFFHEADER\r\nBODY\r\n")
+  expect(after5).toBe("HEADER\r\nBODY\r\n")
   cleanup(home)
 })
 

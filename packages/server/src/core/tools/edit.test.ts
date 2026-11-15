@@ -126,6 +126,22 @@ describe("edit 编码与行尾健壮性", () => {
     const back = decodeTextFile(new Uint8Array(readFileSync(join(c.workdir, "u16.txt"))))!
     expect(back.encoding).toBe("utf-16le")
     expect(back.text).toBe("hello\nWORLD\n")
+    // UTF-16 的 BOM 承载字节序（解码必需），必须原样保留——与 UTF-8 的「写回清 BOM」相反
+    const bytes = new Uint8Array(readFileSync(join(c.workdir, "u16.txt")))
+    expect([bytes[0], bytes[1]]).toEqual([0xff, 0xfe])
+  })
+
+  test("UTF-8 BOM 文件：edit 写回后 BOM 被清掉（UTF-8 的 BOM 可选，且会污染首行）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-bom-"))
+    const c = ctx(home)
+    const withBom = () => new Uint8Array(readFileSync(join(c.workdir, "bom.txt")))
+    writeFileSync(join(c.workdir, "bom.txt"), "\uFEFFalpha\nbeta\n")
+    await readTool.execute({ path: "bom.txt" }, c)
+    const e = await editTool.execute({ path: "bom.txt", edits: [{ old_string: "beta", new_string: "BETA" }] }, c)
+    expect(e.output).toContain("已按无 BOM 写回")
+    const bytes = withBom()
+    expect(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf).toBe(false)
+    expect(new TextDecoder().decode(bytes)).toBe("alpha\nBETA\n")
   })
 
   test("混合行尾文件：未修改区域字节级保留（CRLF/LF 原样），仅替换文本按主导行尾", async () => {

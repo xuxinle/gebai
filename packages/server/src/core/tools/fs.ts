@@ -134,7 +134,8 @@ function withLineNumbers(text: string, startLine: number): string {
 }
 
 /** 剥离 UTF-8 BOM（文件头 \uFEFF）：read 展示与 edit 匹配用干净正文（BOM 会让文件首行的
- *  old_string 精确匹配静默失败——Windows 工具生成的文件常见）；写回时按原文件有无 BOM 补回（edit/write）。 */
+ *  old_string 精确匹配静默失败——Windows 工具生成的文件常见）。写入口径统一**不带 BOM**（write/edit 均如此），
+ *  因此无需“按原文件有无 BOM 补回”；UTF-16 的 BOM 承载字节序，由编解码层原样保留。 */
 function stripBom(s: string): string {
   return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s
 }
@@ -275,7 +276,7 @@ async function withPathWriteLock<T>(absPath: string, fn: () => Promise<T>): Prom
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件（默认整体覆盖；append:true 追加到文件末尾、不存在则新建）。目标文件**已存在且本会话未 read 过**、或**自上次读取/写入后已被改动**（并行分支、脚本命令、外部编辑）时拒绝写入（防盲覆盖与陈旧覆盖；新建文件不受限）。**内容护栏**：content 若以「[输出超长，已截断」开头会被拒绝——那是 `read` 的**截断提示文本**、不是文件内容。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写（每段 200~300 行），避免单次输出过长被截断或接口超时。",
+    "写入文件（默认整体覆盖；append:true 追加到文件末尾、不存在则新建）。写入一律**不带 UTF-8 BOM**（原文件带 BOM 时覆盖写会清掉它）。目标文件**已存在且本会话未 read 过**、或**自上次读取/写入后已被改动**（并行分支、脚本命令、外部编辑）时拒绝写入（防盲覆盖与陈旧覆盖；新建文件不受限）。**内容护栏**：content 若以「[输出超长，已截断」开头会被拒绝——那是 `read` 的**截断提示文本**、不是文件内容。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写（每段 200~300 行），避免单次输出过长被截断或接口超时。",
   card: { titleParams: ["path"], args: "code", codeField: "content", file: "path" },
   parameters: schema({
     path: { type: "string" },
@@ -336,17 +337,20 @@ export const writeTool: Tool = {
             `大文件改写请用 edit 定点改；确需整体覆盖先分段 read 拼出全文（或直接读截断落盘文件），并核对行数与原文一致。`,
         }
       }
-      // 覆盖写保留原文件的 UTF-8 BOM（read 展示的是去 BOM 正文，模型意图即正文；BOM 丢失会改变文件字节内容）；
-      // 追加模式接在 existing 之后不动文件头
-      const bom = existing !== null && existing.startsWith("\uFEFF") ? "\uFEFF" : ""
-      const final = append && existing !== null ? existing + content : bom + content
+      // 覆盖写一律按无 BOM 落盘（append 模式接在 existing 之后不动文件头）。
+      // UTF-8 的 BOM 是可选的，留着会让首行带零宽字符——git diff 多一行、shebang/JSON 首字符被污染；
+      // 模型给的是正文，所以要的就是正文。原文件若带 BOM，覆盖后即被清掉。
+      const final = append && existing !== null ? existing + content : content
       await ctx.writeFile(path, final)
       ctx.fileGuard?.markRead(path, final)
       const blocks = artifactBlocks(previewLogicalPath(path, ctx), final)
+      // 追加模式若接在一个带 BOM 的文件后面（BOM 是既有的，不是这次写进去的）如实标一声，
+      // 免得用户以后看到首行有怪字符却以为是这个工具写坏的
+      const keptBom = append && existing !== null && existing.startsWith("\uFEFF")
       return {
         output: append && existing !== null
-          ? `已追加 ${content.length} 字符至 ${args.path}（现共 ${final.length} 字符）`
-          : `已写入 ${args.path}（${content.length} 字符）`,
+          ? `已追加 ${content.length} 字符至 ${args.path}（现共 ${final.length} 字符）${keptBom ? "；该文件原有 UTF-8 BOM 未动（覆盖写即可清掉）" : ""}`
+          : `已写入 ${args.path}（${content.length} 字符）${existing?.startsWith("\uFEFF") ? "；原文件的 UTF-8 BOM 已清掉" : ""}`,
         blocks,
       }
     })
@@ -1597,7 +1601,7 @@ interface EditItem {
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：old_string → new_string 定点替换（或 pattern 正则），可一次多处、整体原子落盘；编辑项按序应用——后一项在前几项应用后的内容上匹配，因此原文落在前项改写范围内也能继续改（自动合并，无需自己拼一个大编辑项）。目标文件须本会话已 read（防盲改）；编码与行尾自适应；old_string 误携行号前缀时自动剥离。大文件改动用本工具或 write 分段，不要 read 全文后整体 write。",
+    "精确修改文件：old_string → new_string 定点替换（或 pattern 正则），可一次多处、整体原子落盘；编辑项按序应用——后一项在前几项应用后的内容上匹配，因此原文落在前项改写范围内也能继续改（自动合并，无需自己拼一个大编辑项）。目标文件须本会话已 read（防盲改）；编码与行尾自适应（UTF-8 文件写回时**清掉 BOM**，UTF-16 的 BOM 保留）；old_string 误携行号前缀时自动剥离。大文件改动用本工具或 write 分段，不要 read 全文后整体 write。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" },
   parameters: schema(
     {
@@ -1824,12 +1828,18 @@ export const editTool: Tool = {
       parts.push(bytes.subarray(cursor))
       outBytes = concatBytes(parts)
     } else {
-      outBytes = encodeText(newText, encoding)
+      /*
+       * UTF-8 文件一律按**无 BOM** 写回：BOM 在 UTF-8 里是可选的“签名”，留着会让首行带一个零宽字符
+       * （git diff 多一行 `﻿`、shebang/JSON 首字符被污染、构建脚本识别失败）。
+       * 探测出来是 `utf-8-bom` 时只是“读到了 BOM”，不等于用户要它——写入口径统一去 BOM，并在结果里如实报出。
+       * UTF-16 的 BOM 不同：它承载字节序，是解码必需的，必须原样保留（见下方 encodeText）。
+       */
+      outBytes = encodeText(newText, encoding === "utf-8-bom" ? "utf-8" : encoding)
     }
     if (!sameBytes(outBytes, bytes)) {
-      // 二进制通道优先（编码/BOM 精确保留）；未注入时（最小测试桩）UTF-8 系回落到文本写入通道
+      // 二进制通道优先（编码精确保留）；未注入时（最小测试桩）UTF-8 系回落到文本写入通道
       if (ctx.writeBinaryFile) await ctx.writeBinaryFile(path, outBytes)
-      else if (encoding === "utf-8" || encoding === "utf-8-bom") await ctx.writeFile(path, (encoding === "utf-8-bom" ? "\uFEFF" : "") + newText)
+      else if (encoding === "utf-8" || encoding === "utf-8-bom") await ctx.writeFile(path, newText)
       else return { output: `edit 失败：${args.path} 为 ${ENCODING_LABEL[encoding]} 编码，当前环境未提供二进制写入通道——请改用 write。` }
     }
     // 修改后内容即已掌握（模型无需重读验证），登记已读——指纹按落盘解码文本（与 read 口径一致）
@@ -1838,7 +1848,7 @@ export const editTool: Tool = {
     // 产物块（与 read/write 同款）：修改后的文件内容卡（内容无变化时不产出，与调用方「无变化不落盘」口径一致）
     const noChange = sameBytes(outBytes, bytes)
     const blocks = noChange ? undefined : artifactBlocks(previewLogicalPath(path, ctx), finalText)
-    const encNote = encoding === "utf-8" ? "" : `（${ENCODING_LABEL[encoding]}）`
+    const encNote = encoding === "utf-8" ? "" : encoding === "utf-8-bom" ? "（原带 UTF-8 BOM，已按无 BOM 写回）" : `（${ENCODING_LABEL[encoding]}）`
     const outNote = noChange ? "，内容无变化" : ""
     return { output: `已对 ${args.path}${encNote} 应用 ${edits.length} 处修改${outNote}：${applied.join("；")}`, blocks }
   },

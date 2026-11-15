@@ -97,12 +97,16 @@ bun install
 # 开发（脚本调试模式，GEBAI_HOME 为项目根目录）
 bun run dev          # 或 turbo run dev
 
-# 构建（内含仓库自检：存在被 gitignore 误伤的源码则直接失败）
+# 构建（内含两项仓库自检：gitignore 误伤的源码、入库文件的 UTF-8 BOM；任一不过直接失败）
 bun run build
 bun run check:repo   # 单独跑：确认没有"存在于工作树但从未入库"的源文件
 # 判定表与豁免在 scripts/check-repo-core.ts（主：源码扩展名 / 产物段名 / EXEMPT_PREFIXES）；
 # 报错而该路径确实由生成器产出或资产清单托管时，**在那里加一条精确路径 + 理由**（写清谁生成/重建入口），
 # 不要放宽 IGNORED_SEGMENTS（全局段名会盖住真实漏项）。判定核有单测（scripts/check-repo-core.test.ts）。
+bun run check:bom    # 单独跑：入库文本文件不得带 UTF-8 BOM（判定核 scripts/check-bom-core.ts + 单测）
+# PS1/BAT/CMD 是**必须带 BOM** 的例外（PowerShell 5.1 读无 BOM 脚本按 ANSI 代码页解，带中文的脚本会静默无输出）；
+# 工具侧的写入口径已统一去 BOM（write/edit 都是），写入工具别再选「UTF-8 with BOM」。
+# 写文件时：PowerShell 5.1 的 `Set-Content/Out-File -Encoding utf8` **必带 BOM**，用 pwsh 7 或不给编码参数。
 
 # 测试（bun test，测试文件与被测代码同目录 *.test.ts）
 bun run test                 # 经 turbo：**命中缓存时会回放日志而不真跑**（要确信就跑下面两条或加 --force）

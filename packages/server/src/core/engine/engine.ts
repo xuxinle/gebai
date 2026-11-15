@@ -73,7 +73,7 @@ function clipArgsError(s: string | undefined): string {
 }
 
 /** 文件内容指纹（fileGuard 防陈旧覆盖）：BOM 无关（去 \uFEFF 前缀后哈希——read 登记去 BOM 正文、
- *  write 比对含 BOM 原文，边界归一后一致），sha256 十六进制前 16 位（非加密用途，防撞足够）。 */
+ *  write 比对原文，边界归一后一致），sha256 十六进制前 16 位（非加密用途，防撞足够）。 */
 function fingerprint(content: string): string {
   const body = content.startsWith("\uFEFF") ? content.slice(1) : content
   return createHash("sha256").update(body).digest("hex").slice(0, 16)
@@ -910,8 +910,8 @@ private activeSchemas(sessionId: string) {
     if (m.size) this.dynamicTools.set(sessionId, m)
   }
 
-  /** 取（或建）会话的 fileGuard：标记/查询本会话已读文件与内容指纹（BOM 无关——read 登记去 BOM 正文、
-   *  write 比对含 BOM 原文，指纹在边界统一归一）。子会话继承上下文形态传入 fork 快照副本（与父会话/兄弟子会话隔离）。 */
+  /** 取（或建）会话的 fileGuard：标记/查询本会话已读文件与内容指纹（BOM 无关——指纹在边界统一归一）。
+ *  子会话继承上下文形态传入 fork 快照副本（与父会话/兄弟子会话隔离）。 */
   private fileGuardFor(tracked: Map<string, string | null>): NonNullable<ToolContext["fileGuard"]> {
     return {
       markRead(absPath: string, content?: string) {
@@ -1897,8 +1897,8 @@ private activeSchemas(sessionId: string) {
         if (resolveRoot) return sandbox.enforcedFor(user) ? resolveInSandbox(resolveRoot, p) : resolve(resolveRoot, p)
         return sandbox.resolvePath(user, sessionId, p)
       },
-      // node utf8 读取保留 UTF-8 BOM（Bun.file().text() 会剥离）——read 展示/edit 匹配在工具层统一
-      // stripBom 去除、edit/write 写回时按原文件补回（BOM 文件往返编辑不丢头，见 DESIGN「BOM 感知」）
+          // node utf8 读取保留 UTF-8 BOM（Bun.file().text() 会剥离）——read 展示/edit 匹配在工具层统一
+    // stripBom 去除；写入口径**不带 BOM**（write/edit 都清），故不需要补回逻辑（见 DESIGN「BOM 策略」）
       readFile: async (p) => {
         const { readFile } = await import("node:fs/promises")
         return readFile(p, "utf8")
