@@ -735,3 +735,34 @@ describe("样式契约：差异视图导航在头部不在标签栏", () => {
     expect(body).toMatch(/list\(\)\.length\s*\)\s*reveal\(0, false\)/)
   })
 })
+
+/**
+ * 样式契约：目录树里的目录行**不画文件夹图标、也不留空占位**。
+ *
+ * 守的理由：这一条纯视觉，删了不会报错、也没有功能后果——只表现成「目录行又长回一个文件夹图标」
+ * 或「名字后面多出一块空白」（占位一格 14px）。图形无测试通道，按本仓惯例钉在源码 + 样式层：
+ * ① 目录行只建 twisty + 名称（图标格只给文件行）；② `.fw-file-icon-slot` 不得再存在。
+ */
+describe("样式契约：目录树目录行无文件夹图标（也不留空占位）", () => {
+  test("目录行不画文件夹图标也不留空占位；文件行仍按扩展名上色", () => {
+    const src = stripComments(readFileSync(join(SRC, "files", "explorer.ts"), "utf8"))
+    const at = src.indexOf("function renderEntry(")
+    expect(at).toBeGreaterThan(-1)
+    const end = src.indexOf("function renderChildren(", at + 1)
+    const body = src.slice(at, end > at ? end : undefined)
+    // 文件夹图标不得再出现在树行里（图标名是 folder/folderOpen）
+    expect(body).not.toMatch(/icon\(\s*(isDir\s*\?\s*)?"folder/)
+    expect(body).not.toContain('exp ? "folderOpen" : "folder"')
+    // 图标格只在文件行建：目录行连空占位也不留（详见上方注释）
+    expect(body).toContain('if (!isDir) row.append(h("span", { class: "fw-file-icon" }, [entry.type === "symlink" ? icon("file") : fileIcon(entry.name)]))')
+    expect(body).not.toContain("fw-file-icon-slot")
+    expect(allCss()).not.toContain(".fw-file-icon-slot")
+  })
+
+  test("文件行的 twisty 占位与目录行的 twisty 同宽（各响应式档都要跟）", () => {
+    expect(ruleBody(".fw-twisty-empty")).toMatch(/width:\s*14px/)
+    // 触屏档 .fw-twisty 加到 24px 时，文件行的 .fw-twisty-empty 必须跟着加宽
+    const coarse = CONTRACT_CSS.slice(CONTRACT_CSS.indexOf("@media (pointer: coarse)"))
+    expect(coarse).toMatch(/\.fw-twisty-empty\s*\{\s*width:\s*24px/)
+  })
+})

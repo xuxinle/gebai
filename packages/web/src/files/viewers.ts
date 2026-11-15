@@ -10,6 +10,7 @@
  */
 import type { FsApi, FileStat } from "./api"
 import { h, icon, toast, formatSize, formatTime, extOf } from "./ui"
+import { fileIcon } from "./file-icons"
 import { wbUrl, wbAbsUrl } from "./url-base"
 // 扩展名 → 图表类型 的清单在 preview-kind.ts（与「可渲染形态」判定同一处，两边不会漂移）；此处转出保持既有引用路径
 import { diagramKindOf } from "./preview-kind"
@@ -248,7 +249,7 @@ function renderArchive(host: HTMLElement, ctx: ViewerCtx): () => void {
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((e) =>
           h("div", { class: `fw-archive-row${e.isDir ? " dir" : ""}` }, [
-            icon(e.isDir ? "folder" : "file"),
+            e.isDir ? icon("folder", 16) : h("span", { class: "fw-file-icon" }, [fileIcon(e.name)]),
             h("span", { class: "fw-archive-name", text: e.name, title: e.name }),
             h("span", { class: "fw-archive-size", text: e.isDir ? "" : formatSize(e.size) }),
             h("span", { class: "fw-archive-ratio", text: e.isDir || !e.compressedSize ? "" : `${Math.round((1 - e.compressedSize / Math.max(1, e.size)) * 100)}%` }),

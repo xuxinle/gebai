@@ -191,30 +191,6 @@ export function extOf(name: string): string {
   return extOfPath(name)
 }
 
-/** 文件类型 → 图标颜色类（IDE 风格的语义色，不依赖具体主题）。 */
-const ICON_COLOR: Record<string, string> = {
-  ts: "blue", tsx: "blue", mts: "blue", cts: "blue",
-  js: "yellow", jsx: "yellow", mjs: "yellow", cjs: "yellow",
-  json: "yellow", jsonc: "yellow", json5: "yellow", jsonl: "yellow",
-  md: "cyan", markdown: "cyan", mdx: "cyan", rst: "cyan",
-  py: "green", rb: "red", go: "cyan", rs: "orange", java: "red", kt: "purple", kts: "purple",
-  c: "blue", h: "blue", cpp: "blue", cc: "blue", hpp: "blue", cs: "purple", swift: "orange", dart: "cyan",
-  html: "orange", htm: "orange", vue: "green", svelte: "orange", css: "blue", scss: "pink", sass: "pink", less: "blue",
-  yml: "purple", yaml: "purple", toml: "orange", ini: "gray", conf: "gray", env: "yellow",
-  sh: "green", bash: "green", zsh: "green", ps1: "blue", bat: "gray", cmd: "gray",
-  png: "purple", jpg: "purple", jpeg: "purple", gif: "purple", webp: "purple", svg: "orange", ico: "purple", bmp: "purple", avif: "purple",
-  pdf: "red", doc: "blue", docx: "blue", xls: "green", xlsx: "green", ppt: "orange", pptx: "orange",
-  zip: "yellow", tar: "yellow", gz: "yellow", "7z": "yellow", rar: "yellow", jar: "yellow",
-  mp4: "pink", mov: "pink", webm: "pink", mkv: "pink", avi: "pink", mp3: "pink", wav: "pink", flac: "pink", ogg: "pink",
-  sql: "cyan", graphql: "pink", gql: "pink", proto: "cyan", lock: "gray", sum: "gray",
-}
-
-export function iconColorFor(name: string, type: string): string {
-  if (type === "dir") return "folder"
-  if (type === "symlink") return "cyan"
-  return ICON_COLOR[extOf(name)] ?? "gray"
-}
-
 /* ------------------------------ 轻提示 ------------------------------ */
 
 let toastHost: HTMLElement | null = null

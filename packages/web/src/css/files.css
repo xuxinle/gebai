@@ -476,20 +476,15 @@
 .fw-file-icon {
   display: flex;
   align-items: center;
+  flex: none;
+  /* 图标自带配色（material-icon-theme 的 SVG 用写死的 hex），不再由 CSS 类上色 */
   color: var(--text-faint);
 }
 
-.fw-file-icon.c-blue { color: #569cd6; }
-.fw-file-icon.c-yellow { color: #d7ba7d; }
-.fw-file-icon.c-green { color: #4ec9b0; }
-.fw-file-icon.c-red { color: #f14c4c; }
-.fw-file-icon.c-purple { color: #c586c0; }
-.fw-file-icon.c-orange { color: #ce9178; }
-.fw-file-icon.c-cyan { color: #4fc1ff; }
-.fw-file-icon.c-pink { color: #ff79c6; }
-.fw-file-icon.c-cyan { color: #56b6c2; }
-.fw-file-icon.c-folder { color: #dcb67a; }
-.fw-file-icon.c-gray { color: var(--text-faint); }
+/* 文件类型图标（16 格 viewBox，与树行箭头/文字同基线） */
+.fw-file-glyph {
+  display: block;
+}
 
 .fw-git-mark {
   font-size: 10.5px;
@@ -3909,6 +3904,11 @@ button.fw-status-item:hover {
   .fw-twisty {
     width: 24px;
     height: 24px;
+  }
+
+  /* 文件行的 twisty 占位得跟目录行的 twisty 同宽，两条缩进列（箭头列 / 图标列）才在各档一致 */
+  .fw-twisty-empty {
+    width: 24px;
   }
 
   .fw-change-row,

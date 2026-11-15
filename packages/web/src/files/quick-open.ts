@@ -15,6 +15,7 @@ import type { FsApi } from "./api"
 import { rankPaths, type QuickOpenItem } from "./quick-open-core"
 import { recentFiles } from "./recents"
 import { h, icon, toast } from "./ui"
+import { fileIcon } from "./file-icons"
 
 /** 索引缓存：按根存，TTL 内直接复用（打开面板不等待网络）。 */
 const indexCache = new Map<string, { at: number; files: string[]; truncated: boolean }>()
@@ -96,6 +97,7 @@ export function openQuickOpen(deps: QuickOpenDeps): void {
         return frag
       }
       const row = h("div", { class: `fw-qo-row${i === selected ? " active" : ""}${it.recent ? " recent" : ""}` })
+      row.appendChild(h("span", { class: "fw-file-icon" }, [fileIcon(name, 13)]))
       const pathEl = h("span", { class: "fw-qo-path" })
       if (dir) pathEl.appendChild(mark(dir, 0))
       pathEl.appendChild(mark(name, dir.length))

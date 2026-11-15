@@ -8,7 +8,8 @@
  * Git 装饰由 main.ts 传入的当前状态快照计算，避免树自己发请求。
  */
 import type { DirEntry, FsApi, GitStatusInfo, RootInfo } from "./api"
-import { h, icon, iconColorFor, showMenu, toast, formatSize, timeAgo, confirmDialog, promptDialog, clear, type MenuItem } from "./ui"
+import { h, icon, showMenu, toast, formatSize, timeAgo, confirmDialog, promptDialog, clear, type MenuItem } from "./ui"
+import { fileIcon } from "./file-icons"
 import { baseName, canPasteInto, parentDir, pickTargetPath, type ClipEntry } from "./clipboard-core"
 import { buildRootSections, type RootMenuEntry } from "./root-menu"
 import { dirsToRefresh } from "./watch-core"
@@ -420,8 +421,14 @@ function openMoreMenu(anchor: HTMLElement): void {
           return b
         })()
       : h("span", { class: "fw-twisty-empty" })
-    const ic = h("span", { class: `fw-file-icon c-${iconColorFor(entry.name, entry.type)}` }, [icon(isDir ? (exp ? "folderOpen" : "folder") : "file")])
-    row.append(twisty, ic, h("span", { class: "fw-tree-name", text: entry.name, title: entry.path }))
+    /*
+     * 目录行不画文件夹图标，也不留空占位：层级与开合已经由左边的 twisty（箭头）表达，
+     * 再挂一个图标是同一件事说两遍，再占一格位置又白白吃掉横向空间（深层嵌套时名字很快被截）。
+     * 文件行按类型画图标（`fileIcon`：文件名优先、再扩展名，表取自 material-icon-theme）。
+     */
+    row.append(twisty)
+    if (!isDir) row.append(h("span", { class: "fw-file-icon" }, [entry.type === "symlink" ? icon("file") : fileIcon(entry.name)]))
+    row.append(h("span", { class: "fw-tree-name", text: entry.name, title: entry.path }))
     // 装饰统一经 applyDecoration 落位（与刷新路径同源，避免两处逻辑漂移）
     applyDecoration(row)
     row.onclick = () => {

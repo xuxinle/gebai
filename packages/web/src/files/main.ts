@@ -38,6 +38,7 @@ import { createNavHistory, type NavEntry } from "./nav-history"
 import { fingerprint } from "./refresh-guard"
 import { absOfRepo, normPath, relWithin, repoPrefixOfAbs, resolveAbsPath, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
 import { createExplorer } from "./explorer"
+import { fileIcon } from "./file-icons"
 import { createFsWatcher } from "./watch"
 import { invalidateQuickOpenIndex, isQuickOpenOpen, openQuickOpen } from "./quick-open"
 import { recordRecentFile } from "./recents"
@@ -1814,7 +1815,7 @@ function renderTabbar(): void {
   clear(tabstrip)
   for (const t of state.tabs) {
     const el = h("div", { class: `fw-tab${t.id === state.activeId ? " active" : ""}${t.preview ? " preview" : ""}` }, [
-      t.icon ? icon(t.icon, 12) : t.kind === "diff" ? icon("diff", 12) : icon(t.dirty ? "edit" : "file", 12),
+      t.icon ? icon(t.icon, 12) : t.kind === "diff" ? icon("diff", 12) : fileIcon(t.path, 13),
       h("span", { class: "fw-tab-title", text: t.title, title: t.kind === "diff" ? t.title : `${t.root} :: ${t.path}` }),
       t.dirty ? h("span", { class: "fw-tab-dot", title: "未保存" }) : null,
       (() => {
@@ -2947,7 +2948,7 @@ function buildSearchView(): HTMLElement {
       for (const hit of res.hits) {
         const name = hit.path.split("/").pop() ?? hit.path
         const row = h("div", { class: "fw-search-hit" }, [
-          h("div", { class: "fw-search-hit-path" }, [icon("file", 12), h("span", { text: name }), h("span", { class: "fw-change-dir", text: hit.path.includes("/") ? `  ${hit.path.slice(0, hit.path.lastIndexOf("/"))}` : "" })]),
+          h("div", { class: "fw-search-hit-path" }, [h("span", { class: "fw-file-icon" }, [fileIcon(name, 12)]), h("span", { text: name }), h("span", { class: "fw-change-dir", text: hit.path.includes("/") ? `  ${hit.path.slice(0, hit.path.lastIndexOf("/"))}` : "" })]),
           hit.fileOnly ? null : h("div", { class: "fw-search-hit-line" }, [h("span", { class: "fw-search-ln", text: String(hit.line) }), h("span", { class: "fw-search-text", text: hit.lineText })]),
         ])
         row.onclick = () => void openFile(explorer.getRoot(), hit.path, { preview: false, line: hit.line || undefined })
