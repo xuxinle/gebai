@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file search_box.hpp
 /// @brief `SearchBox`：搜索框（放大镜 + 输入 + 清除 × + 结果计数徽标）。

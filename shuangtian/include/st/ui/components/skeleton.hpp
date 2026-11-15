@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file skeleton.hpp
 /// @brief `Skeleton`：骨架屏占位（矩形 / 圆形 / 文本行三种形态，脉冲由时间驱动）。

@@ -1,4 +1,4 @@
-﻿"""SDXL 动漫模型 + ControlNet Union（OpenPose 模式）生成动作立绘。
+"""SDXL 动漫模型 + ControlNet Union（OpenPose 模式）生成动作立绘。
 
 ## 为什么是这条路线（走了三圈才定下来）
 

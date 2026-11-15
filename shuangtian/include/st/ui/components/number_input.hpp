@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file number_input.hpp
 /// @brief `NumberInput`：数值输入框（文本编辑 + 上下步进 + 区间夹取）。

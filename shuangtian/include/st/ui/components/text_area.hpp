@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file text_area.hpp
 /// @brief `TextArea`：多行文本域：自动换行（经 `TextPort::wrap`）+ 内部竖向滚动（光标始终可见）。。

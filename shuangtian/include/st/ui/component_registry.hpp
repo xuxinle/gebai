@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file component_registry.hpp
 /// @brief 组件注册表：**登记**与**查询**的唯一入口。

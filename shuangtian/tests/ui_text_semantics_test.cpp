@@ -1,4 +1,4 @@
-﻿#include <cstddef>
+#include <cstddef>
 #include <format>
 #include <iostream>
 #include <string>

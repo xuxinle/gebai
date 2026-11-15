@@ -1,4 +1,4 @@
-﻿"""在真 Blender 里渲染与 bpy_watch.py 同构的轮系，作为参照图。
+"""在真 Blender 里渲染与 bpy_watch.py 同构的轮系，作为参照图。
 
 ## 为什么需要它
 

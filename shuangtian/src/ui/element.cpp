@@ -1,4 +1,4 @@
-﻿#include "st/ui/element.hpp"
+#include "st/ui/element.hpp"
 
 #include <algorithm>
 #include <cmath>

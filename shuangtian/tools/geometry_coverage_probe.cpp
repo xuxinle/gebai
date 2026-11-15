@@ -1,4 +1,4 @@
-﻿// 涡轮发动机会用到的几何，逐个确认在 three_runtime 里能真出三角形。
+// 涡轮发动机会用到的几何，逐个确认在 three_runtime 里能真出三角形。
 //
 // 为什么需要这个探针：`three_runtime` 是从 `geometry.attributes.position` 通用
 // 抽取的，理论上所有几何都通。但"理论上通"和"实际有面"差得远——某个几何

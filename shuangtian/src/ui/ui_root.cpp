@@ -1,4 +1,4 @@
-﻿#include "st/ui/ui_root.hpp"
+#include "st/ui/ui_root.hpp"
 
 #include "st/ui/input_coalescer.hpp"
 

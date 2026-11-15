@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file cefu_graph.hpp
 /// @brief 册府知识图谱的**领域适配层**：把知识词条变成一张通用关系图。

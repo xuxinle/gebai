@@ -1,4 +1,4 @@
-﻿/// @file three_parity.hpp
+/// @file three_parity.hpp
 /// @brief **过渡层**：把旧的三参数签名接到统一内核 `pbr.hpp` 上。
 ///
 /// ## 为什么还留着这个名字

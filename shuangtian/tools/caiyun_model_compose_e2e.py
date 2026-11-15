@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """验证裁云三维的**组合能力**：`model_script` 提供几何，`model_*` 叠加姿态与相机。
 
 ## 要证的三件事

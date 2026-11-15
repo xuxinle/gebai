@@ -1,4 +1,4 @@
-﻿// mp_runtime_smoke_probe —— `st_mp_init` → `st_mp_run` 的最小闭合检查。
+// mp_runtime_smoke_probe —— `st_mp_init` → `st_mp_run` 的最小闭合检查。
 //
 // 为什么单独做这一支：`mp_reinit_probe` 在**主线程第一次 `run()`** 就崩了（输出停在
 // 步骤①之后），这比“跨线程”更近——说明 `st_mp_init` 之后的**第一次解释执行**就不成立。

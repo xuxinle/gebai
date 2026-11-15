@@ -1,4 +1,4 @@
-﻿/// @file ui_form_components_test.cpp
+/// @file ui_form_components_test.cpp
 /// @brief 包三「输入与表单」回归：`NumberInput` / `SearchBox` / `FormRow` /
 ///        `RadioGroup` / `TagInput`。
 ///

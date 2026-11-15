@@ -1,4 +1,4 @@
-﻿/// 启动卡绘制（见 `include/st/app/splash.hpp` 的设计说明）。
+/// 启动卡绘制（见 `include/st/app/splash.hpp` 的设计说明）。
 ///
 /// ## 为什么这里不用 UI 树
 ///

@@ -1,4 +1,4 @@
-﻿/// @file ui_structure_components_test.cpp
+/// @file ui_structure_components_test.cpp
 /// @brief 包四「结构与容器」回归：`DividerLabel` / `Accordion` / `Toolbar` / `StatusBar`。
 ///
 /// 这一包的共同点是**几何即语义**：

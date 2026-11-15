@@ -1,4 +1,4 @@
-﻿#include "st/pkg/lint.hpp"
+#include "st/pkg/lint.hpp"
 
 #include <algorithm>
 #include <array>

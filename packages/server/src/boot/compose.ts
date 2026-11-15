@@ -1,4 +1,4 @@
-﻿/** 组合根（DI 装配）：loadConfig → 各组件构建（store/registry/sandbox/auth/subAgents/engine/
+/** 组合根（DI 装配）：loadConfig → 各组件构建（store/registry/sandbox/auth/subAgents/engine/
  *  webhooks/tasks/todos/gc/feishuBot/externalAuth/state/app/devReload）→ Composed。网络监听见 serve.ts，
  *  进程入口见 cli.ts / index.ts。自原单文件 index.ts 的 startServer 装配段拆分，行为不变。 */
 import { existsSync } from "node:fs"

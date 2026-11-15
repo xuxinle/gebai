@@ -1,4 +1,4 @@
-﻿// 浏览器真值通道：把同一份 three.js 场景在无头 Chrome（SwiftShader）里渲出来，
+// 浏览器真值通道：把同一份 three.js 场景在无头 Chrome（SwiftShader）里渲出来，
 // 取 gl.readPixels 的原始 RGBA，落成 PNG。
 //
 // 为什么不截图：截图经过窗口合成、色彩管理、DPI 缩放，拿到的不是渲染器的输出。

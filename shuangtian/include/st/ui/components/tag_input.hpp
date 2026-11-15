@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file tag_input.hpp
 /// @brief `TagInput`：标签输入（已输入的标签做成 Chip + 末尾一个可输入的空位）。

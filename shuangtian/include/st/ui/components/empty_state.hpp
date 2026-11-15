@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file empty_state.hpp
 /// @brief `EmptyState`：空态占位（图标 + 标题 + 说明 + 可选动作），四档尺寸。

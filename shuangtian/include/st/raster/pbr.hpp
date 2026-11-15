@@ -1,4 +1,4 @@
-﻿/// @file pbr.hpp
+/// @file pbr.hpp
 /// @brief **本框架唯一的着色内核**：基于物理的 BRDF，与 three.js r160 的
 ///        `MeshStandardMaterial`/`MeshPhysicalMaterial` 逐式同构。
 ///

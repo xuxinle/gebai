@@ -1,4 +1,4 @@
-﻿#include "pages.hpp"
+#include "pages.hpp"
 
 #include "native_host_page.hpp"
 

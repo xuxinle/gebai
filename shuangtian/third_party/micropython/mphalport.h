@@ -1,4 +1,4 @@
-﻿// 霜天 · MicroPython 移植层（HAL）
+// 霜天 · MicroPython 移植层（HAL）
 //
 // ## 这份文件是什么
 //

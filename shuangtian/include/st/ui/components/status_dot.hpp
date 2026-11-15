@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file status_dot.hpp
 /// @brief `StatusDot`：状态点（语义色小圆 + 可选脉冲 + 可选文字标签）。

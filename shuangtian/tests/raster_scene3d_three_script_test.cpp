@@ -1,4 +1,4 @@
-﻿/// `SceneSpec.three_script`（three.js 源码场景）的接入测试。
+/// `SceneSpec.three_script`（three.js 源码场景）的接入测试。
 ///
 /// ## 为什么这一层要有独立的用例
 ///

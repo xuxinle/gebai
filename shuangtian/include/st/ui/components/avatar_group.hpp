@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file avatar_group.hpp
 /// @brief `AvatarGroup`：头像组（重叠若干头像 + 「+N」溢出徽标）。

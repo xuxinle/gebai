@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file input_box.hpp
 /// @brief `Input`：单行文本输入框。。

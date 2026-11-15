@@ -1,4 +1,4 @@
-﻿#include "st/pkg/watch.hpp"
+#include "st/pkg/watch.hpp"
 
 #include <algorithm>
 #include <map>

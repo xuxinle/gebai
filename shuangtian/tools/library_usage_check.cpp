@@ -1,4 +1,4 @@
-﻿/// `docs/AS_LIBRARY.md` 里那个非 GUI 示例的**可执行对照**。
+/// `docs/AS_LIBRARY.md` 里那个非 GUI 示例的**可执行对照**。
 ///
 /// ## 为什么需要它
 ///

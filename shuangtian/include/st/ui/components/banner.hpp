@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// @file banner.hpp
 /// @brief `Banner`：通知条（左色条 + 图标 + 标题/说明 + 可选关闭与动作）。
