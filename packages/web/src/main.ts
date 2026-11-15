@@ -81,6 +81,11 @@ exportBtn.onclick = async () => {
  * 提交串行化（单飞 + 尾随合并）：草稿页首条消息要 await 建会话，而建会话结果回来前当前会话仍是空——
  * 这段空窗里到达的第二次提交会走同一条建会话分支，同一条提示词于是落进两个新会话。重复来源都是
  * 正常输入形态：按住回车的键盘自动重复、软键盘发送键、连点发送按钮。见 submit-queue.ts。
+ *
+ * **串行位只覆盖「受理」**：取舍当前会话要不要建、取内容、清输入、入队或发起任务，到此结束；
+ * 任务流本身交给 `runTaskStream` 脱离 await 运行。这里若把整轮回答 await 进来，串行位会在回答结束前
+ * 一直独占——期间到达的 Enter 只被记成一次尾随合并（运行中排队失效、输入框内容原样留着），
+ * Ctrl+Enter 的中断标记也压在闭包里没人消费（中断插入完全无效）。
  */
 const submitOnce = createSubmitQueue(async () => {
   const interrupt = takeInterruptNext() // Ctrl+Enter：中断插入（运行中取消当前循环后立即执行）
@@ -177,10 +182,28 @@ const submitOnce = createSubmitQueue(async () => {
   void maybeAutoTitle(sessionId)
   // env：浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
   // 直接发送：`queue: false` 保留「幻影消息撤回 + 内容回输入框」的既有语义（本页已自行判定空闲，
-  // 服务端却说在跑 = 本页漏了运行态，下面的 already_running 分支会补齐；静默代性入队会与该分支打架）
-  try {
-    await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal, queue: false }))
-  } catch (err) {
+  // 服务端却说在跑 = 本页漏了运行态，runTaskStream 的 already_running 分支会补齐；静默代性入队会与该分支打架）
+  // 受理段到此结束：任务流不在这里 await（见 runTaskStream 的说明），串行位随即释放
+  runTaskStream({ sessionId, msgId, text, prompt, attachments, userMsgEl })
+})
+
+/** 已上传的附件引用（与 `client.sendPrompt` 的 attachments 入参同形）。 */
+type UploadedAttachment = { name: string; mime: string; path: string }
+
+/**
+ * 发起任务流并渲染（**不占提交串行位**）。
+ *
+ * 为什么不在提交闭包里 await：`consumeTaskStream` 要到整轮回答结束（可能几分钟）才收尾，而串行位在
+ * await 期间一直独占——那段时间里到达的 Enter 只会被记成一次尾随合并（运行中排队失效），Ctrl+Enter 的
+ * 中断插入标记也压在闭包里没人消费（表现就是「回车与 Ctrl+Enter 都没反应」）。受理段（建会话、取内容、
+ * 清输入、入队或发起）此时已全部落定，流的收尾与运行态登记由 `consumeTaskStream` 自己负责——它在被调用
+ * 的同一拍里就写入 `runs`，所以紧随其后的提交读到的运行态是准的（运行中 → 入队 / 中断插入）。
+ */
+function runTaskStream(p: { sessionId: string; msgId: string; text: string; prompt: string; attachments: UploadedAttachment[]; userMsgEl: HTMLElement | null }): void {
+  const { sessionId, msgId, text, prompt, attachments } = p
+  const userMsgEl = p.userMsgEl
+  const stream = consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal, queue: false }))
+  void stream.catch((err: unknown) => {
     // 本页不知情的并行任务（其他标签页/飞书桥接/定时任务）在跑：本条输入服务端未受理——
     // 撤回幻影消息（已上屏但从未进存储/模型）、把内容放回输入框，并附加该会话的运行态（页面此前不知道它在跑）
     if ((err as Error & { code?: string }).code === "already_running") {
@@ -196,9 +219,10 @@ const submitOnce = createSubmitQueue(async () => {
       attachRunningIfNeeded(sessionId)
       return
     }
-    throw err
-  }
-})
+    // 其余异常已由 consumeTaskStream 渲染成错误气泡；这里只兜住 reject 本身，不再变成未处理拒绝
+    console.error("[gebai] 任务流异常：", err)
+  })
+}
 
 composer.addEventListener("submit", (e) => {
   e.preventDefault()

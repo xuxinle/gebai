@@ -123,4 +123,21 @@ describe("接线：草稿页提交必须串行化", () => {
     expect(handler).toContain("e.repeat")
     expect(handler.indexOf("e.repeat")).toBeLessThan(handler.indexOf("composer.requestSubmit()"))
   })
+
+  test("提交闭包只做受理：任务流必须离 await 起跑，否则运行中回车/中断插入全被串行位吃掉", () => {
+    const s = src("main.ts")
+    const queueAt = s.indexOf("const submitOnce = createSubmitQueue(")
+    const closureEnd = s.indexOf("composer.addEventListener(\"submit\"")
+    expect(queueAt).toBeGreaterThan(-1)
+    const closure = s.slice(queueAt, closureEnd)
+    // 整轮回答的等待不得坐在串行位里（consumeTaskStream 要到任务结束才 resolve）
+    expect(closure).not.toContain("await consumeTaskStream(")
+    // 受理段的最后一步是「脱离 await 起跑」
+    expect(closure).toContain("runTaskStream({")
+    // 起跑函数自带 catch（否则失败变成未处理拒绝）
+    const runner = s.slice(s.indexOf("function runTaskStream("), s.indexOf("composer.addEventListener(\"submit\""))
+    expect(runner).toContain("void stream.catch(")
+    // already_running 的幻影消息撤回语义随任务流搬到起跑函数里，不能丢
+    expect(runner).toContain("code === \"already_running\"")
+  })
 })

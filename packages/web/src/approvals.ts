@@ -1,14 +1,12 @@
 import { approvalsEl, attachBtn, client, el, getCurrentSession, input, pendingTools, pendingToolsKey, sendBtn } from "./state"
 import { focusInput } from "./state"
 import type { KeyBinding } from "./keymap"
+import { composerLocked } from "./composer-lock"
 import { displayToolName } from "./tool-cards"
 import { makeCardFoldable } from "./card-fold"
 import { toast } from "./ui"
 
 /* ---------- 审批卡片 ---------- */
-
-/** 每会话待审批卡片数：同一会话全部处理完才解除输入锁定。 */
-const pendingBySession = new Map<string, number>()
 
 /** 待决卡片增减通知：会话列表的运行角标要据此变成「⌛ 等待你的输入」（它直接数 DOM 里的卡）。
  *  用事件而不是直接调 sessions（sessions 已导入本模块，反向导入会成环）。 */
@@ -16,10 +14,22 @@ function notifyPendingChange(): void {
   document.dispatchEvent(new CustomEvent("gebai:pending-change"))
 }
 
-/** 输入锁定：当前会话有待审批卡片时禁止输入/发送/附件，全部处理后恢复焦点。 */
-function syncLock() {
+/** 当前会话是否有待处理审批卡（DOM 即真值，整批一次算）。 */
+function lockedForCurrentSession(): boolean {
   const cur = getCurrentSession()
-  const locked = !!cur && (pendingBySession.get(cur.id) ?? 0) > 0
+  const sessions: string[] = []
+  for (const card of approvalsEl.querySelectorAll<HTMLElement>(".approval")) {
+    const sid = card.dataset.session
+    if (sid) sessions.push(sid)
+  }
+  return composerLocked(sessions, cur?.id)
+}
+
+/** 输入锁定：当前会话有待审批卡片时禁止输入/发送/附件，全部处理后恢复焦点。
+ *  判据是卡片集合本身而不是计数（见 composer-lock.ts：重复推送的卡会被替换成一张，
+ *  计数在替换里虚高，用户处理完最后一张后输入框仍锁着）。 */
+function syncLock() {
+  const locked = lockedForCurrentSession()
   if (!locked && input.disabled) focusInput() // 解锁瞬间恢复输入焦点
   input.disabled = locked
   sendBtn.disabled = locked
@@ -45,8 +55,8 @@ export function clearApprovals(sessionId: string) {
     }
   }
   if (removed > 0) {
-    pendingBySession.delete(sessionId)
     syncLock()
+    notifyPendingChange()
   }
 }
 
@@ -58,9 +68,8 @@ export function hasPendingInteraction(sessionId: string): boolean {
 }
 
 export function addApproval(sessionId: string, toolCallId: string, tool: string) {
-  // 同 toolCallId 重复推送（无 seq 服务端的事件重放/重放应答窗口）替换旧卡不堆叠——
-  // 同款防御已存在于选择/环境变量卡（choiceId/envId），审批卡此前缺失；堆叠会虚高
-  // pendingBySession 计数，处理一张后输入持续锁定
+  // 同 toolCallId 重复推送（事件重放、attach 快照与实时事件各来一次）替换旧卡不堆叠——
+  // 堆叠会让用户面对两张一模一样、而服务端只等一次决策的卡
   for (const old of approvalsEl.querySelectorAll<HTMLElement>(`.approval[data-toolcall="${CSS.escape(toolCallId)}"]`)) old.remove()
   const box = el("div", "approval")
   box.dataset.session = sessionId
@@ -80,9 +89,6 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
   /** 收卡：移除并解除输入锁定（决策送达或服务端已确认该请求失效时调用）。 */
   const drop = () => {
     box.remove()
-    const left = (pendingBySession.get(sessionId) ?? 1) - 1
-    if (left > 0) pendingBySession.set(sessionId, left)
-    else pendingBySession.delete(sessionId)
     syncLock()
     notifyPendingChange()
   }
@@ -123,9 +129,7 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
   // 先入文档再装折叠：折叠控件按真实内容高度决定是否出现
   approvalsEl.appendChild(box)
   makeCardFoldable(box, body)
-  pendingBySession.set(sessionId, (pendingBySession.get(sessionId) ?? 0) + 1)
-  applyApprovalVisibility()
-  syncLock()
+  applyApprovalVisibility() // 内含 syncLock：新卡入场即锁当前会话输入
   notifyPendingChange()
   // 当前会话弹出审批：锁定页面并聚焦到卡片（键盘焦点落到审批，输入已禁用）
   if (getCurrentSession()?.id === sessionId) {
