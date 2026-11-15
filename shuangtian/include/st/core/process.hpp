@@ -37,6 +37,34 @@ struct RunResult {
 /// 在 PATH 中查找可执行文件（返回绝对路径）。
 [[nodiscard]] auto which(std::string_view program) -> std::optional<std::string>;
 
+/// **分离启动**一个 GUI 子进程：不建管道、不继承句柄、不持有进程句柄。
+///
+/// 与 `run`/`StreamHandle` 的分工：那两个为「读子进程输出」设计（管道 +
+/// 继承句柄），而 GUI 子进程不需要 stdout，且实测句柄继承会让某些 GUI
+/// 子进程卡在极早期不建窗口。分离启动零继承零管道，子进程行为与双击
+/// 启动一致。返回 pid（0 = 失败）；不持有句柄意味着**没有** still_running/
+/// terminate——需要生命期管理的调用方用 `StreamHandle`。
+[[nodiscard]] auto spawn_detached(const std::string& program) -> std::uint64_t;
+
+/// **分离启动（带参数与工作目录）**：与上面同一个语义（零继承零管道、不持句柄），
+/// 但能传参数与工作目录。
+///
+/// ## 为什么需要 workdir 而不能用当前目录
+///
+/// 不少应用按**当前工作目录**找自己的资源（建木的 `scenes/`、码本的配置）。
+/// 双击启动时 cwd 就是 exe 目录，而由别的进程拉起（桌面壳/启动器）时 cwd 是
+/// 拉起者自己的——不显式设就会“应用起来了、界面空”。
+///
+/// ## 为什么参数是 `vector<string>` 而不是拼好的命令行
+///
+/// 拼命令行就得自己处理引号/转义（Windows 的 `CommandLineToArgvW` 分词规则与
+/// POSIX 不同），而拼错的表现是“参数被静默截断”或更糟：带空格的路径被当成两个
+/// 参数。这里让平台层各自做正确的转义（Windows：`CreateProcessW` 要求单串，
+/// 由本层按命令行规范拼；POSIX：直接 `execv` 传向量）。
+[[nodiscard]] auto spawn_detached(const std::string& program,
+                                  const std::vector<std::string>& args = {},
+                                  std::string_view workdir = {}) -> std::uint64_t;
+
   /// 当前可执行文件路径（用于自举/重启场景）。
   [[nodiscard]] auto executable_path() -> Result<std::string>;
 

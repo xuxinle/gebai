@@ -271,6 +271,56 @@ void close_fd(int& fd) {
 
 }  // namespace
 
+auto spawn_detached(const std::string& program) -> std::uint64_t {
+  return spawn_detached(program, {}, {});
+}
+
+auto spawn_detached(const std::string& program, const std::vector<std::string>& args,
+                    std::string_view workdir) -> std::uint64_t {
+#if defined(_WIN32)
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION child{};
+  // 必须经 `build_command_line`：它按 MSVCRT 的规则给每个参数加引号。
+  // 直接拿 `program` 当命令行会让带空格的路径（`C:\Program Files\…`）被拆成两个参数。
+  std::wstring command = build_command_line(program, args);
+  const std::wstring cwd = workdir.empty() ? std::wstring{} : to_wide(std::string(workdir));
+  const BOOL created =
+      ::CreateProcessW(nullptr, command.data(), nullptr, nullptr,
+                       /*bInheritHandles=*/FALSE, /*dwCreationFlags=*/0, nullptr,
+                       workdir.empty() ? nullptr : cwd.c_str(), &startup, &child);
+  if (created == 0) return 0;
+  const std::uint64_t pid = static_cast<std::uint64_t>(child.dwProcessId);
+  (void)::CloseHandle(child.hProcess);   // 分离：不持有
+  (void)::CloseHandle(child.hThread);
+  return pid;
+#else
+  const pid_t forked = ::fork();
+  if (forked < 0) return 0;
+  if (forked == 0) {
+    (void)::setsid();
+    // 工作目录：子进程自己 chdir（失败就不换——总比不启动强）；
+    // 不用 `posix_spawn` 的 file_actions：那需要把参数也换成 `argv` 数组的
+    // 生命周期管理，而 `execv` 这条路径已在用，不新增第二套。
+    if (!workdir.empty()) {
+      const std::string dir(workdir);
+      (void)::chdir(dir.c_str());  // NOLINT(l14)
+    }
+    std::vector<std::string> argv_storage;
+    argv_storage.reserve(args.size() + 1);
+    argv_storage.push_back(program);
+    for (const auto& argument : args) argv_storage.push_back(argument);
+    std::vector<char*> argv;
+    argv.reserve(argv_storage.size() + 1);
+    for (auto& entry : argv_storage) argv.push_back(entry.data());
+    argv.push_back(nullptr);
+    (void)::execv(program.c_str(), argv.data());
+    ::_exit(127);
+  }
+  return static_cast<std::uint64_t>(forked);
+#endif
+}
+
 auto run(std::string_view program, const std::vector<std::string>& args, const Options& options)
     -> Result<RunResult> {
   const std::int64_t start_ns = time::now_ns();

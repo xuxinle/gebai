@@ -598,6 +598,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L3 | `src/net/platform_tls_openssl.cpp`（`ST_SYM`） | dlopen 符号还原样板：11 个 `ST_SYM` 展开是同一形参表，函数化反而藏错。行内豁免在此**结构上放不下**：`#define` 首行必须以 `\` 结尾（尾随注释在 Linux g++ 判 stray `'\'` 拒编），而 `has_allow_comment` 只认同一行 | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
 | L3 | `tests/shard_parity_test.cpp`（`ST_SHARDPROBE_CASE`） | 哨兵生成 X 宏：12 个哨兵展开是同一段注册体，函数化反而藏错（且落片断言依赖哨兵按数值序注册，手写 12 段更容易插错位置）。行内豁免同样结构上放不下（多行宏首行以 `\` 结尾） | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
 | L14 | `src/shell/backend.cpp` | 需 `dlopen` 做**运行时后端探测**——而这正是 §10 第 1 条「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测本身就是平台差异的唯一判定点 | 内置 |
+| L14 | `apps/st_desktop/main.cpp` | **系统任务栏守卫**（`--taskbar-guard <父pid>`）：要探父进程是否还活着（`OpenProcess`/`GetExitCodeProcess`）并操作 explorer 的 `Shell_TrayWnd`——那是“看另一个进程/另一个进程的窗口”，没有平台中立封装能表达。背景：桌面壳隐藏任务栏后，强杀/崩溃会绕过所有 C++ 收尾，实测会让用户**永久失去任务栏**（`tools/desktop_taskbar_kill_probe.py`）。 | **清单**（`st.pkg` 的 `lint.exempt.L14`） |
 | L6 | `src/raster/*simd*`（NEON/SIMD 内核） | SIMD intrinsics 的位级重解释只能在单点封装里发生（与 L6 的 `platform_*` 同一纪律） | 内置 |
 | L18 | `tools/**`、`tests/**`、`apps/**` | 存量输出已各有落盘通道：`tools/**`（stpm 的 `st::print`/`fprintf` 走 `cli_log` 镜像落盘 `st` 命令日志；探针/参考工具是独立实体不进框架库）、`tests/**`（测试输出进分片日志）、`apps/**`（应用入口错误经宿主 stderr 捕获）。迁移到 `ST_LOG` 是增量过程，新增代码应走 `st::print`/`ST_LOG_*` | **清单**（`st.pkg` 的 `lint.exempt.L18`） |
 | L18 | `print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*` | 打印**实现方**：`print`/`console_log` 是 `st::print` 的底层、`log_file` 是 `st::log` 的落盘实现、`platform_crash` 的崩溃栈必须在日志系统不可用时仍能输出（信号处理器里不能依赖分配/锁） | 内置 |

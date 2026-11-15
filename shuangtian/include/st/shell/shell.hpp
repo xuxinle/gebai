@@ -109,6 +109,44 @@ struct WindowOptions {
   /// 只在"窗口里有一大块半透明区域"时才有意义——当前唯一的调用方是启动卡
   ///（`Application` 的启动首帧）。主界面全程不透明时开着它只是白付合成成本。
   bool backdrop_blur{false};
+  /// **铺满整块显示器**（`rcMonitor`，而不是 `rcWork`）——连系统任务栏的条带一起要。
+  ///
+  /// ## 它解决的是哪一类窗口
+  ///
+  /// 默认路径把窗口夹进 `rcWork`（已扣任务栏），这对普通应用是对的：没人希望
+  /// 编辑器的标题栏被任务栏盖住。但**桌面壳**类窗口（替代原生桌面的那层）语义相反——
+  /// 它要的就是整个屏幕，任务栏那条带子也是它的画布；否则 Dock 只能摆在任务栏上方，
+  /// 屏幕底部永久少 48px。
+  ///
+  /// ## 与 `fill_work_area` 的分工
+  ///
+  /// | 字段 | 尺寸来源 | 典型用途 |
+  /// |---|---|---|
+  /// | `fill_work_area` | `rcWork` × 92% | 普通主窗口（IDEA/VSCode 形态） |
+  /// | `fill_monitor` | `rcMonitor` × 100% | 桌面壳 / 屏保 / 全屏展示 |
+  ///
+  /// 两者**互斥**：`fill_monitor` 为真时 `fill_work_area_on_create` 不再生效
+  /// （92% 的边距对桌面壳是错的——它会露出一圈原生桌面）。
+  ///
+  /// 无头后端：按 `monitor_override`（若给了）否则按 `width×height` 处理，不报错
+  /// ——无头没有“显示器”，这里只保证**布局不出错**，不假装真的铺满了屏幕。
+  bool fill_monitor{false};
+  /// **钉在窗口层最底部**（`HWND_BOTTOM`）：任何普通窗口都浮在它上面。
+  ///
+  /// ## 为什么必须是后端能力而不是应用自己调 `SetWindowPos`
+  ///
+  /// "在最底层"不是一次调用就能达成的状态，而是每帧都要维持的不变量：
+  /// 用户点一下它、程序抢一次前台、另一个窗口被最小化——都会把它顶上来。
+  /// 应用层自己做只能靠定时轮询（并且要碰 `HWND`，那是平台分支）。
+  /// 因此契约放在后端：**窗口过程里持续维持 `HWND_BOTTOM`**，应用只说一次意图。
+  ///
+  /// ## 与"点击不抢焦点"的区别
+  ///
+  /// 这一位只管 Z 序。点击是否激活由窗口自身决定（桌面壳通常还希望 `WS_EX_NOACTIVATE`，
+  /// 那是另一件事，见后端实现处的说明）。
+  ///
+  /// 无头后端：`set_stay_at_bottom` 返回 `Unsupported`（如实——没有 Z 序这回事）。
+  bool stay_at_bottom{false};
 };
 
 /// 窗口背景能力查询结果（给应用层决定"要不要做磨砂启动卡"）。
@@ -631,6 +669,49 @@ class Backend {
   }
   /// 窗口当前是否最大化（自绘窗框据此切换按钮形态）。
   [[nodiscard]] virtual auto maximized() const noexcept -> bool { return false; }
+
+  // —— 桌面壳类窗口所需的形态控制 ——
+  //
+  // 存在的理由：`st_desktop` 这类"替代原生桌面的窗口"与普通应用窗口的窗口语义不同——
+  // 它要**铺满整块显示器**（含任务栏条带）、**钉在最底层**、并且能**在全屏与窗口之间切换**。
+  // 这三件事都必须在后端做（碰 `rcMonitor` / `HWND_BOTTOM` / 显示器枚举），
+  // 而平台差异只能住 `platform_*`（`CONVENTIONS.md` §10 第 1 条）。
+  //
+  // 契约同上：不支持时**如实**报 `Unsupported`，不静默无效。
+
+  /// 把窗口铺满**它所在那块显示器**（`rcMonitor`，含系统任务栏条带）。
+  ///
+  /// 与 `fit_window_to_work_area` 的区别是"面积来源"：那个用 `rcWork`（已扣任务栏）
+  /// 且留 92% 边距；这个用整块显示器且不留边距。
+  [[nodiscard]] virtual auto fit_window_to_monitor() -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持铺满显示器");
+  }
+  /// 设为/取消"钉在最底层"（见 `WindowOptions::stay_at_bottom`）。
+  ///
+  /// 开启后后端负责**持续维持**：窗口过程每次收到 `WM_WINDOWPOSCHANGING` 都把
+  /// 目标 Z 序改成 `HWND_BOTTOM`——否则任何一次点击/抢前台都会把它顶上来。
+  [[nodiscard]] virtual auto set_stay_at_bottom(bool enabled) -> Status {
+    (void)enabled;
+    return unexpected(ErrorCode::Unsupported, "该后端不支持窗口置底");
+  }
+  /// 显示/隐藏**本窗口所在显示器的系统任务栏**（Windows：`Shell_TrayWnd`）。
+  ///
+  /// ## 为什么要这个而不是"把窗口盖上去"
+  ///
+  /// 盖上去只解决"看不见"：系统任务栏仍占着 `rcWork`，仍会在鼠标划到底边时弹出来，
+  /// 仍在任务栏切换器里有一席。桌面壳要替代它，就得让它真的让位。
+  ///
+  /// ## 调用方必须负责还原
+  ///
+  /// 这是**进程外的全局状态**（系统任务栏只有一个）。后端不会在析构里替你还原——
+  /// 调用方要在退出路径（含异常收尾）显式 `set_system_taskbar_visible(true)`。
+  /// 后端会在窗口销毁时**兜底**还原一次，但那只覆盖“正常销毁”这条路径。
+  ///
+  /// `show = true` 是幂等的（本来就可见时直接成功）。
+  [[nodiscard]] virtual auto set_system_taskbar_visible(bool show) -> Status {
+    (void)show;
+    return unexpected(ErrorCode::Unsupported, "该后端不支持系统任务栏控制");
+  }
 };
 
 /// 可复用纯函数：**逻辑坐标的损坏区 → 物理像素的上屏区域**。
@@ -666,7 +747,17 @@ class Backend {
 [[nodiscard]] auto centered_origin(math::IntRect window, math::IntRect work_area) noexcept
     -> math::IntPoint;
 
-/// 是否检测到显示服务（DISPLAY / WAYLAND_DISPLAY）。
+  /// 可复用纯函数：**把窗口矩形铺满显示器矩形的结果**（物理像素）。
+  ///
+  /// 为什么抽出来：Win32 与 X11/Wayland 都要算它，而"铺满"最容易算错的地方是
+  /// **多显示器下用错那块屏的矩形**（拿主屏算会把窗口摆到另一块屏上，与
+  /// `centered_origin` 同一类错误）。纯函数 + 单测才钉得住。
+  ///
+  /// 语义：返回 `monitor` 本身（位置与尺寸都不改）。**不做任何边距收缩**——
+  /// 桌面壳要的就是整块屏；需要留边距的调用方自己缩，别在这里加旋钮。
+  [[nodiscard]] auto monitor_fill_rect(math::IntRect monitor) noexcept -> math::IntRect;
+
+  /// 是否检测到显示服务（DISPLAY / WAYLAND_DISPLAY）。
 [[nodiscard]] auto has_display() noexcept -> bool;
 /// 探测可用的图形后端名（无显示时返回 "headless"）。
 [[nodiscard]] auto probe_backend() -> std::string;

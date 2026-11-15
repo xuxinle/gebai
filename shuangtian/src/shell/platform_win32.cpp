@@ -502,13 +502,15 @@ class Win32Backend final : public Backend {
       (void)::SetProcessDPIAware();
     }
 
-    logical_width_ = options.width > 0 ? options.width : 1280;
+        logical_width_ = options.width > 0 ? options.width : 1280;
     logical_height_ = options.height > 0 ? options.height : 720;
               decorations_ = options.decorations;
     shadow_enabled_ = options.window_shadow;
     window_resizable_ = options.resizable;
   defer_gpu_ = options.defer_gpu;
   tray_minimize_on_close_ = options.tray_minimize_on_close;
+  stay_at_bottom_ = options.stay_at_bottom;
+  fill_monitor_ = options.fill_monitor;
   scale_ = options.scale > 0.0f ? options.scale : 1.0f;
     // 显式给了 `--scale` 就**不再被窗口 DPI 覆盖**：它是测试/复现用的覆盖值。
     // 关键在于"窗口尺寸"与"缓冲尺寸"必须用**同一个** scale——早先窗口按请求值建、
@@ -540,7 +542,33 @@ class Win32Backend final : public Backend {
     //（`MonitorFromPoint` + `rcWork`，不需要窗口存在）。
     //
     // ⚠ 默认关闭：建窗尺寸是“黑框/白闪”历史缺陷高发区，改了要跟真窗口验证。
-    if (options.fill_work_area_on_create) {
+    //
+    // `fill_monitor`（桌面壳）走**另一条口径**：`rcMonitor`、不收边距（见下面分支）。
+    if (options.fill_monitor) {
+      // 桌面壳：直接按**整块显示器**建窗（含任务栏条带）。
+      POINT probe{0, 0};
+      const HMONITOR monitor = ::MonitorFromPoint(probe, MONITOR_DEFAULTTOPRIMARY);
+      MONITORINFO info{};
+      info.cbSize = sizeof(MONITORINFO);
+      if (monitor != nullptr && ::GetMonitorInfoW(monitor, &info) != 0) {
+        float s = scale_;
+        if (HDC dc = ::GetDC(nullptr); dc != nullptr) {
+          const int dpi = ::GetDeviceCaps(dc, LOGPIXELSX);
+          ::ReleaseDC(nullptr, dc);
+          if (dpi > 0) s = static_cast<float>(dpi) / 96.0f;
+        }
+        if (s <= 0.0f) s = 1.0f;
+        // `rcMonitor` 是物理像素，`logical_*` 是逻辑像素：必须除以 s（与上面同一坑）。
+        const float w = static_cast<float>(info.rcMonitor.right - info.rcMonitor.left) / s;
+        const float h = static_cast<float>(info.rcMonitor.bottom - info.rcMonitor.top) / s;
+        logical_width_ = static_cast<int>(std::lround(w));
+        logical_height_ = static_cast<int>(std::lround(h));
+        ST_LOG_INFO("建窗即铺满显示器：{}x{} 物理 / 缩放 {:.2f} → 窗口 {}x{} 逻辑",
+                    static_cast<int>(info.rcMonitor.right - info.rcMonitor.left),
+                    static_cast<int>(info.rcMonitor.bottom - info.rcMonitor.top),
+                    static_cast<double>(s), logical_width_, logical_height_);
+      }
+    } else if (options.fill_work_area_on_create) {
       // 主屏（窗口还不存在，只能拿默认屏；多屏下先落在主屏再被 `center_window` 修正）
       POINT probe{0, 0};
       const HMONITOR monitor = ::MonitorFromPoint(probe, MONITOR_DEFAULTTOPRIMARY);
@@ -2275,6 +2303,152 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
+  /// 把窗口铺满**它所在那块显示器**（`rcMonitor`，含系统任务栏条带）。
+  ///
+  /// 与 `fit_window_to_work_area` 的区别只有“用哪块矩形”：那个用 `rcWork` 且留 92%
+  /// 边距（普通应用要留边），这个用整块显示器且**零边距**（桌面壳要取代它）。
+  auto fit_window_to_monitor() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    MONITORINFO info{};
+    info.cbSize = sizeof(MONITORINFO);
+    const HMONITOR monitor = ::MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (monitor == nullptr || ::GetMonitorInfoW(monitor, &info) == 0) {
+      return unexpected(ErrorCode::Unsupported, "拿不到窗口所在显示器的矩形");
+    }
+    const math::IntRect rect = monitor_fill_rect(
+        math::IntRect{static_cast<int>(info.rcMonitor.left), static_cast<int>(info.rcMonitor.top),
+                      static_cast<int>(info.rcMonitor.right - info.rcMonitor.left),
+                      static_cast<int>(info.rcMonitor.bottom - info.rcMonitor.top)});
+    if (rect.is_empty()) return unexpected(ErrorCode::Unsupported, "显示器矩形无效");
+    // 已经铺满就不动：避免启动时一次无意义的 SetWindowPos（会多一次重绘）。
+    RECT current{};
+    if (::GetWindowRect(window_, &current) != 0 && current.left == rect.x &&
+        current.top == rect.y && (current.right - current.left) == rect.width &&
+        (current.bottom - current.top) == rect.height) {
+      return ok();
+    }
+    // `SWP_NOACTIVATE`：铺满屏不该抢焦点（桌面壳不是前台应用）。
+    // 不传 `SWP_NOZORDER`——保留当前 Z 序；置底由 `stay_at_bottom_` 单独监督。
+    if (::SetWindowPos(window_, nullptr, rect.x, rect.y, rect.width, rect.height,
+                       SWP_NOACTIVATE | SWP_FRAMECHANGED) == 0) {
+      return unexpected(ErrorCode::Io, "SetWindowPos 失败");
+    }
+    // 与 `fit_window_to_work_area` 同一收尾：改完必须重同步缓冲（与 WM_SIZE 同一条路径）。
+    return sync_buffers_to_client(scale_);
+  }
+
+  /// 设/取消“钉在最底层”。
+  ///
+  /// ## 为何不是一次性 `SetWindowPos(HWND_BOTTOM)`
+  ///
+  /// 那只能管当下。窗口被点击、另一个应用抢前台、被最小化后恢复——任意一件事都会
+  /// 把它顶到别处。所以这里设的是**一个位**（`stay_at_bottom_`），真正的置底在
+  /// 窗口过程的 `WM_WINDOWPOSCHANGING` 里**每次改 Z 序时强制改写**。
+  [[nodiscard]] auto set_stay_at_bottom(bool enabled) -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    stay_at_bottom_ = enabled;
+    if (enabled) {
+      (void)::SetWindowPos(window_, HWND_BOTTOM, 0, 0, 0, 0,
+                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    return ok();
+  }
+
+  /// 显示/隐藏系统任务栏（`Shell_TrayWnd`）。
+  ///
+  /// ## 为何必须配一个**守卫进程**（2026-11-15，实测代价）
+  ///
+  /// `ShowWindow(SW_HIDE)` 改的是 **explorer 的**窗口：那是进程外的全局状态。正常退出
+  /// 走 `WM_DESTROY` 能还原，但这三条路径**都不会**执行任何 C++ 代码：
+  ///
+  /// | 路径 | 实测结果 |
+  /// |---|---|
+  /// | 任务管理器“结束任务” / `TerminateProcess` | 任务栏**永久隐藏** |
+  /// | 进程崩溃（未处理异常） | 同上 |
+  /// | 断电/注销后重登 | 任务栏正常（explorer 重建） |
+  ///
+  /// 而“桌面壳开机自启 + 被强杀一次”是很容易撞到的组合——用户会失去任务栏且
+  /// 自己完全不知道怎么同复。所以隐藏任务栏时**同时拉起一个同名 exe 的守卫子进程**
+  /// （`--taskbar-guard`）：它不建窗口，只等父进程结束（std 句柄 + `WaitForSingleObject`），
+  /// 一旦父进程没了（**包括被强杀**），立即 `ShowWindow(SW_SHOW)` 后退出。
+  ///
+  /// 选“同 exe 子进程”而不是脚本（VBScript/PowerShell）的理由：
+  /// ① 无可执行文件路径依赖（分发形态下临时目录不一定可写、杀毒软件会拦脚本）；
+  /// ② 逻辑不发散（还原代码就在本文件，与隐藏代码同一份常量）；
+  /// ③ 无新进程类型（不引入 `wscript.exe` 这类“用户会问这是什么”的东西）。
+  [[nodiscard]] auto set_system_taskbar_visible(bool show) -> Status override {
+    const HWND taskbar = ::FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (taskbar == nullptr) {
+      // explorer 没跑（或不是标准 shell）：不是错误，如实报“控制不了”。
+      return unexpected(ErrorCode::Unsupported, "未找到系统任务栏（Shell_TrayWnd）");
+    }
+    if (show) {
+      // **先显任务栏、再收守卫**：反过来会有一个窗口（守卫已退、任务栏还藏）。
+      ::ShowWindow(taskbar, SW_SHOW);
+      stop_taskbar_guard();
+      system_taskbar_hidden_ = false;
+      ST_LOG_INFO("系统任务栏已还原");
+      return ok();
+    }
+    ::ShowWindow(taskbar, SW_HIDE);
+    system_taskbar_hidden_ = true;
+    // 先拉守卫再返回：中间不加长“已隐藏但无守卫”的窗口期
+    //（那几微秒恰好强杀就还是会丢任务栏，但这是能接受的最小窗口）。
+    start_taskbar_guard();
+    ST_LOG_INFO("系统任务栏已隐藏（守卫：{}）",
+                taskbar_guard_ != nullptr ? "已启动" : "启动失败");
+    return ok();
+  }
+
+  /// 拉起守卫子进程（幂等：已在跑就不重复拉）。
+  ///
+  /// 守卫是**同一个 exe** 的 `--taskbar-guard <pid>` 模式（不建窗、不读配置、不画任何
+  /// 东西，只轮询父进程是否还在；父走了就还原任务栏）。应用层负责它的实现，
+  /// 后端只负责拉起来与收掉。
+  ///
+  /// 为何不在这里写守卫逻辑：它要知道自己的 exe 路径与参数语义——那是**应用**的
+  /// 知识；后端只该知道“需要有一个存活监视”。这个分工也让无头/X11 后端零成本
+  /// （它们根本不支持隐藏任务栏）。
+  void start_taskbar_guard() {
+    if (taskbar_guard_ != nullptr) return;
+    wchar_t self[MAX_PATH]{};
+    if (::GetModuleFileNameW(nullptr, self, MAX_PATH) == 0) return;
+    std::wstring command = L"\"";
+    command.append(self);
+    command.append(L"\" --taskbar-guard ");
+    command.append(std::to_wstring(static_cast<std::uint32_t>(::GetCurrentProcessId())));
+    // `CreateProcessW` 的第二参数是 `LPWSTR`（可能原地修改），必须给可写缓冲。
+    std::vector<wchar_t> buffer(command.begin(), command.end());
+    buffer.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION child{};
+    if (::CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE,
+                         CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &startup,
+                         &child) == 0) {
+      ST_LOG_WARN("任务栏守卫没起来（{}）：强杀本程序后需手动还原任务栏（或重启 explorer）",
+                  static_cast<int>(::GetLastError()));
+      return;
+    }
+    ::CloseHandle(child.hThread);
+    taskbar_guard_ = child.hProcess;
+    ST_LOG_INFO("任务栏守卫已启动（pid={}）", static_cast<int>(child.dwProcessId));
+  }
+
+  /// 结束守卫（幂等）。
+  ///
+  /// 为何是 `TerminateProcess` 而不是“给个信号让它自己退”：守卫阻塞在等待里，
+  /// 让它优雅退出要多一条通信通道（命名事件/管道）；而它完全没有状态
+  /// （唯一的动作是 `ShowWindow(SW_SHOW)`，且那一步在父进程正常还原时已经做过）。
+  void stop_taskbar_guard() {
+    if (taskbar_guard_ == nullptr) return;
+    (void)::TerminateProcess(taskbar_guard_, 0);
+    ::CloseHandle(taskbar_guard_);
+    taskbar_guard_ = nullptr;
+  }
+
   /// 把窗口开到**屏幕工作区**（DPI 适配的主路径：不是“超屏才缩”，而是“按屏幕铺开”）。
   ///
   /// 为何不是“只夹上限”：实测用户场景——屏幕 3840×2160、DPI 1.5 ⇒ 工作区
@@ -3199,6 +3373,26 @@ class Win32Backend final : public Backend {
       return 0;
     }
     switch (message) {
+      // **置底监督**（`stay_at_bottom_`）：桌面壳要“永远在最底层”，而这是一个
+      // **每帧都要维持的不变量**——不是一次 `SetWindowPos(HWND_BOTTOM)` 就能达成的状态。
+      //
+      // 为何挂在 `WM_WINDOWPOSCHANGING`：系统在**每次改变窗口位置/尺寸/Z 序之前**都先
+      // 发这条消息，改它的 `WINDOWPOS` 就能在不产生额外一次 SetWindowPos 的情况下
+      // 把目标 Z 序顶回去（不会闪）。
+      //
+      // ⚠ **不能改 `x/y/cx/cy`**：那些是布局真源，改写后 `WM_SIZE` 会收到幻觉尺寸，
+      // 画布与窗口会逐步漂移。这里只碰 Z 序位。
+      case WM_WINDOWPOSCHANGING: {
+        if (stay_at_bottom_) {
+          auto* pos = reinterpret_cast<WINDOWPOS*>(lparam);
+          if (pos != nullptr && (pos->flags & SWP_NOZORDER) == 0) {
+            pos->hwndInsertAfter = HWND_BOTTOM;
+            // 清掉 NOZORDER：带着它系统会忽略刚改的 `hwndInsertAfter`。
+            pos->flags &= ~static_cast<UINT>(SWP_NOZORDER);
+          }
+        }
+        break;   // 继续走 DefWindowProc（不改其它字段）
+      }
       case WM_CLOSE:
         // 关窗→托盘常驻：隐藏窗口而非退出（进程/托盘图标保留，从托盘菜单或
         // 显式 request_quit 退出）。未启用该行为（或托盘没建起来）才走“关窗即退出”。
@@ -3213,6 +3407,19 @@ class Win32Backend final : public Backend {
         // 托盘图标必须在窗口销毁**之前**移除：否则通知区会留下殫尸图标
         // （鼠标划过才消失）。
         remove_tray_icon();
+        // **系统任务栏兜底还原**：我们 hid 了 explorer 的任务栏，如果就这么退出，
+        // 用户会面对一个没有任务栏的桌面（且资源管理器里也找不到它）。
+        //
+        // 这里只覆盖“正常销毁”这条路径；崩溃/强杀无法拦住，所以调用方仍必须
+        // 在退出路径上显式还原（见 `WindowOptions::set_system_taskbar_visible`）。
+        if (system_taskbar_hidden_) {
+          if (const HWND taskbar = ::FindWindowW(L"Shell_TrayWnd", nullptr); taskbar != nullptr) {
+            ::ShowWindow(taskbar, SW_SHOW);
+            system_taskbar_hidden_ = false;
+          }
+        }
+        // 守卫也收掉：任务栏已经还原，它再跑下去只是空转。
+        stop_taskbar_guard();
         ::PostQuitMessage(0);
         return 0;
 
@@ -3756,6 +3963,15 @@ class Win32Backend final : public Backend {
   /// 是否给窗口挂 DWM 外阴影（`WindowOptions::window_shadow`）。
   /// 运行时会因 DWM 不接受而转 `false`（见 `create_window`）。
   bool shadow_enabled_{true};
+  /// 是否**钉在窗口层最底部**（桌面壳）。由 `WM_WINDOWPOSCHANGING` 持续维持。
+  bool stay_at_bottom_{false};
+  /// 启动是否铺满整块显示器（`WindowOptions::fill_monitor`）：只影响建窗尺寸排，
+  /// 后续尺寸/位置全走 `WM_SIZE` 与 `fit_window_to_monitor`。
+  bool fill_monitor_{false};
+  /// 本进程是否 hid 了系统任务栏（`WM_DESTROY` 与显式还原都用它判）。
+  bool system_taskbar_hidden_{false};
+  /// 任务栏守卫子进程句柄（隐藏任务栏时拉起；父进程一死——**包括被强杀**——它还原）。
+  void* taskbar_guard_{nullptr};
   /// 背景磨砂是否已确认生效（`set_backdrop_blur` 读回成功才置位）。
   ///
   /// `show_early` 靠它决定要不要涂不透明底色：磨砂开着的时候涂底色会把

@@ -1,0 +1,20 @@
+{
+  "//": "霜天桌面应用清单。放在 st_desktop.exe 同目录即自动生效（或用 --config 指别处）。",
+  "//coverage": "这份清单**优先于内置兜底清单**（main.cpp 的 default_apps）。所以新增应用时两边都要加，否则会退回旧的一组。覆盖：st.pkg 里 group \"all\" 的八个应用 + 桌面自己。",
+  "//id": "必填且唯一：元素 id 与图标查找键都用它。缺 id 的条目会被跳过并在日志里点名。",
+  "//exe": "可执行文件名（带不带 .exe 都行）。查找顺序：与桌面 exe 同目录 → PATH。找不到时图标置灰但仍显示。",
+  "//icon": "内置图标名（gallery/gbcode/jianmu/caiyun/louyue/xiangqi/cefu/gedou/st_desktop）——与 apps/*/assets/*-icon.png 同名，编进 exe。",
+  "//icon_path": "可选：外部 PNG 路径，优先级高于 icon（换图标不必重编 exe）。",
+  "//args": "可选：启动参数数组。",
+  "apps": [
+    { "id": "gallery", "label": "画廊", "icon": "gallery", "exe": "gallery" },
+    { "id": "gbcode", "label": "码本", "icon": "gbcode", "exe": "gbcode" },
+    { "id": "jianmu", "label": "建木", "icon": "jianmu", "exe": "jianmu" },
+    { "id": "caiyun", "label": "裁云", "icon": "caiyun", "exe": "caiyun" },
+    { "id": "louyue", "label": "镂月", "icon": "louyue", "exe": "louyue" },
+    { "id": "xiangqi", "label": "相期", "icon": "xiangqi", "exe": "xiangqi" },
+    { "id": "cefu", "label": "册府", "icon": "cefu", "exe": "cefu" },
+    { "id": "gedou", "label": "格斗", "icon": "gedou", "exe": "gedou" },
+    { "id": "st_desktop", "label": "霜天桌面", "icon": "st_desktop", "exe": "st_desktop" }
+  ]
+}

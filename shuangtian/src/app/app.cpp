@@ -478,6 +478,9 @@ struct Application::Impl {
   std::unique_ptr<ui::WebViewPort> webview_port{};
   /// 托盘是否真启用（后端不支持时保持 false——如实反映，不假装）。
   bool tray_ready{false};
+  /// 当前是否处于**桌面壳形态**（铺满显示器 + 置底 + 隐藏系统任务栏）。
+  /// 切回普通窗口时按它决定要恢复什么；无头/不支持的后端恒为 false。
+  bool desktop_shell_mode{false};
   std::unique_ptr<st::text::FontStack> fonts{};
   std::unique_ptr<st::text::TextRenderer> renderer{};
   std::unique_ptr<RendererTextPort> text_port{};
@@ -861,6 +864,79 @@ auto Application::set_window_size(int width_logical, int height_logical) -> Stat
   root_.set_viewport(
       math::Size{static_cast<float>(width_logical), static_cast<float>(height_logical)});
   root_.mark_dirty_all();
+  return ok();
+}
+
+auto Application::desktop_shell_mode() const noexcept -> bool {
+  return impl_ != nullptr && impl_->desktop_shell_mode;
+}
+
+auto Application::fill_monitor() -> Status {
+  if (impl_->backend == nullptr) return unexpected(ErrorCode::Unsupported, "后端未就绪");
+  const auto filled = impl_->backend->fit_window_to_monitor();
+  if (!filled) return filled;
+  // 视口以**后端改完之后的真实尺寸**为准（不要拿本轮请求值回写：
+  // `device_scale` 与取整都可能让它差 1px，而差 1px 就是整块纹理缩放 → 整屏发糊）。
+  const math::Size size = impl_->backend->logical_size();
+  root_.set_viewport(size);
+  root_.mark_dirty_all();
+  return ok();
+}
+
+auto Application::set_stay_at_bottom(bool enabled) -> Status {
+  if (impl_->backend == nullptr) return unexpected(ErrorCode::Unsupported, "后端未就绪");
+  return impl_->backend->set_stay_at_bottom(enabled);
+}
+
+auto Application::set_system_taskbar_visible(bool show) -> Status {
+  if (impl_->backend == nullptr) return unexpected(ErrorCode::Unsupported, "后端未就绪");
+  return impl_->backend->set_system_taskbar_visible(show);
+}
+
+auto Application::desktop_shell_supported() const -> bool {
+  if (impl_->backend == nullptr || impl_->backend->headless()) return false;
+  // 三个能力必须**全部**具备：缺一个就会出现“铺满了但任务栏还在上面盖着”这类
+  // 半成品形态。用“实际能不能拿到显示器矩形”探测太贵（要一次 SetWindowPos），
+  // 这里只筛掉明确不支持的后端（无头），具体失败由各 Status 如实报。
+  return true;
+}
+
+auto Application::set_desktop_shell_mode(bool enabled) -> Status {
+  if (impl_->backend == nullptr) return unexpected(ErrorCode::Unsupported, "后端未就绪");
+  // ## 顺序是硬约束：先置底/先隐藏任务栏，最后才改尺寸
+  //
+  // 进入桌面壳时如果先铺满屏再置底，铺满那一瞬间窗口会在最前面闪一下（桌面壳
+  // 一启动就盖住整个屏幕）；退出时反过来，先恢复尺寸再取消置底会让“窗口已经
+  // 变小但仍压在底下”的中间态持续一帧（用户看到窗口出来一下又消失）。
+  if (enabled) {
+    // ① 先隐藏任务栏：否则铺满屏那一帧会与任务栏重叠（任务栏在更上层）。
+    (void)impl_->backend->set_system_taskbar_visible(false);
+    // ② 再置底：之后铺满屏不会抢前台。
+    (void)impl_->backend->set_stay_at_bottom(true);
+    // ③ 最后改尺寸；失败则回滚前两步（不留半成品形态）。
+    if (auto filled = fill_monitor(); !filled) {
+      (void)impl_->backend->set_stay_at_bottom(false);
+      (void)impl_->backend->set_system_taskbar_visible(true);
+      return filled;
+    }
+    impl_->desktop_shell_mode = true;
+    return ok();
+  }
+  // —— 退出桌面壳：与进入严格对称 ——
+  // ① **先**取消置底与还原任务栏：不然接下来改尺寸时窗口仍在最底层，
+  //    用户会看到它“缩小了但被压在所有窗口下面”，得先去点一下才能看见。
+  (void)impl_->backend->set_stay_at_bottom(false);
+  (void)impl_->backend->set_system_taskbar_visible(true);
+  // ② 再按工作区铺回普通窗口（与启动时 `fill_work_area` 同一口径：92%，不是整屏）。
+  if (auto fitted = impl_->backend->fit_window_to_work_area(); !fitted) {
+    // 拿不到工作区：退回启动时的请求尺寸（宁可尺寸不对，不要留在整屏不动）。
+    (void)impl_->backend->set_size(options_.width, options_.height);
+  }
+  (void)impl_->backend->center_window();
+  const math::Size size = impl_->backend->logical_size();
+  root_.set_viewport(size);
+  root_.mark_dirty_all();
+  impl_->desktop_shell_mode = false;
   return ok();
 }
 
@@ -1378,7 +1454,11 @@ auto Application::start() -> Status {
   //
   // ⚠ 仅当应用要铺开（`fill_work_area`）时开：相期那类常驻面板的尺寸是它自己的
   // 语义（“一张 460×620 的卡片”），铺开就毁了。
-  window.fill_work_area_on_create = options_.fill_work_area;
+  window.fill_work_area_on_create = options_.fill_work_area && !options_.fill_monitor;
+  // 桌面壳类窗口：铺满整块显示器（`rcMonitor`）而不是工作区。
+  // 传给后端的是**意图**，具体怎么算由后端（它才知道显示器在哪）。
+  window.fill_monitor = options_.fill_monitor;
+  window.stay_at_bottom = options_.stay_at_bottom;
   window.work_area_width = static_cast<int>(options_.work_area_override.width);
   window.work_area_height = static_cast<int>(options_.work_area_override.height);
   window.scale = options_.scale;
@@ -1410,6 +1490,21 @@ auto Application::start() -> Status {
       }
     } else {
       return forward_error(status.error());
+    }
+  }
+  // 启动即接管系统任务栏（`AppOptions::system_taskbar_visible`）。
+  //
+  // 为何放在建窗之后而不是构造时：它要对 **explorer 的**任务栏起作用，而本进程
+  // 当时还没建窗（若先隐藏任务栏、建窗又失败，用户会留在一个没任务栏的桌面上）。
+  // 同样：失败不阻止启动（桌面壳本来就已经铺满屏，只差“看不见”那一层）。
+  if (!options_.system_taskbar_visible) {
+    if (auto status = impl_->backend->set_system_taskbar_visible(false); !status) {
+      ST_LOG_WARN("系统任务栏未隐藏：{}", status.error().message);
+    }
+  }
+  if (options_.stay_at_bottom) {
+    if (auto status = impl_->backend->set_stay_at_bottom(true); !status) {
+      ST_LOG_WARN("窗口置底未生效：{}", status.error().message);
     }
   }
   perf::startup_mark("window.create");
@@ -1512,7 +1607,16 @@ auto Application::start() -> Status {
   //
   // `fill_work_area = false` 的应用**跳过这一步**：常驻面板/轻提示的尺寸是
   // 它自己的语义（“一张 460×620 的卡片”），铺开到工作区会直接毁掉它。
-  if (options_.fill_work_area) {
+  if (options_.fill_monitor) {
+    // **桌面壳路径**：铺满整块显示器（含任务栏条带），不经过 92% 边距。
+    //
+    // 为何不走下面那个 `fill_work_area` 分支：它的语义是“留边距、不贴死屏边”——
+    // 对桌面壳正好是反的（那圈边距会露出一圈原生桌面，任务栏条带也不归它）。
+    if (const auto fitted = impl_->backend->fit_window_to_monitor(); !fitted) {
+      // 无头/拿不到显示器不是错误：退回请求尺寸（布局仍按窗口本身排）。
+      ST_LOG_INFO("窗口未铺满显示器（{}）", fitted.error().message);
+    }
+  } else if (options_.fill_work_area) {
     if (const auto fitted = impl_->backend->fit_window_to_work_area(); !fitted) {
       // 无头/拿不到屏幕不是错误：退回 `work_area_override` 的语义。
       const math::Size work = work_area_logical();
@@ -1539,20 +1643,20 @@ auto Application::start() -> Status {
     }
   }
 
-  // **新窗口一律居中**（与上面那个分支无关：铺不铺开都要居中）。
+  // **新窗口一律居中**（与上面那两条尺寸分支无关：铺不铺开都要居中）。
   //
   // 为何在“尺寸定下来之后”：居中要按窗口的**最终尺寸**算，先移后改尺寸会让
   // 窗口偏到一边（长宽各差一半）。所以两条尺寸路径（铺开 / 只夹上限）都做完，
   // 这里再一次性定位置。
   //
-  // 为何不让各后端在建窗时自己居中：三个后端的做法不同（Win32 只能在
-  // `WM_*` 里改、X11 发一个请求、Wayland 根本没得选），而“居中”是**产品口径**，
-  // 不是平台细节。实测旧状态就是分家的：只有 Win32 在 `fit_window_to_work_area`
-  // 里顺手居中，于是 `fill_work_area = false` 的常驻面板与所有 X11 应用开局
-  // 都落在屏幕左上角（(0,0)）。
-  if (const auto centered = impl_->backend->center_window(); !centered) {
-    // 无头（没有屏幕）/Wayland（位置归合成器）不是错误，只记一句供排障。
-    ST_LOG_INFO("窗口未居中（{}）", centered.error().message);
+  // 铺满显示器的窗口**不居中**：它的矩形就是显示器矩形，居中会把它挪到
+  // （显示器尺寸 − 显示器尺寸）/2 = 0 的偏差上——在副屏（原点不在 0,0）上
+  // 那就是一次无意义的 SetWindowPos，还会把窗口从副屏拽回主屏。
+  if (!options_.fill_monitor) {
+    if (const auto centered = impl_->backend->center_window(); !centered) {
+      // 无头（没有屏幕）/Wayland（位置归合成器）不是错误，只记一句供排障。
+      ST_LOG_INFO("窗口未居中（{}）", centered.error().message);
+    }
   }
 
   // 字体栈首次装配（实测 63.5 ms：要读多个 TTC 的表目录）——泵一次消息。

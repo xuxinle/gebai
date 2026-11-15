@@ -1032,8 +1032,38 @@ void Element::place_absolute(const RenderContext& context, Element& child, math:
   // ⚠ 右缘基准用的是**本元素的 bounds_ 右缘**，不是 `content` 的：
   // `content` 已扣过 padding，贴右缘若按它算会往左缩一个 padding。
   // 而“贴右缘”的直觉是“贴容器的右边缘”（与 CSS 一致）。
-  if (child_style.right >= 0.0f) x = bounds_.right() - child_style.right - size.width;
-  if (child_style.bottom >= 0.0f) y = bounds_.bottom() - child_style.bottom - size.height;
+  //
+  // **两边缘都锚定且没给尺寸 = 拉伸**（CSS 的 `left:0; right:0` 语义）。
+  //
+  // 为何需要它：全宽/全高的覆盖层（桌面壳的底栏、页面级遮罩、横幅）必须**跟随容器**
+  // 宽度，而“显式给 width”要把窗口宽度抄一份到样式里（窗口一改就不对）。
+  //
+  // ## 两个基准**必须统一**（2026-11-15 实测踩过）
+  //
+  // `left/top` 以**内容盒**（已扣 padding）为原点，而 `right/bottom` 以**边框盒**右缘
+  // 为基准——两边基准不同，则“四边归零”不再是铺满：实测 112px 图标格、padding 6，
+  // 拉伸结果宽 106（左边进 6、右边不进），而 106 是个“不左不右”的怪数。
+  // 修法：拉伸时把左边也换到**边框盒**坐标（`bounds_.x + left`，与 CSS 同口径）。
+  //
+  // 为何拉伸判定必须在右锚**之前**：右锚会先算出 `x`（此时用的还是测量宽度），
+  // 随后再按那条 `x` 反解宽度只会得到原测量值——成为一个静默的空操作。
+  const bool stretches_x = child_style.width == kAuto && child_style.right >= 0.0f;
+  const bool stretches_y = child_style.height == kAuto && child_style.bottom >= 0.0f;
+  if (stretches_x) {
+    // 左边改用边框盒原点：左右同基准才能“归零 = 铺满”。
+    x = bounds_.x + child_style.left;
+    const float stretched = bounds_.right() - child_style.right - x;
+    if (stretched > 0.0f) size.width = stretched;
+  } else if (child_style.right >= 0.0f) {
+    x = bounds_.right() - child_style.right - size.width;
+  }
+  if (stretches_y) {
+    y = bounds_.y + child_style.top;
+    const float stretched = bounds_.bottom() - child_style.bottom - y;
+    if (stretched > 0.0f) size.height = stretched;
+  } else if (child_style.bottom >= 0.0f) {
+    y = bounds_.bottom() - child_style.bottom - size.height;
+  }
   child.arrange(context, math::Rect{x, y, size.width, size.height});
 }
 
@@ -1261,7 +1291,11 @@ void Element::arrange(const RenderContext& context, math::Rect rect) {
     used += main_extent;
   }
 
-  // 主轴剩余空间分配（无 grow 子节点时按 justify 处理）
+  // 主轴剩余空间分配（无 grow 子节点时按 justify 处理）。
+  //
+  // ⚠ 这里只补「偏移 + 每空隙的 extra_gap」：上面的第一遍排布已经把步长
+  //（width + gap）走完了，位移段若再按 width+gap 累加，步长就被计两次
+  //（实测：7×30px 图标 + gap22 步长变成 104 而不是 52，整组右偏）。
   if (grow_weight == 0.0f && style_.justify != Justify::Start) {
     const float slack = main_available - used;
     if (slack > 0.0f) {
@@ -1280,17 +1314,17 @@ void Element::arrange(const RenderContext& context, math::Rect rect) {
           break;
         case Justify::Start: break;
       }
-      float shift = row ? content.x : content.y;
-      shift += offset;
+      std::size_t index = 0;
       for (auto* child : visible) {
+        const float delta = offset + extra_gap * static_cast<float>(index);
         math::Rect moved = child->bounds();
         if (row) {
-          moved.x += shift - (row ? content.x : content.y);
+          moved.x += delta;
         } else {
-          moved.y += shift - (row ? content.x : content.y);
+          moved.y += delta;
         }
         child->arrange(context, moved);
-        shift += (row ? moved.width : moved.height) + style_.gap + extra_gap;
+        ++index;
       }
     }
   }
@@ -1380,6 +1414,32 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   if (hovering && hover_effect_.border && colors.border_hover.a != 0U) {
     border = border.mix(colors.border_hover, hover_t);
   }
+  // **元素级背板毛玻璃**：在本元素任何自绘内容（辉光/阴影/底色）之前执行。
+  //
+  // 顺序是硬约束（`paint_raised_surface` 同一条教训）：`blur_region` 模糊的是
+  // “这一步之前已画在画布上的像素”，画在阴影/辉光之后就会把它们也模糊进去；
+  // 画在底色之后则只能模糊到自己的底，白做。
+  //
+  // 圆角裁剪同弹层：`blur_region` 只认矩形，不裁会把模糊溢到圆角外成“毛边”。
+  // 后端不支持时静默跳过（退实色底）；`tint` 只有在模糊真的发生时才生效，
+  // 否则保持 1 ——降级路径的观感与“从未开过玻璃”完全一致。
+  float backdrop_tint = 1.0f;
+  if (style.backdrop_blur > 0.0f && canvas.supports_blur()) {
+    // **液态玻璃优先**：折射强度 > 0 且后端支持时走 `refract_region`
+    //（透镜畸变 + 色散，自带模糊）；失败或不受支持再退回普通 `blur_region`。
+    // 两条部都失败才算“毛玻璃未发生”，tint 回到 1（实色底）。
+    bool glass_done = false;
+    if (style.backdrop_refraction > 0.0f && canvas.supports_refraction()) {
+      glass_done = canvas.refract_region(box, style.backdrop_blur, style.backdrop_refraction,
+                                         style.backdrop_dispersion, style.radius);
+    }
+    if (!glass_done) {
+      if (style.radius > 0.0f) canvas.push_clip_rounded_rect(box, style.radius);
+      glass_done = canvas.blur_region(box, style.backdrop_blur);
+      if (style.radius > 0.0f) canvas.pop_clip();
+    }
+    if (glass_done) backdrop_tint = style.backdrop_tint;
+  }
   // 外发光：把强调色以低不透明度铺一层**放大**的圆角矩形（v0.2 的阴影/模糊机制复用）
   if (hovering && hover_effect_.glow && colors.glow.a != 0U) {
     const float spread = metrics.hover_glow_width * hover_t;
@@ -1403,7 +1463,8 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     //
     // 为何要显式判 `opacity >= 0.999`：半透明合成后底色仍半透明，不能跳
     //（契约第 1 条要求“完全覆盖”，而 `opacity < 1` 的底不满足）。
-    const bool can_skip_covered = background.a == 255U && style.opacity >= 0.999f;
+    const bool can_skip_covered =
+        background.a == 255U && style.opacity >= 0.999f && backdrop_tint >= 0.999f;
     const auto options = raster::DrawOptions{
         .opacity = style.opacity,
         .covered_region = can_skip_covered ? box : math::Rect{},
@@ -1493,12 +1554,13 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
         break;
     }
     canvas.fill_rect(box, raster::Paint::with_gradient(std::move(*mapped)), style.radius,
-                     raster::DrawOptions{.opacity = style.opacity * style.gradient_opacity});
+                     raster::DrawOptions{.opacity = style.opacity * style.gradient_opacity *
+                                                     backdrop_tint});
     painted_gradient = true;
   }
   if (!painted_gradient && background.a != 0U) {
     canvas.fill_rect(box, raster::Paint::solid(background), style.radius,
-                     raster::DrawOptions{.opacity = style.opacity});
+                     raster::DrawOptions{.opacity = style.opacity * backdrop_tint});
   }
   // **内阴影（`inset`）在底色之后画**——它要压在底色之上才看得见。
   //

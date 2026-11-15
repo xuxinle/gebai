@@ -173,6 +173,25 @@ struct AppOptions {
   /// 会被撑成整屏（实测：相期在 2355×1280 的全屏尺寸下启动，用户看到的是
   /// “窗口没有圆角”——实际上窗口有两个屏那么大，圆角在屏外）。
   bool fill_work_area{true};
+  /// **铺满整块显示器**（含系统任务栏条带）：桌面壳/全屏展示类窗口用。
+  ///
+  /// 为真时启动直接按 `rcMonitor` 建窗，**跳过** `fill_work_area` 的 92% 收敛——
+  /// 两者语义相反（一个要留边距和任务栏，一个要把整个屏当画布）。
+  /// 术语与降级契约见 `shell::WindowOptions::fill_monitor`。
+  bool fill_monitor{false};
+  /// **钉在窗口层最底部**（任何普通窗口都浮在它上面）。
+  ///
+  /// 由后端**持续维持**（不是一次调用），见 `shell::WindowOptions::stay_at_bottom`：
+  /// “在最底层”是一个每帧都要守住的不变量，应用层自己轮询做不到。
+  bool stay_at_bottom{false};
+  /// **显示/隐藏系统任务栏**（Windows 上是 `Shell_TrayWnd`）。
+  ///
+  /// 默认 `true`（不动它）。桌面壳要替代原生桌面时置 false 并让窗口铺满显示器：
+  /// 只“盖上去”不“让位”的话，任务栏仍占 `rcWork`、仍会从底边弹出来。
+  ///
+  /// 还原由应用负责（进程外的全局状态）：后端在窗口销毁时会兜底还原一次，
+  /// 但那只覆盖“正常退出”这条路径。
+  bool system_taskbar_visible{true};
   /// 显示器工作区的逻辑尺寸覆盖（0 = 问后端）。
   ///
   /// 为何需要它：高 DPI + 小屏上“可用逻辑空间不够”是个**只在特定硬件组合下**
@@ -557,6 +576,32 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 为何不用多个窗口：多窗口在无头后端与截图验证里都要额外路径，
   /// 而“同一个窗口换尺寸 + overlay 换内容”就能满足轻提示/主界面两种形态。
   [[nodiscard]] auto set_window_size(int width_logical, int height_logical) -> Status;
+
+  /// 把窗口铺满**它所在那块显示器**（含系统任务栏条带）。
+  ///
+  /// 与 `set_window_size` 的分工：那个是“我要具体多大”，这个是“我要整块屏、
+  /// 不关心数字”——多显示器/DPI 不同时后者才是对的（窗口只能知道自己那块屏）。
+  /// 无头/不支持的后端如实报 `Unsupported`（不是错误：没有“显示器”这回事）。
+  [[nodiscard]] auto fill_monitor() -> Status;
+  /// 设为/取消**钉在窗口层最底部**（见 `AppOptions::stay_at_bottom`）。
+  [[nodiscard]] auto set_stay_at_bottom(bool enabled) -> Status;
+  /// 显示/隐藏**系统任务栏**（Windows）。退出前请显式还原——见 `AppOptions::system_taskbar_visible`。
+  [[nodiscard]] auto set_system_taskbar_visible(bool show) -> Status;
+  /// 当前是否处于“桌面壳形态”（铺满显示器 + 置底）：切回普通窗口时要恢复的基准。
+  [[nodiscard]] auto desktop_shell_mode() const noexcept -> bool;
+  /// 切换桌面壳形态：`true` = 铺满显示器 + 置底 + 隐藏系统任务栏；
+  /// `false` = 回到普通窗口（按 `AppOptions::width/height` 与工作区 92%）。
+  ///
+  /// ## 为什么要有这个开关
+  ///
+  /// 桌面壳是一个**霸占整个屏幕**的窗口：调试/截图/与其它应用并排时需要把它降回
+  /// 一个普通窗口。而这三件事（尺寸/置底/任务栏）必须**一起**切，分两次切会出现
+  /// “已经变小了但还压在底下”的中间态（用户看到窗口出来一下又消失）。
+  [[nodiscard]] auto set_desktop_shell_mode(bool enabled) -> Status;
+  /// 任务栏/桌面壳相关能力是否齐备（给 UI 据此禁用切换按钮，而不是画个点不动的装饰）。
+  ///
+  /// 无头后端为 `false`（如实：没有显示器/Z 序/系统任务栏）。
+  [[nodiscard]] auto desktop_shell_supported() const -> bool;
 
   /// 单帧推进（自检与外部驱动用）：布局 → 绘制 → present。
   void render_frame();

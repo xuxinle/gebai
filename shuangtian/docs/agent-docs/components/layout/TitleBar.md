@@ -21,7 +21,7 @@ auto w = std::make_unique<st::ui::TitleBar>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`title` · `text` · `icon` · `show_controls` · `maximized` · `window_control_available` · `hovered_button` · `hovered_caption`
+**可读写**：`title` · `text` · `icon` · `show_controls` · `show_theme_button` · `maximized` · `window_control_available` · `hovered_button` · `hovered_caption` · `surface_color`
 
 > 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
 

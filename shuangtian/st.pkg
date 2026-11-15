@@ -61,7 +61,7 @@
   "lint": {
     "//": "规则豁免：规则 id → 路径 glob。成片/基于位置的边界走这里（单点破例走行内 // lint-allow）。两通道都需在 CONVENTIONS.md §8 登记，且各自计数、不静默。",
     "exempt": {
-      "L14": ["**/entry.cpp", "tools/*_probe.cpp", "tools/**", "tests/**", "**/slow_content.cpp"],
+      "L14": ["**/entry.cpp", "tools/*_probe.cpp", "tools/**", "tests/**", "**/slow_content.cpp", "apps/st_desktop/main.cpp"],
       "L3": ["src/net/platform_tls_openssl.cpp", "tests/shard_parity_test.cpp"],
       "//probe": "量测探针（tools/*_probe.cpp）是**一次性量尺**、不是交付物：用 std::printf 输出数字、直接 include 系统头拿 ABI。它们不进任何 target 产物、不被应用包含，按 CONVENTIONS §8 做成片豁免。",
       "//probe_window": "窗口层探针（2026-11-01，量 OS 窗口而非画布）：① L8 —— 窗口过程只能靠进程级状态回填当前被测方案；② L12 —— 误报：探针自有的像素取值器名叫 `Shot::at(x,y)`，接收者不是容器；③ L17 —— 直接 Win32 的 `HRESULT`/`DWORD`/`long` ABI，转定宽只是为 printf。同属「一次性量尺」口径。",
@@ -263,6 +263,24 @@
                   "icon": "apps/gebai_desktop/assets/gebai.ico",
                   "//embed": "只有窗口/任务栏图标。**侧车不 embed**：`packages/desktop/dist/gebai.exe` 是 270MB 的构建产物，用 b::embed 会生成 ~1.1GB C++ 源码、每次全量重编（实测不可接受）。发布形态由打包脚本把侧车二进制**追加到宿主 exe 末尾**（trailer：魔数+长度+哈希，见 main.cpp 的 read_payload_from_self 与 packages/desktop/scripts/pack-desktop.ts），单文件分发不受影响；开发期用 --server-exe 指一件现成二进制。",
                   "embed": ["apps/gebai_desktop/assets/gebai-icon32.rgba"] },
+    "st_desktop": { "kind": "executable", "sources": ["apps/st_desktop/*.cpp"],
+                  "exclude_sources": ["src/pkg/*"],
+                  "//note": "霜天桌面：替代原生桌面的全屏置底启动器（壁纸 + 真实应用图标网格 + 液态玻璃任务栏），同时也是液态玻璃特性的验收载体。**不内嵌子窗口**：点图标只是 spawn 起真实 exe，应用窗口自然浮在桌面之上。窗口形态（铺满显示器/置底/隐藏系统任务栏）由 shell 层的 fill_monitor / stay_at_bottom / set_system_taskbar_visible 提供，`--windowed` 可切回普通窗口。应用清单读 exe 同目录的 desktop.json。玻璃 = Style::backdrop_blur + backdrop_refraction + backdrop_dispersion（GPU 生效，软件/无头降级实色底）。",
+                  "//system": "GUI 子系统（桌面环境，双击不弹控制台）；--headless 时入口 startup_configure_console 接回 stdout，无头冒烟靠它读日志。",
+                  "//icon": "exe 文件图标（标题栏/任务栏/资源管理器）。由 tools/st_desktop_icon_gen.py 按 splash.cpp 的品牌几何绘制，与内嵌的 st_desktop-icon.png **同一份像素**的不同尺寸档——否则窗口图标与桌面图标会是两个标。",
+                  "icon": "apps/st_desktop/assets/st_desktop.ico",
+                  "//embed": "**全套应用图标**：各应用自己那份 `<app>-icon.png`（就是它们的窗口/任务栏图标），覆盖 `group all` 的八个应用 + 桌面自己——桌面图标必须与任务栏一致，不自己另画一套。桌面那份由 `tools/st_desktop_icon_gen.py` 按 `src/app/splash.cpp` 的品牌几何（三条主干 + ±52° 分叉 + 中心点）绘制，与启动卡上的标同源。另加壁纸位图 `bg-slate.png`（复用裁云素材库的石面细纹：亮度 36.5%，玻璃才有可透的亮度差）。合计约 1MB。",
+                  "embed": ["apps/gallery/assets/gallery-icon.png",
+                              "apps/gbcode/assets/gbcode-icon.png",
+                              "apps/jianmu/assets/jianmu-icon.png",
+                              "apps/caiyun/assets/caiyun-icon.png",
+                              "apps/louyue/assets/louyue-icon.png",
+                              "apps/xiangqi/assets/xiangqi-icon.png",
+                              "apps/cefu/assets/cefu-icon.png",
+                              "apps/gedou/assets/gedou-icon.png",
+                              "apps/st_desktop/assets/st_desktop-icon.png",
+                              "apps/caiyun/assets/media/bg-slate.png"],
+                  "system": "gui" },
     "gedou_rl": { "kind": "executable",
                   "sources": ["tools/gedou_rl.cpp",
                               "apps/gedou/rl_env.cpp",
@@ -1428,4 +1446,4 @@
 
 
 
-
+

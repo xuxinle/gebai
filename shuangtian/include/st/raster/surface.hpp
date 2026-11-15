@@ -273,6 +273,30 @@ class Surface {
   /// 本后端是否支持 `blur_region`（调用方据此决定要不要走毛玻璃排版）。
   [[nodiscard]] virtual auto supports_blur() const noexcept -> bool { return false; }
 
+  /// **区域内液态玻璃（折射 + 色散）**：把 `rect` 内已绘内容按圆角 SDF 法线
+  /// 位移采样（透镜畸变）并叠加 RGB 三通道错位（色散），就地写回。
+  ///
+  /// 与 `blur_region` 的分工：blur 是各向同性模糊（毛玻璃）；refract 在模糊之上
+  /// 加「边缘吸入背景」的畸变与彩虹纹——液态玻璃的“液态”本体。
+  ///
+  /// 降级契约（同 blur 的口径）：后端未实现时返回 `false`，调用方应退回
+  /// `blur_region`（观感退为普通毛玻璃，界面仍正确）。
+  ///
+  /// 参数：`radius` 模糊半径；`strength` 折射强度（逻辑像素，位移量纲）；
+  /// `dispersion` 色散强度（无量纲，0 = 无）；`corner` 玻璃元素的圆角半径
+  /// （逻辑像素，决定 SDF 形状——折射发生在圆角边缘带内）。
+  [[nodiscard]] virtual auto refract_region(math::Rect rect, float radius, float strength,
+                                           float dispersion, float corner) -> bool {
+    (void)rect;
+    (void)radius;
+    (void)strength;
+    (void)dispersion;
+    (void)corner;
+    return false;
+  }
+  /// 本后端是否支持 `refract_region`（支持折射的 GPU 后端才返回 true）。
+  [[nodiscard]] virtual auto supports_refraction() const noexcept -> bool { return false; }
+
   /// **不透明纹理句柄**：把“本 Surface 的像素”以不透明句柄交给同后端的上层合成。
   ///
   /// 存在的理由（实测数据说话）：三维 GPU 腿的光栅只要 **0.06 ms**，而把它交回一张

@@ -285,6 +285,18 @@ auto centered_origin(math::IntRect window, math::IntRect work_area) noexcept -> 
   return math::IntPoint{work_area.x + offset_x, work_area.y + offset_y};
 }
 
+auto monitor_fill_rect(math::IntRect monitor) noexcept -> math::IntRect {
+  // “铺满”= 直接用显示器矩形：位置与尺寸都不动。
+  //
+  // 这里**故意什么都不算**：曾经想“留 1px 避免 DWM 圆角”——圆角是 DWM 给**有边框窗口**
+  // 加的，自绘窗框（`decorations=false`）本来就申请不到它（`apply_dwm_window_shadow`
+  // 里同时关掉了 Win11 圆角）；留边反而是自找的一条缝。
+  //
+  // 唯一要处理的是空输入：退化尺寸的显示器（虚拟显示器/远程会话偶发 0×0）
+  // 传进来时返回空矩形，调用方据此**跳过**而不是拿一个畸形矩形去 SetWindowPos。
+  return monitor;
+}
+
 auto create_backend(std::string_view name) -> Result<std::unique_ptr<Backend>> {
   const std::string requested = name.empty() ? probe_backend() : std::string(name);
   if (requested == "headless") {

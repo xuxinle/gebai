@@ -107,6 +107,11 @@ struct Style {
   float top{0.0f};
   /// 绝对定位时用“右缘/底缘”锚定：非负则按 `父宽 - right - 自身宽` 定位。
   /// 用于「贴右缘」这类需求，免得调用方自己算父宽（它往往拿不到）。
+  ///
+  /// **`left` 与 `right` 同时给、且 `width` 为 `kAuto` = 横向拉伸**（CSS 同语义）：
+  /// 宽度 = 父宽 − left − right。全宽覆盖层（桌面底栏、页面级遮罩）靠它跟随容器，
+  /// 因而不能靠“显式写 width”来实现：那要把窗口尺寸抄一份到样式里，窗口一改就错。
+  /// 纵向同理（`top` + `bottom` 且 `height` 为 `kAuto`）。
   float right{-1.0f};
   float bottom{-1.0f};
 
@@ -159,6 +164,35 @@ void set_gradient_background(raster::Gradient fill, math::Color fallback) noexce
   background_gradient = std::move(fill);
   gradient_opacity = 1.0f;
 }
+  /// **背板毛玻璃（元素级）**：> 0 时，本元素底色绘制**之前**先把
+  /// `bounds_` 内已绘的背板内容模糊掉（`Surface::blur_region`，与 CSS
+  /// `backdrop-filter: blur()` 同口径）。与 `Metrics::overlay_blur_radius`
+  /// （只作用于弹层）互不影响：这是元素自带的能力，供工具栏/Dock/玻璃卡片用。
+  ///
+  /// 降级契约：后端不支持（`supports_blur()` 为假，如软件腿在性能预算下不开）
+  /// 或半径为 0 时**跳过模糊**，下方的 `background`/`top_highlight` 照常画——
+  /// 观感退为“实色底”而不是报错或半透明裸底。
+  ///
+  /// 为何不接 `hover_t`/动画：模糊是重操作，逐帧变半径会把成本变成动画时长 × 频率；
+  /// 需要“玻璃淡入”时用 `opacity` 动画叠在已模糊的底上，成本不变。
+  float backdrop_blur{0.0f};
+  /// **毛玻璃上叠的底色不透明度**（0 = 只模糊不叠色，1 = 完全不透明 = 模糊白做）。
+  ///
+  /// 毛玻璃 = 模糊 + 半透明着色，两者必须同时存在（`Metrics::overlay_blur_tint`
+  /// 同一条口径）：只模糊不叠色 → 背后内容抢眼，文字读不出来；
+  /// 只叠色不模糊 → 就是实色底。着色色就用 `background`，本字段控制它的 alpha。
+  float backdrop_tint{1.0f};
+  /// **液态玻璃折射强度**（> 0 且后端支持时，在毛玻璃之上叠加「透镜畸变 +
+  /// 色散」——`Surface::refract_region`，GPU 腿专属）。0 = 关。
+  ///
+  /// 语义：与 `backdrop_blur` 组合使用（折射自带模糊半径）；后端不支持折射时
+  /// 自动退回 `backdrop_blur` 的普通毛玻璃（`supports_refraction()` 判定），
+  /// 界面仍正确。量纲是逻辑像素（边缘位移量）。
+  float backdrop_refraction{0.0f};
+  /// **色散强度**（无量纲，0 = 关）：作用在折射位移上——R/B 通道采样坐标
+  /// 沿法线各偏一点，玻璃边缘出现细微彩虹纹。仅在 `backdrop_refraction > 0`
+  /// 且后端支持折射时生效。
+  float backdrop_dispersion{0.0f};
   float radius{0.0f};
   math::Color border_color{0, 0, 0, 0};
   float border_width{0.0f};

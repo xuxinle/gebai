@@ -580,6 +580,75 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
     return float4(sum.r / count, 0.0, 0.0, 1.0);
   }
 
+  if (mode == 6) {
+    // **液态玻璃：折射 + 色散**（`Surface::refract_region` 的 GPU 实现）。
+    //
+    // 与毛玻璃（mode 4）的区别：采样坐标不再固定，而是按圆角 SDF 的**法线**
+    // 向内位移——靠近玻璃边缘时背景被"吸入/压缩"（透镜畸变），中心 1:1。
+    // 再叠加 R/G/B 三通道采样错位（色散），边缘出现细微彩虹纹。
+    //
+    // 参数（axis_extra 的空闲槽）：
+    //   x = 模糊半径（同 mode 4 的口径）
+    //   y = 折射强度（0 = 关，退化为纯毛玻璃）
+    //   z = 色散强度（0 = 关；作用在折射位移上，无量纲）
+    //   w = 边缘带宽（像素；SDF 距离小于它的地方才发生折射）
+    //
+    // 实现口径：blur 与折射**同一个 pass** ——采样点先按法线位移，再取
+    // 盒式模糊均值（单 pass 内的循环采样），色散则把 R/B 两个通道的采样
+    // 坐标沿法线再各偏一点。这样只需一次贴回，不会多出 ping-pong 轮次。
+    //
+    // ## 采样坐标映射到**外扩拷贝**（2026-11-15 实测教训）
+    //
+    // `refract_region` 的拷贝阶段把玻璃区域四周**外扩**了一段（模糊半径 +
+    // 折射位移 + 边缘带）——本 pass 采样的纹理比玻璃区大，且玻璃区在纹理里
+    // 不在 (0,0)。`local01` 是玻璃区内坐标（0..1），采样时必须先映射到
+    // 外扩纹理的子矩形（`g_uv`，语义同 mode 3 的位图子矩形）。
+    // 位移/步进的换算同理：以**物理像素**为单位定义，除以外扩纹理尺寸。
+    // 若不映射（直接用 local01 采样），外扩拷贝等于白做：外侧背景仍然
+    // 采样不到，实测 Dock 上方紧贴的高频条纹完全不被吸入。
+    const int radius = (int)g_axis_extra.x;
+    const float strength = g_axis_extra.y;
+    const float dispersion = g_axis_extra.z;
+    const float edge_band = max(g_axis_extra.w, 1.0);
+    // 模糊步进：1 步 = 1 物理像素。`g_axis.xy` 由调用方直接填「1/ext 尺寸」
+    //（外扩纹理的 uv 步长）——外扩拷贝后纹理尺寸 ≠ 区域尺寸，着色器内
+    // 自算会错（实测：中心模糊失效，高频未被抹平）。
+    const float2 step = g_axis.xy;
+    // SDF 与法线：局部坐标以区域中心为原点（local_px 是相对左上，先移到中心）。
+    const float2 half2 = half_size;
+    const float sdf = rounded_sdf(local_px, half2, g_radii);
+    // 法线 = SDF 梯度。解析梯度在直边段为轴对齐、圆角段为归一化径向——
+    // 用有限差分近似（两吹采样，足够平滑）：
+    const float eps = 1.0;
+    const float sdf_x = rounded_sdf(local_px + float2(eps, 0.0), half2, g_radii) - sdf;
+    const float sdf_y = rounded_sdf(local_px + float2(0.0, eps), half2, g_radii) - sdf;
+    const float2 normal = normalize(float2(sdf_x, sdf_y) + float2(1e-6, 1e-6));
+    // 边缘衰减：SDF 越接近边界（值越接近 0），折射越强；中心（深度负值）无折射。
+    const float edge_t = 1.0 - saturate(-sdf / edge_band);
+    // 位移量：法线方向、向**外**推（采样到更外侧的背景 → 视觉上背景被吸向边缘）。
+    // 单位是**物理像素**：strength 已换算到物理，再除以外扩纹理尺寸得 uv 位移。
+    const float2 ext_size = g_uv.zw > 0.0 ? float2(1.0, 1.0) / (g_uv.zw / max(g_rect.zw, float2(1.0, 1.0))) : g_rect.zw;
+    const float2 push_uv = normal * (strength * edge_t) / max(ext_size, float2(1.0, 1.0));
+    const float2 disp_r = push_uv * (1.0 + dispersion);
+    const float2 disp_b = push_uv * (1.0 - dispersion);
+
+    float3 sum_rgb = float3(0.0, 0.0, 0.0);
+    float count = 0.0;
+    for (int i = -64; i <= 64; ++i) {
+      if (i < -radius || i > radius) continue;
+      // 玻璃区 0..1 坐标先映射进外扩纹理的子矩形（g_uv），再叠加位移/步进
+      //（它们同样已换算到外扩纹理的 uv 尺度）。
+      const float2 base = g_uv.xy + local01 * g_uv.zw + push_uv + step * (float)i;
+      const float r_c = g_texture.SampleLevel(g_sampler, base + disp_r - push_uv, 0).r;
+      const float g_c = g_texture.SampleLevel(g_sampler, base, 0).g;
+      const float b_c = g_texture.SampleLevel(g_sampler, base + disp_b - push_uv, 0).b;
+      sum_rgb += float3(r_c, g_c, b_c);
+      count += 1.0;
+    }
+    if (count <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
+    return float4(sum_rgb / count, 1.0);
+  }
+
   if (mode == 0 || mode == 1) {
     // 实心 / 渐变圆角矩形：SDF 给出解析覆盖率（1px 过渡带）
     coverage = saturate(0.5 - rounded_sdf(local_px, half_size, g_radii));
@@ -729,6 +798,9 @@ enum class DrawMode : std::uint32_t {
   BoxBlur = 4,
   /// 亚像素（LCD）覆盖率遮罩：纹理是 R8G8B8，混合走**两遍**（`g_mode.w` 选遍次）。
   CoverageMaskLcd = 5,
+  /// 液态玻璃（折射 + 色散）：采样坐标按圆角 SDF 法线位移 + RGB 三通道错位。
+  /// 参数在 `g_axis_extra`（半径/强度/色散/边缘带宽）；仅 `refract_region` 用。
+  RefractionBlur = 6,
 };
 
 /// 着色器与固定状态（设备级共享；懒创建）。
@@ -1607,7 +1679,125 @@ class GpuCanvas final : public Surface {
               &area);
     note_deferred_draw();
     return true;
+  }
+
+  /// **液态玻璃（折射 + 色散）**：与 `blur_region` 同管线，但单 pass 完成
+  /// 「模糊 + 法线位移采样 + RGB 错位」（DrawMode::RefractionBlur）。
+  ///
+  /// 与 blur 的差异：
+  /// - **圆角半径进 SDF**（`g_radii`）——折射量取决于到圆角边缘的距离，
+  ///   直角矩形给不出"边缘法线"的渐变，透镜效果无从谈起；调用方应把
+  ///   玻璃元素的圆角传进来（与元素自身的 `Style::radius` 同值）。
+  /// - 不做 3 遍 ping-pong（折射是一个非线性采样，叠三遍会破坏色散结构）。
+  ///   单 pass 内盒式循环 + 位移采样；性能与 blur 同量级（采样次数同为 2r+1）。
+  /// - 软件腿不实现（`Surface::refract_region` 默认 false）：调用方拿不到
+  ///   折射时退回 `blur_region`，观感退为普通毛玻璃，界面仍正确。
+  ///
+  /// 参数：`strength` 折射强度（逻辑像素，位移量纲）；`dispersion` 色散强度
+  /// （无量纲，作用在折射位移上，0 = 无色散）；`corner` 圆角半径（逻辑像素）。
+  [[nodiscard]] auto refract_region(math::Rect rect, float radius, float strength,
+                                    float dispersion, float corner) -> bool override {
+    if (radius <= 0.0f || strength <= 0.0f || rect.is_empty() || target_ == nullptr ||
+        target_srv_ == nullptr) {
+      return false;
+    }
+    math::IntRect area = to_physical(rect).intersect(clip_rect());
+    area = area.intersect(math::IntRect{0, 0, physical_width_, physical_height_});
+    if (area.width <= 1 || area.height <= 1) return false;
+
+    submit_deferred_now();
+
+    // ① 拷入（**外扩拷贝**）：折射/模糊会把区域**外**的背景吸入（法线位移指向
+    // 外侧、模糊核越界采样），只拷玻璃矩形会让这些采样全部 clamp 到边缘、
+    // 外侧内容永远进不来（实测：Dock 上方紧贴的高频条纹完全不被吸入）。
+    // 外扩量 = 模糊半径 + 折射位移 + 边缘带，拷到画布边界为止。
+    const int pad = static_cast<int>(std::lround(
+        radius * scale_ * 0.5f + strength * scale_ + corner * scale_ + 8.0f));
+    math::IntRect ext = area;
+    ext.x = std::max(0, ext.x - pad);
+    ext.y = std::max(0, ext.y - pad);
+    ext.width = std::min(physical_width_ - ext.x, area.x + area.width - ext.x + pad);
+    ext.height = std::min(physical_height_ - ext.y, area.y + area.height - ext.y + pad);
+    if (ext.width <= 1 || ext.height <= 1) return false;
+
+    ShadowTargets targets;
+    if (!acquire_color_targets(ext.width, ext.height, targets)) return false;
+    const float clear_rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    {
+      const DrawScope gfx = draw_scope();
+      gfx->ClearRenderTargetView(targets.rtv_a, clear_rgba);
+      note_deferred_draw();
+    }
+
+    ShaderParams copy = base_params(
+        DrawMode::Bitmap,
+        math::Rect{0.0f, 0.0f, static_cast<float>(ext.width), static_cast<float>(ext.height)},
+        {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+    copy.mode[2] = 0.0f;
+    copy.uv[0] = static_cast<float>(ext.x) / static_cast<float>(physical_width_);
+    copy.uv[1] = static_cast<float>(ext.y) / static_cast<float>(physical_height_);
+    copy.uv[2] = static_cast<float>(ext.width) / static_cast<float>(physical_width_);
+    copy.uv[3] = static_cast<float>(ext.height) / static_cast<float>(physical_height_);
+    apply_shadow_viewport(copy, ext);
+    submit_deferred_now();
+    submit_to(targets.rtv_a, copy, target_srv_, true, true, ext.width, ext.height);
+
+    // ② 单 pass 折射：从 A 读、写回 A（不自交：读的是采样前的原始拷贝，
+    // 写的是另一个 RT 不允许同绑——所以实际写 B，再贴回 B）。
+    const int box_radius = std::max(1, static_cast<int>(std::lround(radius * scale_ * 0.5f)));
+    ShaderParams refract = base_params(
+        DrawMode::RefractionBlur,
+        math::Rect{0.0f, 0.0f, static_cast<float>(area.width), static_cast<float>(area.height)},
+        {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+    refract.axis[0] = 1.0f / static_cast<float>(std::max(1, ext.width));
+    refract.axis[1] = 1.0f / static_cast<float>(std::max(1, ext.height));
+    //（语义：每步 1 物理像素的外扩纹理 uv 步长；mode6 内直接当 step 用）
+    refract.axis_extra[0] = static_cast<float>(box_radius);
+    refract.axis_extra[1] = strength * scale_;
+    refract.axis_extra[2] = dispersion;
+    refract.axis_extra[3] = std::max(corner * scale_, 8.0f);   // 边缘带宽至少盖住圆角
+    refract.mode[2] = 0.0f;   // 离屏：禁用裁剪
+    // 采样映射：RT_a 是**外扩拷贝**（ext），玻璃区在其中的 uv 子矩形——
+    // mode6 的着色器靠 g_uv 把玻璃区 0..1 坐标映射进外扩纹理（位移/步进
+    // 也按同一尺度换算），外侧背景才能被吸进来。
+    refract.uv[0] = static_cast<float>(area.x - ext.x) / static_cast<float>(ext.width);
+    refract.uv[1] = static_cast<float>(area.y - ext.y) / static_cast<float>(ext.height);
+    refract.uv[2] = static_cast<float>(area.width) / static_cast<float>(ext.width);
+    refract.uv[3] = static_cast<float>(area.height) / static_cast<float>(ext.height);
+    // SDF 的圆角用区域的**物理**圆角（与元素逻辑圆角同比例）。
+    refract.radii[0] = refract.radii[1] = refract.radii[2] = refract.radii[3] =
+        corner * scale_;
+    apply_shadow_viewport(refract, area);
+    submit_deferred_now();
+    submit_to(targets.rtv_b, refract, targets.srv_a, false, true, area.width, area.height);
+    submit_deferred_now();
+
+    // ③ 贴回（uv 内缩半纹素、scissor 收紧、正常混合）。
+    // ⚠ RT_b 是 **ext 尺寸**纹理，mode6 的输出只画在它的左上 area 区域
+    //（viewport=area）——采样 uv 必须按 ext 纹理的纹素内缩、且限制在
+    // 内容子矩形 [0, area/ext] 内。按 area 尺寸算内缩会把 uv 拉伸到整个
+    // ext 纹理：右/下半采到未写区域（alpha=0），blend 后保留原背景——
+    // 实测玻璃右半完全没模糊（左半正常），根因即此。
+    ShaderParams paste = base_params(
+        DrawMode::Bitmap,
+        math::Rect{static_cast<float>(area.x), static_cast<float>(area.y),
+                   static_cast<float>(area.width), static_cast<float>(area.height)},
+        {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+    const float half_u = 0.5f / static_cast<float>(std::max(1, ext.width));
+    const float half_v = 0.5f / static_cast<float>(std::max(1, ext.height));
+    paste.uv[0] = half_u;
+    paste.uv[1] = half_v;
+    paste.uv[2] = static_cast<float>(area.width) / static_cast<float>(ext.width) - 2.0f * half_u;
+    paste.uv[3] = static_cast<float>(area.height) / static_cast<float>(ext.height) - 2.0f * half_v;
+    submit_to(rtv_, paste, targets.srv_b, true, /*opaque=*/false, physical_width_, physical_height_,
+              &area);
+    note_deferred_draw();
+    return true;
   }  [[nodiscard]] auto supports_blur() const noexcept -> bool override { return true; }
+ /// 折射（液态玻璃）由 `refract_region` 实现——能力位与实现同步置真。
+ /// 若不 override，基类默认 false 会让上层永远走不到折射路径（实测：
+ /// st_desktop Dock 开折射后无头 GPU 截图里边缘带无任何吸入，原因正是漏了这条）。
+ [[nodiscard]] auto supports_refraction() const noexcept -> bool override { return true; }
   /// GPU 画布**不**支持区域重绘：整帧绘制只需 ~1ms，而局部路径要另维护一套
   /// 裁剪/命令列表状态；更关键的是局部重绘成立的前提是**画布保留上一帧内容**——
   /// GPU 画布的呈现走 `DXGI_SWAP_EFFECT_DISCARD` 的 swapchain，`Present` 之后

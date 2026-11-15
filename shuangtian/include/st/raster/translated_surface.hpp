@@ -136,6 +136,14 @@ class TranslatedSurface final : public Surface {
   [[nodiscard]] auto supports_blur() const noexcept -> bool override {
     return inner_.supports_blur();
   }
+  [[nodiscard]] auto refract_region(math::Rect rect, float radius, float strength,
+                                    float dispersion, float corner) -> bool override {
+    return inner_.refract_region(rect.offset(offset_.x, offset_.y), radius, strength,
+                                 dispersion, corner);
+  }
+  [[nodiscard]] auto supports_refraction() const noexcept -> bool override {
+    return inner_.supports_refraction();
+  }
   /// **纹理句柄透传**（不是本包装画的，是同后端的 `inner`）：零拷贝快路的语义是
   /// “采样这张纹理”，与坐标平移无关，透传即可。
   [[nodiscard]] auto native_texture() const noexcept -> NativeTexture override {

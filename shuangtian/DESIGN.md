@@ -5027,6 +5027,107 @@ Result<std::unique_ptr<Backend>> create_backend(std::string_view name);   // 自
 - `headless`：**默认在无 DISPLAY/WAYLAND_DISPLAY 时自动选择**；离屏 Framebuffer，输入事件由控制通道注入。
 - 平台后端：运行时探测（`dlopen`/`LoadLibrary`），不产生链接期依赖；缺失或未实现时如实报 `Unsupported`。
 
+#### 4.6.0 桌面壳类窗口的形态能力（`fill_monitor` / `stay_at_bottom` / 系统任务栏）
+
+替代**原生桌面**的窗口（`apps/st_desktop`）与普通应用窗口的窗口语义不同。三项能力都只能是
+后端职责（要碰 `rcMonitor` / `HWND_BOTTOM` / `Shell_TrayWnd`），因此是 `WindowOptions` 字段 +
+`Backend` 虚函数，**不是**应用层自己调平台 API（§10 第 1 条）。
+
+```cpp
+// WindowOptions / AppOptions 字段
+bool fill_monitor{false};       // 按 rcMonitor（含任务栏条带）建窗，与 fill_work_area 互斥
+bool stay_at_bottom{false};     // 钉在窗口层最底部
+
+// Backend 虚函数（默认 Unsupported，无头后端如实拒绝）
+virtual Status fit_window_to_monitor();                    // 铺满所在那块显示器，零边距
+virtual Status set_stay_at_bottom(bool enabled);
+virtual Status set_system_taskbar_visible(bool show);      // Shell_TrayWnd
+```
+
+四条**必须记下的口径**（各自都对应一个会静默错的写法）：
+
+| 口径 | 为什么 |
+|---|---|
+| `fill_monitor` 与 `fill_work_area` **互斥** | 后者是「工作区 × 92%」——对桌面壳正好是反的：那圈边距会露出一圈原生桌面，任务栏条带也不归它 |
+| 铺满显示器的窗口**不居中** | 它的矩形就是显示器矩形；居中在副屏（原点不在 0,0）上是一次无意义的 `SetWindowPos`，会把窗口从副屏拽回主屏 |
+| 置底是**持续维持的不变量**，不是一次调用 | 点一下、被抢前台、最小化后恢复——任意一件事都会把它顶上来。实现在窗口过程的 `WM_WINDOWPOSCHANGING` 里**每次改 Z 序时改写 `hwndInsertAfter = HWND_BOTTOM`**；且**只碰 Z 序位，不改 `x/y/cx/cy`**（那些是布局真源，改写后 `WM_SIZE` 会收到幻觉尺寸） |
+| 系统任务栏是**进程外的全局状态** | 后端在 `WM_DESTROY` 兜底还原一次（只覆盖正常销毁）；崩溃/强杀拦不住，所以应用必须用 RAII 在每条退出路径还原 |
+
+**强杀/崩溃的守卫进程**（实测没有它就会丢任务栏）：隐藏任务栏时同时拉起**同 exe 的
+`--taskbar-guard <父pid>` 子进程**。它不建窗、不读配置，只轮询父进程是否还在（500ms），
+父进程一死（**包括 `TerminateProcess`**）就把 `Shell_TrayWnd` 显回来再退出。
+
+实测（`tools/desktop_taskbar_kill_probe.py`，3 轮）：
+
+| 阶段 | 任务栏可见 |
+|---|---|
+| 启动前 | true |
+| 桌面壳运行中 | **false**（已隐藏） |
+| `proc.kill()`（模拟任务管理器结束任务）后 1.2s | **true**（守卫还原） |
+
+没有守卫时的同一实验：强杀后仍为 **false**——用户的桌面永久没有任务栏，
+而且不知道该怎么同复。这是必须做守卫而不是“写进文档提醒用户”的理由。
+
+切换（`Application::set_desktop_shell_mode`）的顺序是硬约束：
+
+- **进入**：隐藏任务栏 → 置底 → 铺满（失败则回滚前两步，不留半成品形态）；
+- **退出**：取消置底 → 还原任务栏 → 按工作区铺回 → 居中。
+
+实测（`tools/desktop_shell_probe.py`，2560×1440 / win32 真窗口）：窗口矩形 (0,0,2560,1440)
+= 整块显示器；底缘 1440 > 工作区底缘 1392 ⇒ **盖住了 48px 任务栏条带**；Z 序位 319（最前=0）；
+`IsWindowVisible(Shell_TrayWnd) = false`；退出后任务栏复原为可见。
+
+#### 4.6.0.1 背板毛玻璃的“透亮度”是两个正交量（选型口径）
+
+`Style::backdrop_blur` / `backdrop_tint` 的参数看着像可以随便调，实际有一条硬约束：
+**“透”与“亮”是两个独立量，只动一个就会得出相反结论**。
+
+| 量 | 定义 | 只看它会被怎么骗 |
+|---|---|---|
+| **亮度差** = 玻璃 − 紧邻背景 | “亮不亮” | 把底色改浅就能任意抬高，而板子仍是一块死色 |
+| **纹理透过率** = 玻璃内标准差 / 背景标准差 | “透不透” | 只看它会以为调 tint 有用；真因是 blur 把细纹抹平了 |
+
+实测（`tools/desktop_glass_probe.py`，st_desktop 的 Dock / 石纹壁纸）：
+
+| 档位 | 亮度差 | 纹理透过 | 玻璃内极差 |
+|---|---|---|---|
+| blur 22 + 深底 `0x141A2C@0xB4` | **−13.3**（压暗） | 39% | 17.8 |
+| blur 22 + 浅底 tint .34 | +12.9 | 42% | 22.3 |
+| **blur 6 + 浅底 tint .30（采用）** | **+11.4** | **54%** | 31.5 |
+| blur 4 + tint .18 | +4.8 | 62% | 36.8 |
+
+#### 4.6.0.2 桌面 Dock 的几何：三条关系必须**同时**成立
+
+桌面壳的底栏（Dock）不是“一条好看的浮条”，它必须在几何上与系统任务栏重合，
+否则用户会看见缝或遮蔽。三条关系（实测 2560×1440，`tools/desktop_dock_geometry_probe.py`）：
+
+| 关系 | 实测值 | 不成立时 |
+|---|---|---|
+| Dock 顶缘 == `rcWork.bottom`（= 最大化窗口底边） | 1392 == 1392 | 高 → 上方永久少一截；矮 → **遮蔽**窗口底边 |
+| Dock 底缘 == `rcMonitor.bottom` | 1440 == 1440 | 屏幕底与 Dock 间露一条壁纸缝 |
+| Dock 高度 == 系统任务栏厚度 | 48 == 48 | 与第一条等价 |
+
+四条实现约束：
+
+- **高度问后端要**，不写死：`rcMonitor.bottom − rcWork.bottom`。它随 DPI（125% → 60）、
+  系统版本、「小任务栏按钮」设置而变。
+- **隐藏任务栏不会改 `rcWork`**（实测：隐藏前后都是 1392）——所以“桌面壳遮蔽系统任务栏”
+  与“与它等高”可以同时成立，不必二选一。
+- **几何要在 `start()` 之后算**：`start()` 之前 `viewport()` 报的是 `--width/--height`
+  初值（实测 720），真实尺寸直到 `start()` 末尾才同步（实测 754）。算早了就会
+  拿到一个“数字碰巧对、来源却错”的值。
+- **直角贴底**：`Style::radius` 是四角统一的，没有“只圆上方”的字段。给非零值会在
+  屏幕底部露两个三角形缺角；而系统任务栏本身就是直角矩形。
+
+
+两条结论：
+
+- **`backdrop_blur` 是“透不透”的主旋钮**：壁纸的细颗粒（石纹裂痕只有 2~3px）被大于它
+  几倍的半径一磨就是一块均匀色。低到 4px 时纹理透过达 62%，但玻璃观感开始退化
+  （像半透明而不是毛玻璃）。
+- **`backdrop_tint` 只影响“亮不亮”**：深色底会让玻璃**压暗**背景，那时模糊与折射都在，
+  只是被那层底盖住了——用户看到的是“一块发闷的板”，而不是“玻璃”。
+
 #### 4.6.1 原生子窗口宿主（`NativeHost`，可选能力）
 
 把**外部程序的窗口**嵌进界面一块矩形（典型用途：内嵌真网页）。框架**不渲染**它，只负责
@@ -5706,6 +5807,23 @@ class Compositor {                                  // UI 图层 → GPU 合成
 > 它模糊的是弹层**背后已绘的像素**，与 CSS `backdrop-filter: blur()` 同口径。
 > 当前消费方是弹层（菜单/对话框/命令面板/气泡），参数是
 > `Metrics::overlay_blur_radius` + `overlay_blur_tint`（两者都可经主题 JSON 覆盖）。
+>
+> **2026-11-15 起还有元素级背板毛玻璃**：`Style::backdrop_blur` / `backdrop_tint`，
+> 任意元素可声明（工具栏/Dock/玻璃卡片），`Element::paint_box` 在底色之前接线。
+> GPU 腿实测全窗 0.69ms（`gpu_blur_cost_test`，比软件腿快约 107 倍）——常驻
+> 面板开玻璃在 GPU 路径上成立；软件腿（无头/CI）由 `supports_blur()` 判定
+> 自动降级实色底。回归：`ui_backdrop_blur_test.cpp`。
+>
+> **同日再有「液态玻璃」折射**：`Style::backdrop_refraction`（边缘位移量，
+> 逻辑像素）+ `backdrop_dispersion`（色散，无量纲）——`Surface::refract_region`
+> 在毛玻璃之上叠「圆角 SDF 法线位移采样 + R/B 通道错位」，玻璃边缘把外侧
+> 背景吸入并弯折（透镜畸变 + 彩虹色缘）。GPU 腿专属（D3D11 单 pass，与
+> blur 同量级）；拷贝阶段**外扩**（模糊半径+位移+边缘带），采样经 `g_uv`
+> 映射进外扩纹理，否则外侧背景永远来不了。能力位 `supports_refraction()`
+> 缺省 false，软件腿退普通毛玻璃。回归：`gpu_refraction_test.cpp`。
+> 实测验证：st_desktop Dock（refraction=14/dispersion=0.4）在高频条纹
+> 背景下，上缘边缘带出现「红吸入→衰减→汇入底色」的 14px 过渡（R 从 79
+> 渐减到 21），圆角区径向吸入同样成立。
 >
 > 但那**不改变本节的原则**：歌白 `themes/acrylic.css` 的面板与页底预合成后只差 **1.03**，
 > 它的层差靠模糊与阴影补足；而霜天的面板并非全部走毛玻璃（列表/表单/卡片仍是实色）。
