@@ -161,59 +161,31 @@ auto read_snapshot(const std::string& cwd) -> RepoSnapshot {
 auto read_log(const std::string& cwd, std::size_t limit, const std::string& ref)
     -> std::vector<LogEntry> {
   std::vector<LogEntry> entries;
-  for (LogRow& row : read_log_rows(cwd, limit, ref)) {
-    if (row.entry.has_value()) entries.push_back(std::move(*row.entry));
-  }
-  return entries;
-}
-
-auto read_log_rows(const std::string& cwd, std::size_t limit, const std::string& ref)
-    -> std::vector<LogRow> {
-  std::vector<LogRow> rows;
   // 格式定死（字段间 `\x1f` 分隔——提交信息里出现任何可打印字符都不怕）：
   // hash\x1fshort\x1fsubject\x1fauthor\x1fdate\x1frefs
   //
-  // ## 图区为什么这次要**保留**
-  //
-  // 旧实现把 `--graph` 的前缀整个丢掉，只留 `body / 2` 算一个列号。后果：
-  // 泳道一变就断线，**合并/分叉的斜边全没了**——而那正是提交图要表达的东西。
-  // 现在前缀原样存成**字格字符串**（`|` `*` `/` `\` 空格），交给 `Table` 画。
+  // ⚠ **不再带 `--graph`**：那是给人看的渲染产物（列宽、斜线落在奇/偶格、
+  // 为一个合并插几个连接行，都由 git 的排版决定，没有稳定契约）。它曾把拓扑
+  // 编码成像素，害得我们要从字符位置反推“这笔提交有几个父、连到哪道”。
+  // 现在泳道与边由 `read_commit_graph`（`rev-list --parents`）单独提供，
+  // 本函数只负责**提交本身**的展示字段。
   const auto out = git(cwd,
-                       {"log", "--graph", "--no-color", std::format("-{}", limit),
+                       {"log", "--no-color", std::format("-{}", limit),
                         std::string("--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ad\x1f%D"),
                         std::string("--date=format:%Y-%m-%d %H:%M"),
                         (ref.empty() ? std::string("--all") : ref)},
                        nullptr);
-  if (!out.has_value()) return rows;
+  if (!out.has_value()) return entries;
 
   for (const std::string_view line : lines_of(*out)) {
     if (line.empty()) continue;
-    // 拆图区与正文：图区是开头那段**只由图字符组成**的部分。
-    //
-    // 为何判“只由图字符组成”而不是“遇到第一个非图字符就停”：提交信息里可能出现
-    // `|`（如 `a || b`），按字符集判断会在那里提前截断——而 git 的图区与正文之间
-    // 总是有**空格分隔**，且图区字符集固定，两者叠加才能唯一切分。
-    std::size_t body = 0;
-    while (body < line.size() && (line[body] == '|' || line[body] == '/' || line[body] == '\\' ||
-                                  line[body] == ' ' || line[body] == '*' || line[body] == '_' ||
-                                  line[body] == '-')) {
-      ++body;
-    }
-    if (body >= line.size()) {
-      // 纯图字符行：这是 `--graph` 的**连接行**（如 `|\`、`| |/`）——要保留。
-      // `git` 在 `--graph` 下会把斜边画在独立行里，丢了它整个分支关系就没了。
-      std::string graph(line);
-      if (!graph.empty()) rows.push_back(LogRow{std::nullopt, std::move(graph)});
-      continue;
-    }
-    const std::string_view rest = line.substr(body);
     // 拆 \x1f 字段。
     std::array<std::string_view, 6> fields{};
     std::size_t count = 0;
     std::size_t at = 0;
     while (count < fields.size()) {
-      const std::size_t sep = rest.find('\x1f', at);
-      fields[count] = rest.substr(at, sep == std::string_view::npos ? std::string::npos
+      const std::size_t sep = line.find('\x1f', at);
+      fields[count] = line.substr(at, sep == std::string_view::npos ? std::string_view::npos
                                                                     : sep - at);
       ++count;
       if (sep == std::string_view::npos) break;
@@ -225,31 +197,24 @@ auto read_log_rows(const std::string& cwd, std::size_t limit, const std::string&
     entry.subject = std::string(fields[2]);
     entry.author = std::string(fields[3]);
     entry.date = std::string(fields[4]);
-    // 图格：前缀原样留下（含空格——空格也是图的一部分，它表示“这列没线”）。
-    entry.graph = std::string(line.substr(0, body));
-    // 圆点所在列 = 本行的泳道（用于旧通道/语义描述）——按**图字符**位置算，
-    // 不按字节数：每个图列占 2 字符（`* ` 或 `| `），所以除以 2。
-    if (const std::size_t star = entry.graph.find('*'); star != std::string::npos) {
-      entry.lane = star / 2U;
-    }
     // refs：`HEAD -> main, origin/main` → 逐个。
     std::string_view refs_field = fields[5];
     if (!refs_field.empty()) {
       std::size_t cursor = 0;
       while (cursor <= refs_field.size()) {
         const std::size_t comma = refs_field.find(", ", cursor);
-        const std::string_view one =
-            refs_field.substr(cursor, comma == std::string_view::npos ? std::string::npos
-                                                                     : comma - cursor);
+        const std::size_t stop = comma == std::string_view::npos ? refs_field.size() : comma;
+        std::string_view one = refs_field.substr(cursor, stop - cursor);
+        if (!one.empty() && one.front() == ' ') one.remove_prefix(1);
         if (!one.empty()) entry.refs.emplace_back(one);
         if (comma == std::string_view::npos) break;
         cursor = comma + 2;
       }
     }
     if (entry.hash.empty()) continue;
-    rows.push_back(LogRow{std::move(entry), std::string(line.substr(0, body))});
+    entries.push_back(std::move(entry));
   }
-  return rows;
+  return entries;
 }
 
 auto read_commit_detail(const std::string& cwd, LogEntry& entry) -> std::string {
@@ -1170,13 +1135,10 @@ auto read_audit(const std::string& cwd, std::size_t limit) -> std::vector<std::s
 
 auto read_log_snapshot(const std::string& cwd) -> LogSnapshot {
   LogSnapshot snapshot;
-  // `read_log_rows` 内部就是一次 `git log --graph`；`log` 从它派生，**不跑第二遍子进程**
-  //（旧实现一次，现在仍是一次——图上加能力不该付进程开销）。
-  snapshot.log_rows = read_log_rows(cwd, 200);
-  snapshot.log.reserve(snapshot.log_rows.size());
-  for (LogRow& row : snapshot.log_rows) {
-    if (row.entry.has_value()) snapshot.log.push_back(row.entry.value());
-  }
+  // 提交（展示字段）与**拓扑图**（泳道/边）各一次子进程：前者供业务（详情/选中/计数），
+  // 后者供绘制。两条命令都**不带 `--graph`**（字符画已彻底退出）。
+  snapshot.log = read_log(cwd, 200);
+  snapshot.graph = read_commit_graph(cwd, 200);
   snapshot.branches = read_branches(cwd);
   // 标签 / 远程 / 暂存 / 引用 / 上游 / 多步操作状态 / 审计：与日志同一批读完
   //（都是“回顾面”，一次读完最省进程数；分开读只会在切标签时卡一下）。

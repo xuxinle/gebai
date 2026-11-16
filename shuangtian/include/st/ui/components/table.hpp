@@ -56,6 +56,25 @@ class Table : public Element {
   static constexpr float kScrollBarHeight{3.0f};    ///< 滚动指示条宽（px）
   static constexpr float kSelectedAccentWidth{3.0f};///< 选中行左缘主色条宽（px）
 
+  /// 泳道色（第 `lane_index` 道的连线与圆点用色）——**自动生成，不设上限**。
+  ///
+  /// ## 为何按道号生成而不是用一张固定色表
+  ///
+  /// 分支图是“跟着一条线往下看”的读图方式：同一道在不同行必须是同一色，
+  /// 不同道之间必须能分开。固定色表（如原来循环 primary/accent/success 三色）
+  /// 意味着并行分支一旦超过表的长度，“第 0 道”与“第 3 道”就同色——而那往往
+  /// 正是两个**不同**分支，观感上等于把两条不相干的线当成同一条。
+  ///
+  /// 这里用色相环上的**黄金角**（137.508°）跳步：该增量无限不循环，任意前 N 道
+  /// 都不会回环重合，也不需要预知 N 或维护色表。饱和度/亮度取主题 `primary`
+  /// 自身 HSL 为基准（只换色相），于是暗色主题下够亮、浅色主题下不刺眼。
+  ///
+  /// 公开为静态函数的理由：它是一条**纯函数、可复算的判断依据**——测试可以直接
+  /// 断言“任意两道色距够远”，不必依赖截图像素采样（像素采样到的常是抗锯齿
+  /// 边沿色，量出来的距离远小于真实值）。
+  [[nodiscard]] static auto lane_color(std::size_t lane_index, const Palette& colors)
+      -> math::Color;
+
   /// 单元格**色调**（主/次信息分层）。
   ///
   /// 为何需要它（2026-11-05，做 Git 日志表时）：一列一色的表格读不了——
@@ -78,14 +97,6 @@ class Table : public Element {
 
   /// 行首**泳道标记**（图形分支线）：每行一个列号（0 起），负值 = 不画。
   ///
-  /// 为何进框架而不是应用自己画：泳道是**行属性**，它要和行高/滚动/斑马纹
-  /// 同一套几何算——应用自己画就得到表格外面去覆一层，而覆层拿不到
-  /// “第 n 行现在在屏幕上第几个像素”（那是 `row_rect` 的内部知识）。
-  /// 取值语义与 git 泳道图一致：0 = 主干，n = 第 n 条分支线。
-  ///
-  /// ⚠ 这是**简化接口**：它只能表达“本行在第 n 列有个点”，**表达不了跨道连线**
-  ///（合并/分叉的斜边）。真实的分支图请用 `set_row_lanes` 之上的 `set_lane_links`。
-  void set_row_lanes(std::vector<int> lanes);
   /// 设在该列位置画泳道（负值保持默认 28px；0 会吃掉列宽，不要传）。
   ///
   /// 这个宽度是**真的从左边留出来**的：开了泳道的表格，各列的 `bounds_` 从
@@ -93,41 +104,46 @@ class Table : public Element {
   /// 实测症状就是“提交信息的首字被竖线和圆点盖住”。
   void set_lane_column_width(float width);
 
-  // —— 行首连线图（通用「行 × 列」连线模型）——
+  // ── 行首连线图：**节点-边平面** ──────────────────────────────
   //
-  // ## 为何需要它（`set_row_lanes` 不够用）
+  // 不传字符、不传列号，只传“哪个节点在哪一道、哪两个节点之间有线”。
   //
-  // `set_row_lanes` 只给“本行一个列号”，于是绘制只能画出「圆点 + 只在相邻行同列时
-  // 才连一截竖线」——**泳道一变就断线**，合并/分叉（`|\`、`|/`）根本表达不了。
-  // 而真实的提交图（`git log --graph`）恰恰是“一个字符网格”：每行若干列，
-  // 每列可能有一条竖线、一条向左/右的斜线、或一个圆点。
+  // ## 为何不提供字符网格接口
   //
-  // 本接口把这层网格**原样**收进 `Table`：应用只负责把语义翻译成字格，
-  // 几何（行高、纵向偏移、裁剪、列宽、缩进、主题色）全由 `Table` 算。
+  // 行首连线图只有一个通道：`set_graph`（节点 + 边）。
+// 不提供字符网格接口：`git log --graph` 的 ASCII 图区是渲染产物，没有稳定契约
+//（列宽、斜线落在奇/偶格、为一个合并插几个连接行都是排版决定）——拿它当数据模型，
+// 排版一变就错；它还逼着列表为“纯连线行”留空行。也不提供“每行一个列号”的简化接口，
+// 因为它表达不了跨道连线（合并/分叉的斜边）。
   //
-  // ## 字格语义（与 `git log --graph` 一致，便于直接映射）
-  //
-  // | 字符 | 含义 |
-  // |---|---|
-  // | `"|"` | 本格一条竖线 |
-  // | `"*"` | 提交点（画实心圆） |
-  // | `"/"` | 左下→右上 的斜线 |
-  // | `"\\"` | 左上→右下 的斜线 |
-  // | `" "` | 空 |
-  //
-  // 字符格的宽在绘制时按 `lane_column_width / cell_columns` 等比算，
-  // 所以调用方**不必**关心像素（只管把图写成字符串）。
+  // 正解是把**拓扑**直接交进来：节点是行，边是显式的（行，道）对。
+
+  /// 一个提交节点：第 `row` 行在第 `lane` 道。
+  struct GraphNodeSpec {
+    std::size_t row{0};
+    std::size_t lane{0};
+  };
+  /// 一条边：从（`from_row`, `from_lane`）到（`to_row`, `to_lane`）。
   ///
-  /// ## 为何用字符串而不是坐标列表
+  /// 同道边画竖线，跳道边画曲线——这是“换道”的唯一表达方式。
+  struct GraphEdgeSpec {
+    std::size_t from_row{0};
+    std::size_t from_lane{0};
+    std::size_t to_row{0};
+    std::size_t to_lane{0};
+  };
+  /// 设行首连线图的**节点与边**（坐标全用“行号 / 道号”，不涉像素）。
   ///
-  /// 坐标列表（“第 r 行第 c 列的格子画什么”）在人写/序列化/日志时会迅速不可读，
-  /// 而字符串网格**可以直接贴进测试、截图对账、肉眼对**——与要表达的东西同构。
-  void set_lane_links(std::vector<std::string> rows);
-  [[nodiscard]] auto lane_links() const noexcept -> const std::vector<std::string>& {
-    return row_links_;
+  /// 不变式（绘制端假定，调用方负责）：① 边从**小行号指向大行号**（子 → 父）；
+  /// ② 两个端点都在 `nodes` 里（越界的边会被裁掉，表现为“线断一截”）。
+  void set_graph(std::vector<GraphNodeSpec> nodes, std::vector<GraphEdgeSpec> edges);
+  void clear_graph();
+  [[nodiscard]] auto graph_nodes() const noexcept -> const std::vector<GraphNodeSpec>& {
+    return graph_nodes_;
   }
-  /// 清掉行首连线图（回到 `set_row_lanes` 那套简化绘制）。
-  void clear_lane_links();
+  [[nodiscard]] auto graph_edges() const noexcept -> const std::vector<GraphEdgeSpec>& {
+    return graph_edges_;
+  }
 
   // —— 数据 ——
   /// 设定列（会清空既有列宽缓存；行数据保留）。
@@ -269,13 +285,11 @@ class Table : public Element {
   static constexpr std::size_t kNoRow = static_cast<std::size_t>(-1);
 
   std::vector<TableColumn> columns_{};
-  std::vector<std::vector<std::string>> rows_{};
-  std::vector<float> column_widths_{};
-  /// 每列的默认色调 / 行×列的个别覆盖（与 `rows_` 同形，缺省 `Inherit`）。
-  std::vector<CellTone> column_tones_{};
-  std::vector<std::vector<CellTone>> cell_tones_{};
-  /// 每行的泳道列号（`-1` = 不画）。
-  std::vector<int> row_lanes_{};
+   std::vector<std::vector<std::string>> rows_{};
+ std::vector<float> column_widths_{};
+ /// 每列的默认色调 / 行×列的个别覆盖（与 `rows_` 同形，缺省 `Inherit`）。
+ std::vector<CellTone> column_tones_{};
+ std::vector<std::vector<CellTone>> cell_tones_{};
   std::function<void(std::size_t)> on_row_click_{};
   float total_width_{0.0f};
   float row_height_{kDefaultRowHeight};
@@ -284,6 +298,10 @@ class Table : public Element {
   void ensure_row_offsets() const;
   /// 调用方显式设过 `set_row_height`：字号覆盖不再改写行高（见 apply_theme）。
   bool explicit_row_height_{false};
+  /// 节点-边通道的绘制（见 `set_graph`）：只读本对象的行几何与本帧的裁剪参数。
+  void paint_node_edge_graph(raster::Surface& canvas, const Palette& colors,
+                            std::size_t first_row, std::size_t last_row, float clip_left,
+                            float clip_right) const;
   /// 每行的**高度倍率**（空 = 全部 1.0）。见 `set_row_scales`。
   std::vector<float> row_scales_{};
   /// `row_scales_` 的**前缀和**前缀（第 i 行的上边距；长度 = 行数 + 1）。
@@ -299,11 +317,15 @@ class Table : public Element {
   std::size_t hovered_row_{kNoRow};
   std::optional<std::size_t> selected_row_{};
   bool zebra_{false};
-  /// 每行的行首连线图（字格；空 = 不用本通道，回退到 `row_lanes_`）。
-  std::vector<std::string> row_links_{};
-  /// `row_links_` 的最大列数（缓存：每行长度不等，按最宽的决定泳道带宽度）。
-  std::size_t lane_columns_{0};
-  float lane_column_width_{28.0f};
+   /// 行首连线图：**节点-边**（`set_graph`）。空 = 不画泳道图。
+ std::vector<GraphNodeSpec> graph_nodes_{};
+ std::vector<GraphEdgeSpec> graph_edges_{};
+ /// 泳道带宽（“字符格”数）的缓存：`set_graph` 时按最大道号 × 2 算。
+ ///
+ /// 那个 2 来自早期字符网格的度量（`* ` / `| ` 两字符一道），与 `lane_inset()`
+ /// 和绘制端的 `cell` 计算共用同一口径——改一处就要三处一起改。
+ std::size_t lane_columns_{0};
+ float lane_column_width_{28.0f};
 
   /// 上一帧实际绘制的可见行区间（半开）——与 `Tree::last_visible_first_` 同一手法。
   /// `mutable`：`paint_content` 是 const（「绘制不改元素状态」是框架硬约束）。

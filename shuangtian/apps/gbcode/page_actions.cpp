@@ -596,6 +596,27 @@ void CodeEditorPage::load_active_text() {
   }
 
 
+  /// 跳到“某文件某行”（问题面板跨文件跳转的统一入口）。
+  ///
+  /// 为何不是直接 `editor->goto_line`：面板是**跨文件**的，而编辑器只装当前标签。
+  /// 直接定位到另一个文件的行号 = 光标落在无关文件的同一行上（看上去像“跳错了”）。
+  /// 已在当前标签则直接定位（`open_path` 会重读盘，得不偿失）。
+  void CodeEditorPage::jump_to_diagnostic(const std::string& path, std::size_t line) {
+    if (path.empty()) return;
+    const std::string target = st::fs::normalize(path);
+    if (target != st::fs::normalize(current_buffer_path())) {
+      open_path(target);   // 内部会切活动标签；失败时已写状态栏，如实不假成功
+    }
+    if (editor == nullptr) return;
+    editor->goto_line(line);
+    editor->scroll_to_line(line);
+    if (auto* host = editor->host(); host != nullptr) {
+      (void)host->set_keyboard_focus(editor);
+    }
+    status_.set(std::format("已跳到第 {} 行", line));
+  }
+
+
   void CodeEditorPage::jump_to_problem(std::size_t index) {
     if (index >= problems_.size() || editor == nullptr) return;
     editor->goto_line(problems_[index].line);
@@ -739,6 +760,31 @@ void CodeEditorPage::load_active_text() {
     list.erase(list.begin() + static_cast<std::ptrdiff_t>(from + 1), list.end());
     buffers_.set(std::move(list));
     status_.set("已关闭右侧标签");
+  }
+
+
+  /// 关闭除当前标签以外的全部（脏的同样拦截，**并指出是哪个**）。
+  void CodeEditorPage::close_others() {
+    auto list = buffers_.value();
+    const std::size_t keep = active_.value();
+    if (keep >= list.size()) return;
+    for (std::size_t index = 0; index < list.size(); ++index) {
+      if (index == keep) continue;
+      if (list[index].dirty) {
+        status_.set("有其他未保存的修改：" + list[index].label);
+        switch_tab(index);
+        request_close(list[index].key);
+        return;
+      }
+    }
+    // 先把编辑器里的当前文本收回缓冲区（否则保留的那一个会丢掉未同步的编辑）。
+    stash_active_text(list);
+    const OpenBuffer kept = list[keep];
+    buffers_.set({kept});
+    active_.set(0);
+    loaded_key_.clear();
+    refresh_problems();
+    status_.set("已关闭其他编辑器");
   }
 
 
@@ -1401,8 +1447,8 @@ void CodeEditorPage::load_active_text() {
 
   /// 把一批 git 快照落到成员上（**主线程**；只有 `ensure_git_log` 与退路会调）。
   void CodeEditorPage::adopt_git_log(gbcode::LogSnapshot snapshot) {
-    git_log_ = std::move(snapshot.log);
-    git_log_rows_ = std::move(snapshot.log_rows);
+  git_log_ = std::move(snapshot.log);
+  git_graph_ = std::move(snapshot.graph);
     git_branches_ = std::move(snapshot.branches);
     git_tags_ = std::move(snapshot.tags);
     git_remotes_ = std::move(snapshot.remotes);
@@ -2440,6 +2486,22 @@ void CodeEditorPage::load_active_text() {
   }
 
 
+  /// 切换亮/暗主题（命令面板 `view.toggle-theme` 与主题入口共用）。
+  ///
+  /// 真值源只有一个：宿主的主题（`theme_mode` 读、`theme_setter` 写，两者都指向
+  /// `UiRoot::theme()`）。本页**不维护自己的 `dark_`**——影子状态会变成
+  /// “按钮文案翻了、画面没变”的假动作（BACKLOG 已记过这个历史缺陷）。
+  void CodeEditorPage::toggle_theme() {
+    if (!theme_mode || !theme_setter) {
+      status_.set("当前环境不支持切换主题");
+      return;
+    }
+    const ThemeMode next = theme_mode() == ThemeMode::Dark ? ThemeMode::Light : ThemeMode::Dark;
+    theme_setter(next);
+    status_.set(next == ThemeMode::Dark ? "主题：暗色" : "主题：亮色");
+  }
+
+
   /// 页面缩放（查看菜单 / Ctrl+= · Ctrl+- · Ctrl+0）。
   ///
   /// `direction`：+1 放大、-1 缩小、0 重置到 100%。
@@ -3081,6 +3143,12 @@ void CodeEditorPage::load_active_text() {
       sidebar_visible_.set(!sidebar_visible_.value());
     } else if (id == "view.compare-blank") {
       open_compare_blank();
+    } else if (id == "view.toggle-theme") {
+      toggle_theme();
+    } else if (id == "edit.format") {
+      format_selection();
+    } else if (id == "edit.rename") {
+      rename_symbol();
     } else if (id == "view.toggle-indent-guides") {
       if (editor != nullptr) {
         editor->set_indent_guides(!editor->indent_guides());
@@ -3134,6 +3202,10 @@ void CodeEditorPage::load_active_text() {
     add("view.compare-blank", "查看: 比较两段文本…", "自己粘两侧内容做结构化差异（不读磁盘）");
     add("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换");
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");
+    // 命令面板里补齐**常用且已在菜单里存在**的动作（VSCode / IDEA 同做法：
+    // 菜单里有、命令面板里能搜到）。每一个都对应 `run_command` 里一个真实分支。
+    add("edit.format", "编辑: 格式化文档", "走语言服务；未就绪时如实不生效（Shift+Alt+F）");
+    add("edit.rename", "编辑: 重命名符号", "走语言服务（F2）");
     // blame 行尾注解：开关 + 当前视口取数（B5）。
     add("view.toggle-blame", "查看: 切换行尾 blame 注解", "显示当前视口行的作者与日期");
     // 单文件历史弹窗（B6）——入口同时挂在编辑器右键菜单（与 IDEA 一致）。
@@ -3162,8 +3234,10 @@ void CodeEditorPage::load_active_text() {
     std::vector<CommandPalette::Command> table;
     if (workspace_.empty()) return table;
     const auto& files = workspace_files();
-    // 预先排好序（按路径子序列匹配程度）——空查询下 filter 返回稳定列表；
-    // 具体按键过滤由 CommandPalette 自己按输入再筛一遍（它用的是逐字符子串）。
+    // 这里**不封顶**：过滤必须在**全量**上做（否则“记得名字去跳”会失败——
+    // 列表外的文件永远搜不到）。真正要封顶的是**造型**：`CommandPalette::rebuild`
+    // 只把命中项的前 300 条建成 List 条目（实测 2350 个文件直接全造 = 一次按键 220~490ms）。
+    table.reserve(files.size());
     for (const auto& entry : files) {
       table.push_back(CommandPalette::Command{
           .id = "path:" + entry.path, .title = entry.name,

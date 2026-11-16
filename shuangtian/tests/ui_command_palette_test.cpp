@@ -2,7 +2,9 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/input.hpp"
@@ -349,4 +351,60 @@ ST_TEST(palette_children_follow_theme_switch) {
   const int dark_luma = static_cast<int>(dark_bg.r) + dark_bg.g + dark_bg.b;
   const int light_luma = static_cast<int>(light_bg.r) + light_bg.g + light_bg.b;
   ST_CHECK(dark_luma < light_luma);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 大命令表：**命中数封顶、但计数说真话**
+// ————————————————————————————————————————————————————————————————————————————
+
+/// 「用一段时间后 Ctrl+P 卡到用不了」的回归。
+///
+/// ## 现象与量到的数
+///
+/// gbcode 工作区里 2350 个文件时，`Ctrl+P` 空查询下 2350 条命中**全都被建成
+/// `ListItem` 元素**（`List::sync_items` 逐条对应一个元素），于是每敲一个字符
+/// 就要重新造型几千个元素：实测一次按键 **220~490ms**。用户侧描述就是
+/// “运行一段时间后 Ctrl+P 用不了”——工作区越大、缓存越满越明显。
+///
+/// ## 本用例锁住的两件事
+///
+/// 1. **造型数封顶**：命中再多，进列表的条目也有上限（否则元素数随命令数线性膨胀）；
+/// 2. **计数不造假**：`match_count` 必须报**全量**命中数。
+///    这条是反向约束——封顶很容易把“只造了 300 条”写成了“只搜到 300 项”，
+///    而自动化与状态条都在读它。
+ST_TEST(palette_caps_rendered_matches_but_reports_full_count) {
+  PaletteFixture fx;
+  std::vector<CommandPalette::Command> many;
+  many.reserve(5000);
+  for (int index = 0; index < 5000; ++index) {
+    many.push_back(fx.command(std::format("cmd-{}", index), std::format("命令 {}", index)));
+  }
+  fx.palette->set_commands(std::move(many));
+
+  // 空查询 = 全命中：计数必须报 5000。
+  ST_CHECK_EQ(fx.palette->command_count(), static_cast<std::size_t>(5000));
+  ST_CHECK_EQ(fx.palette->match_count(), static_cast<std::size_t>(5000));
+  // 但属性面同样报全量（它是自动化与状态条的口径）。
+  ST_CHECK_EQ(fx.palette->get_property("match_count").value(), "5000");
+
+  // 列表里造出的条目必须**远少于**命中数（封顶生效）。
+  std::size_t list_items = 0;
+  const auto walk = [](auto&& self, const st::ui::Element& element, std::size_t& count) -> void {
+    for (std::size_t index = 0; index < element.children().size(); ++index) {
+      const st::ui::Element* child = element.child_at(index);
+      if (child == nullptr) continue;
+      if (child->type() == std::string_view("ListItem")) ++count;
+      self(self, *child, count);
+    }
+  };
+  walk(walk, *fx.palette, list_items);
+  st::log::out("[palette] 5000 命中 → 造出 {} 个 ListItem\n", list_items);
+  ST_CHECK(list_items < 1000);
+  ST_CHECK(list_items > 0);
+
+  // 过滤仍然在**全量**上做：能搜到不在前 300 里的命令。
+  fx.palette->set_query("命令 4999");
+  ST_CHECK_EQ(fx.palette->match_count(), static_cast<std::size_t>(1));
+  fx.palette->set_query("命令");
+  ST_CHECK_EQ(fx.palette->match_count(), static_cast<std::size_t>(5000));
 }

@@ -18,15 +18,11 @@ auto w = std::make_unique<st::ui::Panel>();  // 构造参数见头文件
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`anchor`
-
-> 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
+本组件**没有自己的属性面**——只能读写通用属性（`id`/`visible`/几何/样式）与它自己的 C++ 接口。要断言内容，用 `tree` 的 `text`/`value` 字段或截图。
 
 ## 动作面（控制通道 `invoke`）
 
-`activate_item`
-
-> `invoke` 是**绕过鼠标**的可靠触发路径：它直接调组件的动作入口，与真实点击走同一段业务代码但不过命中测试。要验证点击路径本身再用 `click`。
+本组件没有自定义动作。通用动作（`focus` 等）由 `Element` 提供。
 
 ## 更细
 

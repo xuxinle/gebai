@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <tuple>
 
 #include "st/math/geometry.hpp"
 
@@ -72,8 +73,7 @@ struct Color {
 
   /// HSL（h ∈ [0,360)，s/l ∈ [0,1]）→ sRGB8。
   [[nodiscard]] static constexpr auto from_hsl(float hue, float saturation, float lightness,
-                                               std::uint8_t alpha = 255) noexcept -> Color {
-    const float h = wrap_degrees(hue) / 360.0f;
+                                               std::uint8_t alpha = 255) noexcept -> Color {    const float h = wrap_degrees(hue) / 360.0f;
     const float s = clamp01(saturation);
     const float l = clamp01(lightness);
     const auto channel = [](float p, float q, float t) constexpr noexcept -> float {
@@ -97,6 +97,35 @@ struct Color {
   [[nodiscard]] constexpr auto with_alpha(std::uint8_t alpha) const noexcept -> Color {
     return Color{r, g, b, alpha};
   }
+
+  /// sRGB8 → HSL。`hue` 单位为度（[0,360)），`saturation`/`lightness` ∈ [0,1]。
+  ///
+  /// 为何需要它：按主题基色“换色相但保留明暗语气”的场合（如分支图的
+  /// 泳道自动取色）必须能拆出色相再重组；只靠 `from_hsl` 单程无法从主题色
+  /// 拿回自己的饱和度/亮度。
+  [[nodiscard]] constexpr auto to_hsl() const noexcept
+      -> std::tuple<float, float, float> {
+    const float rf = static_cast<float>(r) / 255.0f;
+    const float gf = static_cast<float>(g) / 255.0f;
+    const float bf = static_cast<float>(b) / 255.0f;
+    const float maximum = std::max({rf, gf, bf});
+    const float minimum = std::min({rf, gf, bf});
+    const float lightness = (maximum + minimum) * 0.5f;
+    const float delta = maximum - minimum;
+    if (delta <= 0.0f) return {0.0f, 0.0f, lightness};   // 灰阶：无彩色
+    const float saturation =
+        lightness > 0.5f ? delta / (2.0f - maximum - minimum) : delta / (maximum + minimum);
+    float hue = 0.0f;
+    if (maximum == rf) {
+      hue = (gf - bf) / delta + (gf < bf ? 6.0f : 0.0f);
+    } else if (maximum == gf) {
+      hue = (bf - rf) / delta + 2.0f;
+    } else {
+      hue = (rf - gf) / delta + 4.0f;
+    }
+    return {hue * 60.0f, saturation, lightness};
+  }
+
   [[nodiscard]] constexpr auto with_alpha_f(float alpha) const noexcept -> Color {
     const float scaled = clamp01(alpha) * 255.0f + 0.5f;
     return Color{r, g, b, static_cast<std::uint8_t>(scaled)};

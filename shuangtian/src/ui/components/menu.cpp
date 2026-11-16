@@ -87,12 +87,31 @@ auto MenuPanel::get_property(std::string_view name) const -> std::optional<std::
     return std::format("{:.2f},{:.2f},{:.2f},{:.2f}", anchor_.x, anchor_.y, anchor_.width,
                        anchor_.height);
   }
+  // `items`：**可激活项的 id 列表**（`|` 分隔，不含分隔线）。
+  //
+  // 为何需要它：菜单动作的正确派发口是 id（分隔线占下标，按序号派发会错位到
+  // 别的条目——资源管理器菜单那次“点重命名却删了文件”就是这么来的）。
+  // 自动化要验“id → 动作”这条链，就必须能先读到这一份 id 清单；
+  // 而 `text` 给的是 label（带中文与快捷键），不能当身份用。
+  if (name == "items") {
+    std::string joined;
+    for (const auto& item : items_) {
+      if (item.separator) continue;
+      if (!joined.empty()) joined += '|';
+      joined += item.id;
+    }
+    return joined;
+  }
+  // `count`：条目总数（含分隔线）——用于自动化判“菜单出来了”与条目数量变化。
+  if (name == "count") return std::to_string(items_.size());
   return Element::get_property(name);
 }
 
 auto MenuPanel::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.push_back("anchor");
+  names.push_back("items");
+  names.push_back("count");
   return Element::with_universal(names);
 }
 
@@ -706,6 +725,29 @@ void ContextMenu::paint_content(const RenderContext& context, raster::Surface& c
   if (panel_ == nullptr) return;
   // 只画面板（透明遮罩：不铺 overlay 色，面板外完全透出下层内容）。
   panel_->paint(context, canvas);
+}
+
+// —— 条目面转发 ——
+//
+// 三个入口（`items`/`count` 属性 + `activate_item` 动作）全部转发给内部面板：
+// 面板才是条目的真值源，这里做“第二个真理”必然分叉。
+auto ContextMenu::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (panel_ != nullptr) {
+    if (auto value = panel_->get_property(name); value.has_value()) return value;
+  }
+  return Element::get_property(name);
+}
+
+auto ContextMenu::property_names() const -> std::vector<std::string_view> {
+  auto names = Element::property_names();
+  names.push_back("items");
+  names.push_back("count");
+  return Element::with_universal(names);
+}
+
+auto ContextMenu::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  if (panel_ != nullptr && panel_->invoke_action(action, argument)) return true;
+  return Element::invoke_action(action, argument);
 }
 
 auto ContextMenu::on_event(const RenderContext& context, Event& event) -> bool {

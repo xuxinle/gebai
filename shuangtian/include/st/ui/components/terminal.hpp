@@ -418,6 +418,12 @@ class Terminal : public Element {
   // —— 几何（测试与命中共用；arrange 后有效）——
   [[nodiscard]] auto tabs_rect() const noexcept -> math::Rect { return tabs_rect_; }
   [[nodiscard]] auto output_rect() const noexcept -> math::Rect { return output_rect_; }
+  /// 输出区的内边距（逻辑 px）：文字起点、字符网格、光标、选区、高亮**全部**
+  /// 从它推导（一处可调，不会出现“改了 padding 但光标不跟”）。
+  ///
+  /// 公开给测试的理由：锁“文字 origin 与行顶几何同源”时该用它，
+  /// 而不是在测试里手写第二份常量（那会把“两者同源”错锁成“内边距永远是 4”）。
+  static constexpr float kOutputInset = 10.0f;
 
  private:
   /// 会话容器：**`unique_ptr`**——会话里含 `jthread`/`shared_ptr`（不可拷贝），

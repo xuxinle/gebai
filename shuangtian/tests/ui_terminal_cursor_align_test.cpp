@@ -104,13 +104,17 @@ class BandPort final : public st::ui::TextPort {
 
 }  // namespace
 
-/// **核心契约**：文字绘制 `origin.y` == 光标块顶边 y（同一"行顶"口径）。
+/// **核心契约**：文字绘制 `origin.y` == 光标块顶边 y（同一“行顶”口径）。
 ///
 /// 做法：驱动组件渲染一屏内容，然后比较两件事——
 /// 1. 桩记录到的文字 `origin.y`；
-/// 2. 组件的行顶几何（`output_rect_.y + 4`，即 `paint_content` 里的 `origin_y`）。
+/// 2. 组件的行顶几何（`output_rect_.y + Terminal::kOutputInset`，即
+///    `paint_content` 里的 `origin_y`）。
 ///
 /// 两者必须相等。若实现多加了 `ascent`，第 1 项会比第 2 项大 `kAscent`。
+///
+/// 口径从**组件自己**取（`Terminal::kOutputInset`），不在测试里写第二份常量——
+/// 内边距是产品的可调项，测试应当锁“两者同源”，而不是锁“内边距永远是 4”。
 ST_TEST(terminal_text_origin_y_equals_line_top) {
   BandPort port{};
   st::ui::Theme theme{st::ui::Theme::dark()};
@@ -138,8 +142,8 @@ ST_TEST(terminal_text_origin_y_equals_line_top) {
   ST_REQUIRE(!port.draws.empty());
 
   const float text_y = first_text_origin_y(port, terminal->output_rect().y);
-  // 行顶（组件内 `origin_y = output_rect_.y + 4`）。
-  const float line_top = terminal->output_rect().y + 4.0f;
+  // 行顶（组件内 `origin_y = output_rect_.y + kOutputInset`）。
+  const float line_top = terminal->output_rect().y + Terminal::kOutputInset;
   ST_CHECK_NEAR(text_y, line_top, 0.5f);
   // 反向护栏：文字起点**不能**比行顶低一整段 ascent（那就是双重相加）。
   ST_CHECK(text_y < line_top + BandPort::kAscent * 0.5f);
@@ -191,7 +195,7 @@ ST_TEST(terminal_cursor_block_starts_at_same_y_as_text) {
   // 文字第一行（row 0）与光标若不同行，按行高换算到同一行再比。
   const auto* screen = terminal->screen(0);
   ST_REQUIRE(screen != nullptr);
-  const float line_top = terminal->output_rect().y + 4.0f;
+  const float line_top = terminal->output_rect().y + Terminal::kOutputInset;
   const float expected_cursor_y = line_top + static_cast<float>(screen->cursor_row()) * cell_h;
   ST_CHECK_NEAR(cursor_y, expected_cursor_y, 0.6f);
   // 反向护栏：光标行顶与文字行顶用的是**同一个起点**（差值为整数行）。

@@ -25,8 +25,17 @@ namespace {
 
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token）——
 constexpr float k_min_tab_width = 36.0f;    // 标签项最小宽度（避免空标签塌陷）
-constexpr float k_close_zone = 20.0f;       // × 命中区边长（大于视觉 × 本体，好点）
-constexpr float k_close_glyph = 8.0f;       // × 视觉尺寸
+
+/// 标签**文字左右内边距**（逻辑 px）。
+///
+/// `metrics.space_md`（12）偏小：实测标签文字距左缘只有 12px、与关闭钮只隔 8px，
+/// 密集排列时读起来像“连成一片”（VSCode 是 12 + 左侧 16 的不对称额余）。
+/// 16 与 IDE 的一档对齐，且正好等于 `space_lg`，让“标签内边距 = 内容内边距”
+/// 成为一条可陈述的规则。
+constexpr float k_tab_pad = 16.0f;
+/// 关闭钮命中区边长（大于视觉 × 本体，好点）。
+constexpr float k_close_zone = 22.0f;
+constexpr float k_close_glyph = 9.0f;       // × 视觉尺寸（8 在 1.5x DPI 下偏细）
 constexpr float k_modified_dot = 6.0f;      // 修改点直径
 constexpr float k_arrow_zone = 18.0f;       // 溢出箭头命中区宽
 constexpr float k_arrow_glyph = 6.0f;       // 箭头视觉尺寸
@@ -467,9 +476,8 @@ auto Tabs::tab_index_at(math::Point point) const -> std::optional<std::size_t> {
 }
 
 void Tabs::rebuild_widths(const RenderContext& context) const {
-  const Metrics& metrics = context.theme.metrics();
   const TextPort& port = text_port_of(context);
-  const float pad = metrics.space_md;
+  const float pad = k_tab_pad;
   widths_.clear();
   widths_.reserve(labels_.size());
   float total = 0.0f;
@@ -853,10 +861,21 @@ auto Tabs::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::MouseDown:
+      // **右键**：只报“右键了哪一项”，**不改选中**（与 `Tree::on_context_menu`
+      // 同一形态与同一理由：右键不应当把用户的上下文从当前项上搮走）。
+      if (event.button == 2) {
+        if (!on_context_menu) return false;
+        const auto index = tab_index_at(event.position);
+        if (index.has_value()) on_context_menu(*index);
+        event.handled = true;
+        return true;
+      }
+      [[fallthrough]];
     case EventKind::MouseUp:
     case EventKind::Click:
     case EventKind::DoubleClick:
     case EventKind::TripleClick: {
+      // 非右键的 `MouseDown` 落到这里继续走原有的命中/选中逻辑（上分支只拦右键）。
       if (!enabled_) return false;
       // 尾部动作钮、「+」与溢出箭头优先于标签（都在右缘固定区，不随滚动动）。
       if (event.kind == EventKind::Click) {

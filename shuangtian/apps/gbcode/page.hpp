@@ -95,6 +95,18 @@ struct CodeEditorPage : Component {
 
   /// 当前画面是否暗色（读真值源）——本页用它做与主题相关的分支判断。
   std::function<ThemeMode()> theme_mode{};
+  /// 主题**写**出口（`run_app` 注入为 `Application::set_theme_mode`）。
+  ///
+  /// 与 `theme_mode`（读）成对：读/写必须走同一真值源（`UiRoot::theme()`），
+  /// 否则就是“影子状态”——实测荷载：`toggle_theme()` 曾只写页面自己的
+  /// `State<bool> dark_`，从未真正切主题，按钮文案翻转、画面一动不动。
+  std::function<void(ThemeMode)> theme_setter{};
+  /// 剪贴板**写**出口（`run_app` 注入；返回 false = 无宿主/写入失败）。
+  ///
+  /// 为何不走 `Element::host()`：本页是 `Component`（不是 `Element`），没有宿主指针；
+  /// 而剪贴板是**平台能力**，采同一套注入形态（与 `device_scale_setter` 一致）
+  /// 比“ Borrow 某个元素的 host”稳（元素会随重组重建，宿主指针不保证跨帧）。
+  std::function<bool(std::string_view)> clipboard_writer{};
   /// 页面缩放出口（`run_app` 注入为 `Application::set_device_scale`）。
   ///
   /// 为什么"缩放页面"就是 DPI 缩放：霜天的**全自绘**意味着界面里没有第二套
@@ -360,8 +372,16 @@ struct CodeEditorPage : Component {
   // —— Git 工具窗（阶段 B）——
   /// 排队的 shell 命令（终端实例就绪后投递——见 `flush_terminal_commands`）。
   std::vector<std::string> pending_shell_commands_{};
-  /// 底部单槽当前显示的面板（0=终端 1=Git）。
-  State<std::size_t> bottom_tab_{0};
+  /// 停靠槽位（与 `bottom_tab_` 一一对应）。
+  ///
+  /// 用枚举而不是字面量：`build_bottom` 分成三个面板、活动栏有三个激活判据、
+  /// 状态栏与快捷键也要进去——散落魔数在增删槽位时会静默指向别的面板。
+  enum class BottomSlot : std::size_t { Terminal = 0, Git = 1, Problems = 2 };
+  [[nodiscard]] static constexpr auto slot(BottomSlot value) noexcept -> std::size_t {
+    return static_cast<std::size_t>(value);
+  }
+  /// 底部单槽当前显示的面板（见 `BottomSlot`）。
+  State<std::size_t> bottom_tab_{static_cast<std::size_t>(BottomSlot::Terminal)};
   /// 日志/分支已读（帧首泵读；git 操作后置 false 重读）。
   bool git_log_loaded_{false};
   /// **正在后台读**（防止把同一个读任务每帧重复提交）。
@@ -369,12 +389,10 @@ struct CodeEditorPage : Component {
   /// 需要读日志（Git 标签可见或状态栏入口点过；泵里消费）。
   bool git_log_wanted_{false};
   std::vector<gbcode::LogEntry> git_log_{};
-  /// 逐行视图（含纯连线行的 `graph`）：日志表的**绘制数据源**。
-  ///
-  /// 为何与 `git_log_` 并存而不只用一个：`git_log_` 是“提交维度”（详情/选中/计数
-  /// 都以它为准），而列表要的是“行维度”（合并/分叉的斜边行也占一行）。两者由同一份
-  /// `read_log_rows` 产出（不跑两遍 git），不会不一致。
-  std::vector<gbcode::LogRow> git_log_rows_{};
+  /// **拓扑图**（从 `rev-list --parents` 自算）：日志表泳道图的**唯一**真值源。
+  gbcode::CommitGraph git_graph_{};
+  /// 拓扑图的只读访问（`build_*` 与测试用；未读到时返回空图）。
+  [[nodiscard]] auto commit_graph() const -> const gbcode::CommitGraph& { return git_graph_; }
   std::vector<gbcode::BranchInfo> git_branches_{};
   /// 选中的提交（详情摘要与高亮用）。
   std::string git_selected_hash_{};
@@ -572,6 +590,11 @@ struct CodeEditorPage : Component {
 
   State<bool> context_open_{false};
   st::math::Point context_anchor_{};
+  // —— 标签栏右键菜单（与上面两个菜单同形态、各自独立的开关与锚点）——
+  State<bool> tab_menu_open_{false};
+  st::math::Point tab_menu_anchor_{};
+  /// 右键命中的标签下标（**独立记录**：右键不改选中，所以目标必须单独存）。
+  std::size_t tab_menu_index_{0};
   /// 快捷键一览浮层开关。
   State<bool> shortcuts_open_{false};
   /// 打开/另存对话框的待执行动作（选完路径后调）。
@@ -833,11 +856,15 @@ auto open_recent(const std::string& path) -> void;
    void toggle_git_panel();
 
 
-  /// 开关底部终端面板（活动栏按钮 / `` Ctrl+` `` 同一条路径）。
+    /// 开关底部终端面板（活动栏按钮 / `` Ctrl+` `` 同一条路径）。
   ///
   /// 打开时把键盘焦点交给终端输入行（`Terminal` 自己会在下一次事件里接住），
   /// 这是“点了终端按钮就能直接敲命令”的那一步。
-   void toggle_terminal_panel();
+  void toggle_terminal_panel();
+
+
+  /// 问题按钮：切到问题面板（底部停靠槽的第三页）。
+  void toggle_problems_panel();
 
 
   /// “命令要在终端里跑给用户看”的统一入口：确保下半开着且停在终端
@@ -1009,13 +1036,28 @@ auto open_recent(const std::string& path) -> void;
   // （看输出时想高、看代码时想矮），固定值只能靠改代码。分栏手柄还顺带把
   // 「上半 / 下半」的边界画成一条可抓的线（与侧栏同一种交互语言）。
   //
-  // 底部面板**只有终端一个视图**（问题/输出已删，见 `Problem` 处的说明）——
-  // 于是这里不再需要标签栏，只留一行“终端标题 + 状态 + 动作”。
+  // 底部面板：终端 / Git / 问题三个停靠槽（见 `BottomSlot`）——
+  // 三个面板**同时声明**、非当前的隐藏（`set_visible(false)`），不拆子树。
    void build_bottom(Composer& c);
 
 
   /// 终端本体（`build_bottom` 的终端面板内容）。
    void build_terminal_body(Composer& c);
+
+
+  /// 问题面板（VSCode / IDEA 的 PROBLEMS）：LSP 诊断 + 内置轻量检查的**汇总清单**。
+  ///
+  /// 为何必须有（而不是只保留状态栏那两个可点的计数）：状态栏只能“一个一个跳”，
+  /// 而实际用法是“先看全貌：哪些文件、哪些行、什么严重级别”。没有清单就只能
+  /// 靠 F8 一直按——用户无法回答“这个文件到底有多少问题”。
+  ///
+  /// 多文件聚合：`lsp_` 按 URI 存诊断，`problems_` 是当前文件的内置检查。
+  /// 两者合并成“同一行一个条目”，点行即跳（跨文件会自动切标签）。
+   void build_problems_view(Composer& c);
+
+
+  /// 跳到某文件某行（问题面板跨文件跳转用：必要时先开那个标签）。
+   void jump_to_diagnostic(const std::string& path, std::size_t line);
 
 
   // —— Git 工具窗（底部标签）：分支 | 日志 | 标签 | 暂存 | 远程 ——
@@ -1083,25 +1125,9 @@ auto open_recent(const std::string& path) -> void;
    void build_pane_head(Composer& c, const char* id, std::function<std::string()> title, const char* action_id);
 
 
-  /// 日志行的展示文本（泳道标记 + 短 hash + 主题 + refs 胶囊）。
-   auto log_line_label(const gbcode::LogEntry& entry) const -> std::string;
-
 
     /// 过滤后的日志（提交信息/作者/路径三个条件都作用在同一条上）。
   auto filtered_log() const -> std::vector<gbcode::LogEntry>;
-
-
-  /// 日志列表的一行：要么是提交（`entry` 非空），要么是纯连线行。
-  ///
-  /// 为何不直接用 `gbcode::LogRow`：过滤后 `entry` 是**指向成员**的视图（不拷），
-  /// 而 `LogRow` 存的是值（它是解析层的产物，不该为绘制层的数据量付拷代价）。
-  struct LogRowView {
-    const gbcode::LogEntry* entry{nullptr};
-    std::string graph{};
-  };
-
-  /// 过滤后的**逐行**日志（含纯连线行；日志表的绘制源）。
-  auto filtered_log_rows() const -> std::vector<LogRowView>;
 
 
   /// 右栏：**选中提交的内容**（元信息 + 汇总 + 文件清单；点文件开并列差异）。
@@ -1248,11 +1274,25 @@ auto open_recent(const std::string& path) -> void;
    void build_editor_context(Composer& c);
 
 
-  /// 右键菜单条目（序号 = `kContextItems` 的下标）。
-   void run_context_action(std::size_t index);
+  /// 右键菜单的**条目 id** 派发（旧实现按下标 switch——分隔线占下标导致整体错位）。
+   void run_context_action(const std::string& id);
 
 
    static auto context_items() -> std::vector<MenuItem>;
+
+
+  // —— 标签栏右键菜单（关闭其他 / 右侧 / 全部 / 复制路径）——
+  ///
+  /// 对标 VSCode / IDEA：标签多了之后“逐个点 ×”是最慢的关法，而“关闭其他”、
+  /// “关到右边”是日常。**右键标签**触发（`Tabs::on_context_menu`）。
+   void build_tab_context(Composer& c);
+
+
+  /// 标签右键菜单的条目动作（序号 = 菜单条目下标）。
+   void run_tab_context_action(std::size_t index);
+
+
+   static auto tab_context_items() -> std::vector<MenuItem>;
 
 
   /// 关闭脏标签确认对话框（`Dialog` overlay；三个按钮与 VSCode 同序）。
@@ -1348,7 +1388,11 @@ auto open_recent(const std::string& path) -> void;
 
 
   /// 关闭当前标签**右侧**的全部（脏的按同样规则拦截）。
-   void close_to_right();
+void close_to_right();
+
+
+/// 关闭除当前标签以外的全部（脏的同样拦截，并指出是哪个）。
+void close_others();
 
 
    [[nodiscard]] auto index_of_key(std::string_view key) const -> std::size_t;
@@ -2057,15 +2101,28 @@ auto shutdown() -> void;
            {{.id = "undo", .label = "撤销"},
             {.id = "redo", .label = "重做"},
             {.separator = true},
+            {.id = "cut", .label = "剪切"},
+            {.id = "copy", .label = "复制"},
+            {.id = "paste", .label = "粘贴"},
+            {.separator = true},
             {.id = "comment", .label = "切换行注释（Ctrl+/）"},
-            {.id = "select-all", .label = "全选"}}},
+            {.separator = true},
+            {.id = "find", .label = "查找（Ctrl+F）"},
+            {.id = "replace", .label = "替换（Ctrl+H）"},
+            {.separator = true},
+            // 格式化与重命名是 LSP 能力（server 未就绪时如实不生效——
+            // `format_selection` / `rename_symbol` 内部会把失败原因写到状态栏，
+            // 不假装成功）。
+            {.id = "format", .label = "格式化文档（Shift+Alt+F）"},
+            {.id = "rename", .label = "重命名符号（F2）"}}},
+          // `选择` 只保留“选中范围”与“跳转”：剪切/复制/粘贴归`编辑`——
+          // 旧表把复制/粘贴放在这里，与 VSCode / IDEA 的一致性习惯相反。
           {"selection", "选择",
            {{.id = "select-all", .label = "全选（Ctrl+A）"},
+            {.separator = true},
             {.id = "goto-line", .label = "转到行…"},
             {.id = "goto-symbol", .label = "转到当前文件符号…"},
-            {.id = "goto-workspace-symbol", .label = "转到工作区符号…（Ctrl+T）"},
-            {.id = "copy", .label = "复制"},
-            {.id = "paste", .label = "粘贴"}}},
+            {.id = "goto-workspace-symbol", .label = "转到工作区符号…（Ctrl+T）"}}},
           {"view", "查看",
            {{.id = "command-palette", .label = "命令面板…（Ctrl+Shift+P）"},
             {.separator = true},

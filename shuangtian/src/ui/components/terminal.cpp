@@ -41,6 +41,9 @@ namespace st::ui {
 
 namespace {
 
+// 内边距的**单源**是 `Terminal::kOutputInset`（头文件公开），这里不再定义第二个常量：
+// 本文件是匿名命名空间作用域，与成员常量同名会遮蔽它（-Wshadow）。
+
 /// 平台默认 shell。
 ///
 /// Windows 上默认用 **PowerShell**（`pwsh.exe` 优先，回落 `powershell.exe`），
@@ -833,8 +836,8 @@ auto Terminal::caret_at(const RenderContext& context, math::Point point) const -
       ? measured_cell_width_
       : port.measure_width("M", font, text::FontRole::Monospace);
   const float line_h = measured_line_height_ > 0.0f ? measured_line_height_ : port.line_height(font);
-  const float origin_x = output_rect_.x + 4.0f;
-  const float origin_y = output_rect_.y + 4.0f;
+  const float origin_x = output_rect_.x + kOutputInset;
+  const float origin_y = output_rect_.y + kOutputInset;
   // 与 `paint_content` 同一份几何（`sb_first` 是回看区起点）。
   const int sb_total = static_cast<int>(screen.scrollback_count());
   const int sb_offset = std::clamp(target.scrollback_offset, 0, sb_total);
@@ -1427,7 +1430,8 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
     view_->set_visible(!pty);
     if (!pty && !output_rect_.is_empty()) {
       view_->measure(context, Constraints{});
-      view_->arrange(context, output_rect_.inset(math::Insets{4.0f, 4.0f, 4.0f, 4.0f}));
+      view_->arrange(context, output_rect_.inset(math::Insets{kOutputInset, kOutputInset,
+                                                                kOutputInset, kOutputInset}));
     }
   }
   // 回看滚动条：贴输出区右缘满高（PTY 模式；几何与可见性在 `sync_scrollbar`）。
@@ -1498,7 +1502,7 @@ auto Terminal::output_row_band(int row) const -> math::Rect {
                                                     : line_height_ * font_scale_;
   if (cell_h <= 0.0f) return {};
   // 文本起点与 `paint_content` 一致（`origin_x/origin_y = output_rect + 4`）。
-  const float y = output_rect_.y + 4.0f + static_cast<float>(row) * cell_h;
+      const float y = output_rect_.y + kOutputInset + static_cast<float>(row) * cell_h;
   // 行高向上/下各取整一像素：字形可能轻微溢出格高（下伸部/行距），
   // 少一像素就会残留半截墨迹。宽度取**整个输出区**（含行右缘空白与滚动条带），
   // 因为同一行里可能同时有背景色块、选区和光标。
@@ -1569,11 +1573,17 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   // 实现里 `TextRenderer::draw` 自己算 `origin.y + ascent(size)` 作为基线）。
   // 旧代码传的是 `y + ascent`——ascent 被**加了两次**，文字每行整体下移约半行
   //（实测：光标块画在行顶、文字却低 8px，看起来"光标在上一行"）。
-  const float origin_x = output_rect_.x + 4.0f;
-  const float origin_y = output_rect_.y + 4.0f;
+  const float origin_x = output_rect_.x + kOutputInset;
+  const float origin_y = output_rect_.y + kOutputInset;
 
   const math::Color default_fg = palette.fg;
   const math::Color default_bg = palette.bg;
+  // 输出区背景：**清屏色 = 终端自己的底色**，铺满整个输出矩形。
+  //
+  // 为何必须显式填：默认只在“非默认背景的字符格”上填色，于是面板底色是
+  // **父级卡片色**而不是终端底色——与 IDEA / Windows Terminal 那种
+  // “终端是一块独立面”的观感不符，分界靠的是“突发色差”而非设计。
+  canvas.fill_rect(output_rect_, raster::Paint::solid(default_bg));
 
   // —— 回看滚动 ——
   // 往上翻时把 scrollback 的末尾接在屏幕上方一起画：
@@ -2148,9 +2158,9 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
     if (target == nullptr || target->screen == nullptr) return std::string("0,0,0,0");
     const float cell_w = measured_cell_width_ * font_scale_;
     const float line_h = measured_line_height_ * font_scale_;
-    const float x = output_rect_.x + 4.0f +
+    const float x = output_rect_.x + kOutputInset +
                     static_cast<float>(target->screen->cursor_col()) * cell_w;
-    const float y = output_rect_.y + 4.0f +
+    const float y = output_rect_.y + kOutputInset +
                     static_cast<float>(target->screen->cursor_row()) * line_h;
     return std::format("{:.1f},{:.1f},{:.1f},{:.1f}", x, y, cell_w, line_h);
   }

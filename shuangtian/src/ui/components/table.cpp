@@ -88,12 +88,6 @@ void Table::add_row(std::vector<std::string> cells) {
   // 色调/泳道表跟着长：否则后调的 `set_cell_tone` 会因行数不够而静默失效，
   // 而“设了不生效”是最难查的一类缺陷（属性面也看不到）。
   cell_tones_.emplace_back(columns_.size(), CellTone::Inherit);
-  row_lanes_.push_back(-1);
-  // 连线图：**只在不够长时**才补空格子（图可能先于行设置，那时它比行多）。
-  //
-  // ⚠ 不能无条件 `emplace_back()`：先 `set_lane_links` 给 2 格、再 `add_row` 加 2 行时，
-  // 无条件补会把图变 4 格——而前两行本来就有图，结果图与行整体错位（实测）。
-  if (!row_links_.empty() && row_links_.size() < rows_.size()) row_links_.emplace_back();
   row_offsets_valid_ = false;   // 多了一行，前缀和必须重建
   mark_layout_dirty();
 }
@@ -125,29 +119,101 @@ auto Table::cell_tone(std::size_t row, std::size_t column) const -> CellTone {
   return CellTone::Inherit;
 }
 
-void Table::set_row_lanes(std::vector<int> lanes) {
-  row_lanes_ = std::move(lanes);
-  row_lanes_.resize(rows_.size(), -1);
-  // **布局脏**（不是只重绘）：泳道带占宽度，列宽要重算（见 `lane_inset`）。
+void Table::set_graph(std::vector<GraphNodeSpec> nodes, std::vector<GraphEdgeSpec> edges) {
+  graph_nodes_ = std::move(nodes);
+  graph_edges_ = std::move(edges);
+  // 泳道带占宽 = 最大道号（`lane_inset` 读它）。
+  std::size_t widest = 0;
+  for (const GraphNodeSpec& node : graph_nodes_) widest = std::max(widest, node.lane + 1U);
+  for (const GraphEdgeSpec& edge : graph_edges_) {
+    widest = std::max({widest, edge.from_lane + 1U, edge.to_lane + 1U});
+  }
+  // 每道占 2 个“字符格”：这个 2 不是笔误——它来自早期字符网格的度量
+  //（`* ` / `| ` 两字符一道），与 `lane_inset()` / 绘制端的 `cell` 计算同一口径。
+  lane_columns_ = widest * 2U;
   mark_layout_dirty();
 }
 
-void Table::set_lane_links(std::vector<std::string> rows) {
-  // ⚠ **不要** `resize(rows_.size())`：本接口可能先于 `add_row` 调用（声明式重建里
-  // 常见“先配样式、再填数据”），而 resize 会把已给的图全截成空串——实测症状是
-  // `lane_inset = 0`（泳道带不占宽）且图上一条线都不画，**不报错**。
-  // 长度对齐改由 `add_row` 侧补齐（见那里的 `row_links_.resize`）。
-  row_links_ = std::move(rows);
-  lane_columns_ = 0;
-  for (const std::string& row : row_links_) lane_columns_ = std::max(lane_columns_, row.size());
+void Table::clear_graph() {
+  if (graph_nodes_.empty() && graph_edges_.empty()) return;
+  graph_nodes_.clear();
+  graph_edges_.clear();
   mark_layout_dirty();
 }
 
-void Table::clear_lane_links() {
-  if (row_links_.empty()) return;
-  row_links_.clear();
-  lane_columns_ = 0;
-  mark_layout_dirty();
+void Table::paint_node_edge_graph(raster::Surface& canvas, const Palette& colors,
+                                  std::size_t first_row, std::size_t last_row, float clip_left,
+                                  float clip_right) const {
+  const float band_x = bounds_.x + 4.0f;
+  const float cell =
+      lane_columns_ > 0U
+          ? std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_))
+          : 7.0f;
+  const float lane_width = std::max(1.5f, std::min(2.5f, cell * 0.18f));
+  // 圆点半径：跟格宽走，并用最小行高做**宽松**封顶。
+  //
+  // 下界 2.6px（直径 5.2）：再小就分不清“节点”与“线”（线宽 1.5~2.5）。
+  const float min_row_h = std::min(row_height_at(0), row_height_ * 0.4f);
+  const float dot_radius =
+      std::max(2.6f, std::min({4.2f, cell * 0.40f, min_row_h * 0.70f * 0.5f}));
+  const auto lane_x = [&](std::size_t lane) {
+    return band_x + cell * (static_cast<float>(lane) * 2.0f + 0.5f);
+  };
+  const auto row_center_y = [&](std::size_t row) {
+    const math::Rect box = row_rect(row);
+    return box.y + box.height * 0.5f;
+  };
+  // 纵向裁剪边界：表体上下缘（滚动时线被裁到边界，而不是画进表头/表尾外面）。
+  const float clip_top = bounds_.y + kHeaderHeight;
+  const float clip_bottom = bounds_.bottom();
+
+  // ── 第一遍：边 ──
+  //
+  // 三类：同道且相邻行（短竖线）、同道跨多行（一根连到底）、跨道（曲线）。
+  // 线**只存在于边里**——没有“某个字符说这里有线”这回事，因此不可能出现悬空线头。
+  for (const GraphEdgeSpec& edge : graph_edges_) {
+    if (edge.from_row >= rows_.size() || edge.to_row >= rows_.size()) continue;
+    const std::size_t color_lane = std::max(edge.from_lane, edge.to_lane);
+    const math::Color color = Table::lane_color(color_lane, colors);
+    const raster::Paint paint = raster::Paint::solid(color);
+    const float from_y = row_center_y(edge.from_row);
+    const float to_y = row_center_y(edge.to_row);
+    if (from_y >= clip_bottom || to_y <= clip_top) continue;
+    if (edge.from_lane == edge.to_lane) {
+      const float cx = lane_x(edge.from_lane);
+      if (cx >= clip_right || cx <= clip_left) continue;
+      const float top = std::min(from_y, to_y);
+      const float bottom = std::max(from_y, to_y);
+      canvas.fill_rect(math::Rect{cx - lane_width * 0.5f, top, lane_width, bottom - top}, paint);
+      continue;
+    }
+    // 跨道：三次贝塞尔；控制点从端点**垂直引出** → 端点处与竖线切向连续（无折角）。
+    const float from_x = lane_x(edge.from_lane);
+    const float to_x = lane_x(edge.to_lane);
+    const float span = std::abs(to_y - from_y);
+    const float handle = std::max(row_height_ * 0.5f, span * 0.45f);
+    math::Path line;
+    line.move_to(math::Point{from_x, from_y});
+    line.cubic_to(math::Point{from_x, from_y + handle}, math::Point{to_x, to_y - handle},
+                  math::Point{to_x, to_y});
+    canvas.stroke_path(line, paint, lane_width,
+                       raster::StrokeStyle{raster::LineCap::Round, raster::LineJoin::Round});
+  }
+
+  // ── 第二遍：节点（盖在边上）──
+  for (const GraphNodeSpec& node : graph_nodes_) {
+    if (node.row < first_row || node.row >= last_row) continue;
+    if (node.row >= rows_.size()) continue;
+    const math::Rect box = row_rect(node.row);
+    if (box.height <= 0.0f) continue;
+    const float cx = lane_x(node.lane);
+    if (cx >= clip_right || cx <= clip_left) continue;
+    const float cy = box.y + box.height * 0.5f;
+    const math::Color color = Table::lane_color(node.lane, colors);
+    canvas.fill_rect(
+        math::Rect{cx - dot_radius, cy - dot_radius, dot_radius * 2.0f, dot_radius * 2.0f},
+        raster::Paint::solid(color), dot_radius);
+  }
 }
 
 void Table::set_lane_column_width(float width) {
@@ -157,18 +223,11 @@ void Table::set_lane_column_width(float width) {
 }
 
 auto Table::lane_inset() const noexcept -> float {
-  // 优先：连线图模式（宽度由字符列数决定）。
-  if (!row_links_.empty() && lane_columns_ > 0U) {
-    // 每字符列占 `lane_column_width_ / 每列宽`——但这里把 `lane_column_width_` 当作
-    // **整条泳道带的宽度上限**，字符列宽 = 总宽 / 列数（上限 14px，免得 2 列就撑满）。
-    const float cell = std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_));
-    return cell * static_cast<float>(lane_columns_) + 8.0f;
-  }
-  // **任何一行**有泳道就整表让位：同一张表里列必须对齐，不能按行变。
-  for (const int lane : row_lanes_) {
-    if (lane >= 0) return lane_column_width_;
-  }
-  return 0.0f;
+  if (lane_columns_ == 0U) return 0.0f;
+  // `lane_column_width_` 当作**整条泳道带的宽度上限**，字符列宽 = 总宽 / 列数
+  //（上限 14px，免得 2 列就撑满）。
+  const float cell = std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_));
+  return cell * static_cast<float>(lane_columns_) + 8.0f;
 }
 
 void Table::clear_rows() {
@@ -177,8 +236,6 @@ void Table::clear_rows() {
   // ⚠ 色调/泳道表**同样要清**：否则下一次 `add_row` 后旧数据还挂着，
   // 新行会拿到上一批的行位（颜色/泳道错位，而画面看着“有值只是不对”）。
   cell_tones_.clear();
-  row_lanes_.clear();
-  row_links_.clear();
   lane_columns_ = 0;
   hovered_row_ = kNoRow;
   selected_row_ = std::nullopt;  // 数据没了：选中索引必然悬空
@@ -575,6 +632,53 @@ auto Table::row_at(math::Point point) const noexcept -> std::size_t {
   return index < rows_.size() ? index : kNoRow;
 }
 
+/// 泳道色：**按道号自动生成，不设上限**（语义与理由见头文件 `Table::lane_color`）。
+[[nodiscard]] auto Table::lane_color(std::size_t lane_index, const Palette& colors) -> math::Color {
+  // 第 0 道：主题主色。它是“当前所在分支”，也负责让分支图与界面主色一致。
+  if (lane_index == 0U) return colors.primary;
+
+  // —— 亮度/饱和度：**从主题主色自身推**，不写死 ——
+  //
+  // 写死会踩两个相反方向的坑：暗色主题下偏暗的色看不清（与深底拉不开），
+  // 浅色主题下偏亮的色刺眼（像荧光笔）。拿 primary 的 HSL 做基准、只换色相，
+  // 就等于“同一套语气、不同颜色”。
+  const auto [base_hue, base_saturation, base_lightness] = colors.primary.to_hsl();
+  (void)base_hue;
+  (void)base_saturation;
+  (void)base_lightness;
+
+  // —— 取色：**三维分层**（不设上限，任意两道都可区分）——
+  //
+  // 单用色相黄金角不够：它只保证“不回到同一个色相”，保证不了“任意两道 RGB 距离
+  // 够远”。实测（16 道）：单黄金角最差对 RGB 距离仅 24～32——画成 2px 细线
+  // 就是同一色。
+  //
+  // 所以三个维度轮流错开：色相（20° 步进远小于 180°，相邻道一眼能分）、
+  // 明度（8 档）、饱和（4 档）。三者周期互不为倍数，最小公倍数 =
+  // (360/20) × 8 × 4 = 576 道才可能重复——远超任何真实分支数（本仓 git log
+  // 实测最多 4 道并行）。而“每多一道就换一档”意味着**不需要任何上限**，
+  // 这正是“不限制颜色数量”。
+  //
+  // 参数是脚本搜出来的（实测 64 道内最差对 RGB 距离 52，> 0 即不重色）：
+  // 手推“黄金角 + 明度偏移”两次都被实测判死（最差对 29 / 32），搜参数才靠谱。
+  constexpr float kHueStep = 20.0F;
+  constexpr std::size_t kLightnessSteps = 8;
+  constexpr std::size_t kSaturationSteps = 4;
+  const float hue = kHueStep * static_cast<float>(lane_index);
+  // 明度：在 [0.34, 0.76] 均分 8 档——下限保证深底上不沉底，上限保证浅底上不发飘。
+  const float lightness =
+      0.34F + (0.76F - 0.34F) *
+                  (static_cast<float>(lane_index % kLightnessSteps) /
+                   static_cast<float>(kLightnessSteps - 1));
+  // 饱和：在 [0.50, 0.92] 均分 4 档，用**不同步长**轮转（×3）——避免与明度同步。
+  const float saturation =
+      0.50F + (0.92F - 0.50F) *
+                  (static_cast<float>((lane_index * 3U) % kSaturationSteps) /
+                   static_cast<float>(kSaturationSteps - 1));
+
+  return math::Color::from_hsl(hue, saturation, lightness);
+}
+
 void Table::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
@@ -668,123 +772,23 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
 
   // —— 行首连线图（图形分支线）——
   //
-  // 两种通道，**连线图优先**：
-  // ① `row_links_`（字格）：能画竖线、斜线、圆点，可表达合并/分叉；
-  // ② `row_lanes_`（旧接口）：只能圆点 + 同列竖线。
+  // 只有一个通道：**节点-边**（`Table::set_graph` 收节点与边，绘制端按 (行, 道) 坐标算）。
   //
   // 为何进框架：泳道是**行属性**，它要和行高/纵向偏移/裁剪同一套几何算；
   // 应用自己画得不到 `row_rect` 的内部知识（现在屏幕上第几像素）。
-  if (!row_links_.empty() && lane_columns_ > 0U) {
-    const float band_x = bounds_.x + 4.0f;
-    const float cell =
-        std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_));
-    // 线宽/圆点半径跟**格宽**走（不写死 px）：泳道带被窄栏挤窄时不能变成一园糊。
-    // 下限 1.5px：1px 在 1.5× DPI 下会因亚像素定位而时粗时细（实测：同一列的竖线
-    // 看起来深浅不一）。
-    const float lane_width = std::max(1.5f, std::min(2.5f, cell * 0.18f));
-    const float dot_radius = std::max(2.8f, std::min(4.2f, cell * 0.34f));
-    for (std::size_t row = first_row; row < last_row; ++row) {
-      if (row >= row_links_.size()) continue;
-      const std::string& glyphs = row_links_[row];
-      if (glyphs.empty()) continue;
-      const math::Rect row_box = row_rect(row);
-      if (row_box.height <= 0.0f) continue;
-      const float cy = row_box.y + row_box.height * 0.5f;
-      for (std::size_t col = 0; col < glyphs.size(); ++col) {
-        const char glyph = glyphs[col];
-        if (glyph == ' ') continue;
-        const float cx = band_x + cell * (static_cast<float>(col) + 0.5f);
-        if (cx >= clip_right || cx <= clip_left) continue;
-        // 颜色：**按泳道取色**，不是“第0道主色、其他一律灰”。
-        //
-        // 为何要有色差：多分支并行时，全用同一种灰就看不出“哪条线属于哪个分支”，
-        // 汇合处尤其乱（实测：两条灰线交叉后完全分不清走向）。
-        // 调色板取三个语义色循环：primary（主干/当前分支）、accent、success。
-        // ⚠ 不用 `border_*`：那是**分隔线**的色，在暗色主题下与背景差不到 1.2:1，
-        // 画分支线会看起来“要断不断”（实测：截图里分支泳道像没有一样）。
-        const std::size_t lane_index = col / 2U;
-        const math::Color color =
-            lane_index == 0U ? colors.primary
-                             : (lane_index % 2U == 1U ? colors.accent : colors.success);
-        const raster::Paint paint = raster::Paint::solid(color);
-        switch (glyph) {
-          case '|':
-            // 整行高的竖线（**不断线**：连不连得上由调用方的字格决定，不由相邻行推断）
-            canvas.fill_rect(
-                math::Rect{cx - lane_width * 0.5f, row_box.y, lane_width, row_box.height}, paint);
-            break;
-          case '*':
-            // 提交点：上下各半行竖线（把行间连起来）+ 实心圆。
-            canvas.fill_rect(
-                math::Rect{cx - lane_width * 0.5f, row_box.y, lane_width, row_box.height * 0.5f},
-                paint);
-            canvas.fill_rect(
-                math::Rect{cx - lane_width * 0.5f, cy, lane_width, row_box.height * 0.5f}, paint);
-            canvas.fill_rect(math::Rect{cx - dot_radius, cy - dot_radius, dot_radius * 2.0f,
-                                        dot_radius * 2.0f},
-                             paint, dot_radius);
-            break;
-          case '/':
-          case '\\': {
-            // 斜线：跨道连线（`/` = 左下→右上；`\` = 左上→右下）。
-            //
-            // ## 端点必须落在**相邻行圆点的中心**
-            //
-            // 斜线表达的连接是“上一行的 A 道提交 → 下一行的 B 道提交”。两个端点就是
-            // 那两行的行中线。⚠ 不能用“本行高”算：连线行被压到 0.35 倍高（见 gbcode
-            // 的 `set_row_scales`），而相邻提交行是 1.0 倍——用本行高算会得到一个
-            // 明显偏短的跨距，斜线两端够不到圆点，看上去就是“几段断开的短线”（实测）。
-            const float half = lane_width * 0.5f;
-            const float prev_h = row > 0 ? row_height_at(row - 1) : row_box.height;
-            const float next_h = row + 1 < rows_.size() ? row_height_at(row + 1) : row_box.height;
-            const float above = row_box.y - prev_h * 0.5f;
-            const float below = row_box.bottom() + next_h * 0.5f;
-            math::Path line;
-            if (glyph == '/') {
-              line.move_to(math::Point{cx - cell + half, below});        // 左下（下一行左道）
-              line.line_to(math::Point{cx + cell - half, above});        // 右上（上一行右道）
-            } else {
-              line.move_to(math::Point{cx - cell + half, above});        // 左上（上一行左道）
-              line.line_to(math::Point{cx + cell - half, below});        // 右下（下一行右道）
-            }
-            canvas.stroke_path(line, paint, lane_width,
-                               raster::StrokeStyle{raster::LineCap::Round,
-                                                    raster::LineJoin::Round});
-            break;
-          }
-          default:
-            break;
-        }
-      }
-    }
-  } else {
-    // 旧通道：圆点 + 同列相邻行的半行竖线。
-    for (std::size_t row = first_row; row < last_row; ++row) {
-      if (row >= row_lanes_.size() || row_lanes_[row] < 0) continue;
-      const math::Rect row_box = row_rect(row);
-      if (row_box.height <= 0.0f) continue;
-      const float lane_x = bounds_.x + 10.0f + static_cast<float>(row_lanes_[row]) * 12.0f;
-      const float cy = row_box.y + row_box.height * 0.5f;
-      if (lane_x >= clip_right || lane_x <= clip_left) continue;
-      // 竖线：连到**下一条同泳道**的行（相邻行不同泳道时断开，如实反映分支）。
-      const bool next_same = row + 1 < row_lanes_.size() && row_lanes_[row + 1] == row_lanes_[row];
-      const bool prev_same = row > 0 && row_lanes_[row - 1] == row_lanes_[row];
-      const math::Color lane_color =
-          row_lanes_[row] == 0 ? colors.primary : colors.border_strong;
-      const float half = row_box.height * 0.5f;
-      if (prev_same) {
-        canvas.fill_rect(math::Rect{lane_x - 0.5f, row_box.y, 1.0f, half},
-                         raster::Paint::solid(lane_color));
-      }
-      if (next_same) {
-        canvas.fill_rect(math::Rect{lane_x - 0.5f, cy, 1.0f, half},
-                         raster::Paint::solid(lane_color));
-      }
-      // 圆点（半径 3）。
-      canvas.fill_rect(math::Rect{lane_x - 3.0f, cy - 3.0f, 6.0f, 6.0f},
-                       raster::Paint::solid(lane_color), 3.0f);
-    }
-  }
+  //
+  // ⚠ **必须重新压上 body 裁剪**：这里已经走到了表头绘制之后，而表头那一步
+  // 为了不被 body 裁掉半边 `pop_clip` 过（表头固定在顶部、不随纵向滚动）。
+  // 于是本段若直接画，就会画进表头区域——实测：滚到中间时顶部那根黄线
+  // （上一行的道）直接穿进表头，看着像“线从表头里长出来”。
+  const math::Rect body_clip{bounds_.x, bounds_.y + kHeaderHeight, bounds_.width,
+                             std::max(0.0f, bounds_.height - kHeaderHeight)};
+  canvas.push_clip_rect(body_clip);
+
+  paint_node_edge_graph(canvas, colors, first_row, last_row, clip_left, clip_right);
+
+  // 泳道图单独压的裁剪到此为止（见本段开头的说明）。
+  canvas.pop_clip();   // body_clip（泳道段）
 
   // 横向滚动指示（内容超出容器时）。
   const float limit = max_scroll();

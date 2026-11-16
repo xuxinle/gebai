@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <format>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "st/core/fs.hpp"
 #include "st/core/process.hpp"
@@ -369,6 +371,20 @@ auto LanguageService::problems() const -> const std::vector<LspProblem>& {
   static const std::vector<LspProblem> empty{};
   const auto found = impl_->diagnostics.find(normalize_path(impl_->active_path));
   return found == impl_->diagnostics.end() ? empty : found->second;
+}
+
+auto LanguageService::all_diagnostics() const
+    -> std::vector<std::pair<std::string, std::vector<LspProblem>>> {
+  std::vector<std::pair<std::string, std::vector<LspProblem>>> out;
+  out.reserve(impl_->diagnostics.size());
+  for (const auto& [path, list] : impl_->diagnostics) {
+    if (list.empty()) continue;   // 空列表是“已无问题”，不占清单行
+    out.emplace_back(path, list);
+  }
+  // 稳定顺序：按路径排（面板每帧重组，顺序不稳会让行“自己跳”）。
+  std::sort(out.begin(), out.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  return out;
 }
 
 auto LanguageService::error_count() const -> std::size_t {

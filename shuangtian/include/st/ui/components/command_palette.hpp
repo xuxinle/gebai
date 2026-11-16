@@ -59,8 +59,8 @@ class CommandPalette : public Element {
   /// 过滤词（空 = 全部）。变化即重过滤并把高亮归零。
   void set_query(std::string query);
   [[nodiscard]] auto query() const noexcept -> const std::string& { return query_; }
-  /// 当前过滤命中数。
-  [[nodiscard]] auto match_count() const noexcept -> std::size_t { return matched_.size(); }
+  /// 当前过滤命中数（**全量**，不受“只造型前 300 条”的影响）。
+  [[nodiscard]] auto match_count() const noexcept -> std::size_t { return total_matches_; }
   /// 当前高亮命令 id（无命中为空）。
   [[nodiscard]] auto active_id() const -> std::string;
 
@@ -109,6 +109,10 @@ class CommandPalette : public Element {
 
   std::vector<Command> commands_{};
   std::vector<std::size_t> matched_{};  // 命中命令在 commands_ 的下标（按表序）
+  /// **全量**命中数（不封顶）。`matched_` 只保留前 `kMaxRenderedMatches` 条
+  /// （见 `rebuild` 的说明）——它只用于造型，不代表“搜到几项”。
+  /// 分成两个量的理由：自动化断言与状态条都在读 `match_count`，它必须说真话。
+  std::size_t total_matches_{0};
   std::string query_{};
   /// 列表里只有那一行“没有匹配项”占位（不代表任何命令）——
   /// 此时不得高亮/激活任何条目，否则 Enter 会去取 `matched_[0]` 而越界。

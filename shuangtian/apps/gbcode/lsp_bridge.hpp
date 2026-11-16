@@ -97,6 +97,14 @@ class LanguageService {
 
   /// 当前活动文件的诊断（UI 直接读）。
   [[nodiscard]] auto problems() const -> const std::vector<LspProblem>&;
+  /// **全工作区**诊断快照（路径 → 诊断列表）——供问题面板聚合。
+  ///
+  /// 为何要它：`problems()` 只看**活动文件**，而问题面板要回答“整个工作区有多少
+  /// 问题、分别在哪个文件”。server 每次 `publishDiagnostics` 都按 URI 存了一份，
+  /// 这里把这堆存量原样交出（不再复制一份影子状态）。
+  /// 键是**本地路径**（与 `active_path()` 同一口径，已归一 `\` → `/` 之外的差异）。
+  [[nodiscard]] auto all_diagnostics() const
+      -> std::vector<std::pair<std::string, std::vector<LspProblem>>>;
   [[nodiscard]] auto error_count() const -> std::size_t;
   [[nodiscard]] auto warning_count() const -> std::size_t;
 

@@ -1204,25 +1204,18 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
   } else {
     // 新建（或类型/key 对不上）：腾出游标位，把新元素插进那一格。
     //
-    // **同位类型切换诊断**（2026-10-13）：位置对齐遇类型不符会销毁旧元素——
+    // **同位类型切换诊断**（2026-10-13 起）：位置对齐遇类型不符会销毁旧元素——
     // 换页场景合法，但元素级状态（文本/滚动/展开态）会**静默丢失**，且应用侧
     // 的「已装载」类判据往往还没失效（实测：gbcode md 预览↔编辑器互切，切回
     // 后编辑器空白）。记进 stats + 一条日志：从"猜哪个状态丢了"变成
     // "一眼看到哪次切换丢了哪棵子树"。
-    if (existing != nullptr && !type_matches) {
-      const std::string from = std::string(existing->type());
-      const std::string to = std::string(type);
-      const std::string where = existing->id().empty()
-                                    ? std::string("#") + std::to_string(cursor)
-                                    : "#" + existing->id();
-      const std::string note = std::format("{}: {} -> {}", where, from, to);
-      if (std::find(impl_->last_stats.type_switches.begin(),
-                    impl_->last_stats.type_switches.end(),
-                    note) == impl_->last_stats.type_switches.end()) {
-        impl_->last_stats.type_switches.push_back(note);
-        st::log::info("[dsl] 同位类型切换（元素级状态随旧实例丢失）：{}", note);
-      }
-    }
+    //
+    // ⚠ 2026-11-16 修正：**只在真正释放旧元素时记**（见下面 `occupant_is_stale` 处）。
+    // 旧实现比一句 `type_matches` 就记日志，而“类型不同”不等于“元素被丢”：
+    // 一个条件声明的兄弟从无到有（gbcode 日志表头那个 `if (!branch.empty()) text(...)`）
+    // 会让后面的带 key 元素右移一格——游标处“上帧是 Button、本帧是 Text”，于是它报
+    // “Button→Text：元素级状态丢失”，而那个 Button 实例完好无损（被自己的 key 命中
+    // 挪到了后一格）。**日志造假比不报更贵**：它教人以后习惯性忽视这条输出。
     //
     // **腾位只释放真正的残留**（`keyed_region` 里没有它的 key）：占着这一格的兄弟
     // 很可能只是「还没轮到」（它的 key 在本区段里，待会儿自己会被复用）——
@@ -1249,9 +1242,40 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
     // ⚠ 注意不能反过来写成“释放 keyed 但未认领的”——那恰好毁掉 key 复用
     // （占着游标位的只是“还没轮到”的兄弟）。实测：这么改 `dsl_for_each_reuses_by_key`
     // 当场变红（身份丢失、child_at 全对不上）。
+    //
+    // ⚠ 2026-11-16 补：**带 key 的元素不在此处释放**。
+    //
+    // `keyed_region` 只由 `for_each` 填充（那里的数据是一份可枚举的 key 列表）。
+    // 而“条件声明里一个带 key 的兄弟从无到有”（gbcode 日志表头那个
+    // `if (!branch.empty()) text(...)`）根本不是 keyed 区段——占着游标位的
+    // 带 key 兄弟于是被当成残留释放，后面每个按钮按位置抓到“上一个角色的实例”，
+    // 表现为**属性泄漏**（`icon=refresh` / `hint=重新读取日志` 跑到另一个按钮上）。
+    //
+    // 带 key 的元素有自己的归宿：它要么本轮晚些被自己的 key 命中复用，要么
+    // 本轮结束时被**尾部截断**清理（那里才知道谁真的没被声明）。在这里释放它只会
+    // 把“待复用”误判成“残留”。
+    //
+    // 无 key 的元素仍按位置对齐（新旧行为一致：类型不符就在它前面插入新元素）。
     const bool occupant_is_stale =
-        occupant != nullptr && impl_->keyed_region.count(occupant->key()) == 0;
+        occupant != nullptr && occupant->key().empty() &&
+        impl_->keyed_region.count(occupant->key()) == 0;
     if (occupant_is_stale) {
+      // 真正的“同位类型切换”：旧元素即将被销毁（调用方可能还指着它）。
+      // 只在**这里**记——`type_matches` 不够，它不能区分“换页”与“位移一格”。
+      if (!type_matches) {
+        const std::string from = std::string(occupant->type());
+        const std::string to = std::string(type);
+        const std::string where = occupant->id().empty()
+                                      ? std::string("#") + std::to_string(cursor)
+                                      : "#" + occupant->id();
+        const std::string note = std::format("{}: {} -> {}", where, from, to);
+        if (std::find(impl_->last_stats.type_switches.begin(),
+                      impl_->last_stats.type_switches.end(),
+                      note) == impl_->last_stats.type_switches.end()) {
+          impl_->last_stats.type_switches.push_back(note);
+          st::log::info("[dsl] 同位类型切换（元素级状态随旧实例丢失）：{}", note);
+        }
+      }
       // 交给 root **延后到派发结束**再释放：事件回调里改 State 会当场触发重组，
       // 而派发栈（冒泡链、事件观察者）还拿着这棵子树的裸引用——
       // 立即析构就是 use-after-free（实测：点「暂存」钮后崩溃）。

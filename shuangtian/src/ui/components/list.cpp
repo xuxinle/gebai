@@ -263,6 +263,43 @@ List::List() {
   set_focusable(true);
 }
 
+void List::measure(const RenderContext& context, const Constraints& constraints) {
+  // `List` 的显式 `height` 是**单行高**，不是容器高（与 `apply_row_height_override`
+  // 同一语义）。基类 `Element::measure` 把它当容器总高——不覆写的话容器只排一行高，
+  // 其余项全部落到父容器的裁剪区外（实测：gbcode 大纲 164 个符号只显示 1 行，
+  // 滚动宿主量到 `content_height` = 22，滚动条因“内容不超出”根本不出现）。
+  //
+  // 高度 = 可见行数 × 行高 + 项间距 + padding，与 `Tree` 的口径一致
+  //（树也按行数累加，而不是把 `row_height` 当容器高）。
+  apply_row_height_override();
+  const float row_height = style_.has_explicit_height() ? style_.height : ListItem::kHeight;
+
+  float width = 0.0f;
+  float content_height = 0.0f;
+  std::size_t visible_items = 0;
+  for (const auto& child : children_) {
+    if (!child->visible()) continue;
+    if (visible_items > 0) content_height += style_.gap;
+    Constraints child_constraints;
+    child_constraints.max_width = constraints.max_width;
+    child_constraints.max_height = kUnbounded;
+    child_constraints.available_width = constraints.max_width;
+    child_constraints.available_height = kUnbounded;
+    child->measure(context, child_constraints);
+    width = std::max(width, child->measured_size().width);
+    content_height += row_height;
+    ++visible_items;
+  }
+
+  width = std::clamp(width, style_.min_width, style_.max_width);
+  if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
+
+  float height = content_height + style_.padding.vertical();
+  height = std::clamp(height, style_.min_height, style_.max_height);
+  if (constraints.max_height < kUnbounded) height = std::min(height, constraints.max_height);
+  measured_ = math::Size{width, height};
+}
+
 void List::apply_row_height_override() {
   // 容器上设了显式高度 ⇒ 它是**行高**而不是"列表总高"（列表由内容撑开，
   // 总高由行数决定；给容器钉一个高度在滚动容器里没有意义）。
@@ -341,6 +378,11 @@ void List::sync_items(const std::vector<Entry>& entries) {
     if (node == nullptr) {
       node = std::make_unique<ListItem>(entry.label, entry.subtitle);
       node->set_key(entry.key);
+      // ⚠ **新建分支也要搬图标**：旧实现只在「复用」分支调 `set_icon`，于是
+      // 首次数据到达时图标**全部丢失**，要等下一次 `sync_items` 才补上
+      //（实测 gbcode 大纲：164 个符号全是纯文本、`sym-*` 图标一个没画；
+      //  而搜索/导航结果因先空后填刚好走了复用分支所以有图标）。
+      node->set_icon(entry.icon);
     } else {
       node->set_label(entry.label);  // 文案可能变了，元素不变
       node->set_subtitle(entry.subtitle);
@@ -450,7 +492,12 @@ auto List::semantics_flags() const -> SemanticsFlags {
 auto List::visible_item_count() const noexcept -> std::size_t {
   const std::size_t total = children_.size();
   if (bounds_.is_empty()) return total == 0 ? 1 : total;
-  const auto count = static_cast<std::size_t>(std::max(1.0f, bounds_.height / ListItem::kHeight));
+  // 行高按**实际**取值（`height` = 单行高，未设才是 `ListItem::kHeight`）。
+  // 用旧常量会在大纲这类紧凑列表里少报一半（实测：22px 行高、511px 视口应报 23，
+  // 旧实现报 12）。
+  const float row_height = style_.has_explicit_height() ? style_.height : ListItem::kHeight;
+  const float rows = row_height > 0.0f ? bounds_.height / row_height : 1.0f;
+  const auto count = static_cast<std::size_t>(std::max(1.0f, rows));
   return std::max<std::size_t>(1, count);
 }
 

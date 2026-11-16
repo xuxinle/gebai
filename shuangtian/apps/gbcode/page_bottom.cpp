@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <format>
 #include <functional>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -51,7 +52,7 @@ namespace gbcode_ui {
           // 终端也是“内容区”：`Sunken`。与编辑器同档——两者都是“我在这里读/写内容”，
           // 而外壳条带（标签条/状态栏）才是 `Alt`。
           panel.set_surface(Element::Surface::Content);
-          panel.set_visible(bottom_tab_.value() == 0);
+          panel.set_visible(bottom_tab_.value() == slot(BottomSlot::Terminal));
         },
         {.grow = true, .key = "pane:terminal"});
     (void)custom_container<Panel>(
@@ -60,9 +61,18 @@ namespace gbcode_ui {
         [this](Panel& panel) {
           panel.set_id("git-panel");
           panel.set_surface(Element::Surface::Content);
-          panel.set_visible(bottom_tab_.value() != 0);
+          panel.set_visible(bottom_tab_.value() == slot(BottomSlot::Git));
         },
         {.grow = true, .key = "pane:git"});
+    (void)custom_container<Panel>(
+        c,
+        [&] { build_problems_view(c); },
+        [this](Panel& panel) {
+          panel.set_id("problems-panel");
+          panel.set_surface(Element::Surface::Content);
+          panel.set_visible(bottom_tab_.value() == slot(BottomSlot::Problems));
+        },
+        {.grow = true, .key = "pane:problems"});
   }
 
 
@@ -553,36 +563,59 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     // 提交信息/作者/日期挤成一串，**列不对齐**（不同长度就错位）——而日志表
     // 恰恰是靠列对齐来扫的（“谁改的 / 什么时候” 是两列独立信息）。
     //
-    // 泳道列由**连线图**（`Table::set_lane_links`）表示，不走文本列：
-    // 用字符画分支线（`●`/`○`）在有向无环图上根本表达不出合并关系。
+    // 泳道列由**节点-边图**（`Table::set_graph`）表示，不走文本列。
+    //
+    // 数据层只有一份提交列表（`filtered_log`）+ 一份拓扑图（`commit_graph`），
+    // 没有任何“行”概念——字符网格通道已彻底移除。
     (void)custom<Table>(c, [this](Table& table) {
       table.set_id("git-log-table");
-      // **行维度**数据（含合并/分叉的连线行）——不是提交维度（否则斜边没处放）。
-      const auto rows = filtered_log_rows();
+      // 行 = 提交（过滤后的）。过滤会把某些提交去掉，所以行号要**重新算**：
+      // 拓扑图里的 `row` 是“未过滤拓扑序里的下标”，不能直接当表行号用。
+      // 下面按 hash 建一次映射（O(n)），同时维护“保留提交在拓扑图里的原下标”
+      // 供边重映射使用。
+      const auto rows = filtered_log();
       table.clear_rows();   // 每次重组重建：日志量与过滤条件都会变
       // 泳道带宽：默认值（28）只够画一条线，而“圆点+线”与首字之间还需要一档空白。
-      // 旧版**根本没给泳道留宽度**（`column_x` 从 `bounds_.x` 起算），圆点与竖线直接
-      // 压在提交信息首字上（“提交线和信息贴太紧”的那个现象）。现在框架的 `Table`
-      // 会把这块宽度真的让出来（见 `Table::lane_inset`），这里只调宽。
       table.set_lane_column_width(34.0f);
-      // —— 行首连线图（字格）——
-      //
-      // 直接把 `git log --graph` 的图区喂给 `Table`：它能画竖线、斜线、圆点，
-      // 于是**合并/分叉的斜边能真的画出来**（旧实现只存了列号，泳道一变就断线，
-      // 分支关系全丢——而那正是提交图存在的理由）。
-      std::vector<std::string> graphs;
-      graphs.reserve(rows.size());
-      for (const auto& row : rows) graphs.push_back(row.graph);
-      table.set_lane_links(std::move(graphs));
-      // —— 逐行高度：纯连线行压到 0.35 行高 ——
-      //
-      // 连线行只为了把斜边画出来，不承载文字。给它整行高会把两个相邻提交拉开数倍
-      // 距离（实测 1.0：合并处被 3 个连线行撑出 4 倍行距，整张表稀稀拉拉）。
-      // 0.35 是实测调出来的：再低（0.25 以下）斜线会因跨度太短而与上下行失去连接；
-      // 再高（0.5）依然看得出“多出几个空行”。
-      std::vector<float> scales;
-      scales.reserve(rows.size());
-      for (const auto& row : rows) scales.push_back(row.entry != nullptr ? 1.0f : 0.35f);
+      const auto graph = commit_graph();
+      std::vector<Table::GraphNodeSpec> nodes;
+      std::vector<Table::GraphEdgeSpec> edges;
+      // 行号对齐：拓扑图的 `node.row` 是“**未过滤**拓扑序里的下标”，
+      // 而过滤/仅当前分支会去掉一些提交——直接拿来当表行号会整体错位。
+      // 按 hash 建一次映射（O(n)，每帧一次不心疼），并把被去掉的行映射到
+      // `rows.size()`（哨兵值，下面跳过引用它的边）。
+      if (!graph.nodes.empty()) {
+        std::map<std::string, std::size_t> row_of_hash;
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+          row_of_hash.emplace(rows[index].hash, index);
+        }
+        std::vector<std::size_t> table_row_of_graph(graph.nodes.size(), rows.size());
+        for (std::size_t index = 0; index < graph.nodes.size(); ++index) {
+          const auto found = row_of_hash.find(graph.nodes[index].hash);
+          if (found == row_of_hash.end()) continue;
+          table_row_of_graph[index] = found->second;
+          nodes.push_back(Table::GraphNodeSpec{.row = found->second,
+                                               .lane = graph.nodes[index].lane});
+        }
+        for (const auto& edge : graph.edges) {
+          if (edge.from_row >= table_row_of_graph.size() ||
+              edge.to_row >= table_row_of_graph.size()) {
+            continue;
+          }
+          const std::size_t from_row = table_row_of_graph[edge.from_row];
+          const std::size_t to_row = table_row_of_graph[edge.to_row];
+          // 被过滤掉的行（哨兵 = rows.size()）不能成边：那会在两行真实提交之间
+          // 拉一根“跳过了一堆被隐藏提交”的线，让人以为它们是直系父子。
+          if (from_row >= rows.size() || to_row >= rows.size()) continue;
+          edges.push_back(Table::GraphEdgeSpec{.from_row = from_row,
+                                               .from_lane = edge.from_lane,
+                                               .to_row = to_row,
+                                               .to_lane = edge.to_lane});
+        }
+      }
+      table.set_graph(std::move(nodes), std::move(edges));
+      // 行高：全部 1.0（每行都是一笔提交；不再有“为画斜边而占的空行”）。
+      std::vector<float> scales(rows.size(), 1.0f);
       table.set_row_scales(std::move(scales));
       // 窄栏压缩优先级：先把哈希/日期让出去，再是作者；提交信息（主列）最后。
       //
@@ -603,14 +636,14 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       // 不这样做就只能全表一个颜色，靠列位置猜重点。
       table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
                               Table::CellTone::Muted, Table::CellTone::Muted});
-      table.set_row_height(24.0f);
-      for (const auto& row : rows) {
-        if (row.entry == nullptr) {
-          // 纯连线行：**空内容占位**（四列全空，但行高保留——斜边就画在它这一格里）。
-          table.add_row({});
-          continue;
-        }
-        const gbcode::LogEntry& entry = *row.entry;
+      // 行高（= 提交线的纵向间距）。
+      //
+      // 从 24 调到 28 的理由是**图而不是文字**：分支图的斜边要跨越相邻两行，
+      // 行高太矮时曲线只能压在一两个像素里完成横向位移——“换道”看上去就像
+      // 线被撞了一下（实测截图：曲线几乎看不见，只剩一个凸起）。28px 给了曲线
+      // 上下各半行的缓冲，仍能 4 屏看到 ~20 条提交（原来约 23 条）。
+      table.set_row_height(28.0f);
+      for (const auto& entry : rows) {
         // refs（分支/标签胶囊）拼在提交信息尾部：它是**这条提交的身份装饰**，
         // 单独开一列会在窄视图里把真正的内容挤没。
         std::string subject = entry.subject;
@@ -624,18 +657,15 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       // 选中行与左栏的“当前提交”同源（同一条高亮，不是两个独立状态）。
       if (!git_selected_hash_.empty()) {
         for (std::size_t index = 0; index < rows.size(); ++index) {
-          if (rows[index].entry != nullptr && rows[index].entry->short_hash == git_selected_hash_) {
+          if (rows[index].short_hash == git_selected_hash_) {
             table.set_selected_row(index);
             break;
           }
         }
       }
-      // 点行 = 看这条提交的详情（与旧版同一动线）。
-      //
-      // ⚠ 连线行不可点：下标是**行**下标，不是提交下标——必须经 `entry` 判空转一步，
-      // 否则“点了合并那一行 → 打开了另一笔提交”（差一行，极难归因）。
+      // 点行 = 看这条提交的详情。行下标就是 `rows` 下标（行 = 提交，无偏移）。
       table.set_on_row_click([this, rows](std::size_t row) {
-        if (row < rows.size() && rows[row].entry != nullptr) show_commit(*rows[row].entry);
+        if (row < rows.size()) show_commit(rows[row]);
       });
     }, {.grow = true, .id = "git-log-host"});
     // 给 e2e 用的断言面：当前可见行区间（“表格真的在显示数据”而非空壳）。
@@ -660,54 +690,37 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   }
 
 
-  /// 日志行的展示文本（泳道标记 + 短 hash + 主题 + refs 胶囊）。
-  auto CodeEditorPage::log_line_label(const gbcode::LogEntry& entry) const -> std::string {
-    std::string refs;
-    for (const auto& ref : entry.refs) refs += "[" + ref + "] ";
-    return std::format("{} {}  {}  {}", entry.lane == 0 ? "●" : "○", entry.short_hash,
-                       entry.subject, refs);
-  }
 
-
-  /// 过滤后的日志（提交信息/作者/路径三个条件都作用在同一条上）。
-  auto CodeEditorPage::filtered_log() const -> std::vector<gbcode::LogEntry> {
-    std::vector<gbcode::LogEntry> out;
-    for (const auto& row : filtered_log_rows()) {
-      if (row.entry != nullptr) out.push_back(*row.entry);
-    }
-    return out;
-  }
-
-  /// 过滤后的**逐行**日志（保留纯连线行）。
+  /// 过滤后的日志（提交信息/作者/hash 三个条件都作用在同一条上）。
   ///
-  /// 与 `filtered_log()` 的区别只在“连线行要不要”：列表绘制要（否则斜边没处放），
-  /// 而详情/选中/计数不要（那些是“提交”维度）。
-  auto CodeEditorPage::filtered_log_rows() const -> std::vector<CodeEditorPage::LogRowView> {
+  /// 这是日志表的**唯一**数据入口：行 = 提交，没有“连线行”这回事
+  ///（字符网格通道已移除；跨道连线由拓扑图 `set_graph` 画，本就跨行）。
+  auto CodeEditorPage::filtered_log() const -> std::vector<gbcode::LogEntry> {
     const std::string needle = std::string(st::trim(log_filter_text_.value()));
     const bool current_only = log_filter_current_branch_.value();
-    std::vector<LogRowView> out;
-    out.reserve(git_log_rows_.size());
-    for (const auto& row : git_log_rows_) {
-      if (!row.entry.has_value()) {
-        // 纯连线行：跟着**上下文**决定留不留。
-        //
-        // 为何不一律丢掉：合并/分叉的斜边行就是纯连线行——丢了它们，
-        // “两个分支在这里汇合”这件事在画面上就是不存在的。
-        // 而在过滤时它们没有可匹配的内容（不是提交），所以：只要**不过滤**就留，
-        // 一旦有过滤条件就全部隐去（否则会出现“行留着、两边提交都没了”的悬空线）。
-        if (current_only || !needle.empty()) continue;
-        out.push_back(LogRowView{nullptr, row.graph});
-        continue;
+    // “仅当前分支”的判据：**拓扑图里道号 0**。
+    //
+    // 道 0 的定义就是“从 HEAD 一路走第一个父提交的那条线”（见 `git_graph.cpp`），
+    // 也就是当前分支本身，所以它天然是“当前分支上的提交”这个集合。
+    // 道号要从未过滤的图里查（过滤后的行号已经重排过）。
+    std::map<std::string, std::size_t> lane_of_hash;
+    if (current_only) {
+      for (const auto& node : git_graph_.nodes) lane_of_hash.emplace(node.hash, node.lane);
+    }
+    std::vector<gbcode::LogEntry> out;
+    out.reserve(git_log_.size());
+    for (const auto& entry : git_log_) {
+      if (current_only) {
+        const auto found = lane_of_hash.find(entry.hash);
+        if (found == lane_of_hash.end() || found->second != 0) continue;
       }
-      const gbcode::LogEntry& entry = *row.entry;
-      if (current_only && entry.lane != 0) continue;
       if (!needle.empty()) {
         const bool hit = entry.subject.find(needle) != std::string::npos ||
                          entry.author.find(needle) != std::string::npos ||
                          entry.short_hash.find(needle) != std::string::npos;
         if (!hit) continue;
       }
-      out.push_back(LogRowView{&entry, row.graph});
+      out.push_back(entry);
     }
     return out;
   }
@@ -1037,7 +1050,90 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   }
 
 
+  /// 问题面板（VSCode / IDEA 同位置：底部停靠槽的第三页）。
+  ///
+  /// 内容 = **两份真数据源的合并**：
+  ///   · `lsp_.all_diagnostics()`：语言服务按文件推的语义诊断（跨文件）
+  ///   · `problems_`：当前文件的**内置轻量检查**（行尾空白/Tab/TODO/超长行）
+  ///
+  /// 后者在 LSP 就绪时仍然保留——TODO 标记这类项 LSP 不会报，而它们是本仓的
+  /// 实际工作流（见 `Problem` 的注释）。两者同一行一条目，按“文件 → 行号”排；
+  /// 点行即跳（跳当前文件的直接定位，跨文件的先 `open_path` 再跳，否则光标会
+  /// 落在别的标签上）。
+  void CodeEditorPage::build_problems_view(Composer& c) {
+    build_pane_head(c, "problems-head", [this] {
+      return std::format("问题  错误 {} · 警告 {}", error_count(), warning_count());
+    }, nullptr);
+
+    struct Row {
+      std::string key{};
+      std::string path{};
+      std::size_t line{1};
+      bool warning{true};
+      std::string message{};
+      std::string source{};
+    };
+    std::vector<Row> rows;
+    for (const auto& [path, list] : lsp_.all_diagnostics()) {
+      for (const auto& problem : list) {
+        rows.push_back(Row{.key = std::format("lsp:{}:{}:{}", path, problem.line, rows.size()),
+                           .path = path,
+                           .line = problem.line,
+                           .warning = problem.warning,
+                           .message = problem.message,
+                           .source = problem.source.empty() ? std::string("lsp")
+                                                            : problem.source});
+      }
+    }
+    const std::string current = current_buffer_path();
+    for (const auto& problem : problems_) {
+      rows.push_back(Row{.key = std::format("lint:{}:{}", problem.line, rows.size()),
+                         .path = current,
+                         .line = problem.line,
+                         .warning = problem.warning,
+                         .message = problem.message,
+                         .source = "内置检查"});
+    }
+
+    if (rows.empty()) {
+      (void)text(c, [] { return std::string("当前工作区没有诊断问题。"); },
+                 {.color = Tone::Muted, .id = "problems-empty"});
+      return;
+    }
+
+    // 行**必须带业务 key**（由“来源+路径+行号+序号”拼，不含下标）——面板每帧重算，
+    // 不带 key 时元素 id 随序号漂移，“刷新后点了另一条”这类错很难查。
+    std::vector<ListItemData> items;
+    items.reserve(rows.size());
+    for (const Row& row : rows) {
+      const std::string leaf = st::fs::file_name(row.path);
+      items.push_back(ListItemData{
+          .key = row.key,
+          .label = std::format("{}:{}  {}", leaf, row.line, row.message),
+          .subtitle = std::format("{} · {}", row.path, row.source),
+          .icon = row.warning ? "warning" : "error"});
+    }
+    const auto snapshot = rows;   // 回调按快照取值（重组后 rows 会被重建）
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          (void)list(c, items,
+                     [this, snapshot](std::size_t index) {
+                       if (index >= snapshot.size()) return;
+                       jump_to_diagnostic(snapshot[index].path, snapshot[index].line);
+                     },
+                     // 行高 24：问题面板是“扫一眼”的清单，比常规列表紧凑。
+                     {.gap = 0.0f, .height = 24.0f, .id = "problems-list",
+                      .key = "problems-list"});
+        },
+        [](ScrollView& scroll) { scroll.set_id("problems-scroll"); },
+        {.grow = true, .id = "problems-host"});
+  }
+
+
   auto CodeEditorPage::context_items() -> std::vector<MenuItem> {
+    // 条目 id 与 `run_context_action` 的派发**一一对应**（两边同源，增删同步）。
+    // 顺序按 IDEA / VSCode 归组：撤销重做 → 剪贴板 → 选中 → 注释 → 导航/重构。
     return {{.id = "undo", .label = "撤销"},
             {.id = "redo", .label = "重做"},
             {.separator = true},
@@ -1047,6 +1143,13 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
             {.id = "select_all", .label = "全选"},
             {.separator = true},
             {.id = "comment", .label = "切换行注释"},
+            {.separator = true},
+            // 导航与重构（IDEA 把它们放在右键菜单——“看到这个词就想跳/改”是最高频的组合）。
+            {.id = "goto-definition", .label = "转到定义（F12）"},
+            {.id = "find-references", .label = "查找引用（Shift+F12）"},
+            {.separator = true},
+            {.id = "format", .label = "格式化文档（Shift+Alt+F）"},
+            {.id = "rename", .label = "重命名符号（F2）"},
             {.separator = true},
             {.id = "history", .label = "文件历史…"},
             {.separator = true},

@@ -266,6 +266,17 @@ class ContextMenu : public Element {
   /// 构造公开（`make` 工厂仍提供，两者等价）。
   ContextMenu(math::Point anchor, std::vector<MenuItem> items);
 
+  // —— 条目面（**转发给内部面板**）——
+  //
+  // 为何要转发：菜单条目的正确派发口是 **id**（分隔线占数组下标，按序号派发
+  // 会错位到别的条目——“点重命名却删了文件”就是这么发生的）。不把这条链路
+  // 暴露到控制通道，就无法在**真应用**上验证它到底走对了没。
+  [[nodiscard]] auto get_property(std::string_view name) const
+      -> std::optional<std::string> override;
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+      -> bool override;
+
   math::Point anchor_{};
   MenuPanel* panel_{nullptr};             ///< 非拥有（指向 owned_panel_）
   std::unique_ptr<MenuPanel> owned_panel_{};  ///< 拥有（不走 add_child，免 Flex 挪位）

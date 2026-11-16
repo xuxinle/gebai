@@ -207,19 +207,27 @@ ST_TEST(table_visible_range_accounts_for_vertical_offset) {
 
 /// **行首连线图**：竖线/斜线/圆点都真的画出来，且泳道带真的让出宽度。
 ///
-/// ⚠ 这里**先设图、后建行**（不是先 `make_table(4)`）：
-/// `set_lane_links` 若内含 `resize(rows_.size())`，在“行已有 4 行”时**什么也不会截**
-/// —— 逆向验证会误判成“这条测试钉不住”（实测：回退后仍然绿）。
-/// 必须先有图、再让行数从 0 长上来，那条截断才能真正触发。
-ST_TEST(table_lane_links_draw_lines_and_reserve_inset) {
+/// 数据用节点-边：4 个节点，其中第 0 行在第 0 道、第 1/2 行在第 1 道、
+/// 第 3 行回到第 0 道——一条同道边 + 两条跨道边，等价于旧用例里
+/// `"*  " / "|\ " / "| *" / "|/ "` 那张四行图想表达的形状（合并后再汇合）。
+ST_TEST(table_graph_draws_lines_and_reserves_inset) {
   const Theme theme = Theme::dark();
   auto table = make_table(0);
   st::ui::RenderContext context{theme, nullptr, 0.0};
 
-  // 与 git 同构的四行：合并点 + 分叉斜线。
-  table->set_lane_links({"*  ", "|\\ ", "| *", "|/ "});
+  std::vector<Table::GraphNodeSpec> nodes{
+      {.row = 0, .lane = 0}, {.row = 1, .lane = 1}, {.row = 2, .lane = 1},
+      {.row = 3, .lane = 0}};
+  std::vector<Table::GraphEdgeSpec> edges{
+      // 0 → 1：跨道（同道主干分出侧支）
+      {.from_row = 0, .from_lane = 0, .to_row = 1, .to_lane = 1},
+      // 1 → 2：同道竖线
+      {.from_row = 1, .from_lane = 1, .to_row = 2, .to_lane = 1},
+      // 2 → 3：跨道（侧支汇回主干）
+      {.from_row = 2, .from_lane = 1, .to_row = 3, .to_lane = 0}};
+  table->set_graph(std::move(nodes), std::move(edges));
   ST_CHECK(lane_inset_of(*table) > 0.0f);
-  // 建行在**设图之后**：若实现里 resize 把图截空，inset 会在这里掉回 0。
+  // 建行在**设图之后**：图与行是独立的两个维度，后加行不能影响泳道带宽。
   for (std::size_t index = 0; index < 4U; ++index) {
     table->add_row({std::format("row {}", index), "x"});
   }
@@ -230,7 +238,7 @@ ST_TEST(table_lane_links_draw_lines_and_reserve_inset) {
   table->apply_theme(theme);
   table->arrange(context, Rect{0.0f, 0.0f, 300.0f, 200.0f});
   const Canvas canvas = render(*table, Rect{0.0f, 0.0f, 300.0f, 200.0f}, theme);
-  // 泳道带（最左侧一条）必须有墨——竖线 + 圆点 + 斜线。
+  // 泳道带（最左侧一条）必须有墨——竖线 + 圆点 + 曲线。
   const int lane_ink = ink_count(canvas, Rect{0.0f, Table::kHeaderHeight, 40.0f, 80.0f});
   st::log::out("[table] 泳道带墨量={} inset={}\n", lane_ink,
                static_cast<double>(lane_inset_of(*table)));
@@ -242,25 +250,31 @@ ST_TEST(table_lane_links_draw_lines_and_reserve_inset) {
   ST_CHECK(bare_ink < lane_ink);
 }
 
-/// **先设图、后填行**不能把图截掉（`resize(rows_.size())` 那个坑）。
-ST_TEST(table_lane_links_survive_rows_added_later) {
+/// **先设图、后填行**：行的增删不能改变已经设好的节点与边（两个独立维度）。
+///
+/// 这条盯的是旧实现的一个坑：`set_lane_links` 若内含 `resize(rows_.size())`，
+/// “行已有 N 行”时会把图截成 N 格甚至清空——而**不报错**，只表现为泳道带忽然变窄。
+ST_TEST(table_graph_survives_rows_added_later) {
   auto table = make_table(0);
-  table->set_lane_links({"|* ", "|  "});
+  std::vector<Table::GraphNodeSpec> nodes{{.row = 0, .lane = 0}, {.row = 1, .lane = 1}};
+  std::vector<Table::GraphEdgeSpec> edges{
+      {.from_row = 0, .from_lane = 0, .to_row = 1, .to_lane = 1}};
+  table->set_graph(nodes, edges);
   const float inset_before = lane_inset_of(*table);
   ST_CHECK(inset_before > 0.0f);
-  // 之后补行：图不能被截断/错位（已有的两格必须原样保留）。
+
+  // 之后补行：节点与边必须原样保留。
   table->add_row({"a", "b"});
   table->add_row({"c", "d"});
-  // 长度**跟着行数长**（新行补空串）——这是正确行为，不是“多出来”。
-  ST_CHECK_EQ(table->lane_links().size(), 2U);
-  ST_CHECK_EQ(table->lane_links()[0], std::string("|* "));
-  ST_CHECK_EQ(table->lane_links()[1], std::string("|  "));
+  ST_CHECK_EQ(table->graph_nodes().size(), 2U);
+  ST_CHECK_EQ(table->graph_edges().size(), 1U);
+  ST_CHECK_EQ(table->graph_nodes()[0].lane, 0U);
+  ST_CHECK_EQ(table->graph_nodes()[1].lane, 1U);
   ST_CHECK(std::abs(lane_inset_of(*table) - inset_before) < 0.01f);
-  // 再补一行：新行是空串，且**不能错位**（第 0 格仍是原来的图）。
+
   table->add_row({"e", "f"});
-  ST_CHECK_EQ(table->lane_links().size(), 3U);
-  ST_CHECK_EQ(table->lane_links()[0], std::string("|* "));
-  ST_CHECK_EQ(table->lane_links()[2], std::string(""));
+  ST_CHECK_EQ(table->graph_nodes().size(), 2U);
+  ST_CHECK(std::abs(lane_inset_of(*table) - inset_before) < 0.01f);
 }
 
 /// **逐行高度**：连线行压扁后，行矩形与内容高都跟着变（斜线端点靠它算）。

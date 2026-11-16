@@ -784,7 +784,18 @@ void register_element_type_by_token(const void* token, std::string name);
 template <class T>
 [[nodiscard]] auto custom(Composer& c, std::function<void(T&)> configure = {},
                           const BoxProps& props = {}, std::string_view key = {}) -> T& {
-  Element* element = c.create_element(element_type_name<T>(), st::empty_json_object(), key);
+  // ⚠ **身份必须在这里交给对齐器**，不能用 `props.key` 事后补。
+  //
+  // `create_element` 的第三个参数就是“对齐依据”，而 `apply_box` 里的 `set_key`
+  // 只是写属性（对齐已经做完了）。旧实现只传第 4 个参数，于是只写 `BoxProps.key`
+  // 的调用全部退化成**纯位置对齐**：兄弟数量一变（条件声明的那段文字从无到有），
+  // 整行元素右移一格，每个按钮按位置抓到“上一个角色的实例”。
+  //
+  // 实测（gbcode 日志表头）：写 `set_label("仅当前分支")` 的按钮拿到了刷新按钮的实例，
+  // 于是保留着 `icon=refresh` / `hint=重新读取日志`，画面上是**两个刷新图标**。
+  // 这类属性泄漏单看任一帧的代码都正确，错的是**跨帧的元素身份**。
+  const std::string_view identity = !key.empty() ? key : std::string_view(props.key);
+  Element* element = c.create_element(element_type_name<T>(), st::empty_json_object(), identity);
   // 未知类型：**必须是显式错误**——静默返回假元素会让界面缺块而不报，最难查。
   // 这里不做异常（禁令 L5：业务错误走 Result/致命断言）：编译期类型 + 注册表
   // 应当一致，不一致就是程序缺陷——直接终止并打印出缺的类型名。

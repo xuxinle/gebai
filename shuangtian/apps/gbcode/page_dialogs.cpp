@@ -549,7 +549,67 @@ namespace gbcode_ui {
   }
 
 
-  // —— 编辑器右键菜单（`ContextMenu` overlay；锚点 = 最后一次鼠标位置）——
+  /// 标签右键菜单（关闭其他 / 右侧 / 全部 / 复制路径）。
+  ///
+  /// 条目序号与 `tab_context_items()` 一一对应（单源：菜单文本与动作分支同序）。
+  void CodeEditorPage::build_tab_context(Composer& c) {
+    if (!tab_menu_open_.value()) return;
+    (void)overlay(c, "tab-context", {}, [&] {
+      (void)custom<ContextMenu>(c, [this](ContextMenu& menu) {
+        menu.anchor_ = tab_menu_anchor_;
+        if (menu.panel() != nullptr) {
+          menu.panel()->set_items(tab_context_items());
+          menu.panel()->on_activate = [this](std::size_t index) {
+            tab_menu_open_.set(false);
+            run_tab_context_action(index);
+          };
+          menu.panel()->on_close = [this] { tab_menu_open_.set(false); };
+        }
+        menu.on_close = [this] { tab_menu_open_.set(false); };
+      }, {.id = "tab-context-menu"});
+    });
+  }
+
+  auto CodeEditorPage::tab_context_items() -> std::vector<MenuItem> {
+    return {{.id = "close", .label = "关闭"},
+            {.id = "close-others", .label = "关闭其他"},
+            {.id = "close-right", .label = "关闭右侧的"},
+            {.id = "close-all", .label = "关闭全部"},
+            {.separator = true},
+            {.id = "copy-path", .label = "复制文件路径"},
+            {.id = "reveal", .label = "在资源管理器中定位"}};
+  }
+
+  void CodeEditorPage::run_tab_context_action(std::size_t index) {
+    // 先把“右键的那个标签”切为活动项：用户点的就是它，后续批量操作也应以它为准。
+    // （与资源管理器右键一致：右键不改选中，但**动作入口**必须把目标当上下文。）
+    if (tab_menu_index_ < buffers_.value().size() && tab_menu_index_ != active_.value()) {
+      switch_tab(tab_menu_index_);
+    }
+    const std::string path = current_buffer_path();
+    switch (index) {
+      case 0: close_active(); break;
+      case 1: close_others(); break;
+      case 2: close_to_right(); break;
+      case 3: close_all(); break;
+      case 5: {
+        // 真写剪贴板（与资源管理器“复制路径”同一出口）。
+        const bool copied = clipboard_writer && !path.empty() && clipboard_writer(path);
+        status_.set(copied ? ("已复制路径：" + path) : ("复制失败（当前后端无剪贴板）：" + path));
+        break;
+      }
+      case 6:
+        activity_.set(view_index(SidebarView::Explorer));
+        sidebar_visible_.set(true);
+        mark_sidebar_visited(view_index(SidebarView::Explorer));
+        status_.set("已在资源管理器中定位：" + path);
+        break;
+      default: break;
+    }
+  }
+
+
+  /// 编辑器右键菜单（`ContextMenu` overlay；锚点 = 最后一次鼠标位置）——
   void CodeEditorPage::build_editor_context(Composer& c) {
     if (!context_open_.value()) return;
     (void)overlay(c, "editor-context", {}, [&] {
@@ -559,9 +619,18 @@ namespace gbcode_ui {
         menu.anchor_ = context_anchor_;
         if (menu.panel() != nullptr) {
           menu.panel()->set_items(context_items());
-          menu.panel()->on_activate = [this](std::size_t index) {
+          menu.panel()->on_activate = [this, panel = menu.panel()](std::size_t index) {
             context_open_.set(false);
-            run_context_action(index);
+            // ⚠ **派发必须用条目 id，不能用下标**。
+            //
+            // `context_items()` 里有分隔线，而分隔线**占数组下标**（菜单不渲染它，
+            // 但 `on_activate` 给的仍是完整数组里的序号）——按下标写 `switch`
+            // 就会整体错位。实测后果：点“剪切”实际执行了“复制”，
+            // 而点“重命名”——由于条数不够——直接走到 `default` 或错误分支上。
+            // 同类缺陷在资源管理器菜单里更危险（那条菜单的末项是“删除”）。
+            //
+            // 派发到 id 后，插/删条目不会再静默改变语义。
+            run_context_action(std::string(panel != nullptr ? panel->item_id(index) : ""));
           };
           menu.panel()->on_close = [this] { context_open_.set(false); };
         }
@@ -572,25 +641,53 @@ namespace gbcode_ui {
 
 
   /// 右键菜单条目（序号 = `kContextItems` 的下标）。
-  void CodeEditorPage::run_context_action(std::size_t index) {
+  void CodeEditorPage::run_context_action(const std::string& id) {
     const auto click = [this](const char* action) {
       if (editor != nullptr) (void)editor->invoke_action(action, {});
     };
-    switch (index) {
-      case 0: click("undo"); status_.set("已撤销"); break;
-      case 1: click("redo"); status_.set("已重做"); break;
-      case 2: click("cut"); status_.set("已剪切"); break;
-      case 3: click("copy"); status_.set("已复制"); break;
-      case 4: click("paste"); status_.set("已粘贴"); break;
-      case 5: click("select_all"); status_.set("已全选"); break;
-      case 6:
-        if (editor != nullptr) status_.set(editor->toggle_comment() ? "已切换行注释"
-                                                                   : "本语言无行注释标记");
-        break;
-      case 7: open_find(); break;
-      case 8: open_file_history(); break;
-      case 9: open_palette(false); break;
-      default: break;
+    // 按**条目 id** 派发（与 `context_items()` 的 `.id` 同源），不看数组下标：
+    // 分隔线占下标，按下标写 `switch` 会整体错位（“剪切”变成“复制”、
+    // “重命名”落到“删除”——资源管理器菜单里就是真删文件）。
+    if (id == "undo") {
+      click("undo");
+      status_.set("已撤销");
+    } else if (id == "redo") {
+      click("redo");
+      status_.set("已重做");
+    } else if (id == "cut") {
+      click("cut");
+      status_.set("已剪切");
+    } else if (id == "copy") {
+      click("copy");
+      status_.set("已复制");
+    } else if (id == "paste") {
+      click("paste");
+      status_.set("已粘贴");
+    } else if (id == "select_all") {
+      click("select_all");
+      status_.set("已全选");
+    } else if (id == "comment") {
+      if (editor != nullptr) {
+        status_.set(editor->toggle_comment() ? "已切换行注释" : "本语言无行注释标记");
+      }
+    } else if (id == "find") {
+      open_find();
+    } else if (id == "history") {
+      open_file_history();
+    } else if (id == "palette") {
+      open_palette(false);
+    } else if (id == "goto-definition") {
+      goto_definition();
+    } else if (id == "find-references") {
+      find_references();
+    } else if (id == "format") {
+      format_selection();
+    } else if (id == "rename") {
+      rename_symbol();
+    } else if (!id.empty()) {
+      // 未知 id **如实上报**（不静默）：菜单里多一条却没接动作时，
+      // 用户能看到“未识别的菜单项”，而不是“点了没反应”。
+      status_.set("未识别的菜单项：" + id);
     }
   }
 
@@ -909,17 +1006,37 @@ namespace gbcode_ui {
                                    {.id = "delete", .label = "删除"},
                                    {.separator = true},
                                    {.id = "reveal", .label = "复制路径"}});
-          menu.panel()->on_activate = [this](std::size_t index) {
+          menu.panel()->on_activate = [this, panel = menu.panel()](std::size_t index) {
             explorer_menu_open_.set(false);
-            switch (index) {
-              case 0: explorer_create(false); break;
-              case 1: explorer_create(true); break;
-              case 2: explorer_rename(); break;
-              case 3: explorer_delete(); break;
-              case 4:
-                status_.set(std::format("路径：{}", tree_key_to_path(context_key_.value())));
-                break;
-              default: break;
+            // ⚠ **按条目 id 派发，不看下标**。
+            //
+            // 这张菜单里 `separator` 占数组下标（菜单不渲染它，但 `on_activate`
+            // 给的仍是完整数组的序号）——旧代码 `switch(index)` 于是整体错位：
+            // 点“新建文件夹”实际执行了“重命名”，点“重命名”实际执行了——
+            // **删除文件**。这是本轮拓真的最危险的一个缺陷：用户指着“重命名”点下去，
+            // 文件没了（虽然 `explorer_delete` 内部有确认，但菜单语义已经错了）。
+            const std::string id(panel != nullptr ? panel->item_id(index) : "");
+            if (id == "new-file") {
+              explorer_create(false);
+            } else if (id == "new-folder") {
+              explorer_create(true);
+            } else if (id == "rename") {
+              explorer_rename();
+            } else if (id == "delete") {
+              explorer_delete();
+            } else if (id == "reveal") {
+              // **真写剪贴板**，而不是只把路径写进状态栏。
+              //
+              // 旧实现只 `status_.set("路径：…")`——用户点「复制路径」后到终端粘不出
+              // 东西，而状态栏那个“路径：…”看起来像成功了（假成功比失败更贵）。
+              // 剪贴板是**平台**能力，经注入的窄接口下发（无头后端用进程内模拟，
+              // 与有窗口行为一致）；写失败**如实上报**。
+              const std::string path = tree_key_to_path(context_key_.value());
+              const bool copied = clipboard_writer && clipboard_writer(path);
+              status_.set(copied ? std::format("已复制路径：{}", path)
+                                 : std::format("复制失败（当前后端无剪贴板）：{}", path));
+            } else if (!id.empty()) {
+              status_.set("未识别的菜单项：" + id);
             }
           };
           menu.panel()->on_close = [this] { explorer_menu_open_.set(false); };

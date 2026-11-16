@@ -357,6 +357,15 @@ auto run_app(int argc, char** argv) -> int {
   // 改成把路径记下来、**第一帧之后**再打开（那时宿主已就绪，时序干净）。
   if (!options.open_path.empty()) page->set_pending_open_path(options.open_path);
   page->theme_mode = [&app] { return app.root().theme().mode(); };
+  // 主题**写**出口（与上面成对）：命令面板/菜单切换主题走这里，
+  // 不写页面自己的影子状态——`Application::set_theme_mode` 会连带刷字号缩放与
+  // 文本 gamma，并沿全树传播。
+  page->theme_setter = [&app](st::ui::ThemeMode mode) { app.set_theme_mode(mode); };
+  // 剪贴板写出口（资源管理器「复制路径」等）：走宿主的窄接口，
+  // 它下面就是后端（win32 真剪贴板 / headless 进程内模拟）。
+  page->clipboard_writer = [&app](std::string_view text) {
+    return app.root().host_set_clipboard_text(text);
+  };
   // 慢内容异步排版的调度器（Markdown 预览大文档不冻结主窗）。
   page->layout_tasks_ = &app.tasks();
   // 页面缩放 = DPI 缩放（见 `CodeEditorPage::device_scale_setter` 的说明）：

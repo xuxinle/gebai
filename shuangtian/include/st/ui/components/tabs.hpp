@@ -200,6 +200,12 @@ class Tabs : public Element {
   std::function<void(std::size_t)> on_close{};
   /// 新建请求回调（点击「+」；`show_add_` 只在装了它时才显示按钮）。
   std::function<void()> on_add{};
+  /// **右键标签**回调（参数 = 标签下标；与 `Tree::on_context_menu` 同一形态）。
+  ///
+  /// 从 `MouseDown`(button==2) 上报而不等 `Click`：右键是否产生 `Click` 取决于
+  /// 后端，而“按下”在所有后端上都是确定的（`Tree` 已因同一个原因这样做）。
+  /// 组件只报“右键了第几个”，菜单内容与行为全归调用方。
+  std::function<void(std::size_t)> on_context_menu{};
 
  private:
   /// 重算标签项宽度缓存（布局期调用；文本度量依赖 `context.text`）。

@@ -195,8 +195,16 @@ auto ScrollView::reserved_width() const noexcept -> float {
 }
 
 auto ScrollView::content_extent(const Element& child) const noexcept -> float {
-  const float explicit_height = child.style().height;
-  return explicit_height != kAuto ? explicit_height : child.measured_size().height;
+  // ⚠ **不能用 `child.style().height`**（2026-11-16 实测）：有些组件的显式 `height`
+  // 语义**不是自己的总高**——`List` 的 `height` 是**单行高**（见
+  // `List::apply_row_height_override`），它的容器高由 `measure()` 按行数累加得出。
+  // 拿样式里的 22 当内容高，滚动宿主就以为“内容只有 22px”：164 行的列表
+  // `max_scroll = 0`、滚动条不出现、后面 163 行被当成溢出丢弃（实测 gbcode 大纲）。
+  //
+  // 去重后的尺寸就是**该元素要的高度**（flex 主轴尺寸），这是唯一对所有组件
+  // 都成立的取法；显式 `height` 已经在 `measure()` 里被兑现了。
+  (void)child;
+  return child.measured_size().height;
 }
 
 void ScrollView::recompute_content_height() noexcept {

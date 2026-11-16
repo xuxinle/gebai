@@ -8,8 +8,6 @@
 | 2 | `row_rect` 不减纵向偏移（滚了但画面不动） | `table_vertical_scroll_moves_rows_and_clamps` |
 | 3 | 滚轮只认 Shift（纵向恒不可滚） | `table_wheel_scrolls_vertically_without_shift` |
 | 4 | 可见区间不扣纵向偏移（滚一格漏一行） | `table_visible_range_accounts_for_vertical_offset` |
-| 5 | `set_lane_links` 里 `resize(rows_.size())`（图被截空） | `table_lane_links_draw_lines_and_reserve_inset` |
-| 6 | `add_row` 无条件给图补格子（图与行错位） | `table_lane_links_survive_rows_added_later` |
 
 ## 两个已知的判定链路坑（本脚本踩过）
 
@@ -67,22 +65,6 @@ CASES: list[tuple[str, list[tuple[str, str]], str]] = [
             "  const float rows_top = bounds.y + header_height;",
         )],
         "table_visible_range_accounts_for_vertical_offset",
-    ),
-    (
-        "set-lane-links-truncates",
-        [(
-            "  row_links_ = std::move(rows);\n  lane_columns_ = 0;",
-            "  row_links_ = std::move(rows);\n  row_links_.resize(rows_.size());\n  lane_columns_ = 0;",
-        )],
-        "table_lane_links_draw_lines_and_reserve_inset",
-    ),
-    (
-        "add-row-always-pads-links",
-        [(
-            "  if (!row_links_.empty() && row_links_.size() < rows_.size()) row_links_.emplace_back();",
-            "  if (!row_links_.empty()) row_links_.emplace_back();",
-        )],
-        "table_lane_links_survive_rows_added_later",
     ),
 ]
 

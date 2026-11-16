@@ -260,7 +260,8 @@ namespace gbcode_ui {
     // 命令面板：**条件声明**（关掉 = 本帧不声明 → 框架 sweep 摘除）
     if (palette_open_.value()) build_palette(c);
     // 编辑器右键菜单 / 关闭确认对话框 / 快捷键一览：同一套条件声明。
-    build_editor_context(c);
+    build_tab_context(c);   // 标签栏右键菜单（关闭其他/右侧/全部、复制路径）
+  build_editor_context(c);
     build_explorer_context(c);
     build_close_confirm(c);
     build_shortcuts_card(c);
@@ -579,6 +580,19 @@ namespace gbcode_ui {
       // 激活态与终端**同一推法**：面板开着 && 停在这个标签。点击三态：
       // 隐藏中 → 打开并切到 Git；停在别的标签 → 切过来；已激活 → 收起面板
       //（与上组“点当前视图 = 收起”同一交互词形）。
+      // —— 下组：问题 / Git / 终端 ——
+      //
+      // 三者都是“工具面板”（底部停靠槽的开关），与上组“导航视图”分开：
+      // 上组互斥地切侧栏，下组开关底部面板（VSCode / IDEA 同分法）。
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("activity-problems");
+        b.set_icon("error");
+        b.set_hint("问题（错误 / 警告清单）");
+        const bool on = bottom_visible_.value() && bottom_tab_.value() == slot(BottomSlot::Problems);
+        b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { toggle_problems_panel(); };
+      }, {.width = 32.0f, .height = 32.0f, .key = "activity-problems"});
       (void)custom<Button>(c, [this](Button& b) {
         b.set_id("activity-git");
         b.set_icon("git-branch");
@@ -620,9 +634,21 @@ namespace gbcode_ui {
 
   /// Git 按钮：切到 Git 工具窗（打开顺带要日志）。
   void CodeEditorPage::toggle_git_panel() {
-    const bool opening = !bottom_visible_.value() || bottom_tab_.value() != 1;
-    toggle_bottom_panel(1);
+    const bool opening = !bottom_visible_.value() || bottom_tab_.value() != slot(BottomSlot::Git);
+    toggle_bottom_panel(slot(BottomSlot::Git));
     if (opening) git_log_wanted_ = true;
+  }
+
+
+  /// 问题按钮：切到问题面板（内容每帧重算，打开即最新）。
+  void CodeEditorPage::toggle_problems_panel() {
+    const bool opening =
+        !bottom_visible_.value() || bottom_tab_.value() != slot(BottomSlot::Problems);
+    toggle_bottom_panel(slot(BottomSlot::Problems));
+    if (opening) {
+      refresh_problems();
+      status_.set(std::format("问题：错误 {} · 警告 {}", error_count(), warning_count()));
+    }
   }
 
 
@@ -631,8 +657,9 @@ namespace gbcode_ui {
   /// 打开时把键盘焦点交给终端输入行（`Terminal` 自己会在下一次事件里接住），
   /// 这是“点了终端按钮就能直接敲命令”的那一步。
   void CodeEditorPage::toggle_terminal_panel() {
-    const bool opening = !bottom_visible_.value() || bottom_tab_.value() != 0;
-    toggle_bottom_panel(0);
+    const bool opening =
+        !bottom_visible_.value() || bottom_tab_.value() != slot(BottomSlot::Terminal);
+    toggle_bottom_panel(slot(BottomSlot::Terminal));
     if (opening) status_.set("终端：已展开");
   }
 
@@ -640,8 +667,8 @@ namespace gbcode_ui {
   /// “命令要在终端里跑给用户看”的统一入口：确保下半开着且停在终端
   ///（Git 操作、运行任务、diff 进终端等都走这里）。
   void CodeEditorPage::ensure_terminal_visible() {
-    if (!bottom_visible_.value() || bottom_tab_.value() != 0) {
-      bottom_tab_.set(0);
+    if (!bottom_visible_.value() || bottom_tab_.value() != slot(BottomSlot::Terminal)) {
+      bottom_tab_.set(slot(BottomSlot::Terminal));
       bottom_visible_.set(true);
     }
   }
@@ -848,6 +875,15 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         // **单一预览按钮**：图标恒为 eye，激活态（预览中）用 tooltip 区分语义；
         // 点击 = 开/关预览（同一个按钮，不按状态换图标——用户要求只有一个预览钮）。
         if (auto* widget = dynamic_cast<Tabs*>(&tabs_element); widget != nullptr) {
+          // **右键标签 → 关闭其他/右侧/全部、复制路径**（VSCode / IDEA 同功能）。
+          // 锚点取标签条左上角向右下偏移：`Tabs` 不对外暴露行矩形，
+          // 而回调不带坐标（与资源管理器右键同一权宜，菜单稳定出现在标签条旁）。
+          widget->on_context_menu = [this, &tabs_element](std::size_t index) {
+            tab_menu_index_ = index;
+            tab_menu_anchor_ = st::math::Point{tabs_element.bounds().x + 24.0f,
+                                               tabs_element.bounds().bottom() + 4.0f};
+            tab_menu_open_.set(true);
+          };
           widget->begin_trailing_sync();
           // **按文档类型放按钮**：不适用的类型什么都不放（尾部槽按目标态清空）。
           // 每个按钮都走 `sync_trailing_button`（同一个 key 复用同一个槽位），
@@ -875,6 +911,14 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
       // 标签条与编辑内容之间的 **1px 分割线**（标签条已与编辑器同色，靠这条线分隔）。
       // 放这里而不是画在 `Tabs` 内部：`Tabs` 同时服务终端标签，那里不需要外框线。
       (void)divider(c);
+      // —— 面包屑（VSCode / IDEA 同位置：标签条下方、正文上方）——
+      //
+      // 只在**普通文件编辑器**下出现：差异/合并/预览/空状态各有自己的头部，
+      // 给它加一条路径带会变成“这一页是哪份文件的”这种不成立的陈述。
+      // 高度 26、不抢焦点、不参与编辑器滚动——它是导航，不是内容。
+      if (has_editor && !md_preview_active() && !compare_open && !merge_open && !diff_open) {
+        build_breadcrumb(c, buffers, active);
+      }
       if (!has_editor && tabs.empty()) {
         // 空状态：**居中三段式**（大图标 + 主文案 + 次级快捷键提示）。
         //
@@ -1436,7 +1480,17 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
                             : (workspace_.empty() ? buffer.path
                                                   : st::fs::relative_to(buffer.path, workspace_));
     const auto segments = st::split(shown, '/');
-    (void)row(c, {.gap = 2.0f, .padding_x = 10.0f, .height = 26.0f, .id = "breadcrumb"}, [&] {
+    // ⚠ 两个必须显式声明：
+    //
+    // ① `justify = Start`（**每帧写**）：本行与“空编辑器的居中提示行”位于同一个
+    //    声明位置，而声明式对**无 key 的同位元素按位置回收**——先把 `empty-hint`
+    //    （`justify = Center`）回收成了本行，继承来的“居中”于是把唯一的段推到
+    //    编辑区正中（实测：`crumb-page_actions.cpp` 的 x = 829.6，应为 340.8）。
+    //    显式写 `justify` 让 `apply_box` 每帧覆写，不依赖“上一个是干净的”。
+    // ② `key`：给它一个稳定业务身份，不再按位置与别的兄弟互换样式。
+    (void)row(c, {.gap = 2.0f, .padding_x = 10.0f, .height = 26.0f,
+                  .justify = Justify::Start, .align_items = Align::Center,
+                  .id = "breadcrumb", .key = "breadcrumb"}, [&] {
       for (std::size_t index = 0; index < segments.size(); ++index) {
         if (index > 0) {
           (void)icon(c, "chevron-right", 11.0f, {.id = std::format("crumb-sep-{}", index)});
@@ -1455,7 +1509,7 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
             mark_sidebar_visited(view_index(SidebarView::Explorer));
             status_.set(last ? "当前文件：" + segment : "已切到资源管理器：" + segment);
           };
-        }, {.height = 22.0f, .key = "crumb:" + segment});
+        }, {.height = 22.0f, .align_self = Align::Center, .key = "crumb:" + segment});
       }
     });
   }
@@ -1544,8 +1598,16 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
   // 每一项尽量做成**可点**的：状态栏是 IDE 里“看一眼”的地方，而看一眼之后往往
   // 想知道更多（分支 → 变更面板、问题数 → 问题面板、语言 → 语言列表……）。
   void CodeEditorPage::build_status_bar(Composer& c) {
-          row(c, {.gap = 10.0f, .padding_x = 12.0f, .height = 28.0f,
-              .surface = Element::Surface::Alt, .id = "statusbar"}, [&] {
+    // 状态栏拆**两组**（VSCode / IDEA 同构）：
+    //
+    //   · 左组：仓库/变更类——“我在哪个代码区”
+    //   · 右组：文件/视图类——“当前这页是什么状态”
+    //
+    // 两组之间用 `spacer` 顶开，中间是**空白**（不是分隔符）——那本身已经是
+    // 最强的分组信号；再加一根线只会让本来就 28px 高的条看起来碎。
+    row(c, {.gap = 10.0f, .padding_x = 12.0f, .height = 28.0f,
+            .surface = Element::Surface::Alt, .align_items = Align::Center,
+            .id = "statusbar"}, [&] {
       status_item(c, "status-branch", "git-branch", [this] {
         // 不在 Git 仓库里就**如实说**，不要回退成 "main"——那是“看着像已探测”的假事实：
         // 切到非仓库工作区后状态栏仍写 main，用户会以为 git 没跟着切换（实测）。
@@ -1570,6 +1632,16 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
       status_item(c, "status-warnings", "warning",
                   [this] { return std::to_string(warning_count()); },
                   [this] { show_problems(true); }, "警告数 — 点一下跳到第一处");
+      // 状态回显放在**左组末尾**（VSCode 同位置：它回答“刚刚发生了什么”，
+      // 与“我在哪个仓库”同属上下文类信息；右组是“这页是什么状态”的文件属性）。
+      //
+      // **限宽 + 尾部省略**：旧形态是裸 `text(c, lambda)`，它按内容自然宽
+      // 参与 flex 主轴计算——“已打开 D:\code\…\page_actions.cpp”这种长文案
+      // 会把右组全部往左挤、自己顶到窗口右缘（截图实测）。给个固定宽度，
+      // `paint_text` 会按 `bounds_.width` 做 `ellipsize`，长路径自动收尾。
+      (void)text(c, [this] { return status_.value(); },
+                 {.width = 320.0f, .color = Tone::Muted, .size = 12.0f,
+                  .align_self = Align::Center, .id = "status", .key = "status"});
       (void)spacer(c);   // 弹性空隙：右侧信息组贴右缘（同标题栏）
       (void)text(c, [this] { return cursor_text_.value(); }, {.id = "cursor-label"});
       (void)text(c, [this] { return selection_text_.value(); }, {.id = "selection-label"});
@@ -1613,8 +1685,7 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         b.set_hint(blame_on_.value() ? "行尾 blame 注解：已开启（点一下关闭）"
                              : "行尾 blame 注解：已关闭（点一下开启，显示当前视口行的作者与日期）");
         b.on_click = [this] { toggle_blame(); };
-      }, {.width = 28.0f, .height = 22.0f, .key = "status-blame"});
-      (void)text(c, [this] { return status_.value(); }, {.id = "status"});
+            }, {.width = 28.0f, .height = 22.0f, .key = "status-blame"});
       // 末尾**不再有**「亮色/暗色」切换按钮：主题入口统一在标题栏的
       // `ThemePicker`（画笔图标 → 内置主题色卡墙）。状态栏是“看一眼”的地方，
       // 不宜再放一个只能在两档间来回的重复入口。

@@ -150,6 +150,19 @@ void CommandPalette::rebuild() {
       matched_.push_back(i);
     }
   }
+  // **命中数封顶**：超出的只计数、不进造型。
+  //
+  // 为何必须有（实测）：文件表在 2350 个文件的工作区里，空查询下 2350 条全部
+  // 过 `sync_items` —— 每一条都是一个 `ListItem` 元素，一次按键过滤 220~490ms。
+  // 用户侧的描述是“用一段时间后 Ctrl+P 卡到用不了”（文件夹越多越慢）。
+  //
+  // 上限 300 的依据：面板可视区一次只看得见十几条，而“再用键盘上下选”最多也就
+  // 走几百条；再多的行对用户不可达，却要逐帧参与造型。
+  // 注意：**过滤是在全量上做的**，所以“名字能搜到”不受影响——它只是不会把
+  // 几千条命中全部建出来。`total_match_count()` 仍如实报告全量命中数。
+  constexpr std::size_t kMaxRenderedMatches = 300;
+  total_matches_ = matched_.size();
+  if (matched_.size() > kMaxRenderedMatches) matched_.resize(kMaxRenderedMatches);
   std::vector<List::Entry> entries;
   entries.reserve(matched_.size());
   for (const std::size_t index : matched_) {
@@ -285,7 +298,10 @@ auto CommandPalette::semantics_value() const -> std::string {
 auto CommandPalette::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "query") return query_;
   if (name == "command_count") return std::to_string(commands_.size());
-  if (name == "match_count") return std::to_string(matched_.size());
+  // ⚠ 报**全量**命中数（不是 `matched_.size()`）。`matched_` 已被封顶到
+  // 造型上限 300，直接读它会让属性面把“只造了 300 条”说成“只搜到 300 项”
+  // ——而自动化与状态条都在读它，必须说真话。
+  if (name == "match_count") return std::to_string(total_matches_);
   if (name == "active") {
     return highlight_ == kNoSelection ? std::string("-1") : std::to_string(highlight_);
   }

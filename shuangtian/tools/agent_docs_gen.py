@@ -170,10 +170,21 @@ def ctor_of(text: str, cls: str) -> str:
 
 
 def brace_block(text: str, needle: str, limit: int = 4000) -> str:
-    """取 `needle` 之后第一个 `{...}`（含花括号）——用于读 `with_universal({...})` 之类。"""
-    i = text.find(needle)
-    if i < 0:
-        return ""
+    """取 `needle` 之后第一个 `{...}`（含花括号）——用于读 `with_universal({...})` 之类。
+
+    ⚠ **必须是“定义”而不是子串命中**：`find(needle)` 会把 `MenuPanel::property_names()`
+    也当成 `Panel::property_names()`（前者的结尾就是后者）——于是 MenuPanel 的属性
+    被算到了 Panel 头上，生成出一页错的 `Panel.md`（2026-11-16 实测）。
+    判据：命中处**左边不能是标识符字符**（字母/数字/下划线/冒号）。
+    """
+    start = 0
+    while True:
+        i = text.find(needle, start)
+        if i < 0:
+            return ""
+        if i == 0 or not (text[i - 1].isalnum() or text[i - 1] in "_:"):
+            break
+        start = i + 1
     j = text.find("{", i)
     if j < 0 or j - i > limit:
         return ""

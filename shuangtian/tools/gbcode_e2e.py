@@ -282,9 +282,18 @@ def main():
               f"切换标签未编辑就被标脏: {client.title('titlebar')!r}")
         print("[3] 点资源管理器树行 → 标签 + 语言 + 编辑器内容联动（未标脏）")
 
-        # —— 4. 终端面板（问题/输出面板已删；2026-10-09 起新增「终端 | Git」双标签）——
-        check(client.count("#problems-list") == 0, "问题面板应已删除")
-        check(client.count("#output-text") == 0, "输出面板应已删除")
+        # —— 4. 终端面板（2026-11-16 起：终端 | Git | 问题 三槽；输出面板仍未做）——
+        #
+        # `#problems-list` 从“已删”改为“**停靠槽的第三页**”（LSP 诊断 + 内置检查汇总，可点跳行）。
+        # 底部面板是“隐藏不拆”的，所以元素**恒在树上**、只是不在当前槽时 `effective_visible=false`。
+        # 断言口径要跟着变：判“可不可见”，不判“存不存在”（后者永远为真，等于没断言）。
+        def visible_count(selector):
+            matches = client.ok("find", {"selector": selector})["matches"]
+            return sum(1 for item in matches if item.get("effective_visible"))
+
+        check(visible_count("#problems-list") == 0, "未切到问题槽时列表不该可见")
+        check(client.count("#problems-panel") >= 1, "问题槽容器应常驻声明")
+        check(client.count("#output-text") == 0, "输出面板仍未实现")
         # **启动默认不开终端**（用户 2026-11-05 要求）：面板收起时是“隐藏但不拆”，
         # 而且**不起 shell**（不白占一个 PTY）。先显式展开，再断言它是真终端。
         check(client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "true",
@@ -428,15 +437,25 @@ def main():
               f"主题切不回原档: 期望 {mode_before}，实际 {client.ok('theme', {})['mode']}")
         print(f"[8] 分栏可拖（{ratio0:.2f} → {ratio1:.2f}）+ 标题栏主题库切换（{current_theme} → {target_theme}，已复原 {mode_before}）")
 
-        # —— 8b. 状态栏子元素占满行高 ——
+        # —— 8b. 状态栏子元素不被内边距压扁 ——
         #
         # 回归：状态栏 `height=26` 但用了四边 `padding=10` → 子元素只剩 **6px** 高，
         # 图标与文字全被压扁，而容器自身尺寸「正确」（单看容器 bounds 看不出问题）。
-        # 判据：固定高度的行里，子元素必须拿到几乎全部可用高度。
+        #
+        # 2026-11-16 口径更新：状态栏改成 `align_items = Center`（条内元素垂直居中，
+        # 与 VSCode / IDEA 同观感），子元素不再被拉伸到满高——所以不能用
+        # “子高 ≈ 容器高”当判据了（那会把“居中”误报成“被压扁”）。
+        # 真正的不变式有两条：
+        #   ① 子元素拿到自己的**控件高**（不被 padding 吃成几像素）；
+        #   ② 在条内**垂直居中**（上下留白相等，误差 ≤ 1px）。
         bar = client.ok("find", {"selector": "#statusbar"})["matches"][0]["bounds"]
         button = client.ok("find", {"selector": "#status-encoding"})["matches"][0]["bounds"]
-        check(button["height"] >= bar["height"] - 2,
-              f"状态栏子元素被内边距压扁: 容器 {bar['height']:.0f}px，按钮 {button['height']:.0f}px")
+        check(button["height"] >= 18.0,
+              f"状态栏子元素被压扁: 容器 {bar['height']:.0f}px，子元素只有 {button['height']:.0f}px")
+        top_gap = button["y"] - bar["y"]
+        bottom_gap = (bar["y"] + bar["height"]) - (button["y"] + button["height"])
+        check(abs(top_gap - bottom_gap) <= 1.0,
+              f"状态栏子元素未垂直居中: 上留白 {top_gap:.1f}px，下留白 {bottom_gap:.1f}px")
         # 且按钮真的能被点到（压扁时 y 中心偏出自身范围）
         hit = client.ok("input.mouse", {"kind": "click",
                                         "x": button["x"] + button["width"] / 2,

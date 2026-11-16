@@ -341,15 +341,32 @@ ST_TEST(table_lane_band_reserves_width_for_the_first_column) {
   const st::math::Rect no_lane = table.cell_rect(0U, 0U);
   ST_CHECK_NEAR(no_lane.x, 0.0f, 0.01f);   // 没开泳道：零影响（旧行为不变）
 
-  table.set_row_lanes(std::vector<int>{0, 0});
+  // 开泳道：两个节点同道、一条同道边（等价于旧 `set_row_lanes({0,0})` 的几何）。
+  table.set_graph(std::vector<st::ui::Table::GraphNodeSpec>{{.row = 0, .lane = 0},
+                                                           {.row = 1, .lane = 0}},
+                  std::vector<st::ui::Table::GraphEdgeSpec>{
+                      {.from_row = 0, .from_lane = 0, .to_row = 1, .to_lane = 0}});
   table.set_lane_column_width(34.0f);
   table.arrange(context, st::math::Rect{0.0f, 0.0f, 400.0f, 200.0f});
   const st::math::Rect with_lane = table.cell_rect(0U, 0U);
-  // 首列从泳道带**之后**开始（而不是与圆点重叠）
-  ST_CHECK_NEAR(with_lane.x, 34.0f, 0.01f);
-  ST_CHECK_NEAR(with_lane.width, 400.0f - 34.0f - 120.0f, 0.5f);
+  // 首列从泳道带**之后**开始（而不是与圆点重叠）。
+  //
+  // 预期值不写死 34：`set_lane_column_width` 是**带宽上限**，而 `lane_inset()`
+  // 返回“按道数分格后的总宽 + 8px 右撇边”（见 `Table::lane_inset`）。
+  // 两道的表：cell = min(14, 34/2) = 14，故 inset = 14×2 + 8 = 36。
+  // 断言用inset 本身作参照：要钉的是“列真的让了位、且表头与列对齐”，
+  // 而那个公式已经有自己的用例（
+  // `table_graph_draws_lines_and_reserves_inset`）。写死数字反而会把
+  // “公式改了”误报成“泳道没让位”。
+  // 经属性面读（`lane_inset` 是私有成员，测试不从外部拆）。
+  const auto inset_property = table.get_property("lane_inset");
+  ST_REQUIRE(inset_property.has_value());
+  const float inset = std::stof(*inset_property);
+  ST_CHECK(inset > 0.0f);
+  ST_CHECK_NEAR(with_lane.x, inset, 0.01f);
+  ST_CHECK_NEAR(with_lane.width, 400.0f - inset - 120.0f, 0.5f);
   // 列必须整体右移同样的量（否则列与表头错位）
-  ST_CHECK_NEAR(table.header_cell_rect(0U).x, 34.0f, 0.01f);
+  ST_CHECK_NEAR(table.header_cell_rect(0U).x, with_lane.x, 0.01f);
   ST_CHECK_NEAR(table.cell_rect(0U, 1U).x, 400.0f - 120.0f, 0.5f);
 }
 

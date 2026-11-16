@@ -80,6 +80,7 @@ class List : public Element {
 
   auto on_event(const RenderContext& context, Event& event) -> bool override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
+  void measure(const RenderContext& context, const Constraints& constraints) override;
 
   /// 容器层的排版覆盖（DSL `BoxProps::color/size`）下放到每个项。
   /// 字是 `ListItem` 画的，容器只记不画——不下放就是静默不生效。
@@ -90,6 +91,9 @@ class List : public Element {
   /// 为何需要：DSL 的 `.height` 应用在 **List 容器**上，而行的实际尺寸由
   /// `ListItem::style_.height` 决定——不写这条下放，`.height` 是"设了没生效"
   ///（实测：大纲想压到 22px，行高恒 40）。
+  ///
+  /// 与 `measure` 的分工：本函数只管**把行高推给各项**；容器自身的高度由 `measure`
+  /// 按行数累加（它必需覆写，否则基类会把同一个 `height` 当成容器总高）。
   void apply_row_height_override();
   void apply_theme(const Theme& theme) override;
 

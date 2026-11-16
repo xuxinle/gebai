@@ -21,7 +21,7 @@ auto w = std::make_unique<st::ui::MenuPanel>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`anchor`
+**可读写**：`anchor` · `items` · `count`
 
 > 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
 
