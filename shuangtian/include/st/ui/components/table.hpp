@@ -228,6 +228,23 @@ class Table : public Element {
   [[nodiscard]] auto max_scroll_y() const noexcept -> float;
   void set_scroll_offset_y(float offset);
   void scroll_by_y(float delta) { set_scroll_offset_y(scroll_offset_y_ + delta); }
+
+  /// 显隐**表头**（默认显示）。关掉后表头高度归 0，行区直接从顶边开始。
+  ///
+  /// 存在的理由：有些表格的列含义**自明**（提交日志的“提交信息/作者/日期/哈希”），
+  /// 而表头要吃掉 `kHeaderHeight` 那么高的黄金视野；它也不随纵向滚动，永远是
+  /// 一块不动的色带。这类表格的列宽本就固定，不需要表头让用户自己对齐。
+  ///
+  /// ⚠ 关掉后 `header_rect()` / `header_cell_rect()` 返回**空矩形**（而不是
+  /// “表头位置但高 0”）：自动化判“表头在不在”应当看它是否 `is_empty()`，
+  /// 否则会拿到一个“存在但看不见”的矩形，判据失效。
+  void set_show_header(bool show);
+  [[nodiscard]] auto show_header() const noexcept -> bool { return show_header_; }
+  /// 表头+行区共用的**头部占高**（关掉表头时为 0）——所有几何计算走它，
+  /// 不直接写 `kHeaderHeight`，否则关表头后行会错位一整条。
+  [[nodiscard]] auto header_height() const noexcept -> float {
+    return show_header_ ? kHeaderHeight : 0.0f;
+  }
   /// 表头之下、可见区域的行数（扣表头与横向滚动条；不受纵向偏移影响）。
   [[nodiscard]] auto viewport_row_count() const noexcept -> std::size_t;
 
@@ -317,6 +334,8 @@ class Table : public Element {
   std::size_t hovered_row_{kNoRow};
   std::optional<std::size_t> selected_row_{};
   bool zebra_{false};
+ /// 表头是否绘制（关掉后 `header_height()` 返回 0，行区顶到边）。
+ bool show_header_{true};
    /// 行首连线图：**节点-边**（`set_graph`）。空 = 不画泳道图。
  std::vector<GraphNodeSpec> graph_nodes_{};
  std::vector<GraphEdgeSpec> graph_edges_{};

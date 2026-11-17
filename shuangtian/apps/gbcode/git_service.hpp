@@ -170,6 +170,28 @@ struct BranchInfo {
 };
 [[nodiscard]] auto read_branches(const std::string& cwd) -> std::vector<BranchInfo>;
 
+/// 远程分支所属的 remote 名（`origin/feature/x` → `origin`；本地分支 → 空串）。
+///
+/// 按**第一个** `/` 切：远程名本身不含 `/`，而分支名可以含（`feature/x`）。
+[[nodiscard]] auto remote_of_branch(const BranchInfo& branch) -> std::string;
+
+/// 分支的**短名**（去掉 remote 前缀）：`origin/feature/x` → `feature/x`。
+///
+/// 展示与搜索都用它：用户脑子里想的是 "feature"，不是 "origin/feature"。
+[[nodiscard]] auto short_branch_name(const BranchInfo& branch) -> std::string_view;
+
+/// 某分支（从它还可达的）提交集合：分支全名 → 它的 hash 列表（近 `limit` 条）。
+///
+/// ## 为何需要它（日志筛选）
+///
+/// “只看某个分支的提交”不能靠**泳道号**推断——泳道号是绘制层的分配结果，
+/// 只有当那个分支恰好是 HEAD 那条时才可靠。用户点的是任意一条分支，
+/// 正确的判据是 `git rev-list <ref>`：**从该引用向前可达的提交集**。
+///
+/// 返回空集有两种情况（调用方需区分）：引用不存在 / git 执行失败。
+[[nodiscard]] auto read_branch_commits(const std::string& cwd, std::string_view ref,
+                                       std::size_t limit) -> std::vector<std::string>;
+
 /// 读工作区文件与 HEAD 的差异文本（只读 diff；不落任何状态）。
 [[nodiscard]] auto read_worktree_diff(const std::string& cwd, const std::string& path,
                                       bool staged) -> std::string;

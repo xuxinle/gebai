@@ -57,6 +57,7 @@
 #include "st/ui/components/text.hpp"
 #include "st/ui/components/webview.hpp"
 #include "st/ui/components/window_frame.hpp"
+#include "st/ui/theme.hpp"
 #include "st/ui/svg.hpp"
 
 namespace {
@@ -158,18 +159,94 @@ inline constexpr std::string_view kTrailerMagic{"GEBAIPAY"};
 ///
 /// 不做缓存：它只在启动时调一次（`materialize_server`），而“函数内 static 缓存”
 /// 会变成进程级共享态（值本身不变，但那类形态一旦开了头就会有人往里塞可变数据）。
-[[nodiscard]] auto read_payload_from_self() -> std::optional<std::vector<std::uint8_t>> {
+/// 从本 exe 尾部读回的 payload（含**已算好的指纹**）。
+///
+/// ## 为何把指纹一起带回来（实测）
+///
+/// 以前 `read_payload_from_self` 算一次指纹做 trailer 自校验，
+/// `materialize_server` 又把**同一份内存**算一次去和既有侧车比对——259MB 白算一遍
+/// （实测 SHA-256 约 150ms）。指纹是同一份字节的纯函数，传下去就能省掉它。
+struct SidecarPayload {
+  /// 物化用的字节（直接读出来，**不再复制**——复制 259MB 实测 85ms）。
+  st::fs::Bytes bytes{};
+  /// trailer 里记录的指纹（= `content_hash64(bytes)`，已在读取时校验通过）。
+  std::uint64_t hash{0};
+};
+
+/// `read_payload_from_self` 的**带原因**结果。
+///
+/// ## 为何不能只返回 `optional`（真实故障暴露的缺陷）
+///
+/// 旧实现把所有“读不到 payload”的情形一律返回 `nullopt`，而上层只能报到一句
+/// 「**本 exe 尾部没有 payload**」。但真实的失败原因至少有五种，而它们**要求用户做
+/// 的事完全不同**：
+///
+/// | 原因 | 用户该做 |
+/// |---|---|
+/// | 跑的本来就是未打包的中间产物（`st build` 的 7.6MB 宿主 exe）| 改用 `dist/gebai-desktop.exe` |
+/// | 打包产物**在拷贝/下载过程中被截断** | 重新完整拷贝（看文件大小）|
+/// | 文件被 antivirus/沙箱**剥掉了尾部** | 加白名单/换目录重试 |
+/// | trailer 结构对但**哈希不符**（篡改/损坏）| 重新获取产物，不要用这份 |
+/// | 权限不足读不了自身 | 换目录/提权 |
+///
+/// 而把它们报成同一句话的结果是：用户拿着**完好的 266MB 产物**被告知“没有 payload”，
+/// 于是去查一个不存在的问题（实测踩到：产物在开发机验证完好，到另一台机器上
+/// 只看到这一句而无任何可行动信息）。
+struct PayloadReadResult {
+  std::optional<SidecarPayload> payload{};
+  /// 失败原因（人话，含可行动提示）；成功时为空。
+  std::string failure{};
+};
+
+[[nodiscard]] auto read_payload_from_self() -> PayloadReadResult {
   const auto self = st::process::executable_path();
-  if (!self) return std::nullopt;
+  if (!self) {
+    return {std::nullopt, "取不到自身可执行文件路径（executable_path 失败）"};
+  }
   const auto size = st::fs::file_size(*self);
-  if (!size || *size < kTrailerSize) return std::nullopt;
+  if (!size) {
+    return {std::nullopt,
+            std::format("读不到自身文件大小（{}）：可能路径不可访问或文件被占用", *self)};
+  }
+  // ## 先区分“根本不是打包产物”与“是打包产物但被截断”
+  //
+  // 两者都表现为“读不到 trailer”，但**处置完全不同**：前者是拿错了文件，
+  // 后者是文件损坏。而要区分它们，就得看**文件有多大**：
+  // 未打包的中间宿主 exe 只有几 MB（侧车没挂上去），而任何打包产物都在几十 MB 以上。
+  if (*size < kTrailerSize) {
+    return {std::nullopt,
+            std::format("自身文件只有 {} 字节，此尺寸不可能是打了包的发布产物", *size)};
+  }
   const auto trailer = st::fs::read_span(*self, *size - kTrailerSize, kTrailerSize);
-  if (!trailer || trailer->size() != kTrailerSize) return std::nullopt;
+  if (!trailer || trailer->size() != kTrailerSize) {
+    return {std::nullopt,
+            std::format("读自身尾部 {} 字节失败（文件 {} 字节）", kTrailerSize, *size)};
+  }
   const std::span<const std::uint8_t> raw = *trailer;
   // 魔数逐字节比：不把 `uint8_t*` 转成 `char*`（那是一次只为比较的 reinterpret_cast）。
   for (std::size_t index = 0; index < kTrailerMagic.size(); ++index) {
     if (raw[index] != static_cast<std::uint8_t>(kTrailerMagic[index])) {
-      return std::nullopt;  // 未打包（开发形态：exe 后面没有 payload）
+      // 魔数不对：这里必须看尺寸才能给出**可行动**的原因，否则用户会在
+      // “产物明明是 266MB”与“程序说没有 payload”之间打转。
+      //   • 小文件（< 阈值）：跑的是**未打包的中间产物**（`st build` 的产物），
+      //     它本就只用于打包输入，名字还叫 `gebai_desktop.exe`，极易拿错。
+      //   • 大文件：应该是打包产物，但尾部魔数丢了——典型是**拷贝/传输被截断**，
+      //     或下载工具/杀软剥掉了尾部。这时给出“看到的大小 vs 预期量级”就能定位。
+      constexpr std::uint64_t kLikelyIntermediateBytes = 32ULL * 1024ULL * 1024ULL;
+      if (*size < kLikelyIntermediateBytes) {
+        return {std::nullopt,
+                std::format(
+                    "这不是打包产物：本 exe 只有 {:.1f} MB，而打包产物应包含内嵌服务端（约 260 MB）。\n"
+                    "  你很可能运行的是 `st build` 的**中间宿主 exe**——它与最终产物名字几乎一样。\n"
+                    "  请运行 `packages/desktop/dist/gebai-desktop.exe`（打包脚本产出），\n"
+                    "  或用 `--server-exe <gebai 可执行文件>` 显式指定服务端。",
+                    static_cast<double>(*size) / 1048576.0)};
+      }
+      return {std::nullopt,
+              std::format(
+                  "文件有 {:.1f} MB（量级像打包产物），但尾部标记缺失——很可能**被截断/尾部被改写**。\n"
+                  "  拷到本机时的实际大小请核对（完整产物约 266 MB）；下载工具或安全软件有时会弄丢尾部。",
+                  static_cast<double>(*size) / 1048576.0)};
     }
   }
   const auto read_u64 = [raw](std::size_t offset) {
@@ -184,18 +261,32 @@ inline constexpr std::string_view kTrailerMagic{"GEBAIPAY"};
   const std::uint64_t expected = read_u64(24);
   // 三道自洽检查：payload 不为空、两者之和等于文件长度、且绝不越过文件头（防被截断的 exe）。
   if (payload == 0 || payload + image + kTrailerSize != *size) {
-    st::log::err("歌白桌面端：尾部 payload 结构与文件长度不符（可能被截断/篡改），忽略\n");
-    return std::nullopt;
+    return {std::nullopt,
+            std::format(
+                "尾部结构自相矛盾（payload {} + image {} + trailer {} ≠ 文件 {}）——文件被截断或拼接损坏",
+                payload, image, kTrailerSize, *size)};
   }
-  const auto body = st::fs::read_span(*self, image, static_cast<std::size_t>(payload));
-  if (!body || body->size() != payload) return std::nullopt;
-  const std::uint64_t actual = st::hash::fnv1a64_bytes(*body);
+  auto body = st::fs::read_span(*self, image, static_cast<std::size_t>(payload));
+  if (!body || body->size() != payload) {
+    return {std::nullopt,
+            std::format("读 payload 主体失败（应读 {} 字节，实得 {}）", payload,
+                        body ? body->size() : 0ULL)};
+  }
+  // ## 为何用 `content_hash64` 而不是 `fnv1a64_bytes`（实测）
+  //
+  // 这里哈希的是 **259MB 的可执行体**，而 FNV-1a 在小数据上够用、在大数据上是另一回事：
+  // C++ 侧 278ms（逐字节串行），JS 侧（打包脚本，BigInt）**14.3 秒**。
+  // `content_hash64` 两侧都走各自的硬件加速 SHA-256（C++ 走 CNG，实测 150ms）。
+  // 注：它与打包脚本（`pack-desktop.ts`）必须**同步**，否则两侧算出的值不同。
+  const std::uint64_t actual = st::hash::content_hash64(*body);
   if (actual != expected) {
-    st::log::err("歌白桌面端：尾部 payload 哈希不符（期望 {:016x}、实得 {:016x}）\n", expected,
-                 actual);
-    return std::nullopt;
+    return {std::nullopt,
+            std::format("payload 哈希不符（recorded {:016x}、actual {:016x}）——文件已损坏或被篡改", expected,
+                        actual)};
   }
-  return std::vector<std::uint8_t>(body->begin(), body->end());
+  // 直接移交读出的字节：以前多一句 `vector(body->begin(), body->end())` 复制 259MB
+  //（实测 85ms），而 `body` 本身就是一块独占的 `Bytes`，没必要再拷一份。
+  return {SidecarPayload{std::move(*body), actual}, {}};
 }
 
 /// 物化侧车到数据目录，返回可执行文件路径（空串 = 找不到可用的侧车二进制）。
@@ -214,15 +305,24 @@ inline constexpr std::string_view kTrailerMagic{"GEBAIPAY"};
 /// 而症状是“界面起来但功能是老版本”——比直接失败难查得多。
 [[nodiscard]] auto materialize_server(const std::string& data_dir) -> std::string {
   const std::string dest = st::fs::join(data_dir, std::format("{}-server.exe", kAppName));
-  const auto payload = read_payload_from_self();
-  if (!payload.has_value() || payload->empty()) return {};
-  const std::span<const std::uint8_t> bytes(*payload);
+  auto read = read_payload_from_self();
+  if (!read.payload.has_value() || read.payload->bytes.empty()) {
+    // 把**具体原因**交回给调用方展示（而不是丢成一句“没有 payload”）：
+    // 五种失败原因要求用户做的事完全不同，见 `PayloadReadResult` 那张表。
+    if (!read.failure.empty()) {
+      st::log::err("歌白桌面端：{}\n", read.failure);
+    }
+    return {};
+  }
+  const std::span<const std::uint8_t> bytes(read.payload->bytes);
 
   bool mismatch = true;
   if (const auto current_size = st::fs::file_size(dest); current_size.has_value()) {
     if (*current_size == static_cast<std::uint64_t>(bytes.size())) {
       if (const auto current = st::fs::read_bytes(dest); current.has_value()) {
-        mismatch = st::hash::fnv1a64_bytes(*current) != st::hash::fnv1a64_bytes(bytes);
+        // 直接复用 `read_payload_from_self` 已经算好的指纹（trailer 自校验时算的）——
+        // 以前这里会把同一份 259MB 再哈希一遍，实测白花 150ms。
+        mismatch = st::hash::content_hash64(*current) != read.payload->hash;
       }
     }
   }
@@ -299,6 +399,18 @@ auto run_app(int argc, char** argv) -> int {
 
   st::app::AppOptions options = std::move(common.app);
   options.title = kAppTitle;
+  // ## 初始主题：**暗色**（与网页默认主题 `acrylic` 对齐）
+  //
+  // 歌白桌面端的界面就是网页（`ui::WebView` 整窗），而网页默认主题是
+  // `acrylic` 的**暗色档**（`theme-core.ts`：`ACRYLIC_LT_MODES` 缺省 null = 暗）。
+  //
+  // 宿主侧不改就一直有两个后果（都属于用户看到的“丑”）：
+  //   ① 启动期的自绘部分（窗框、占位块、启动卡）都是亮色，网页一到位就**从白翻黑**；
+  //   ② WebView 页面首帧前那块底色也是亮色——即使用户最终用的是暗色主题。
+  //
+  // 用 `dark` 而不是某个彩色主题：它是**基准档**（只换明暗基准，不改调色盘），
+  // 网页一旦加载完会用自己的完整调色盘覆盖，这里只需保证“交接前不撞色”。
+  options.theme = st::ui::ThemeMode::Dark;
   // 桌面端是"整个应用"，不是贴角面板：铺开工作区（框架默认行为，显式写出以免被误改）。
   options.fill_work_area = true;
   if (options.backend.empty() && options.headless) options.backend = "headless";
@@ -349,6 +461,30 @@ auto run_app(int argc, char** argv) -> int {
 
   frame->content()->add_child(std::move(root));
   app.set_content(std::move(frame));
+
+  // ## ②.3 物化：为何**不**与建窗并行（实测否定了一个看似显然的优化）
+  //
+  // 物化（读 259MB payload + 校验哈希 + 比对既有侧车）实测约 **1.07 s**，而且它只做
+  // 文件 IO 与哈希、不碰界面——看上去与 `app.start()`（建窗 + WebView + 首帧，约 430ms）
+  // 天然可并行，关键路径能从 `430+1070` 降到 `max(430,1070)`。
+  //
+  // **实测是反的**（`std::async` 并行改法，三轮各量一次）：
+  //
+  // | 形态 | 建窗完成 | 侧车 spawn | 导航 |
+  // |---|---|---|---|
+  // | 串行（本注释下面的写法）| **240 ms** | 1500 ms | 3712 ms |
+  // | 并行（已回退）| **1977~2066 ms** | 2723~2821 ms | 4983~5044 ms |
+  //
+  // 建窗慢 8 倍。原因是**读自身 exe 的 259MB 会把正在执行的代码页挤出去**：
+  // 主线程在首帧里要跑字体光栅化与图元建表（大量代码与字体文件读），
+  // 而后台线程正源源不断地把 259MB 塞进同一份 page cache——两边抢的是同一个资源。
+  // “一个任务只做 IO、不碰 UI”并不等于“它不占关键路径的资源”。
+  //
+  // 所以保持串行：宁可显式等 1.07 s，也不要让首帧跟着变慢（首帧更接近“用户看到什么”）。
+  // 这条写在代码里而不是只写进文档：下一次有人看到“这里可以并行”时，代价已在此。
+  //
+  // 位置：仍在 `app.start()` **之后**（它要用到 `app` 已建好的事实去 spawn 侧车、
+  // 且 `add_init_script` 也必须晚于 start —— 浏览器宿主在 start 里才建）。
 
   // ②.4 窗框随网页主题联动：网页侧 `theme-core.ts` 在主题变化（切主题/换面额/黑白切换）
   // 时经 `chrome.webview.postMessage` 推 `{gebaiDesktop:true,type:"theme",theme,frameColor,light}`。
@@ -402,9 +538,11 @@ auto run_app(int argc, char** argv) -> int {
     app.request_repaint();
   };
 
-  // ③ 侧车：优先 `--server-exe`（开发期指 dist/gebai.exe），否则从**本 exe 尾部**读 payload。
-  std::string server_exe = values.get("--server-exe");
+  // ③ 侧车：`--server-exe`（开发期）优先，否则读本 exe 尾部 payload 物化。
+  //
+  // 为何串行（不并行）：见②.3 段的实测——并行反而把首帧拖慢 8 倍。
   const std::string data_dir = resolve_data_dir();
+  std::string server_exe = values.get("--server-exe");
   if (server_exe.empty()) server_exe = materialize_server(data_dir);
   if (!init_script_ok) {
     st::log::err("歌白桌面端：文档初始化脚本注册失败（桌面形态标记将不生效）\n");
@@ -421,10 +559,15 @@ auto run_app(int argc, char** argv) -> int {
   auto sidecar = std::make_shared<st::process::StreamHandle>();
   bool spawned = false;
   if (server_exe.empty()) {
+    // 具体原因已由 `materialize_server` 打到日志（分情形、带文件大小）。
+    // 这里只给一句**不误导**的汇总——旧版这里写的是“本 exe 尾部没有 payload”，
+    // 而真实原因可能是截断/哈希不符/读不了自身；那会把用户指向一个不存在的问题
+    //（实测踩到：完好的 266MB 产物被报成“没有 payload”）。
     show_failure(
-        "找不到 gebai 服务端二进制：本 exe 尾部没有 payload，且未给 --server-exe。\n"
-        "发布形态应由打包脚本产出（bun run --cwd packages/desktop build）；"
-        "开发期传 --server-exe 指向一个已存在的 gebai 可执行文件");
+        "无法取得内置服务端（具体原因见日志：已按“未打包 / 被截断 / 哈希不符 / 读不了自身”分别说明）。\n"
+        "发布形态应由打包脚本产出：bun run --cwd packages/desktop build"
+        "（产物是 packages/desktop/dist/gebai-desktop.exe，约 266 MB）；\n"
+        "开发期用 --server-exe 指向一个已存在的 gebai 可执行文件。");
   } else {
     // 环境只对**这一个**子进程生效：`GEBAI_NO_OPEN=1` 阻止服务端自己开浏览器
     //（界面已经在我们的窗口里）；`GEBAI_PORT` **总是显式给**——
@@ -439,8 +582,31 @@ auto run_app(int argc, char** argv) -> int {
                                        ? port_override
                                        : (kAppPort[0] != '\0' ? std::string(kAppPort)
                                                               : std::string("47896"));
-    std::map<std::string, std::string> child_env{{"GEBAI_NO_OPEN", "1"}};
-    child_env.emplace("GEBAI_PORT", port_value);
+      std::map<std::string, std::string> child_env{{"GEBAI_NO_OPEN", "1"}};
+  child_env.emplace("GEBAI_PORT", port_value);
+  // ## 桌面形态下禁掉 `restart_server`（用现成的工具裁剪机制，不加新判断）
+  //
+  // 为何要禁：那个工具会拉起**新进程**替换当前服务，而本宿主的 WebView 已导航到
+  // 旧端口的旧连接——重启后页面与后端脱钩（用户看到白屏、且从界面内恢复不了，只能关窗重开）。
+  // 桌面端的重启通道就是“关窗再双击”，不该暴露给模型。
+  //
+  // 为何用 `GEBAI_TOOL_DISABLE` 而不是在 compose 里加一个 `if (桌面形态)`：
+  // 工具启停已有统一机制（`ToolRegistry::setPolicy`，白/黑名单 + `{agent}_*` 通配，
+  // 注册时判定、运行期装载的工具同样受约束）。多一条特判就是多一处会漂的真相源。
+  //
+  // 合并而非覆盖：用户自己也可能设了 `GEBAI_TOOL_DISABLE`（继承自本进程环境），
+  // 直接赋值会把它们抹掉。
+  {
+    std::string disabled;
+    if (const auto inherited = st::fs::read_env("GEBAI_TOOL_DISABLE");
+        inherited.has_value() && !inherited->empty()) {
+      disabled = *inherited;
+      if (disabled.back() != ',') disabled.push_back(',');
+    }
+    disabled.append("restart_server");
+    child_env.emplace("GEBAI_TOOL_DISABLE", disabled);
+  }
+
     sidecar->open(server_exe, state->extra_args, state->workdir, true, child_env);
     if (!sidecar->valid()) {
       show_failure(std::format("拉起侧车失败：{}\n{}", sidecar->error(), server_exe));

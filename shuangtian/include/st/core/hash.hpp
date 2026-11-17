@@ -57,6 +57,22 @@ class Fnv1a64 {
 /// 一次性计算字节缓冲的 FNV-1a 64。
 [[nodiscard]] auto fnv1a64_bytes(std::span<const std::uint8_t> data) noexcept -> std::uint64_t;
 
+/// **大块内容指纹**（SHA-256 前 8 字节，小端读作 u64）。与 `fnv1a64_bytes` 的分工：
+///
+/// | | `fnv1a64_bytes` | `content_hash64` |
+/// |---|---|---|
+/// | 实测（259MB，-O2）| 278 ms | 130 ms |
+/// | 适用 | 小数据（源码/文本/配置）| **大文件/大缓冲区** |
+/// | 跨语言一致 | 需手写对齐 | **天然**（任何语言都有 SHA-256）|
+///
+/// 最大的价值不在那 2 倍，而在**跨语言一致**：打包脚本（TypeScript）与宿主（C++）
+/// 必须算出同一个值，手写算法在 JS 里只能用 BigInt——那是 **14.8 秒/259MB** 的灾难。
+/// 改用 SHA-256 后两侧都走各自内置的优化实现（JS 侧 150ms，走硬件指令集）。
+///
+/// 注：只取 32 字节摘要的前 8 字节，对该用途（同一份文件的自比对）碰撞概率天文学级足够；
+/// 但**不要把它当安全哈希用**（截断后的摘要不适合任何认证场景）。
+[[nodiscard]] auto content_hash64(std::span<const std::uint8_t> data) noexcept -> std::uint64_t;
+
 [[nodiscard]] auto crc32(std::span<const std::uint8_t> data) noexcept -> std::uint32_t;
 [[nodiscard]] auto crc32(std::string_view text) noexcept -> std::uint32_t;
 [[nodiscard]] auto adler32(std::span<const std::uint8_t> data) noexcept -> std::uint32_t;

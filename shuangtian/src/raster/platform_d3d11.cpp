@@ -5832,7 +5832,11 @@ class GpuScene3d final : public st::raster::Scene3D {
       staging->Release();
       return;
     }
-    std::FILE* file = std::fopen(path, "wb");
+    // 走 `st::fs::open_file`：本文件已在前面 include 了 `st/core/fs.hpp`。
+    // `std::fopen` 在 Windows 上按本地 ANSI 代码页解释路径——含中文的目录会写不出去，
+    // 而这里的落盘失败是**静默的**（下面自己判了 `file != nullptr` 就直接跳过），
+    // 于是“调试图像没生成”会被当成另一个问题去查。
+    std::FILE* file = st::fs::open_file(path, "wb");
     if (file != nullptr) {
       std::fprintf(file, "P5\n%d %d\n255\n", shadow_resolution_, shadow_resolution_);
       for (int y = 0; y < shadow_resolution_; ++y) {

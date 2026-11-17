@@ -21,7 +21,7 @@ auto w = std::make_unique<st::ui::Table>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`columns` · `rows` · `row_height` · `zebra` · `scroll` · `max_scroll` · `scroll_y` · `max_scroll_y` · `selected_row` · `value` · `first_visible` · `visible_rows`
+**可读写**：`columns` · `rows` · `row_height` · `zebra` · `show_header` · `scroll` · `max_scroll` · `scroll_y` · `max_scroll_y` · `selected_row` · `value` · `first_visible` · `visible_rows`
 
 **只读**（能 `get`，`set` 不生效）：`column_widths` · `lane_inset`
 

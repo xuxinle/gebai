@@ -785,7 +785,7 @@ struct PchContext {
   // 而真因在这份清单。
   if (platform == "windows") {
     return {"ws2_32", "user32",  "gdi32",  "dwmapi", "shell32", "dbghelp", "nanosrv",
-            "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"};
+            "psapi",  "secur32", "winpthread", "ole32",   "uuid",    "shlwapi", "bcrypt"};
   }
   return {"pthread", "dl", "m"};
 }

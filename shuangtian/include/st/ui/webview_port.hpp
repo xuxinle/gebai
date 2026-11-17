@@ -133,6 +133,10 @@ class WebViewPort {
     return unexpected(ErrorCode::Unsupported, "该宿主不支持嵌入浏览器");
   }
   virtual void webview_destroy() {}
+
+  /// 页面底色（`0xAARRGGBB`；见 `shell::webview::WebViewHost::webview_set_background`）。
+  /// `ui` 层不关心它怎么落地，只负责把“主题底色”传下去。
+  virtual void webview_set_background([[maybe_unused]] std::uint32_t argb) {}
   virtual void webview_sync([[maybe_unused]] math::Rect bounds, [[maybe_unused]] math::Rect clip) {}
 
   [[nodiscard]] virtual auto webview_navigate([[maybe_unused]] std::string_view url) -> Status {

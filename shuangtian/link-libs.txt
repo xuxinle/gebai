@@ -31,6 +31,8 @@
 #               （src/shell/platform_win32_webview.cpp 的 COM 回调 QueryInterface）
 #   shlwapi     SHCreateMemStream（把字节包成 COM IStream，内嵌资源响应用）
 #               （src/shell/platform_win32_webview.cpp）
+#   bcrypt      CNG 的硬件加速 SHA-256（src/core/hash.cpp 的 content_hash64）
+#               —— 可移植实现 267 MB/s，CNG 1777 MB/s（6.6×）；对付的是 259MB 的侧车指纹
 #   pthread/dl/m POSIX 线程 / dlopen（TLS 的运行时 OpenSSL 加载）/ 数学库
 
 windows:
@@ -47,6 +49,7 @@ winpthread
 ole32
 uuid
 shlwapi
+bcrypt
 
 posix:
 pthread

@@ -766,19 +766,34 @@ const inputQueue = new SessionInputQueue()
   personaOutboundDeps.yieldWindowMsFor = (personaId: string) =>
     behaviorParamsForPure(process.env as Record<string, string | undefined>, personaId).yieldSeconds * 1000
     // 启动检查（不吐令牌明文，只报状态）
-    const cred = await creds.status()
-    if (cred.ready) {
-      log.info(`[gebai] 飞书凭据就绪：${cred.message}${cred.remainingMs ? `（剩 ${Math.round(cred.remainingMs / 60000)} 分钟）` : ""}`)
-    } else if (cred.authorizeUrl) {
-      log.warn(`[gebai] 飞书凭据不可用：${cred.message}`)
-      log.warn(`[gebai] 授权链接：${cred.authorizeUrl}`)
-      log.warn(`[gebai] 回调地址需已在飞书后台登记：${callbackUrl()}`)
-    } else {
-              log.warn(`[gebai] 飞书凭据不可用：${cred.message}（渠道实例未配 appId/appSecret，无法发起授权）`)
-    }
-    // 启动即尝试推卡：相期若已连上立刻可见；没开着也无妨（卡片会缓存，它启动后重推）
-    // 这里只尝试一次；子Agent 发现是异步的，若此时还没就绪，下面 discover 之后会再补推。
-    void syncAuthCard(cred)
+    //
+    // ## 为何不 `await`（启动慢的主犯，已实测）
+    //
+    // `status()` 首次会走 `resolveOfflineSupport` —— 两次 HTTPS（tenant_access_token
+    // + 应用信息）且失败时带 8s 超时；令牌临期时还会先试刷新。本机实测这一段
+    // **1001ms 纯网络等待**，而且它只为了打三行日志与推一张卡。
+    // 把它放在 listen 之前 = 周所有人多等 1 秒，换来的只是“日志早 1 秒”。
+    void (async () => {
+      let cred: Awaited<ReturnType<typeof creds.status>>
+      try {
+        cred = await creds.status()
+      } catch (err) {
+        log.warn(`[gebai] 读飞书凭据状态失败：${String((err as Error)?.message || err)}`)
+        return
+      }
+      if (cred.ready) {
+        log.info(`[gebai] 飞书凭据就绪：${cred.message}${cred.remainingMs ? `（剩 ${Math.round(cred.remainingMs / 60000)} 分钟）` : ""}`)
+      } else if (cred.authorizeUrl) {
+        log.warn(`[gebai] 飞书凭据不可用：${cred.message}`)
+        log.warn(`[gebai] 授权链接：${cred.authorizeUrl}`)
+        log.warn(`[gebai] 回调地址需已在飞书后台登记：${callbackUrl()}`)
+      } else {
+        log.warn(`[gebai] 飞书凭据不可用：${cred.message}（渠道实例未配 appId/appSecret，无法发起授权）`)
+      }
+      // 启动即尝试推卡：相期若已连上立刻可见；没开着也无妨（卡片会缓存，它启动后重推）
+      // 这里只尝试一次；子Agent 发现是异步的，若此时还没就绪，下面 discover 之后会再补推。
+      await syncAuthCard(cred).catch(() => {})
+    })()
 
     /**
      * 临近到期主动提醒（常驻检查）。
@@ -869,8 +884,22 @@ const inputQueue = new SessionInputQueue()
   // 就绪后自动合并进定义视图，需完整清单的操作（agent_load）由 SubAgentManager 内部等它。
   await subAgents.discover({ deferNative: true })
   // 子Agent 已发现 → 补推一次授权卡（上面建凭据时相期可能还未被发现）
+  //
+  // ## 为何不能 `await`（真踩过的启动慢）
+  //
+  // `status()` 会**顺带尝试刷新**令牌（见它的注释：临期但可刷对用户就是可用），
+  // 而刷新要发 HTTPS 请求；首次还会去探测应用的长期授权支持（`resolveOfflineSupport`，
+  // 内部两次 HTTPS + 8s 超时）。这一段**完全落在启动路径上**：本机实测从
+  // “人格授权用实例”日志到者后一行隔了 **~2.7 秒**，而那全是网络往返。
+  // 它并不影响服务能不能开工——授权卡只是提醒，推晚 2 秒无人能感知；
+  // 但把它挡在 listen 之前，就是让所有用户多等 2 秒。
   if (personaCredentials && personaAuthCardSync) {
-    void personaAuthCardSync(await personaCredentials.status())
+    const credentials = personaCredentials
+    const pushCard = personaAuthCardSync
+    void credentials
+      .status()
+      .then((status) => pushCard(status))
+      .catch((err) => log.warn(`[gebai] 启动后补推授权卡失败：${String((err as Error)?.message || err)}`))
   }
   // 任务能力开关（GEBAI_TASKS_ENABLED，默认 true）：关闭时 task 子Agent 不注册（agent_list/agent_load/
   // subsession_run 均不可见，task_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/tasks 可管

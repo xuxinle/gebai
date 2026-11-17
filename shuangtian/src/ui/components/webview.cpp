@@ -169,6 +169,12 @@ auto WebView::ensure_page() -> bool {
   // 白跑一次——而白跑的代价不只是开销：它会把一个“本机根本做不了”的动作变成
   // “看着在做事、实际什么都不会发生”（测试实测到过：断言 `stub.navigated.empty()` 红）。
   if (!owner->webview_supported()) return false;
+  // 建页**之前**先把底色交下去：WebView2 的 Controller 一建出来就可能被合成到屏上，
+  // 而它的默认背景是透明。等建完再设，中间那一段（是否被看到取决于同步时机）
+  // 就是“内容区透明”的那个洞。现在只要有当前主题色就提前设。
+  if (has_theme_fill_) {
+    owner->webview_set_background(theme_argb_);
+  }
   // 尺寸未知时给一个合理初值：建页面必须有矩形，而 0×0 会让 WebView2 建出一块
   // “看不见的空”（且不报错——那种失败最难查）。
   const math::Rect target = bounds_.is_empty()
@@ -424,6 +430,22 @@ void WebView::on_visibility_changed() {
 
 void WebView::apply_theme(const Theme& theme) {
   placeholder_fill_ = theme.colors().surface_sunken;
+  // 页面底色跟随主题：分层窗口下网页首帧之前露出的就是这块颜色。
+  //
+  // 用 `surface_sunken`（而不是 `bg`）的理由：它与占位块**同一颜色**——
+  // 首帧前网页区域与周围自绘区域视觉上连成一片，不会出现“两种深浅的方块”。
+  // 与 `placeholder_fill_` 同源，改主题时两者不会漂。
+  if (WebViewPort* owner = port(); owner != nullptr) {
+    const math::Color fill = theme.colors().surface_sunken;
+    // `Color` 是 r/g/b/a 四字节，而 `webview_set_background` 收 `0xAARRGGBB`。
+    // 一定要带 a=0xFF：WebView2 的默认底若半透明，分层窗口下会重复同一个缺陷。
+    theme_argb_ = (static_cast<std::uint32_t>(fill.a) << 24U) |
+                  (static_cast<std::uint32_t>(fill.r) << 16U) |
+                  (static_cast<std::uint32_t>(fill.g) << 8U) |
+                  static_cast<std::uint32_t>(fill.b);
+    has_theme_fill_ = true;
+    owner->webview_set_background(theme_argb_);
+  }
   mark_dirty();
 }
 
@@ -498,12 +520,22 @@ auto WebView::invoke_action(std::string_view action, std::string_view argument) 
 }
 
 void WebView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
-  // 已就绪且可见：这块区域的像素由平台合成器画（我们什么都不画）。
+  // ## 占位块一直画到底（“页面已建但还没内容”也要画）
   //
-  // 为什么不画底：画了会被页面盖住，纯属浪费；更关键的是——若哪天页面没显示出来，
-  // 留空能立刻看出"这层没有像素"，而画一层"看起来正常"的底色会掩盖问题。
+  // 旧判据是 `attached && visible` —— 但 `attached` 只代表**页面对象已创建**
+  //（WebView2 的 controller 回调到了），不代表页面有像素可看。页面建出来到首帧
+  // 之间有一段（歌白桌面端实测 **~2s**：侧车启动 + 前端装载），那段时间：
+  //
+  //   ① 子窗口已建（但空）、② 首帧画布上这块**没画任何东西**（旧代码提前 return）。
+  //
+  // 非分层窗口下看不出问题（空子窗口下面就是没东西，看到的是窗口底色）；
+  // 一旦分层（启动期小窗必需），这块就是 **alpha=0** → 透出背后的桌面：
+  // 用户看到的是“自绘标题栏不透明、内容区透明”，窗口像被挖了个洞。
+  //
+  // 所以判据改成 **`ready`（页面首帧就绪）**：未就绪就画占位底色，
+  // 它属于我们的像素，分层窗口下也正确。就绪后子窗口会盖在上面，无额外成本。
   const WebViewState now = state();
-  if (now.attached && now.visible) return;
+  if (now.ready && now.attached && now.visible) return;
 
   if (!placeholder_) return;
   const math::Rect box = bounds_.inset(style_.padding);

@@ -84,6 +84,26 @@ namespace sys = std::filesystem;
 /// 内部沿用原名（实现委托给上面的 `to_path`/`to_utf8`，避免大范围重命名）。
 [[nodiscard]] auto to_std_path(std::string_view path) -> sys::path { return to_path(path); }
 
+}  // namespace
+
+auto open_file(std::string_view path, const char* mode) -> std::FILE* {
+#if defined(_WIN32)
+  // UTF-8 → 宽字符（与全框架同一入口，不另造转换）→ `_wfopen`（真 Unicode 接口）。
+  const sys::path wide_path = to_std_path(path);
+  // mode 是常量小串（"rb"/"wb"/"ab"），逐字符放宽即可。
+  std::wstring wide_mode;
+  for (const char* cursor = mode; *cursor != '\0'; ++cursor) {
+    wide_mode.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*cursor)));
+  }
+  return ::_wfopen(wide_path.c_str(), wide_mode.c_str());
+#else
+  // POSIX：路径本就是字节串，UTF-8 直接可用。
+  return std::fopen(std::string(path).c_str(), mode);
+#endif
+}
+
+namespace {
+
 [[nodiscard]] auto from_std_path(const sys::path& path) -> std::string { return to_utf8(path); }
 
 [[nodiscard]] auto io_error(std::string_view what, std::string_view path, const std::error_code& ec) -> Error {
@@ -92,11 +112,31 @@ namespace sys = std::filesystem;
 }
 
 /// stdio 句柄 RAII（字节精确读写用；文本读写走 ifstream）。
+///
+/// ## 为何不能直接 `std::fopen(path.c_str(), mode)`（真缺陷，实测）
+///
+/// `std::fopen` 收的是 **`char*`**：Windows 上它按**本地 ANSI 代码页**（如 GBK）
+/// 解释这个字节串，而本框架对外一律用 **UTF-8** 表示路径（见 `to_path` 的长注释）。
+/// 两者一旦不一致，**含中文/中文标点的目录就打不开任何文件**——而症状会跑成
+/// “文件不存在 / open failed”，完全看不出是编码问题。
+///
+/// 实测（本机，路径含中文与全角逗号）：
+///
+/// | 调用 | 含中文目录 | 纯 ASCII 目录 |
+/// |---|---|---|
+/// | `create_directories`（走 `std::filesystem` → 宽字符）| ✓ | ✓ |
+/// | **`write_bytes` / `read_bytes` / `read_span`（本类）** | **✗ open failed** | ✓ |
+///
+/// 桌面端物化用的正是 `read_span`（读自身尾部 payload）——于是把 `gebai-desktop.exe`
+/// 放进带中文标点的目录后，它读不到自己尾巴，报“没有 payload”。
+/// 而本机（全 ASCII 路径）始终验证通过，所以这个问题只能靠**用户环境**发现。
+///
+/// 修法：Windows 上改用 **`_wfopen`**（宽字符 → 真 Unicode 接口）；
+/// 非 Windows 仍走 `fopen`（POSIX 的路径本来就是字节串，UTF-8 直接可用）。
 class FileHandle {
  public:
   static auto open(std::string_view path, const char* mode) -> Result<FileHandle> {
-    const std::string name(path);
-    std::FILE* handle = std::fopen(name.c_str(), mode);
+    std::FILE* handle = open_file(path, mode);
     if (handle == nullptr) {
       return unexpected(ErrorCode::NotFound, std::string("open failed '").append(path).append("'"));
     }

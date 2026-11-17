@@ -350,6 +350,9 @@ class WebViewPortAdapter final : public ui::WebViewPort {
   void webview_sync(math::Rect bounds, math::Rect clip) override {
     if (host_ != nullptr) host_->webview_sync(bounds, clip);
   }
+  void webview_set_background(std::uint32_t argb) override {
+    if (host_ != nullptr) host_->webview_set_background(argb);
+  }
 
   [[nodiscard]] auto webview_navigate(std::string_view url) -> Status override {
     if (host_ == nullptr) return unsupported();
@@ -2399,11 +2402,20 @@ void Application::run_splash_animation(shell::BackdropSupport backdrop) {
   if (!forced_min) {
     // 自适应：拿**上次启动**的首帧耗时当预期（跨进程记忆，见 `read_splash_memory`）。
     //
-    // ⚠ 拿不到历史（首次启动/临时目录不可写）时用 500ms：
+    // ⚠ 拿不到历史（首次启动/临时目录不可写）时用 1000ms：
     // 宁可略长一点让人看清动画，也不要按“很快”的假设一闪而过——
-    // 而首次启动本来就慢，500ms 不会白等。
-    constexpr double kColdStartGuessMs = 500.0;
-    constexpr double kMaxAdaptiveMs = 1500.0;
+    // 而首次启动本来就慢，1s 不会白等。
+    //
+    // ## 为何上限从 1500ms 改到 2500ms（实测）
+    //
+    // “界面准备”量的是 `show_early → show_when_ready`。对**纯霜天应用**
+    //（gbcode 等，界面全自绘）这个数就是首帧耗时（~400ms）。但歌白桌面端的
+    // 界面是 **WebView 里的网页**：窗口侧 2.3s 就已经“首帧完成”，而网页要到侧车
+    // 起来（Bun 单文件约 2.7s）+ 前端装载才能看。也就是说“真实等待”远超自绘应用，
+    // 固定 1.5s 封顶会让卡在真正等待中途就消失、变回一块静止的底色——
+    // 那比没有卡更难看（用户会把它当成“卡死了”）。
+    constexpr double kColdStartGuessMs = 1000.0;
+    constexpr double kMaxAdaptiveMs = 2500.0;
     const double observed =
         impl_->last_first_frame_ms > 0.0 ? impl_->last_first_frame_ms
                                          : read_splash_memory(name_);

@@ -243,34 +243,72 @@ auto read_commit_detail(const std::string& cwd, LogEntry& entry) -> std::string 
 
 auto read_branches(const std::string& cwd) -> std::vector<BranchInfo> {
   std::vector<BranchInfo> branches;
-  // `%(HEAD)` 给 `*` 前缀；`%(upstream:short)` 给跟踪分支。
-  const auto out = git(cwd, {"branch", "--all", "--verbose", "--no-abbrev",
-                             std::string("--format=%(HEAD)%(if)%(upstream:short)%(then)@%(upstream:short)%(end)%09%(refname:short)")});
+  // 字段：`HEAD标记 \t upstream短名或空 \t symref（非空 = 符号引用） \t 完整refname \t 短名`
+  //
+  // ## 为何要 `%(refname)` 与 `%(symref)` 两个字段
+  //
+  // `git branch --all` 会把 **remote 的 HEAD 别名**也列出来：`refs/remotes/origin/HEAD`
+  // → 指向 `refs/remotes/origin/master`。用 `%(refname:short)` 时它们变成裸的
+  // `origin` / `github`（看不出是别名），于是被当成“本地分支”混进本地组——
+  // 实测截图里“本地 (3)”下就多了 `github` 与 `origin` 两项，点它切分支必然失败。
+  //
+  // 两个判据都要（各挡一类错）：
+  // ① `%(symref)` 非空 ⇒ **符号引用**，直接丢（这是别名，不是可切的分支）；
+  // ② 用**完整 refname** 判远程（`refs/remotes/` 前缀），而不是“含 `/`”——
+  //    本地分支名本来就可以含 `/`（`feature/x`），用“含 `/`”会把它们误判成远程。
+  const auto out = git(cwd,
+                       {"branch", "--all", "--no-abbrev",
+                        std::string("--format=%(HEAD)\t%(upstream:short)\t%(symref)\t%(refname)"
+                                    "\t%(refname:short)")});
   if (!out.has_value()) return branches;
   for (std::string_view line : lines_of(*out)) {
-    if (line.empty() || line.starts_with("  remotes/origin/HEAD")) continue;
-    BranchInfo info{};
-    std::string_view rest = line;
-    if (!rest.empty() && rest.front() == '*') {
-      info.is_current = true;
-      rest.remove_prefix(1);
+    if (line.empty()) continue;
+    // 五段（`\t` 分隔）：HEAD \t upstream \t symref \t refname \t short
+    std::array<std::string_view, 5> fields{};
+    std::size_t count = 0;
+    std::size_t at = 0;
+    while (count < fields.size()) {
+      const std::size_t tab = line.find('\t', at);
+      fields[count] = line.substr(at, tab == std::string_view::npos ? std::string_view::npos
+                                                                   : tab - at);
+      ++count;
+      if (tab == std::string_view::npos) break;
+      at = tab + 1;
     }
-    // 跟踪段（`@origin/main`）与名字段用 `\t` 分隔（format 里只有一个 \t）。
-    const std::size_t tab = rest.find('\t');
-    if (tab == std::string_view::npos) continue;
-    std::string_view track = rest.substr(0, tab);
-    std::string_view name = rest.substr(tab + 1);
-    if (!track.empty() && track.front() == '@') info.upstream_short = std::string(track.substr(1));
-    info.is_remote = name.starts_with("origin/") || name.find('/') != std::string_view::npos;
-    // `origin/main` 这种远程分支：refname:short 已去掉 refs/remotes/ 前缀。
-    info.name = std::string(name);
+    if (count < 5U) continue;
+
+    // ① 符号引用（`origin` / `github` 这种 remote HEAD 别名）：不是分支。
+    if (!fields[2].empty()) continue;
+
+    BranchInfo info{};
+    info.is_current = !fields[0].empty() && fields[0].front() == '*';
+    if (!fields[1].empty()) info.upstream_short = std::string(fields[1]);
+    // ② 远程判据看完整 refname 前缀（不是“含 `/`”）。
+    constexpr std::string_view kRemotes = "refs/remotes/";
+    info.is_remote = fields[3].starts_with(kRemotes);
+    info.name = std::string(fields[4]);
     if (!info.name.empty()) branches.push_back(std::move(info));
   }
   return branches;
 }
 
-auto read_worktree_diff(const std::string& cwd, const std::string& path, bool staged)
-    -> std::string {
+auto read_branch_commits(const std::string& cwd, std::string_view ref, std::size_t limit)
+    -> std::vector<std::string> {
+  std::vector<std::string> hashes;
+  if (ref.empty()) return hashes;
+  // `--not --all` 不用：要的就是“从该引用可达的全部”（含合并带来的支线）。
+  // `--topo-order` 与日志取数同序，方便外面直接做集合比对而不必再排。
+  const auto out = git(cwd, {"rev-list", "--topo-order", std::format("-{}", limit),
+                             std::string(ref)},
+                       nullptr);
+  if (!out.has_value()) return hashes;
+  for (std::string_view line : lines_of(*out)) {
+    if (!line.empty()) hashes.emplace_back(line);
+  }
+  return hashes;
+}
+
+auto read_worktree_diff(const std::string& cwd, const std::string& path, bool staged)    -> std::string {
   const auto out = staged ? git(cwd, {"diff", "--no-color", "--cached", "--", path})
                           : git(cwd, {"diff", "--no-color", "--", path});
   return out.has_value() ? *out : std::string();

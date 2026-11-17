@@ -118,6 +118,25 @@ struct DirEntry {
 /// 递归复制目录树（目标不存在则创建）。
 [[nodiscard]] auto copy_tree(std::string_view from, std::string_view to) -> Status;
 
+/// **打开 stdio 文件的唯一正确入口**（UTF-8 路径在 Windows 上也能用）。
+///
+/// ## 为何不能用 `std::fopen(path.c_str(), mode)`
+///
+/// `fopen` 收 `char*`：Windows 上它按**本地 ANSI 代码页**（如 GBK）解释字节串，
+/// 而本框架对外一律用 **UTF-8** 表示路径（见源文件 `to_path` 的长注释）。
+/// 两者不一致时，**含中文/中文标点的目录打不开任何文件**，而错误信息只说
+/// “open failed”——完全看不出是编码。
+///
+/// 实测（本机，路径含中文与全角逗号）：`create_directories`（走 `std::filesystem`，
+/// 已是宽字符）成功，而 `write_bytes`/`read_bytes`/`read_span`（内部曾用 `fopen`）
+/// **全部失败**；换 `_wfopen` 后全部正常。
+///
+/// 真实后果：桌面端把 `gebai-desktop.exe` 放进带中文标点的目录后，读不到自身尾部
+/// payload，报“没有 payload”——而开发机（全 ASCII 路径）永远复现不出来。
+///
+/// 返回 `nullptr` = 打开失败（errno 已置）。
+[[nodiscard]] auto open_file(std::string_view path, const char* mode) -> std::FILE*;
+
 [[nodiscard]] auto current_dir() -> Result<std::string>;
 [[nodiscard]] auto temp_dir() -> std::string;
 [[nodiscard]] auto home_dir() -> std::string;

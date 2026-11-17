@@ -246,6 +246,21 @@ class WebViewHost {
   /// 销毁页面对象（幂等；未创建时为空操作）。
   virtual void webview_destroy() {}
 
+  /// 页面**首帧之前的底色**（不透明；`0xAARRGGBB`）。
+  ///
+  /// ## 为何需要这一条（真缺陷，不是美化）
+  ///
+  /// WebView2 的 `DefaultBackgroundColor` 缺省是**透明（ARGB=0）**。平时看不出来：
+  /// 窗口是非分层（GDI `blit`）时，页面区域显示的是我们的画布——而组件
+  /// `paint_content` 在未就绪时已经画了占位底色。但**分层窗口（WS_EX_LAYERED）**下
+  /// 逐像素 alpha 直接上屏，网页那半边的像素**不进我们的画布**（平台合成器画），
+  /// 于是那块区域的 alpha 完全由页面决定：首帧之前没有任何不透明像素 → 透出窗口背后。
+  /// 现象：自绘标题栏不透明、内容区透明（像一个被挖了洞的框）。
+  ///
+  /// 启动期小窗（`splash_card_window`）就会开分层位，所以这条必定被触发。
+  /// 实现侧应在页面创建时就把它设上（不是等导航完——那时已经透了一会儿）。
+  virtual void webview_set_background([[maybe_unused]] std::uint32_t argb) {}
+
   /// 布局变了：挪到 `bounds`，并且**只显示 `clip` 这一块有交集的部分**。
   ///
   /// 语义与 `Backend::sync_child_view` **逐字一致**（同一个"平台子窗口不吃 UI 裁剪栈"

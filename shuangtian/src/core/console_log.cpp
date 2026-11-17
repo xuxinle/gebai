@@ -42,7 +42,8 @@ auto open(std::string_view path) -> bool {
     }
     // "wb" 而不是 "ab"：每次运行写**自己的**日志文件（文件名带时间戳），
     // 追加语义会把上一次的输出混进来，事后无法判断哪一段属于本次。
-    state.handle = std::fopen(state.file_path.c_str(), "wb");
+    // 走 `fs::open_file`：`std::fopen` 在 Windows 上搞不定含中文的安装目录。
+    state.handle = fs::open_file(state.file_path, "wb");
     if (state.handle == nullptr) {
       std::fprintf(stderr, "[st] 控制台镜像打不开（只写终端）：%s\n", state.file_path.c_str());
       state.file_path.clear();

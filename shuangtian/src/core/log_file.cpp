@@ -86,7 +86,8 @@ void write_line(const std::string& line) {
   file.written += length;
   if (file.max_bytes > 0 && file.written >= file.max_bytes) {
     rotate();
-    file.handle = std::fopen(file.path.c_str(), "wb");
+    // 走 `fs::open_file`：`std::fopen` 在 Windows 上搞不定含中文的日志目录。
+    file.handle = fs::open_file(file.path, "wb");
     file.written = 0;
   }
 }
@@ -122,7 +123,7 @@ auto open_file(const FileOptions& options) -> bool {
     if (const std::size_t slash = file.path.find_last_of("/\\"); slash != std::string::npos) {
       (void)fs::create_directories(file.path.substr(0, slash));
     }
-    file.handle = std::fopen(file.path.c_str(), "ab");
+    file.handle = fs::open_file(file.path, "ab");
     if (file.handle == nullptr) {
       std::fprintf(stderr, "[st-log] 日志文件打不开（只写 stderr）：%s\n", file.path.c_str());
       file.path.clear();

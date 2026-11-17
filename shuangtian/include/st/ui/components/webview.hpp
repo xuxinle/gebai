@@ -222,6 +222,12 @@ class WebView : public Element {
   math::Rect last_synced_{};
   math::Rect last_clip_{};
   math::Color placeholder_fill_{0, 0, 0, 0};
+  /// 当前主题给页面设的底色（`0xAARRGGBB`）与是否已拿到。
+  ///
+  /// 为何要存：建页（`ensure_page`）可能晚于 `apply_theme`，而底色必须在**建页前**
+  /// 就交给宿主（WebView2 的默认背景是透明的，见 `webview_set_background`）。
+  std::uint32_t theme_argb_{0xFFFFFFFFU};
+  bool has_theme_fill_{false};
 };
 
 }  // namespace st::ui

@@ -164,7 +164,7 @@ void Table::paint_node_edge_graph(raster::Surface& canvas, const Palette& colors
     return box.y + box.height * 0.5f;
   };
   // 纵向裁剪边界：表体上下缘（滚动时线被裁到边界，而不是画进表头/表尾外面）。
-  const float clip_top = bounds_.y + kHeaderHeight;
+  const float clip_top = bounds_.y + header_height();
   const float clip_bottom = bounds_.bottom();
 
   // ── 第一遍：边 ──
@@ -302,7 +302,7 @@ auto Table::max_scroll_y() const noexcept -> float {
   // 于是纵向滚轮让给外层（见 `on_event`），保持旧行为。
   if (bounds_.is_empty() || row_height_ <= 0.0f) return 0.0f;
   const float content = content_height();
-  const float viewport = std::max(0.0f, bounds_.height - kHeaderHeight);
+  const float viewport = std::max(0.0f, bounds_.height - header_height());
   return std::max(0.0f, content - viewport);
 }
 
@@ -310,7 +310,7 @@ auto Table::viewport_row_count() const noexcept -> std::size_t {
   if (bounds_.is_empty() || row_height_ <= 0.0f) return 0U;
   // 底部有横向滚动条时把它扣掉，否则最后一行的下半截会被指示条遮住。
   const float bar = max_scroll() > 0.0f ? kScrollBarHeight + 2.0f : 0.0f;
-  const float body = std::max(0.0f, bounds_.height - kHeaderHeight - bar);
+  const float body = std::max(0.0f, bounds_.height - header_height() - bar);
   // 按**实际行高**逐行数（行高可能逐行不同，不能除）；只数到装不下为止。
   float used = 0.0f;
   std::size_t count = 0;
@@ -543,6 +543,9 @@ auto Table::column_x(std::size_t column) const noexcept -> float {
 }
 
 auto Table::header_rect() const noexcept -> math::Rect {
+  // 表头关掉时返**空矩形**（不是“高 0 的矩形”）：调用方与自动化都在用它判
+  // “表头在不在”，而高 0 的矩形在多数判据里仍算“存在”。
+  if (!show_header_) return {};
   return math::Rect{bounds_.x, bounds_.y, bounds_.width, kHeaderHeight};
 }
 
@@ -556,7 +559,7 @@ auto Table::visible_row_count() const noexcept -> std::size_t {
   if (last_visible_last_ > last_visible_first_) return last_visible_last_ - last_visible_first_;
   // 从未绘制过（或空行集）：按 bounds 估（只在 bounds 恰为视口时准确）。
   if (bounds_.is_empty() || row_height_ <= 0.0f) return rows_.empty() ? 1U : rows_.size();
-  const float body = std::max(0.0F, bounds_.height - kHeaderHeight);
+  const float body = std::max(0.0F, bounds_.height - header_height());
   const auto count = static_cast<std::size_t>(std::max(1.0F, body / row_height_));
   return std::max<std::size_t>(1U, count);
 }
@@ -567,7 +570,7 @@ auto Table::row_rect(std::size_t row) const noexcept -> math::Rect {
   ensure_row_offsets();
   const float top = row < row_offsets_.size() ? row_offsets_[row]
                                              : row_height_ * static_cast<float>(row);
-  return math::Rect{bounds_.x, bounds_.y + kHeaderHeight + top - scroll_offset_y_,
+  return math::Rect{bounds_.x, bounds_.y + header_height() + top - scroll_offset_y_,
                     bounds_.width, row_height_at(row)};
 }
 
@@ -577,7 +580,15 @@ auto Table::cell_rect(std::size_t row, std::size_t column) const noexcept -> mat
 }
 
 auto Table::header_cell_rect(std::size_t column) const noexcept -> math::Rect {
+  if (!show_header_) return {};
   return math::Rect{column_x(column), bounds_.y, column_width(column), kHeaderHeight};
+}
+
+void Table::set_show_header(bool show) {
+  if (show_header_ == show) return;
+  show_header_ = show;
+  // **布局脏**（不是只重绘）：表头占高变了，行区起点、可见行数、滚动量全要重算。
+  mark_layout_dirty();
 }
 
 void Table::measure(const RenderContext& context, const Constraints& constraints) {
@@ -596,7 +607,7 @@ void Table::measure(const RenderContext& context, const Constraints& constraints
   width = std::clamp(width, style_.min_width, style_.max_width);
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
 
-  float height = kHeaderHeight + row_height_ * static_cast<float>(rows_.size());
+  float height = header_height() + row_height_ * static_cast<float>(rows_.size());
   if (style_.has_explicit_height()) height = style_.height;
   height = std::clamp(height, style_.min_height, style_.max_height);
   if (constraints.max_height < kUnbounded) height = std::min(height, constraints.max_height);
@@ -618,7 +629,7 @@ void Table::arrange(const RenderContext& context, math::Rect rect) {
 
 auto Table::row_at(math::Point point) const noexcept -> std::size_t {
   if (!bounds_.contains(point) || row_height_ <= 0.0f) return kNoRow;
-  const float top = bounds_.y + kHeaderHeight - scroll_offset_y_;
+  const float top = bounds_.y + header_height() - scroll_offset_y_;
   if (point.y < top) return kNoRow;
   // 行高逐行可异 ⇒ 用前缀和二分（不能除行高）。
   ensure_row_offsets();
@@ -686,12 +697,15 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
 
   canvas.push_clip_rect(bounds_);
 
+  // 行区裁剪（表头之下、底边之上）：单元格底/文字/连线图三段共用。
+  const math::Rect body_clip{bounds_.x, bounds_.y + header_height(), bounds_.width,
+                             std::max(0.0f, bounds_.height - header_height())};
 
   // **逐行视口剔除**（见 `visible_row_range` 的说明）：只画可见那几行——
   // 1000 行的表格在 400px 视口里是 12 行而不是 1000 行。
   // 旧代码靠 `if (row.y >= bounds_.bottom()) break;`——而 ScrollView 给子元素的是
   // **内容全高**，那个 break 在滚动中永不触发（实测 178× 差距）。
-  const auto [first_row, last_row] = visible_row_range(*this, &canvas, row_height_, kHeaderHeight);
+  const auto [first_row, last_row] = visible_row_range(*this, &canvas, row_height_, header_height());
   last_visible_first_ = first_row;
   last_visible_last_ = last_row;
   // 横向列区间：横向滚动时同样只需画交叠的那几列（`column_x` 已是滚动后坐标）。
@@ -714,20 +728,32 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
     }
   }
 
-  // 表头（顶部圆角）与底部分隔线。
+  // —— 表头（必须在行区裁剪**之外**画） ——
   //
-  // ⚠ 表头必须画在**数据区裁剪之外**：它固定在顶部不随纵向滚动，而行矩形已减纵向偏移
-  // （滚到中间时第一行会落到表头高度以内）。不 `pop_clip` 就会被 body_clip 切掉一半。
-  canvas.pop_clip();   // body_clip
+  // 表头固定在顶部、不随纵向滚动，而行矩形已减纵向偏移：滚到中间时首行会落到
+  // 表头高度以内。不弹裁剪就会把表头切掉一半。
+  // 先弹掉 `bounds_`，给表头一个干净的面，画完立即重新压回——**下面所有行内容
+  // （文字、连线图）都必须在行区裁剪内**。
+  canvas.pop_clip();   // bounds_
   const math::Rect header = header_rect();
   if (header.height > 0.0f) {
     fill_round_rect(canvas, header, metrics.radius_md, metrics.radius_md, 0.0f, 0.0f,
                     raster::Paint::solid(colors.surface_alt));
     fill_round_rect(canvas,
-                    math::Rect{bounds_.x, bounds_.y + kHeaderHeight - metrics.border_width,
+                    math::Rect{bounds_.x, bounds_.y + header_height() - metrics.border_width,
                                bounds_.width, metrics.border_width},
                     0.0f, colors.border);
   }
+
+  // 行区裁剪：**单元格底 / 单元格文字 / 行首连线图三段共用**。
+  //
+  // ⚠ 这层不能省。踩过的坑：表头弹裁剪后直接画单元格文字，则文字只受最外层
+  // `bounds_` 约束——有表头时看着没错（文字落在表头下方），可**一旦关掉表头**，
+  // 向上滚动时首行就画到 `bounds_.y` 之上（压在面板工具栏上）。而行的**底色**
+  // 一直是受裁的（它在 body_clip 内画），于是只有文字越界，看上去像“字飘出去了”，
+  // 比整行越界更难归因。
+  canvas.push_clip_rect(bounds_);
+  canvas.push_clip_rect(body_clip);
 
   // 单元格文本（选中行文本用主色，与选中底同语义）。
   for (std::size_t row = first_row; row < last_row; ++row) {
@@ -763,7 +789,9 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   // 无覆盖时仍是 font_xs）：覆盖盖的是整体字号档位，表头略小的层级关系保留。
   const float header_font =
       style_.font_size * (metrics.font_xs / metrics.font_base);
-  for (std::size_t column = 0; column < columns_.size(); ++column) {
+  // 表头关掉时整段跳过（`header_cell_rect` 会返空矩形，但空矩形仍会走到
+  // `draw_cell_text` 里白算一次度量——直接短路更干净）。
+  for (std::size_t column = 0; show_header_ && column < columns_.size(); ++column) {
     const math::Rect box = header_cell_rect(column);
     if (box.right() <= clip_left || box.x >= clip_right) continue;
     draw_cell_text(context, canvas, columns_[column].name, box, kCellPadding,
@@ -777,22 +805,16 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   // 为何进框架：泳道是**行属性**，它要和行高/纵向偏移/裁剪同一套几何算；
   // 应用自己画得不到 `row_rect` 的内部知识（现在屏幕上第几像素）。
   //
-  // ⚠ **必须重新压上 body 裁剪**：这里已经走到了表头绘制之后，而表头那一步
-  // 为了不被 body 裁掉半边 `pop_clip` 过（表头固定在顶部、不随纵向滚动）。
-  // 于是本段若直接画，就会画进表头区域——实测：滚到中间时顶部那根黄线
-  // （上一行的道）直接穿进表头，看着像“线从表头里长出来”。
-  const math::Rect body_clip{bounds_.x, bounds_.y + kHeaderHeight, bounds_.width,
-                             std::max(0.0f, bounds_.height - kHeaderHeight)};
-  canvas.push_clip_rect(body_clip);
-
+  // ⚠ 仍在**行区裁剪内**（它已在上面压入）：滚到中间时顶部那根线若不裁，
+  // 就会直接穿进表头，看着像“线从表头里长出来”。
   paint_node_edge_graph(canvas, colors, first_row, last_row, clip_left, clip_right);
 
-  // 泳道图单独压的裁剪到此为止（见本段开头的说明）。
-  canvas.pop_clip();   // body_clip（泳道段）
+  // 行区裁剪（文字 + 连线图）到此为止。
+  canvas.pop_clip();   // body_clip
 
   // 横向滚动指示（内容超出容器时）。
   const float limit = max_scroll();
-  if (limit > 0.0f && bounds_.height > kHeaderHeight + kScrollBarHeight * 3.0f) {
+  if (limit > 0.0f && bounds_.height > header_height() + kScrollBarHeight * 3.0f) {
     const float ratio = std::clamp(bounds_.width / total_width_, 0.0f, 1.0f);
     const float thumb = std::max(24.0f, bounds_.width * ratio);
     const float travel = bounds_.width - thumb;
@@ -808,13 +830,13 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   const float limit_y = max_scroll_y();
   if (limit_y > 0.0f && bounds_.width > 24.0f) {
     const float content = row_height_ * static_cast<float>(rows_.size());
-    const float viewport = std::max(1.0f, bounds_.height - kHeaderHeight);
+    const float viewport = std::max(1.0f, bounds_.height - header_height());
     const float ratio = std::clamp(viewport / std::max(content, 1.0f), 0.0f, 1.0f);
     const float thumb = std::max(24.0f, viewport * ratio);
     const float travel = std::max(0.0f, viewport - thumb);
     const float progress = scroll_offset_y_ / limit_y;
     const math::Rect bar{bounds_.right() - kScrollBarHeight - 2.0f,
-                         bounds_.y + kHeaderHeight + travel * progress, kScrollBarHeight, thumb};
+                         bounds_.y + header_height() + travel * progress, kScrollBarHeight, thumb};
     fill_round_rect(canvas, bar, kScrollBarHeight * 0.5f, colors.border_strong);
   }
 
@@ -954,6 +976,8 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "lane_inset") return std::format("{}", lane_inset());
   if (name == "row_height") return std::format("{}", row_height_);
   if (name == "zebra") return std::string(zebra_ ? kFlagTrue : "false");
+  // 表头显隐（可读可写）：自动化验“日志表有没有列头”靠它。
+  if (name == "show_header") return std::string(show_header_ ? kFlagTrue : "false");
   if (name == "scroll") return std::format("{}", scroll_offset_);
   if (name == "max_scroll") return std::format("{}", max_scroll());
   if (name == "scroll_y") return std::format("{}", scroll_offset_y_);
@@ -1005,6 +1029,12 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
     set_zebra(*parsed);
     return true;
   }
+  if (name == "show_header") {
+    const auto parsed = st::parse_bool(value);
+    if (!parsed.has_value()) return false;
+    set_show_header(*parsed);
+    return true;
+  }
   if (name == "scroll") {
     const auto parsed = st::parse_f64(value);
     if (!parsed.has_value()) return false;
@@ -1032,9 +1062,9 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
 }
 
 auto Table::property_names() const -> std::vector<std::string_view> {
-  return Element::with_universal({"columns", "rows", "row_height", "zebra", "scroll", "max_scroll",
-                                  "scroll_y", "max_scroll_y", "selected_row", "value",
-                                  "first_visible", "visible_rows"});
+  return Element::with_universal({"columns", "rows", "row_height", "zebra", "show_header",
+                                  "scroll", "max_scroll", "scroll_y", "max_scroll_y",
+                                  "selected_row", "value", "first_visible", "visible_rows"});
 }
 
 /// 只读属性（不进 `property_names()`：那张表是“可读写”契约，`get` 在两处都查）。

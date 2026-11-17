@@ -46,9 +46,15 @@ describe("Sandbox 豁免用户（auth=none 默认用户不受用户沙箱控制�
     const sb = new Sandbox({ home, enabled: true, isExempt: (u) => u === "default" })
     try {
       // 豁免用户（默认用户）：绝对路径直接使用、../ 可越界（相对路径基准 = 会话 tmp/，../ 越界到会话根）
-      // （Windows 下 resolve("/etc/passwd") 为盘符根路径，断言与解析器同口径）
-      expect(sb.resolvePath("default", sid, "/etc/passwd")).toBe(resolve("/etc/passwd"))
-      expect(sb.resolvePath("default", sid, "../secret")).toBe(resolve(join(sessionPath(home, "default", sid), "tmp"), "../secret"))
+      //
+      // ⚠ **期望值必须与被测代码同源推导**（这里都用会话 `tmp/` 作 base），不能写 `resolve("/etc/passwd")`：
+      // 那个调用以 `process.cwd()` 为 base——而 Windows 下“带根无盘符”的路径（`/etc/passwd`）
+      // 会**取 base 的盘符**。测试里 `home` 来自 `tmpdir()`（通常在 C:），而 cwd 可能在 D:
+      //（本仓工作区就常常如此），两个盘符一不符就红，而缺陷根本不在被测代码。
+      // 实测：断言用 cwd 时得到 `D:\etc\passwd`，实现算出 `C:\etc\passwd`——差的是一个盘符，不是行为。
+      const sessionTmp = join(sessionPath(home, "default", sid), "tmp")
+      expect(sb.resolvePath("default", sid, "/etc/passwd")).toBe(resolve(sessionTmp, "/etc/passwd"))
+      expect(sb.resolvePath("default", sid, "../secret")).toBe(resolve(sessionTmp, "../secret"))
       // 其余用户（含多用户模式同名 default 之外的用户）：沙箱拒绝
       expect(() => sb.resolvePath("alice", sid, "/etc/passwd")).toThrow()
       expect(() => sb.resolvePath("alice", sid, "../secret")).toThrow()

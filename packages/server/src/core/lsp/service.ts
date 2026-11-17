@@ -141,7 +141,8 @@ export function withDocumentUri(method: string, params: unknown, docId: string):
 
 export class LspService {
   private opts: LspServiceOptions
-  private reg: LspRegistry
+  /** 探测结果（**惰性**：首次用到时才掃 PATH，见 `registry()`）。 */
+  private reg: LspRegistry | null = null
   private sessions = new Map<string, PooledSession>()
   private docs = new Map<string, DocRef>()
   private subscribers = new Map<object, { user: string; sink: (evt: LspPush) => void }>()
@@ -155,17 +156,36 @@ export class LspService {
     this.now = opts.now ?? Date.now
     this.idleMs = opts.idleMs ?? LSP_IDLE_MS
     this.maxSessions = opts.maxSessions ?? LSP_MAX_SESSIONS
-    this.reg = resolveRegistry({ overrides: opts.overrides, which: opts.which })
+  }
+
+  /**
+   * 探测可用语言服务器（**惰性**，首次真正需要时才做）。
+   *
+   * ## 为何不能放在构造函数里（实测代价）
+   *
+   * `resolveRegistry` 要对着 PATH 里每个目录 × 每个扩展名做 `statSync` 探测，
+   * 而 `DEFAULT_SERVER_DEFS` 有 17 个候选命令。本机实测：**1484ms**（Windows，
+   * PATH 条目多且部分在网络/重定向点）。它曾经在 `composeServer` 里随服务装配
+   * 同步跑，于是这 1.5 秒完全落在用户看到的“启动中”里——而 LSP 是**文件工作台
+   * 按需打开某文件时**才需要的能力，启动时没人用得到它。
+   *
+   * 惰性化不改变任何可观察语义：`servers()` / `open()` 仍然拿得到同一份登记表，
+   * 只是把探测推到第一次真问的时候。前端拉 `/api/v1/lsp/servers` 才会触发它。
+   */
+  private registry(): LspRegistry {
+    this.reg ??= resolveRegistry({ overrides: this.opts.overrides, which: this.opts.which })
+    return this.reg
   }
 
   /** 可用服务器清单（REST/前端启动时拉取）。 */
   servers(): { enabled: boolean; servers: LspServerPick[]; missing: LspMissing[]; errors: string[] } {
-    return { enabled: true, servers: this.reg.picks, missing: this.reg.missing, errors: this.reg.errors }
+    const reg = this.registry()
+    return { enabled: true, servers: reg.picks, missing: reg.missing, errors: reg.errors }
   }
 
   /** 语言 → 可用服务器（无则 undefined：调用方静默降级）。 */
   serverFor(language: string): LspServerPick | undefined {
-    return serverForLanguage(this.reg, language)
+    return serverForLanguage(this.registry(), language)
   }
 
   /**

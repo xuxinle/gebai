@@ -1,24 +1,35 @@
 /**
- * 构建期内置环境变量默认值（`src/core/env-embedded.generated.ts`）。
+ * 构建期内置环境变量默认值（`src/core/session/env-embedded.generated.ts`）。
  *
- * 构建期指定（环境变量）：
- * - `GEBAI_BUILD_EMBED_ENV=1`：从仓库根 `.env`（+ 进程环境变量）收集 GEBAI_LLM_ 与 GEBAI_VISION_ 前缀
- *   的**模型配置**，烘焙为启动默认值——发行裁剪构建产出「开箱即用」
- *   二进制：接收方无需配置模型即可使用；运行时同名环境变量与前端/任务级 env 仍可覆盖内置默认。
- * - 缺省（未设置）：写空对象（还原态）。
+ * ## 口径：**只烘焙显式指定的变量名**（`GEBAI_BUILD_EMBED_ENV`）
  *
- * 消费方：`src/boot/compose.ts` 静态导入（`applyEmbeddedEnvDefaults` 填充进程环境未设置的键）。
+ * 旧口径是“按前缀扫”（`GEBAI_LLM_` / `GEBAI_VISION_`），它有两个真问题：
  *
- * 文件策略与 tools-excluded.generated.ts 一致：**提交默认空对象入库**（缺省态无密钥，compose.ts 静态
- * 导入依赖其存在——不入库会让新克隆环境 `bun run dev` 直接 Cannot find module）。因此
- * **本文件不得写入 .gitignore**（历史踩坑：仓库瘦身时被误随二进制内嵌产物 *.embedded.generated.json
- * 一并移出跟踪，新环境启动即报错）。内置构建后为**脏态（含密钥明文）属预期，绝不提交**——
- * `packages/server` 的 build 链编译完自动调用 `--restore` 还原；手动构建（`GEBAI_BUILD_EMBED_ENV=1
- * bun run scripts/build-env-embed.ts`）后须立即重跑 `bun run scripts/build-env-embed.ts --restore`。
- * 入口自愈：`dev`/`typecheck`/`build` 前置调用本脚本（缺省空态 + write-if-changed 幂等）。
+ * 1. **漏**：列表模式 `GEBAI_LLM_MODELS` 是前缀匹配的，但真正内嵌密钥的是它里面的
+ *    JSON 串——而那个键本身并不在“模型名”这类白名单里（靠前缀才被带进来）；
+ * 2. **过**：凡是带有该前缀的变量都会被烘进去，包括别人为临时调试而导出的值；
+ *    而“前缀”这个口径无法回答“到底烘了哪几个”——审查时只能逐个 `grep`。
  *
- * 安全注意：内置值随二进制分发，**可被持有二进制者提取**（明文打进产物）——仅适用于受信任小范围
- * 分发，建议使用低额度专用 Key；打印仅输出变量名，绝不输出值。
+ * 现在的口径：`GEBAI_BUILD_EMBED_ENV` 的值就是**逗号分隔的变量名白名单**
+ * （不再用 `=1` 开关 + 前缀猜测）：
+ *
+ * ```bash
+ * GEBAI_BUILD_EMBED_ENV="GEBAI_LLM_API_BASE,GEBAI_LLM_API_KEY,GEBAI_LLM_MODEL" \
+ *   bun run scripts/build-env-embed.ts
+ * ```
+ *
+ * 于是“烘了哪些”在命令行本身就能看全，无隐式行为；名单里的键在 `.env` 与进程环境
+ * 里都找不到时**告警但不阻断**（发行构建只缺一项密钥不应当把构建搞死）。
+ *
+ * ## 其它约定（不变）
+ *
+ * - 缺省/`--restore`：写空对象（还原态）。
+ * - 消费方：`src/boot/compose.ts` 静态导入（`applyEmbeddedEnvDefaults` 仅填进程环境
+ *   未设置的键——运行时同名环境变量与前端/任务级 env 仍可覆盖内置默认）。
+ * - 文件**必须入库**（空态）：`compose.ts` 静态导入依赖它存在。烘焙态含密钥明文，
+ *   `packages/server` 的 build 链编译完自动 `--restore`；手动烘焙后必须自己还原。
+ * - 安全：内置值随二进制分发，**可被持有二进制者提取**（明文），仅适用于受信任小范围
+ *   分发，建议用低额度专用 Key；打印只输出变量名，绝不输出值。
  */
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
@@ -29,19 +40,37 @@ const repoRoot = join(serverRoot, "..", "..")
 const outFile = join(serverRoot, "src", "core", "session", "env-embedded.generated.ts")
 const envFile = join(repoRoot, ".env")
 
-/** 内置范围：仅模型配置前缀（GEBAI_LLM_ 与 GEBAI_VISION_ 前缀），不内置端口/沙箱/项目路径等部署配置。 */
-const EMBED_PREFIXES = ["GEBAI_LLM_", "GEBAI_VISION_"]
-
 const collect: Record<string, string> = {}
 
-/** `--restore`：强制还原空态（无视 `GEBAI_BUILD_EMBED_ENV`）。构建链在 `bun build` 完成后立即调用，
+/** `--restore`：强制还原空态（无视烘焙名单）。构建链在 `bun build` 完成后立即调用，
  *  兑现「密钥只进二进制、不进工作区/版本控制」的契约（见文件头注释）。 */
 const restore = process.argv.includes("--restore")
-/** 是否处于「烘焙内置默认值」模式。 */
-const bakeMode = process.env.GEBAI_BUILD_EMBED_ENV === "1" && !restore
+
+/** 烘焙名单：环境变量的值就是逗号分隔的**变量名**（`1`/`true` 这类开关值会被当作非法名单拒绝）。 */
+const bakeList = (process.env.GEBAI_BUILD_EMBED_ENV ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+const bakeMode = bakeList.length > 0 && !restore
+if (!restore && !bakeMode && process.env.GEBAI_BUILD_EMBED_ENV) {
+  console.error(
+    `[build-env-embed] GEBAI_BUILD_EMBED_ENV 必须是**逗号分隔的变量名**（如 "GEBAI_LLM_MODEL,GEBAI_LLM_API_KEY"），而不是开关值。\n` +
+      `  实得：${JSON.stringify(process.env.GEBAI_BUILD_EMBED_ENV)}`,
+  )
+  process.exit(1)
+}
+
+/** 变量名合法性：只接受 shell 风格标识符（防拼写错误变成静默忽略）。 */
+const validName = (name: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
 
 if (bakeMode) {
+  const illegal = bakeList.filter((n) => !validName(n))
+  if (illegal.length) {
+    console.error(`[build-env-embed] 名单里有非法变量名: ${illegal.join(", ")}`)
+    process.exit(1)
+  }
   // 仓库根 .env 显式解析（Bun 亦会自动加载，显式解析保证确定性）
+  const fromFile: Record<string, string> = {}
   if (existsSync(envFile)) {
     for (const raw of readFileSync(envFile, "utf8").split(/\r?\n/)) {
       const line = raw.trim()
@@ -54,23 +83,34 @@ if (bakeMode) {
       if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
         value = value.slice(1, -1)
       }
-      if (value) collect[key] = value
+      if (value) fromFile[key] = value
     }
   }
-  // 进程环境变量并入（Bun 自动加载的 .env 与系统注入同源；显式环境优先于文件解析）
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v) collect[k] = v
+  // 逐个按名单取值：进程环境优先（显式导出 > .env 文件），两者都没有则告警
+  const missing: string[] = []
+  for (const name of bakeList) {
+    const value = process.env[name] ?? fromFile[name]
+    if (value) {
+      collect[name] = value
+    } else {
+      missing.push(name)
+    }
+  }
+  if (missing.length) {
+    // 不阻断：发行构建缺一项非关键变量不应把构建搞死，但必须说清楚缺什么
+    console.warn(`[build-env-embed] 名单中这些变量在 .env 与进程环境里都不存在（已跳过）: ${missing.join(", ")}`)
   }
 }
 
 const embedded: Record<string, string> = {}
-for (const [k, v] of Object.entries(collect)) {
-  if (EMBED_PREFIXES.some((p) => k.startsWith(p)) && v) embedded[k] = v
+for (const name of bakeList) {
+  const value = collect[name]
+  if (value) embedded[name] = value
 }
 
 const lines = [
   "// AUTO-GENERATED by scripts/build-env-embed.ts — do not edit.",
-  "// 构建期内置环境变量默认值（GEBAI_BUILD_EMBED_ENV=1 时从 .env 烘焙 GEBAI_LLM_ 与 GEBAI_VISION_ 前缀模型配置）。",
+  "// 构建期内置环境变量默认值（GEBAI_BUILD_EMBED_ENV = 逗号分隔的变量名白名单）。",
   "// 仅作启动默认（运行时环境变量与前端/任务级 env 优先）；**非空态含密钥明文，绝不提交**。",
   `export const EMBEDDED_ENV_DEFAULTS: Record<string, string> = ${JSON.stringify(embedded)}`,
   "",
@@ -78,7 +118,7 @@ const lines = [
 const content = lines.join("\n")
 const wrote = writeFileIfChanged(outFile, content)
 console.log(
-  `[build-env-embed] ${bakeMode ? `内置 ${Object.keys(embedded).length} 项模型配置: ${Object.keys(embedded).sort().join(", ") || "无（.env 无匹配前缀变量）"}` : "空态（还原）"} -> ${outFile}${wrote ? "" : "（内容未变，跳过写入）"}`,
+  `[build-env-embed] ${bakeMode ? `内置 ${Object.keys(embedded).length}/${bakeList.length} 项（名单）: ${Object.keys(embedded).sort().join(", ") || "无"}` : "空态（还原）"} -> ${outFile}${wrote ? "" : "（内容未变，跳过写入）"}`,
 )
 if (bakeMode && Object.keys(embedded).length) {
   // 该文件**在版本控制中**（空态入库，compose.ts 静态导入）：烘焙态含密钥明文，编译完必须还原

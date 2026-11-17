@@ -512,6 +512,7 @@ class Win32WebView final : public WebViewHost {
   [[nodiscard]] auto webview_create(math::Rect bounds) -> Status override;
   void webview_destroy() override;
   void webview_sync(math::Rect bounds, math::Rect clip) override;
+  void webview_set_background(std::uint32_t argb) override;
 
   [[nodiscard]] auto webview_navigate(std::string_view url) -> Status override;
   [[nodiscard]] auto webview_load_html(std::string_view html) -> Status override;
@@ -547,6 +548,8 @@ class Win32WebView final : public WebViewHost {
   void serve_request(ICoreWebView2WebResourceRequestedEventArgs* args);
   /// 下发目标 DPI（并记下它——导航后会被重置，见文件头第 1 条）。
   void apply_rasterization_scale();
+  /// 把 `background_argb_` 落到 controller（Controller2 不可用时静默无关）。
+  void apply_background_color();
   /// 泵消息直到 `done()` 为真或超时（COM 回调要走消息队列，不泵就永远等不到）。
   [[nodiscard]] auto pump_until(const std::function<bool()>& done, int timeout_ms) -> bool;
   /// 当前逻辑→物理换算（与 `NativeHost` 同一口径：乘 device scale）。
@@ -573,8 +576,16 @@ class Win32WebView final : public WebViewHost {
   Com<ICoreWebView2> webview_{};
   Com<ICoreWebView2Settings> settings_{};
   Com<ICoreWebView2Controller3> controller3_{};
+  Com<ICoreWebView2Controller2> controller2_{};
 
   bool creating_{false};   ///< 创建请求已发出、还没回调
+  /// Controller 的**默认背景色**（ARGB，`0xAARRGGBB`）。
+  ///
+  /// WebView2 缺省背景是**透明**（ARGB=0），而分层窗口下“网页那半边的 alpha
+  /// 由页面自己决定”——页面首帧之前那里是 alpha=0，会透出窗口背后的桌面
+  ///（现象：自绘标题栏不透明、内容区透明）。这里给一块不透明的底色。
+  /// 默认不透明白（`0xFFFFFFFF`）：不依赖主题装配顺序（页面可能先于主题生效建好）。
+  std::uint32_t background_argb_{0xFFFFFFFFU};
   bool ready_{false};      ///< 第一次导航成功完成过
   double zoom_{1.0};
   double target_scale_{1.0};
@@ -813,6 +824,30 @@ void Win32WebView::on_controller_ready() {
   controller_->put_Bounds(bounds);
   controller_->put_IsVisible(TRUE);
 
+  // ## 不透明底：WebView2 的 `DefaultBackgroundColor` **默认是透明**（ARGB=0）
+  //
+  // 这一条只在“窗口本身是分层（WS_EX_LAYERED）”时才咬人，而咬到的表现很难
+  // 从现象反推：启动期小窗为了“只露一张卡”会开分层位（见 `app.cpp` 启动卡段），
+  // 分层窗口的逐像素 alpha 由我们自己送——网页那半边的像素**不在我们的画布里**
+  //（平台合成器直接上屏），于是 WebView 区域的 alpha 完全由页面自己决定。
+  // 页面首帧出来之前那里没有任何不透明像素 → 整块 alpha=0 → 透出窗口背后的桌面：
+  // 用户看到的是“自绘标题栏不透明、内容区透明”，像一个被挖了洞的框。
+  //
+  // 修法是把 Controller 的默认背景色设成**不透明的主题底色**：页面没画之前那片区域
+  // 是这块颜色（与自绘的占位块同色，视觉上连成一片），页面一画就被盖住。
+  //
+  // 能力面在 `ICoreWebView2Controller2` 上（`ICoreWebView2Controller` 没有这个方法），
+  // 拿不到就如实记一笔：那时退化为旧行为（透明），而不是假装设成功了。
+  ICoreWebView2Controller2* controller2 = nullptr;
+  if (SUCCEEDED(controller_->QueryInterface(IID_ICoreWebView2Controller2,
+                                            reinterpret_cast<void**>(&controller2))) &&
+      controller2 != nullptr) {
+    controller2_ = Com<ICoreWebView2Controller2>(controller2);
+    apply_background_color();
+  } else {
+    ST_LOG_INFO("webview：Controller2 不可用——无法设置不透明底色（页面首帧前该区域会是透明的）");
+  }
+
   // DPI：`RasterizationScale` 在 `ICoreWebView2Controller3` 上（不是 1/2）。
   //
   // 拿到它就等于拿到"高 DPI 支持"；拿不到就如实记一笔——那样网页会按 1.0 栅格化，
@@ -900,6 +935,12 @@ void Win32WebView::on_controller_ready() {
             // 导航后 DPI 可能已被重置：补一次（这是实测缺陷的兜底，
             // 正常路径由 RasterizationScaleChanged 触发）。
             apply_rasterization_scale();
+            // ## 页面就绪 → 子窗口才显（见 `webview_sync` 里那段）
+            //
+            // `webview_sync` 在页面就绪前会把宿主子窗口 `SW_HIDE`（它的像素不参与
+            // 分层窗口合成，露着就是“窗口被挖了一个洞”）。而导航完成后**不会再有人**
+            // 调 `webview_sync`（布局没变）——不在这里补一次，页面就永远不显示。
+            sync_bounds_to_host();
             Event event;
             event.kind = Event::Kind::NavigationCompleted;
             event.outcome = success != 0 ? NavigationOutcome::Completed : NavigationOutcome::Failed;
@@ -976,6 +1017,23 @@ void Win32WebView::apply_rasterization_scale() {
   target_scale_ = target_rasterization_scale();
   if (!controller3_.valid()) return;
   controller3_->put_RasterizationScale(target_scale_);
+}
+
+void Win32WebView::apply_background_color() {
+  if (!controller2_.valid()) return;
+  // `put_DefaultBackgroundColor` 收的是 ARGB（0xAARRGGBB）。
+  // `a=0xFF` 才是“不透明”——漏掉 alpha 会得到**完全透明**，与不设无区别
+  //（这是一个真踩过的坑：只填 RGB、a 留 0，看着“设了”实际没变化）。
+  const std::uint32_t argb = background_argb_;
+  const COREWEBVIEW2_COLOR color{static_cast<BYTE>((argb >> 24) & 0xFFU),
+                                 static_cast<BYTE>((argb >> 16) & 0xFFU),
+                                 static_cast<BYTE>((argb >> 8) & 0xFFU),
+                                 static_cast<BYTE>(argb & 0xFFU)};
+  const HRESULT applied = controller2_->put_DefaultBackgroundColor(color);
+  if (FAILED(applied)) {
+    ST_LOG_INFO("webview：设置不透明底色失败（HRESULT=0x{:08X}）——页面首帧前该区域会是透明的",
+                static_cast<unsigned>(applied));
+  }
 }
 
 auto Win32WebView::apply_init_script(const std::string& script) -> HRESULT {
@@ -1060,6 +1118,30 @@ void Win32WebView::webview_sync(math::Rect bounds, math::Rect clip) {
   const int width = std::max(1, host_right - host_x);
   const int height = std::max(1, host_bottom - host_y);
   ::SetWindowPos(host_, HWND_TOP, host_x, host_y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+  // ## 页面就绪之前不显示子窗口（真缺陷的修法）
+  //
+  // WebView2 的子窗口是 **HWND**：它的像素由它自己画、**不经过我们的画布**。
+  // 窗口一开分层（`WS_EX_LAYERED`，启动期小窗为“只露卡”必需），子窗口的像素
+  // **不参与逐像素 alpha 合成**：它不是我们 `UpdateLayeredWindow` 送的那张图的一部分，
+  // 也不是分层窗口的内容——于是那块区域在合成结果里是 alpha=0，直接透出桌面。
+  //
+  // 实测（用户截图 + 逐秒采样）：自绘标题栏不透明、内容区透出背后的飞书，
+  // 窗口像被挖了个洞。**调 WebView2 的 `DefaultBackgroundColor` 没用**：
+  // 那只是页面自己的背景，子窗口不参与分层合成这件事与它无关。
+  //
+  // 正确修法：**页面首帧就绪之前，子窗口根本不显示**。那段时间自绘的占位块
+  // （`WebView::paint_content`）在画布上，属于我们的像素，分层窗口下也正确。
+  // 导航完成（`ready_`）后才显——那时页面已有不透明内容可画。
+  //
+  // 代价：首帧前看不到“白屏闪一下”，看到的是主题底色的占位块（反而是我们要的）。
+  const bool page_paints = ready_;
+  if (!page_paints) {
+    if (!hidden_by_clip_) {
+      hidden_by_clip_ = true;
+      ::ShowWindow(host_, SW_HIDE);
+    }
+    return;
+  }
   if (hidden_by_clip_) {
     hidden_by_clip_ = false;
     ::ShowWindow(host_, SW_SHOWNA);
@@ -1121,6 +1203,13 @@ auto Win32WebView::webview_state() const -> State {
 }
 
 auto Win32WebView::webview_native_handle() -> void* { return host_; }
+
+void Win32WebView::webview_set_background(std::uint32_t argb) {
+  // 强制不透明：上半字节不动（调用方可以传带 alpha 的值，但 WebView2 的默认底
+  // 就是“页面未画之前露出来的那一块”——让它半透明等于把缺陷重新引回来）。
+  background_argb_ = argb | 0xFF000000U;
+  apply_background_color();
+}
 
 }  // namespace st::shell::webview
 

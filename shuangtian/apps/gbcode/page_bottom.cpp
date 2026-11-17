@@ -6,6 +6,7 @@
 #include <format>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -173,11 +174,19 @@ namespace gbcode_ui {
                       [&] {
                         (void)custom_container<Panel>(
                             c, [&] { build_log_pane(c); },
-                            [](Panel& panel) { panel.set_id("git-log-panel"); },
+                            [](Panel& panel) {
+                              panel.set_id("git-log-panel");
+                              // 内边距：内容不贴面板边缘（标题/表格都退进来 8px）。
+                              // 不给就是“字贴着边框”，密集面板里很难读。
+                              panel.style().padding = st::math::Insets{8.0f, 8.0f, 8.0f, 8.0f};
+                            },
                             {.grow = true, .key = "git-log"});
                         (void)custom_container<Panel>(
                             c, [&] { build_commit_detail(c); },
-                            [](Panel& panel) { panel.set_id("git-detail-panel"); },
+                            [](Panel& panel) {
+                              panel.set_id("git-detail-panel");
+                              panel.style().padding = st::math::Insets{8.0f, 8.0f, 8.0f, 8.0f};
+                            },
                             {.grow = true, .key = "git-detail"});
                       },
                       [](SplitView& split) {
@@ -206,7 +215,7 @@ namespace gbcode_ui {
   /// 远程通常一条），固定同时显示会被最短的那个浪费掉全部高度。
   void CodeEditorPage::build_ref_sidebar(Composer& c) {
     build_git_tabs(c);
-    (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-refs-body"}, [&] {
+    (void)column(c, {.gap = 4.0f, .padding = 8.0f, .grow = true, .id = "git-refs-body"}, [&] {
       switch (git_tab_.value()) {
         case 1:
           (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-branches",
@@ -319,7 +328,34 @@ namespace gbcode_ui {
 
 
   /// 子视图 0：分支（本地/远程、切换、新建、删除）。
+  /// 分支面板（**IDEA 结构**：搜索框 + HEAD/本地/远程 三组可折叠树）。
+  ///
+  /// ## 为什么不再是一张平铺列表
+  ///
+  /// IDEA 的分支树回答的是三个不同问题，混在一张平铺表里全都答不好：
+  /// ① **我现在在哪**（HEAD 组，只有一条）；
+  /// ② **本地有哪些可切**（本地组）；
+  /// ③ **远端有哪些**（远程组，按 remote 再分一层）。
+  /// 平铺时 15 个分支 + 若干远程条目挤在一起，`origin/xxx` 与本地 `xxx` 只差前缀，
+  /// 扫一眼分不清「这个能切」还是「这是远端镜像」。
+  ///
+  /// ## 三个可折叠组为什么用 `State` 而不是 Tree 组件
+  ///
+  /// 组只有三层、条目是纯按钮（点击即切分支），用 `Tree` 要额外建一套 key/label/图标
+  /// 映射并绕开它的选中语义；这里用「`State<bool>` + 条件声明」更直白，而且
+  /// 折叠状态天然持久（`State` 跨帧存活），与左侧资源管理器的展开态同一手法。
   void CodeEditorPage::build_branches_pane(Composer& c) {
+    // —— 搜索框（IDEA 顶部「分支或标签」）——
+    //
+    // 过滤**本地名与远程短名**（不带 `origin/` 前缀）：用户脑子里想的是 "feature"，
+    // 不是 "origin/feature"。
+    (void)custom<Input>(c, [this](Input& input) {
+      input.set_id("git-branch-filter");
+      input.set_placeholder("分支或标签");
+      input.set_text(branch_filter_text_.value());
+      input.on_change = [this](std::string_view text) { branch_filter_text_.set(std::string(text)); };
+    }, {.height = 26.0f, .key = "git-branch-filter"});
+
     (void)row(c, {.gap = 4.0f, .id = "git-branches-actions"}, [&] {
       scm_icon_button(c, "branch-new", "plus", "新建分支", [this] {
         // 新建分支默认从 HEAD 起（IDEA 的 New Branch 同此）。
@@ -329,6 +365,7 @@ namespace gbcode_ui {
       (void)text(c, [this] { return git_.branch.empty() ? std::string{} : "当前：" + git_.branch; },
                  {.grow = true, .color = Tone::Muted, .id = "git-current-branch"});
     });
+
     (void)custom_container<ScrollView>(
         c,
         [&] {
@@ -336,22 +373,156 @@ namespace gbcode_ui {
             (void)text(c, [] { return std::string("（没有分支，或读取失败）"); });
             return;
           }
+          const std::string needle = std::string(st::trim(branch_filter_text_.value()));
+          /// 是否命中搜索词（对**短名**匹配，见本函数头注释）。
+          const auto matches = [&needle](std::string_view short_name) {
+            return needle.empty() || short_name.find(needle) != std::string_view::npos;
+          };
+
+          // 三组先分桶（一次遍历；顺序保持 git 给的顺序，不重排——那是用户的仓库顺序）。
+          std::vector<const gbcode::BranchInfo*> locals;
+          std::vector<const gbcode::BranchInfo*> remotes;
+          const gbcode::BranchInfo* head = nullptr;
           for (const auto& branch : git_branches_) {
-            (void)row(c, {.gap = 4.0f, .key = "branch:" + branch.name}, [&] {
-              (void)custom<Button>(c, [this, branch](Button& b) {
-                b.set_id("git-branch-" + branch.name);
-                b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
-b.set_label(std::format("{}{}{}", branch.is_current ? "● " : "  ", branch.name,
-                                        branch.is_remote ? "（远程）" : ""));
-                b.set_variant(branch.is_current ? Button::Variant::Soft : Button::Variant::Ghost);
-                b.set_size(Button::Size::Small);
-                b.on_click = [this, branch] { checkout_branch(branch); };
-              }, {.height = 24.0f, .grow = true});
-              if (!branch.is_current && !branch.is_remote) {
-                scm_icon_button(c, "delbranch-" + branch.name, "trash", "删除分支",
-                                [this, name = branch.name] { ask_delete_branch(name); });
+            const std::string_view short_name = gbcode::short_branch_name(branch);
+            if (!matches(short_name)) continue;
+            if (branch.is_current) head = &branch;
+            if (branch.is_remote) {
+              remotes.push_back(&branch);
+            } else {
+              locals.push_back(&branch);
+            }
+          }
+          const bool nothing = head == nullptr && locals.empty() && remotes.empty();
+          if (nothing) {
+            (void)text(c, [needle] {
+              return needle.empty() ? std::string("（没有分支）")
+                                    : std::format("没有匹配「{}」的分支", needle);
+            }, {.color = Tone::Muted, .id = "git-branch-empty"});
+            return;
+          }
+
+          // —— 组的公共构件 ——
+          //
+          // 一组的形态：`[▾/▸] [图标] 标题 (计数)` + 展开时的条目。
+          // 折叠箭头在左（IDEA 同位置），整行可点（点击目标远大于那个小三角）。
+          const auto group_header = [&](std::string_view key, std::string_view title,
+                                        std::size_t count, State<bool>& open,
+                                        std::string_view icon_name) {
+            (void)custom<Button>(c, [&open, key, title, count, icon_name](Button& button) {
+              button.set_id("git-group-" + std::string(key));
+              button.set_align(Button::Align::Start);
+              // 箭头 + 图标 + 标题 + 计数：全在一个 label 里（`Button` 只画一行）。
+              button.set_label(std::format("{} {}  {} ({})", open.value() ? "▾" : "▸",
+                                           icon_name, title, count));
+              button.set_variant(Button::Variant::Ghost);
+              button.set_size(Button::Size::Small);
+              button.on_click = [&open] { open.set(!open.value()); };
+            }, {.height = 24.0f, .grow = true, .key = "group:" + std::string(key)});
+          };
+
+          // —— ① HEAD（只有一条：当前分支）——
+          //
+          // IDEA 把它单列一组的原因：它是唯一“已经在用”的东西，点它应当是**查看**
+          // 而非切换。这里给 Soft 变体（与其余条目区分）+ 不可删除。
+          if (head != nullptr) {
+            group_header("head", "HEAD", 1, branch_head_open_, "●");
+            if (branch_head_open_.value()) {
+              // ⚠ key 与 id 都带 **`head:` 前缀**：同一条分支在下方的“本地”组里
+              // 还会再出现一次（职责不同，见本段注释）。两处若用同一 key，
+              // 声明式会按 key 把两个位置对齐到同一个实例——两行共用一份状态，
+              // 表现为“点 HEAD 里那条，高亮跑到了本地组”这类错位。
+              (void)row(c, {.gap = 4.0f, .key = "head:" + head->name}, [&] {
+                (void)custom<Button>(c, [this, branch = *head](Button& button) {
+                  button.set_id("git-branch-head-" + branch.name);
+                  button.set_align(Button::Align::Start);
+                  button.set_label("    " + std::string(gbcode::short_branch_name(branch)));
+                  button.set_variant(Button::Variant::Soft);
+                  button.set_size(Button::Size::Small);
+                  // HEAD 也走同一套：点它就是“只看当前分支的历史”（等价于打开“仅当前分支”）。
+                  button.on_click = [this, branch] { filter_log_by_branch(branch); };
+                }, {.height = 24.0f, .grow = true});
+              });
+            }
+          }
+
+          // —— ② 本地 ——
+          //
+          // 含**当前分支**（它同时出现在 HEAD 组里）：两处职责不同——
+          // HEAD 组回答“我现在在哪”（一条、置顶、不可删），本地组回答
+          // “这座仓有哪些本地分支”（完整清单，当前分支用 Soft 高亮标出）。
+          // 早期实现在这里 `continue` 跳过当前分支，结果本地组少一条、
+          // 用户在本地清单里找不到自己在用的那条（目录与计数都对不上）。
+          if (!locals.empty()) {
+            group_header("local", "本地", locals.size(), branch_local_open_, "⏣");
+            if (branch_local_open_.value()) {
+              for (const gbcode::BranchInfo* branch : locals) {
+                const bool current = branch->is_current;
+                (void)row(c, {.gap = 4.0f, .key = "branch:" + branch->name}, [&] {
+                  (void)custom<Button>(c, [this, branch = *branch, current](Button& button) {
+                    button.set_id("git-branch-" + branch.name);
+                    button.set_align(Button::Align::Start);
+                    button.set_label("    " + std::string(gbcode::short_branch_name(branch)));
+                    // 当前分支**高亮**（Soft = 主题主色的浅底，与 HEAD 组一致）。
+                    // 不给高亮就只剩缩进，一屏十几条时看不出自己在哪条上。
+                    button.set_variant(current ? Button::Variant::Soft
+                                               : Button::Variant::Ghost);
+                    button.set_size(Button::Size::Small);
+                    // 点击 = **筛日志**（不是检出）：检出会改工作区，是写操作，
+                    // 不该由“在侧栏看一眼这条分支的历史”触发。
+                    button.on_click = [this, branch] { filter_log_by_branch(branch); };
+                  }, {.height = 24.0f, .grow = true});
+                  // 当前分支不可删（删了就没地方站了）；远程分支的删除在别处管。
+                  if (!current) {
+                    scm_icon_button(c, "delbranch-" + branch->name, "trash", "删除分支",
+                                    [this, name = branch->name] { ask_delete_branch(name); });
+                  }
+                });
               }
-            });
+            }
+          }
+
+          // —— ③ 远程（按 remote 再分一层）——
+          //
+          // IDEA 的层级是 `远程 > origin > master/feature`。多一层缩进的意义：
+          // 一个仓库常配多个 remote（origin / upstream / 同事的 fork），
+          // 平铺时 `origin/xxx` 与 `upstream/xxx` 混在一起，看不出谁是同一台远端。
+          if (!remotes.empty()) {
+            group_header("remote", "远程", remotes.size(), branch_remote_open_, "☁");
+            if (branch_remote_open_.value()) {
+              // 按 remote 名分组（保持首次出现顺序）。
+              std::vector<std::pair<std::string, std::vector<const gbcode::BranchInfo*>>> by_remote;
+              for (const gbcode::BranchInfo* branch : remotes) {
+                const std::string remote = gbcode::remote_of_branch(*branch);
+                auto slot = std::find_if(by_remote.begin(), by_remote.end(),
+                                         [&remote](const auto& pair) { return pair.first == remote; });
+                if (slot == by_remote.end()) {
+                  by_remote.emplace_back(remote, std::vector<const gbcode::BranchInfo*>{});
+                  slot = by_remote.end() - 1;
+                }
+                slot->second.push_back(branch);
+              }
+              for (const auto& [remote, entries] : by_remote) {
+                // remote 父节点：图标 + 名字 + 计数（IDEA 只显示名字，计数帮判断“有没有同步过”）。
+                (void)text(c, [remote, count = entries.size()] {
+                  return std::format("  ▾ {} ({})", remote, count);
+                }, {.color = Tone::Muted, .id = "git-remote-" + remote});
+                for (const gbcode::BranchInfo* branch : entries) {
+                  (void)row(c, {.gap = 4.0f, .key = "branch:" + branch->name}, [&] {
+                    (void)custom<Button>(c, [this, branch = *branch](Button& button) {
+                      button.set_id("git-branch-" + branch.name);
+                      button.set_align(Button::Align::Start);
+                      // 缩进两级：remote 父节点下再退一格（IDEA 同）。
+                      button.set_label("      " + std::string(gbcode::short_branch_name(branch)));
+                      button.set_variant(Button::Variant::Ghost);
+                      button.set_size(Button::Size::Small);
+                      // 同上：点击 = 筛日志，不检出。
+                      button.on_click = [this, branch] { filter_log_by_branch(branch); };
+                    }, {.height = 24.0f, .grow = true});
+                  });
+                }
+              }
+            }
           }
         },
         [](ScrollView& scroll) { scroll.set_id("git-branches-scroll"); },
@@ -531,7 +702,19 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       }, {.weight = FontWeight::Regular, .id = "git-log-head-title"});
       // 当前分支名另起一个弱化小字：它是**范围提示**，不是标题的一部分
       //（标题里的数字会变，把分支拼进去会让它每切一次分支就整段重排）。
-      if (!git_.branch.empty()) {
+      //
+      // 有**分支筛选**时改显示那条筛选：否则日志少了一大量提交，
+      // 而头部只有当前分支名（会让人以为“提交丢了”）。
+      if (!log_filter_branch_.value().empty()) {
+        (void)text(c, [this] {
+          const std::string& ref = log_filter_branch_.value();
+          // 去 `refs/remotes/` 一类前缀：列表里看到的就是短名，要一致。
+          const std::size_t slash = ref.find('/');
+          const std::string shown =
+              slash == std::string::npos ? ref : ref.substr(slash + 1);
+          return std::format("仅 {}（点分支取消）", shown);
+        }, {.color = Tone::Muted, .id = "git-log-head-filter"});
+      } else if (!git_.branch.empty()) {
         (void)text(c, [this] { return git_.branch; },
                    {.color = Tone::Muted, .id = "git-log-head-branch"});
       }
@@ -550,7 +733,10 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
                                                          : Button::Variant::Ghost);
         b.set_size(Button::Size::Small);
         b.on_click = [this] {
-          log_filter_current_branch_.set(!log_filter_current_branch_.value());
+          const bool turn_on = !log_filter_current_branch_.value();
+          log_filter_current_branch_.set(turn_on);
+          // 与“按分支筛”**二选一**：两个都开就变成交集，结果看着像“日志少了”。
+          if (turn_on) clear_log_branch_filter();
         };
       }, {.height = 24.0f, .key = "log-filter-current"});
       scm_icon_button(c, "log-refresh", "refresh", "重新读取日志", [this] {
@@ -569,6 +755,10 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     // 没有任何“行”概念——字符网格通道已彻底移除。
     (void)custom<Table>(c, [this](Table& table) {
       table.set_id("git-log-table");
+      // **不要表头**：这四列的含意自明（提交信息/作者/日期/哈希），扫日志时
+      // 列宽固定、不依赖列名对齐；而表头要吃掉 36px 的黄金视野，还是唯一
+      // 不随滚动移动的色带（IDEA 的日志页也没有列头）。
+      table.set_show_header(false);
       // 行 = 提交（过滤后的）。过滤会把某些提交去掉，所以行号要**重新算**：
       // 拓扑图里的 `row` 是“未过滤拓扑序里的下标”，不能直接当表行号用。
       // 下面按 hash 建一次映射（O(n)），同时维护“保留提交在拓扑图里的原下标”
@@ -698,6 +888,17 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   auto CodeEditorPage::filtered_log() const -> std::vector<gbcode::LogEntry> {
     const std::string needle = std::string(st::trim(log_filter_text_.value()));
     const bool current_only = log_filter_current_branch_.value();
+    // **分支筛选**（点分支列表设的那个）：按 hash 集合判，不看泳道号。
+    //
+    // 为何不能用泳道：泳道号是绘制层的分配结果，“道 0 = 当前分支”只在
+    // 恰好看 HEAD 那条时成立；用户点的是**任意一条**分支（包括远程分支），
+    // 正确的集合是 `git rev-list <ref>`。
+    const std::string& branch_ref = log_filter_branch_.value();
+    const bool by_branch = !branch_ref.empty() && !log_filter_branch_commits_.empty();
+    std::set<std::string> branch_set;
+    if (by_branch) {
+      branch_set.insert(log_filter_branch_commits_.begin(), log_filter_branch_commits_.end());
+    }
     // “仅当前分支”的判据：**拓扑图里道号 0**。
     //
     // 道 0 的定义就是“从 HEAD 一路走第一个父提交的那条线”（见 `git_graph.cpp`），
@@ -710,6 +911,7 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     std::vector<gbcode::LogEntry> out;
     out.reserve(git_log_.size());
     for (const auto& entry : git_log_) {
+      if (by_branch && !branch_set.contains(entry.hash)) continue;
       if (current_only) {
         const auto found = lane_of_hash.find(entry.hash);
         if (found == lane_of_hash.end() || found->second != 0) continue;
@@ -970,6 +1172,51 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     git_confirm_title_ = std::format("切换到分支 {}", branch.name);
     git_confirm_body_ = "未提交的改动会跟着走（冲突时 git 会拒绝）。切换？";
     git_confirm_open_.set(true);
+  }
+
+
+  /// 按分支筛日志（**不检出**，见头文件里的取舍说明）。
+  void CodeEditorPage::filter_log_by_branch(const gbcode::BranchInfo& branch) {
+    const std::string ref = branch.name;
+    // 再点同一条 = 取消（筛选开关的常见词形，与侧栏视图按钮一致）。
+    if (log_filter_branch_.value() == ref) {
+      clear_log_branch_filter();
+      // 回到“全部提交”的范围：**同步**重读（与筛选时同一做法）。
+      //
+      // 为何不用 `git_log_loaded_ = false` 走异步泵：那会留下一帧“筛选已取消、
+      // 但列表还是旧数据”的中间态（实测：标题写 master、第一行却是别的分支的提交）。
+      // 同步读 200 条实测 ~10ms，代价可以接受。
+      git_log_ = gbcode::read_log(workspace_, 200);
+      git_graph_ = gbcode::read_commit_graph(workspace_, 200);
+      status_.set("日志：已取消分支筛选");
+      return;
+    }
+    const std::vector<std::string> commits =
+        gbcode::read_branch_commits(workspace_, ref, git_log_.size() + 200U);
+    if (commits.empty()) {
+      // 读不到就不改状态（而不是“筛成空列表”让用户以为那条分支没提交）。
+      status_.set(std::format("日志：读不到分支 {}", gbcode::short_branch_name(branch)));
+      return;
+    }
+    log_filter_branch_commits_ = commits;
+    log_filter_branch_.set(ref);
+    // 两个筛选**二选一**：“仅当前分支”开关与“具体某条分支”表达的是同一件事，
+    // 同时生效会让结果变成两者的交集（用户看到的是“点了一条分支却没几条提交”）。
+    log_filter_current_branch_.set(false);
+
+    // ⚠ **必须重新读日志**，不能只靠本地已加载的那批（默认 200 条 `--all`）。
+    // 实测：点 `origin/dev-finops`（它的提交全在 200 条之外）→ 本地集合里一个
+    // 都不命中 → 日志表空、而状态栏说“252 条提交”。用户看到的是“这条分支没提交”。
+    // `read_log` 支持 `ref` 参数，直接按该分支重取就是正确范围。
+    git_log_ = gbcode::read_log(workspace_, 200, ref);
+    git_graph_ = gbcode::read_commit_graph(workspace_, 200, ref);
+    status_.set(std::format("日志：只看 {}（{} 条提交）",
+                            gbcode::short_branch_name(branch), git_log_.size()));
+  }
+
+  void CodeEditorPage::clear_log_branch_filter() {
+    log_filter_branch_.set(std::string{});
+    log_filter_branch_commits_.clear();
   }
 
 

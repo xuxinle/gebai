@@ -40,8 +40,8 @@
   "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c",
                           "third_party/micropython/py/*.c"],
   "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
-  "tests": ["tests/*_test.cpp", "apps/gbcode/git_graph.cpp"],
-  "//tests_git_graph": "`git_graph.cpp` 作为用例源直传（与 tests/* 同一处理）：\n它是对应用侧纯数据层的实现，测试要直接链接它；放进 `tests` 段才能被当作\n“用例直传”而不是归档（归档成员未被引用就不加载，链接会未定义）。",
+  "tests": ["tests/*_test.cpp", "apps/gbcode/git_graph.cpp", "apps/gbcode/git_refs.cpp"],
+  "//tests_git_graph": "`git_graph.cpp`/`git_refs.cpp` 作为用例源直传（与 tests/* 同一处理）：\n它们是对应用侧纯数据层的实现（拓扑图、分支分类），测试直接链接它们。\n放进 `tests` 段才能被当作“用例直传”而不是归档（归档成员未被引用就不加载，链接会未定义）。\n⚠ 不能把 `git_service.cpp` 放这里：它已被 gbcode 目标编译，再直传一次就是 duplicate symbol。\n所以“测试要用的纯函数”必须住在**独立编译单元**里（`git_refs.cpp` 就是这么来的）。",
   "flags": [
     "-fno-strict-aliasing",
     "-Wall",
@@ -80,7 +80,7 @@
     }
   },
   "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",
-  "system_libs": ["pthread", "dl", "m", "ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"],
+  "system_libs": ["pthread", "dl", "m", "ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi", "bcrypt"],
   "toolchains": {
     "mingw": {
       "compiler": "x86_64-w64-mingw32-g++",

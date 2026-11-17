@@ -342,6 +342,23 @@ struct CodeEditorPage : Component {
   ///
   /// ⚠ 索引与 `build_git_tabs` 的 `numbers` 表是**同一套**（1/2/4/5）。
   State<std::size_t> git_tab_{1};
+  /// 分支面板的搜索词（IDEA 顶部「分支或标签」）：对**短名**过滤（不带 `origin/`）。
+  State<std::string> branch_filter_text_{};
+  /// 分支面板三个组的展开态（HEAD / 本地 / 远程）。
+  ///
+  /// 默认：HEAD 与本地展开、远程收起——一个仓库的远程分支往往几十条，
+  /// 全展开会把它下面真正要切的本地分支顶出视口。
+  State<bool> branch_head_open_{true};
+  State<bool> branch_local_open_{true};
+  State<bool> branch_remote_open_{false};
+  /// 日志的**分支筛选**：空 = 不筛；非空 = 只看从该引用可达的提交。
+  ///
+  /// 与 `log_filter_current_branch_`（只看 HEAD 那条）不同：那个是开关，
+  /// 这个记的是**具体哪一条**分支——点分支列表里的条目就是设它，
+  /// **不检出**（检出会改工作区，是个写操作，不该由“看一眼日志”触发）。
+  State<std::string> log_filter_branch_{};
+  /// `log_filter_branch_` 对应的提交 hash 集合（读取结果缓存；分支或刷新时重算）。
+  std::vector<std::string> log_filter_branch_commits_{};
   /// 日志过滤（提交信息 / 作者 / 路径）与“只显示当前分支”。
   State<std::string> log_filter_text_{};
   State<std::string> log_filter_author_{};
@@ -1181,6 +1198,18 @@ auto open_recent(const std::string& path) -> void;
 
   /// 按 hash 打开一个提交（标签行点开用）。
    void open_commit_by_hash(const std::string& hash, const std::string& label);
+
+  /// **按分支筛日志**（点分支列表里的条目走这里）：**不检出**。
+  ///
+  /// - 点已筛选的那条（再点一次）= 取消筛选，回到全部提交；
+  /// - 先读该引用可达的提交集（`read_branch_commits`）再置筛选状态；
+  /// - 读不到（引用失效 / git 失败）= 不改状态，如实报一句到状态栏。
+  ///
+  /// 为何不检出：检出是**写操作**（改工作区与 HEAD），“在侧栏看一眼某条分支的
+  /// 历史”不应该把用户正在编辑的工作区换掉。
+  void filter_log_by_branch(const gbcode::BranchInfo& branch);
+  /// 清掉分支筛选（“仅当前分支”开关与它二选一）。
+  void clear_log_branch_filter();
 
 
   /// 切换到分支（终端代敲——checkout 会改工作区，输出必须让用户看见）。
