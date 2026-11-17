@@ -108,3 +108,27 @@ ST_TEST(absolute_left_only_keeps_measured_width) {
   ST_CHECK(std::abs(bounds.y - 30.0f) < 0.5f);
   ST_CHECK(bounds.width < 1.0f);
 }
+
+ST_TEST(absolute_bottom_only_does_not_stretch_height) {
+  // 只给 `bottom`（贴底）+ 高度 auto **不该被拉到父高**（CSS 语义：`bottom:X` 单用
+  // 是“贴底、按内容定高”）。  //
+  // 为何专门一条：旧判据“给了 bottom 就纵向拉伸”让“贴底且高度跟随内容”这个最普通的
+  // 写法变成坑——而现象是**属性全对、控件铺满整块**（实测：悬浮输入胶囊被拉成整屏白饼）。
+  // 拉伸只在 `top`+`bottom` 同时锚定时发生。
+  const st::ui::Theme theme = st::ui::Theme::dark();
+  st::math::Rect bounds{};
+  arrange_child(
+      theme,
+          [](st::ui::Style& style) {
+      style.left = 16.0f;
+      style.right = 16.0f;   // 横向拉伸（left/right 都锚定）
+      style.bottom = 20.0f;  // 只贴底
+      style.height = st::ui::kAuto;  // 高度跟随内容（这才是缺陷路径！）
+    },
+      &bounds);
+  // 高度 = **测量值**（Panel 空内容 → 0），而不是被拉到父高；而且在旧判据下会被拉到
+  // “父高 − bottom”，所以这条断言就是缺陷的直判据。
+  ST_CHECK(bounds.height < 1.0f);
+  ST_CHECK(std::abs(bounds.bottom() - (800.0f - 20.0f)) < 0.5f);  // 贴底（父高 800）
+  ST_CHECK(std::abs(bounds.width - (1280.0f - 32.0f)) < 0.5f);     // 横向仍拉伸
+}

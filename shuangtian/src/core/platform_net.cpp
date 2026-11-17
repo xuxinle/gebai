@@ -125,7 +125,33 @@ void set_blocking(NativeHandle handle, bool enabled) {
     return true;
   }
   if (::inet_pton(AF_INET, text.c_str(), &out.sin_addr) == 1) return true;
-  return false;
+
+  // **域名解析**（`getaddrinfo`）：只认字面 IP/localhost 是致命的——
+  // 任何 `https://api.example.com/...` 都会在连接前就失败，报“无法解析地址”。
+  //
+  // 实测代价（2026-11-17，小白连 deepseek 网关）：系统能解析 `aic.byd.com`
+  // （PowerShell 与 Python 都拿到了内网 IP），而应用报“无法解析地址”；
+  // 追下去是因为这里只做了 `inet_pton`——一个“看着像 DNS 问题、实际是没写 DNS”的陷阱。
+  //
+  // 为什么 `AF_INET` 而不是 `AF_UNSPEC`：本框架的 `TcpStream` 只接 IPv4 地址
+  //（`sockaddr_in`），拿 IPv6 结果反而无法使用。没有 A 记录时如实失败。
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* result = nullptr;
+  if (::getaddrinfo(text.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
+    return false;
+  }
+  bool ok = false;
+  for (addrinfo* entry = result; entry != nullptr; entry = entry->ai_next) {
+    if (entry->ai_family == AF_INET && entry->ai_addr != nullptr) {
+      out.sin_addr = reinterpret_cast<const sockaddr_in*>(entry->ai_addr)->sin_addr;
+      ok = true;
+      break;
+    }
+  }
+  ::freeaddrinfo(result);
+  return ok;
 }
 
 }  // namespace

@@ -259,3 +259,40 @@ ST_TEST(fill_round_rect_split_matches_path_rasterization) {
     ST_CHECK(r.max_channel == 0);
   }
 }
+
+ST_TEST(fill_rect_clamps_radius_to_half_short_side) {
+  // 圆角超过短边一半时必须夹到一半（CSS `border-radius` 语义）：于是“半径 >= 半边长”
+  // 全部等价于胶囊。
+  //
+  // 为何专门一条：`radius_pill` / `RadiusMode::Pill` 是 **999 哨兵值**，而这个字段
+  // 会被直接传到绘制层。不夹取就会把圆角矩形画成巨大椭圆——实测现场：胶囊输入框
+  // 随内容长高后，整个内容区被一块白色椭圆吞掉（属性全对、只有画面错）。
+  using st::math::Color;
+  using st::math::Rect;
+
+  const Color ink = Color::rgb(60, 90, 160);
+  // 短边 40 → 夹到 20。给 20 / 999 / 1e6 应当得到**完全相同**的像素。
+  const Rect box{10.0f, 10.0f, 200.0f, 40.0f};
+  const EquivResult at_limit = round_rect_equivalence(box, 20.0f, ink, 1.0f);
+  ST_CHECK(at_limit.diff_pixels == 0);
+
+  // 用“与胶囊半径的像素等价”来判：把 999 当半径画，结果应与 20 一致。
+  for (const float huge : {999.0f, 100000.0f}) {
+    st::raster::Canvas huge_canvas = st::raster::Canvas::for_logical_size(256, 64, 1.0f);
+    huge_canvas.clear(Color::rgba(0, 0, 0, 0));
+    huge_canvas.fill_rect(box, st::raster::Paint::solid(ink), huge);
+
+    st::raster::Canvas capped_canvas = st::raster::Canvas::for_logical_size(256, 64, 1.0f);
+    capped_canvas.clear(Color::rgba(0, 0, 0, 0));
+    capped_canvas.fill_rect(box, st::raster::Paint::solid(ink), 20.0f);
+
+    const auto huge_pixels = huge_canvas.pixels();
+    const auto capped_pixels = capped_canvas.pixels();
+    ST_CHECK(huge_pixels.size() == capped_pixels.size());
+    std::size_t diff = 0;
+    for (std::size_t i = 0; i < huge_pixels.size() && i < capped_pixels.size(); ++i) {
+      if (huge_pixels[i] != capped_pixels[i]) ++diff;
+    }
+    ST_CHECK(diff == 0);
+  }
+}

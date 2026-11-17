@@ -103,8 +103,13 @@ struct Style {
   /// - 绘制顺序仍按声明顺序（后声明的画在上面）。
   bool absolute{false};
   /// 绝对定位时的偏移（相对父内容盒左上角；`absolute` 为 false 时无意义）。
-  float left{0.0f};
-  float top{0.0f};
+  ///
+  /// 默认 `-1` = **未锚定**（与 `right`/`bottom` 同口径）。为何必须区分“0”与“未设”：
+  /// `left`+`right` 同时锚定才触发横向拉伸（CSS 语义），而默认 0 会让“只写 right”的
+  /// 元素被误判成“两端都锚定”而拉满——属性看着对、画面却铺满整块。
+  /// 只锚定一侧时另一侧保持 auto（按内容测量）。
+  float left{-1.0f};
+  float top{-1.0f};
   /// 绝对定位时用“右缘/底缘”锚定：非负则按 `父宽 - right - 自身宽` 定位。
   /// 用于「贴右缘」这类需求，免得调用方自己算父宽（它往往拿不到）。
   ///
@@ -112,6 +117,7 @@ struct Style {
   /// 宽度 = 父宽 − left − right。全宽覆盖层（桌面底栏、页面级遮罩）靠它跟随容器，
   /// 因而不能靠“显式写 width”来实现：那要把窗口尺寸抄一份到样式里，窗口一改就错。
   /// 纵向同理（`top` + `bottom` 且 `height` 为 `kAuto`）。
+  /// **只给一侧 = 贴边**（不拉伸，尺寸按内容）。
   float right{-1.0f};
   float bottom{-1.0f};
 
@@ -194,6 +200,17 @@ void set_gradient_background(raster::Gradient fill, math::Color fallback) noexce
   /// 且后端支持折射时生效。
   float backdrop_dispersion{0.0f};
   float radius{0.0f};
+  /// 圆角**上限**（`<= 0` = 不设上限，只受绘制层的“短边一半”夹取）。
+  ///
+  /// 用途：让“胶囊”随高度**变高后自然转为圆角矩形**。
+  /// 胶囊的常见写法是 `radius = 999`（或 `RadiusMode::Pill`），绘制层会把它夹到短边
+  /// 一半——于是多行输入框长到 120 高时，两端会变成半径 60 的大半圆（看着像椭圆形）。
+  /// 设 `radius_max = 22` 后：矮时仍是胶囊（半高 < 22），长高后停在 22 = 圆角矩形。
+  ///
+  /// 为何是独立字段而不是让调用方自己 `min(半高, 22)`：半高**要等布局完才知道**，
+  /// 调用方在声明界面时拿不到（胶囊高度本来就由内容决定）——自己算就会写死数值，
+  /// 高度一变就错位。
+  float radius_max{0.0f};
   math::Color border_color{0, 0, 0, 0};
   float border_width{0.0f};
   Shadow shadow{};

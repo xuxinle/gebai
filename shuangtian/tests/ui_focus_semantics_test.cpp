@@ -283,10 +283,64 @@ ST_TEST(input_and_textarea_render_focus_ring_when_focused_via_root) {
   }
 }
 
+ST_TEST(text_area_show_border_false_draws_no_border_or_focus_ring) {
+  // `set_show_border(false)`：控件不再画描边与焦点环。
+  //
+  // 这条测试的存在理由（实测踩到）：只在 `paint_content` 里跳过是**盖不住**的——
+  // 底色与描边主要由基类 `paint_box` 按 `style_` 画，而 `sync_control_style`
+  // 每帧会把 `border_width` 按主题填回 1px。于是“关掉边框”看起来生效、
+  // 但画面上仍剩一道灰边（用户一眼就看出来了，属性全部对）。
+  //
+  // 断言口径：直接查 `style_`（边框宽度/颜色）而不是“整帧像素不变”——
+  // 聚焦状态变化本身会带来光标显隐与文字提色的差异（那是正常行为）。
+  // 必须先走一次**布局**（`measure`）：主题填充发生在 `sync_control_style`，
+  // 它是 measure 路径的一部分，只 paint 不会触发它。
+  UiRoot root;
+  mount(root, std::make_unique<st::ui::TextArea>());
+  auto* area = static_cast<st::ui::TextArea*>(root.content());
+  ST_REQUIRE(area != nullptr);
+
+  const auto layout = [&root] { (void)root.layout(true); };
+
+  // 默认行为：布局一帧后主题落下了边框（非零宽）。
+  layout();
+  ST_CHECK(area->style().border_width > 0.0F);
+
+  // 关掉边框：布局一帧，边框宽/色归零且不会被 `sync_control_style` 填回。
+  area->set_show_border(false);
+  layout();
+  ST_CHECK(area->style().border_width == 0.0F);
+  ST_CHECK(area->style().border_color.a == 0U);
+
+  // 再布局一帧确认稳定（“每帧盖回去”的那条路径真的在跑）。
+  layout();
+  ST_CHECK(area->style().border_width == 0.0F);
+
+  // 切回默认：主题能重新接管（开关不把状态钉死）。
+  area->set_show_border(true);
+  layout();
+  ST_CHECK(area->style().border_width > 0.0F);
+}
+
+ST_TEST(text_area_seamless_background_only_clears_fill_not_border) {
+  // `set_seamless_background` 的语义是**只去底色**（与 `Input` 对齐）；
+  // 边框仍在——要连边框也不要，用另一个开关 `set_show_border(false)`。
+  // 两个开关正交是刻意的：改一个不代表另一个跟着变。
+  UiRoot root;
+  mount(root, std::make_unique<st::ui::TextArea>());
+  auto* area = static_cast<st::ui::TextArea*>(root.content());
+  ST_REQUIRE(area != nullptr);
+
+  (void)render(root);
+  area->set_seamless_background(true);
+  (void)render(root);
+  ST_CHECK(area->style().background.a == 0U);          // 底色被清
+  ST_CHECK(area->style().border_width > 0.0f);         // 边框保留
+}
+
 // ————————————————————————————————————————————————————————————————————————————
 // ⑤ 自动化读得到的框架级状态（`get` 的 props）
 // ————————————————————————————————————————————————————————————————————————————
-
 ST_TEST(element_snapshot_exposes_framework_state_including_focus) {
   // `get` 的 props 是自动化看元素状态的入口。框架级属性必须齐备：`set` 支持
   // `enabled`/`visible`/`focused` 而 `get` 读不到时，「点一下再看焦点」这类验证动作

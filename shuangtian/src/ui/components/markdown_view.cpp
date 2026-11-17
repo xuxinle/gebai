@@ -349,6 +349,13 @@ void MarkdownView::set_max_width(float width) {
   mark_layout_dirty();
 }
 
+void MarkdownView::set_shrink_to_fit(bool enabled) {
+  if (shrink_to_fit_ == enabled) return;
+  shrink_to_fit_ = enabled;
+  needs_layout_ = true;
+  mark_layout_dirty();
+}
+
 void MarkdownView::set_base_font_size(float size) {
   const float next = size > 0.0f ? size : 0.0f;
   if (next == base_font_size_) return;
@@ -1717,7 +1724,23 @@ void MarkdownView::settle_scroll() {
 // —— 布局与绘制 ——
 
 void MarkdownView::measure(const RenderContext& context, const Constraints& constraints) {
-  set_layout_width(context, desired_width(constraints));
+  // **按内容收缩**（`set_shrink_to_fit(true)`）：
+  // 先用容器给的上限排一遍，量出内容实际需要的宽，再用那个宽重排一次。
+  // 为何要两遍：折行结果依赖宽（宽了不折、窄了折行），而“内容自然宽”必须先排一次才知道。
+  // 只缩不放：内容天然比上限窄时才缩（长文本仍占满上限）。
+  if (shrink_to_fit_ && !style_.has_explicit_width()) {
+    set_layout_width(context, desired_width(constraints));
+    const float natural = intrinsic_content_width();
+    if (natural > 0.0f) {
+      const float limit = desired_width(constraints);
+      const float target = std::min(natural + style_.padding.horizontal(), limit);
+      if (target > 0.0f && target + 0.5f < limit) {
+        set_layout_width(context, target);
+      }
+    }
+  } else {
+    set_layout_width(context, desired_width(constraints));
+  }
   float width = layout_width_ + style_.padding.horizontal();
   if (style_.has_explicit_width()) width = style_.width;
   float height = content_height_;  // 全量内容高度（与视口无关）
@@ -1734,6 +1757,32 @@ void MarkdownView::measure(const RenderContext& context, const Constraints& cons
   view_height_ = std::max(height, 0.0f);
   measured_ = math::Size{width, view_height_};
   settle_scroll();
+}
+
+/// 已排行模型里内容实际用到的最右 x（含左侧缩进/项目符号）。
+///
+/// 为何从 `rows_` 反推而不重新量：`rows_` 就是“按当前宽排出来的真值”，
+/// 每行 `box.right()` 已经是合并了缩进/标记/表格列后的结果；另写一套宽度估算
+/// 必然与实际绘制分家（那样“气泡刚好包住文字”就永远是碰运气）。
+auto MarkdownView::intrinsic_content_width() const noexcept -> float {
+  // 关键：不能取 `row.box.right()`——行框已被排成“可用满宽”，那个值恒等于上限。
+  // 要的是**文字实际占到的 x**：`text_x`（含缩进/项目符号）+ 各 Span 的排版宽之和。
+  const TextPort* port = layout_port_;
+  if (port == nullptr) return 0.0f;
+  float right = 0.0f;
+  for (const Row& row : rows_) {
+    if (row.kind == RowKind::Divider) continue;   // 分隔线本来就铺满
+    if (row.kind == RowKind::CodeLine || row.kind == RowKind::TableRow) {
+      // 代码/表格的底板会横向铺满，用它们算“内容宽”只会恒等于上限。
+      continue;
+    }
+    float x = row.text_x;
+    for (const Span& span : row.spans) {
+      x += port->measure_width(span.text, span.size > 0.0f ? span.size : base_font_size_);
+    }
+    if (x > right) right = x;
+  }
+  return right > 0.0f ? right : 0.0f;
 }
 
 void MarkdownView::set_layout_width(const RenderContext& context, float width) {

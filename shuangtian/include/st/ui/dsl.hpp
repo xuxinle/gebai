@@ -552,7 +552,20 @@ struct BoxProps {
   float padding_y{-1.0f};
   float width{kAuto};
   float height{kAuto};
+  /// 宽/高上限（`kAuto`/极值 = 不限）。
+  ///
+  /// 用途：**气泡类内容**——“按内容自适应，但不超过可用宽的一截”。
+  /// 只给 `width` 就得写死像素（长文本会溢出、短文本留白）；
+  /// 只靠 `grow` 则会拉满整行。两者结合才能“短则短、长则封顶”。
+  float max_width{kAuto};
+  float max_height{kAuto};
   bool grow{false};
+  /// 主轴方向（仅容器有意义：默认列）。
+  ///
+  /// 为何要暴露：`column()`/`row()` 两个包装函数已覆盖常见情况，但
+  /// **`custom_container<T>` 拿不到这个选择**（它只声明一次类型，方向在构造里）——
+  /// 于是“横向的自绘容器”只能写 `p.style().direction = Row` 逃生。
+  std::optional<FlexDirection> direction{};
   /// 主轴换行（仅 `row` 有意义；见 `Style::wrap`）。
   ///
   /// 为何要暴露：窄容器里放一排定高标签、且标签���量/宽度随数据变化时，
@@ -576,17 +589,42 @@ struct BoxProps {
   ///
   /// 与 `color`/`hex_color` 的分工：那两个是**文字**色，这个是**背景**。
   Element::Surface surface{Element::Surface::None};
+  /// 直接指定**填充色**（与 `surface` 并行：两都给出时它优先）。
+  ///
+  /// 用于语义表面档位表达不了的底色：半透明遮罩（弹窗背后那层）、
+  /// 特定色调的提示条。透明（`a == 0`）= 不干预。
+  ///
+  /// 为何不是“扩展 Surface 枚举”：遮罩色需要带 alpha 的任意值（如 `#00000038`），
+  /// 而枚举只能表达主题里预先定义的那几档。
+  math::Color fill{0, 0, 0, 0};
   // —— 叠放（绝对定位）——
   /// 本元素**脱离 flex 流**，按下面的偏移叠在父元素内容盒上（`Style::absolute`）。
   ///
   /// 典型用途：「文字层盖在整行可点区上」（文字不拦截输入）、
   /// 「右缘缩略条」（覆盖层不该把主内容挤窄）。
   bool absolute{false};
-  float left{0.0f};
-  float top{0.0f};
+  /// 左上偏移（`<0` = 不锚定，与 `right`/`bottom` 同口径 —— 四个都是可选锚点）。
+  ///
+  /// 为什么是 `-1` 而不是 `0`：`left`+`right` **同时锚定**才触发横向拉伸（CSS 语义）。
+  /// 若默认 `0`，则“只写 `right`”的元素会被当成两端都锚定而拉满——属性看着对、
+  /// 画面却铺满整块。只写 `bottom`（贴底、尺寸跟内容）同理。
+  float left{-1.0f};
+  float top{-1.0f};
   /// 贴右/底缘（<0 = 不用；见 `Style::right`）。
   float right{-1.0f};
   float bottom{-1.0f};
+  /// 圆角（`<0` = 不干预）。
+  ///
+  /// 胶囊类元素可用极大值（如 `999`）：绘制层会夹到短边一半（CSS `border-radius`），
+  /// 配合 `radius_max` 就是“矮时胶囊、长高后圆角矩形”。
+  float radius_max{0.0f};
+  /// 描边宽度（`<= 0` = 不画）与描边色（透明 = 不画）。
+  ///
+  /// 为何要暴露：容器类元素（胶囊/卡片/输入框外壳）常常需要一道细边框把自身
+  /// 从背景里“提”出来，而这只能靠 `custom<Panel>` + 手写 `style()`——
+  /// 声明式里应能一句写完。
+  float border_width{0.0f};
+  math::Color border_color{0, 0, 0, 0};
   /// 本元素是否拦截输入（默认 `true`；`false` = 点击穿透到下层）。
   ///
   /// 为何要属性化：叠放层几乎总需要“上层穿透”，而 `column()`/`row()` 返回的是

@@ -1319,6 +1319,18 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
   const math::IntRect clipped = area.intersect(clip_rect());
   if (clipped.is_empty()) return;
 
+  // **圆角夹取到短边一半**（CSS `border-radius` 语义）。
+  //
+  // 为何必须在绘制层做而不是靠调用方：`radius_pill` / `RadiusMode::Pill` 是
+  // **999 哨兵值**（“取不尽的圆”），语义上等于“胶囊”。不夹取就会把圆角矩形画成
+  // 一个巨大的椭圆——实测（胶囊输入框随内容长高）：整个内容区被一块白色椭圆吞掉。
+  // 夹取后，“半径 >= 半边长” 一律退化为胶囊，且**随尺寸自适应**：
+  // 矮时两端半圆、长高时自动变成“两端固定半圆角”（因为高度变大、半边不变）。
+  if (radius > 0.0f) {
+    const float limit = std::min(rect.width, rect.height) * 0.5f;
+    if (radius > limit) radius = std::max(limit, 0.0f);
+  }
+
   // **跳过“清屏后重复铺同色整屏底”**。
   //
   // `UIView::paint` 的整帧路径是 `clear(bg)` → 画整树，而根容器几乎总会先用同一个
@@ -1779,6 +1791,13 @@ void Canvas::draw_shadow_layered(math::Rect rect, float radius, math::Color key_
     ambient_offset = math::Point{ambient_offset.x * scale_, ambient_offset.y * scale_};
   }
   if (clip_rect().is_empty()) return;
+
+  // 与 `fill_rect` 同一条圆角夹取（CSS `border-radius` 语义）：
+  // 不夹取时阴影遮罩按巨椭圆生成，会与已夹取的底色/边框不同形状（错位）。
+  if (radius > 0.0f) {
+    const float limit = std::min(rect.width, rect.height) * 0.5f;
+    if (radius > limit) radius = std::max(limit, 0.0f);
+  }
 
   const bool has_key = key_color.a != 0U && key_blur > 0.0f;
   const bool has_ambient = ambient_color.a != 0U && ambient_blur > 0.0f;

@@ -789,6 +789,46 @@ void TextArea::set_read_only(bool value) noexcept {
   mark_dirty();
 }
 
+void TextArea::set_seamless_background(bool seamless) noexcept {
+  if (seamless_bg_ == seamless) return;
+  seamless_bg_ = seamless;
+  // 与 `Input::set_seamless_background` 同一口径：**只清底色**（`paint_box` 读的是
+  // `style_.background`，留一份不透明底就等于“还画了一块底色”）；描边不动。
+  if (seamless_bg_) style_.background = math::Color{0, 0, 0, 0};
+  mark_dirty();
+}
+
+void TextArea::set_auto_grow(bool enabled) noexcept {
+  if (auto_grow_ == enabled) return;
+  auto_grow_ = enabled;
+  mark_dirty();
+}
+
+void TextArea::set_lines_range(std::size_t min_lines, std::size_t max_lines) noexcept {
+  const std::size_t next_min = min_lines == 0 ? 1 : min_lines;
+  if (min_lines_ == next_min && max_lines_ == max_lines) return;
+  min_lines_ = next_min;
+  max_lines_ = max_lines;
+  mark_dirty();
+}
+
+void TextArea::set_show_border(bool show) noexcept {
+  if (show_border_ == show) return;
+  show_border_ = show;
+  // 立即落 `style_`（不等下一帧）：`paint_box` 读的就是它。
+  // 关掉时把宽/色都清零；重新打开时主动清回“未设”状态（宽 0 + 色全透明），
+  // 让 `sync_control_style` 的主题填充在下一帧重新接管——否则它看到
+  // `border_width == 0` 也会填，但这一帧的可见结果仍是“没有边框”。
+  if (!show_border_) {
+    style_.border_width = 0.0f;
+    style_.border_color = math::Color{0, 0, 0, 0};
+  } else if (style_.border_width <= 0.0f) {
+    // 下一帧 measure 会按主题填回；这里只是把状态回到“未设”。
+    style_.border_color = math::Color{0, 0, 0, 0};
+  }
+  mark_dirty();
+}
+
 void TextArea::set_text(std::string text) {
   text_ = std::move(text);
   // 光标回到文首：加载文档/程序化替换文本后应当从头展示，
@@ -978,6 +1018,15 @@ void TextArea::arrange(const RenderContext& context, math::Rect rect) {
 
 void TextArea::measure(const RenderContext& context, const Constraints& constraints) {
   sync_control_style(*this, context);
+  // `sync_control_style` 只做“未设则填”，填过就不再动它；两个开关都要**每帧**盖回去：
+  // - 无缝背景：底色盖透明（否则 `paint_box` 会画一块凹槽底）；
+  // - `set_show_border(false)`：描边宽度置 0（否则下一帧就被 `sync_control_style` 填回 1px，
+  //   而它由基类 `paint_box` 画，光在 `paint_content` 里跳过是盖不住的）。
+  if (seamless_bg_) style_.background = math::Color{0, 0, 0, 0};
+  if (!show_border_) {
+    style_.border_width = 0.0f;
+    style_.border_color = math::Color{0, 0, 0, 0};
+  }
   const Metrics& metrics = context.theme.metrics();
   const TextPort& port = text_port_of(context);
 
@@ -988,7 +1037,20 @@ void TextArea::measure(const RenderContext& context, const Constraints& constrai
             style_.padding.horizontal();
   }
   float height = style_.height;
-  if (height == kAuto) {
+  if (auto_grow_) {
+    // 自动增高：先按可用宽度折行数出一行数，再把行数换算成高度。
+    //
+    // 为何必须在 measure 里做：折行结果依赖**可用宽度**（中文与英文单词的折行点都随
+    // 宽度变化），而宽度只有到 measure 才能确定（上一轮 `style_.width` 也可能是 auto）。
+    // 先拿一次宽度再算行数，避免用未定宽度去折行算出错的行数。
+    const float lines_width = width - style_.padding.horizontal() - metrics.space_md * 2.0f;
+    const std::size_t rows = layout_lines(context, std::max(lines_width, 1.0f)).size();
+    line_count_ = rows;
+    std::size_t used = std::max(rows, min_lines_);
+    if (max_lines_ > 0) used = std::min(used, max_lines_);
+    height = static_cast<float>(used) * line_height(context) + metrics.space_sm * 2.0f +
+             style_.padding.vertical();
+  } else if (height == kAuto) {
     height = k_textarea_default_lines * line_height(context) + metrics.space_sm * 2.0f +
              style_.padding.vertical();
   }
@@ -1007,27 +1069,31 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
   const float radius = style_.radius > 0.0f ? style_.radius : metrics.radius_sm;
   const bool usable = enabled();
 
-  math::Color background = colors.surface_sunken;
-  math::Color border = colors.border;
-  if (!usable) {
-    background = colors.surface_alt;
-  } else if (focused()) {
-    border = colors.primary;
-  } else if (hovered() || pressed()) {
-    border = colors.border_strong;
-  }
-  // 同 Input：底色/边框由通用 `paint_box` 画，这里只补状态色差异
-  //（与 Input::paint_content 的说明同一逻辑，2026-11-04 修双绘）。
-  if (usable && focused()) {
-    paint_focus_ring(context, canvas, bounds_, radius);
-    if (border != style_.border_color) {
+  // 无缝背景：**只去底色**（与 `Input::set_seamless_background` 同一语义）。
+  // 描边与焦点环由独立的 `set_show_border` 控制，两个开关正交。
+  if (show_border_) {
+    math::Color background = colors.surface_sunken;
+    math::Color border = colors.border;
+    if (!usable) {
+      background = colors.surface_alt;
+    } else if (focused()) {
+      border = colors.primary;
+    } else if (hovered() || pressed()) {
+      border = colors.border_strong;
+    }
+    // 同 Input：底色/边框由通用 `paint_box` 画，这里只补状态色差异
+    //（与 Input::paint_content 的说明同一逻辑，2026-11-04 修双绘）。
+    if (usable && focused()) {
+      paint_focus_ring(context, canvas, bounds_, radius);
+      if (border != style_.border_color) {
+        paint_border(canvas, bounds_, radius, border, metrics.border_width);
+      }
+    } else if (border != style_.border_color || background != style_.background) {
+      if (background != style_.background) {
+        canvas.fill_rect(bounds_, raster::Paint::solid(background), radius);
+      }
       paint_border(canvas, bounds_, radius, border, metrics.border_width);
     }
-  } else if (border != style_.border_color || background != style_.background) {
-    if (background != style_.background) {
-      canvas.fill_rect(bounds_, raster::Paint::solid(background), radius);
-    }
-    paint_border(canvas, bounds_, radius, border, metrics.border_width);
   }
 
   const math::Rect box = inner_box(context);

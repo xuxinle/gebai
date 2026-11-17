@@ -65,6 +65,46 @@ class TextArea : public Element {
   void set_read_only(bool value) noexcept;
   [[nodiscard]] auto read_only() const noexcept -> bool { return read_only_; }
 
+  /// 无缝背景：**不画底色**（透出父级容器），描边仍按主题保留。
+  ///
+  /// 语义与 `Input::set_seamless_background` 一致：只去底色。
+  /// 把输入框嵌进自绘容器（胶囊输入栏 / 搜索外壳）时，控件自己的凹槽底会把
+  /// 容器的圆角与底色盖掉。
+  ///
+  /// 如果连描边/焦点环也不想要（外框完全由容器提供），另外调 `set_show_border(false)`
+  /// ——两个开关**正交**，不影响普通模式的行为。
+  void set_seamless_background(bool seamless) noexcept;
+  [[nodiscard]] auto seamless_background() const noexcept -> bool { return seamless_bg_; }
+
+  /// 自动增高：高度跟随内容行数，夹在 [`min_lines`, `max_lines`] 之间。
+  ///
+  /// - `min_lines`：空内容时的行数（决定控件的初始高度，通常 1）；
+  /// - `max_lines`：上限（0 = 不设上限）。超过上限后不再长高，改为**内部滚动**
+  ///  （与 `ScrollView` 同一心智：框固定，内容自己滚）。
+  ///
+  /// 开启后 `style().height` 不再生效（它被内容驱动）；要回到固定高度就
+  /// 用 `set_auto_grow(false)` 并设 `style().height`。
+  ///
+  /// 为何做在控件里而不是让调用方每帧算：行数是**折行后**的量，而折行要考虑
+  /// 当前可用宽度——那只有 measure 阶段知道（调用方拿不到准确的宽）。
+  void set_auto_grow(bool enabled) noexcept;
+  [[nodiscard]] auto auto_grow() const noexcept -> bool { return auto_grow_; }
+  void set_lines_range(std::size_t min_lines, std::size_t max_lines) noexcept;
+  [[nodiscard]] auto min_lines() const noexcept -> std::size_t { return min_lines_; }
+  [[nodiscard]] auto max_lines() const noexcept -> std::size_t { return max_lines_; }
+  /// 当前实际行数（最近一次 measure 的结果；未布局过为 0）。
+  [[nodiscard]] auto visible_line_count() const noexcept -> std::size_t { return line_count_; }
+
+  /// 是否绘制描边与焦点环（默认 `true`）。
+  ///
+  /// 关掉后控件**完全不参与外框绘制**：底色、描边、焦点环三者都不画，
+  /// 外框视觉完全交给父容器（典型：嵌在胶囊里的聊天输入框——容器已有外框，
+  /// 控件再画一遭就是“盒中盒”，且两者圆角曲率不同，聚焦时会出现两道边）。
+  ///
+  /// 代价：键盘用户失去“焦点在这个控件上”的视觉指示（只剩光标闪烁）。
+  void set_show_border(bool show) noexcept;
+  [[nodiscard]] auto show_border() const noexcept -> bool { return show_border_; }
+
   [[nodiscard]] auto value() const noexcept -> const std::string& { return text_; }
   [[nodiscard]] auto placeholder() const noexcept -> const std::string& { return placeholder_; }
   [[nodiscard]] auto cursor_index() const noexcept -> std::size_t { return cursor_; }
@@ -140,6 +180,17 @@ class TextArea : public Element {
   /// 只读（编辑禁入，但可聚焦/定位光标/滚动）。与 `enabled_` **无关**：
   /// 后者是“控件不可用”（变灰、不响应），两者语义不同，不要用一个代替另一个。
   bool read_only_{false};
+  /// 无缝背景（不画底色、透出父级）；见 `set_seamless_background`。
+  bool seamless_bg_{false};
+  /// 是否绘制描边与焦点环（默认 true）；见 `set_show_border`。
+  bool show_border_{true};
+  /// 自动增高（高度跟随内容行数）；见 `set_auto_grow`。
+  bool auto_grow_{false};
+  std::size_t min_lines_{1};
+  /// 行数上限（0 = 不设）。
+  std::size_t max_lines_{0};
+  /// 最近一次 measure 量出的行数（`visible_line_count` 用）。
+  mutable std::size_t line_count_{0};
 
   // —— 选区（2026-10-14，与 `Input` 同一套字节偏移模型）——
   static constexpr std::size_t kNoSelection = std::numeric_limits<std::size_t>::max();

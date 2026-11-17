@@ -373,6 +373,36 @@ def icon_jianmu(c):
     thick_line(c, cx, 92, cx + 28, 62, 13, fg)                # 右枝
 
 
+def icon_xiaobai(c):
+    """小白：火箭 —— 机身 + 两支尾翼 + 舷窗 + 尾焰。
+
+    记号取意“一键起飞”：只留最容易在小尺寸下认出的四件——
+    竖直机身（圆角长条）、两侧尾翼（三角）、中间舷窗（挖空圆）、
+    下方两段尾焰（斜线）。
+    """
+    fg = (1.0, 1.0, 1.0)
+    top, bottom = 34, 190          # 机身纵向范围
+    cx = 128
+    half_w = 26
+
+    # —— 机身：两条相切的圆角矩形叠出“尖头圆柱” ——
+    rounded_rect(c, cx - half_w, top + 28, cx + half_w, bottom, 18, fg)
+    # 尖头（小半径上收，形成锥顶）
+    rounded_rect(c, cx - 15, top, cx + 15, top + 62, 14, fg)
+
+    # —— 尾翼：左右各一个三角，向外张开 ——
+    quad(c, [(cx - 24, 132), (cx - 24, 178), (cx - 62, 196)], fg, alpha=0.92)
+    quad(c, [(cx + 24, 132), (cx + 24, 178), (cx + 62, 196)], fg, alpha=0.92)
+
+    # —— 舷窗：挖空（用底色圆盖出洞）——
+    disc(c, cx, 92, 15, (0.08, 0.46, 0.78), alpha=1.0)
+
+    # —— 尾焰：两段斜线，向下外张 ——
+    thick_line(c, cx - 10, 196, cx - 30, 228, 11, fg, alpha=0.75)
+    thick_line(c, cx + 10, 196, cx + 30, 228, 11, fg, alpha=0.75)
+    thick_line(c, cx, 198, cx, 232, 10, fg, alpha=0.45)
+
+
 APPS = {
     # name: (源图输出路径, 底色, 画法)
     "gallery": ("apps/gallery/assets/gallery-icon.png", (0.36, 0.42, 0.86), icon_gallery),
@@ -382,7 +412,8 @@ APPS = {
     "cefu":    ("apps/cefu/assets/cefu-icon.png",       (0.42, 0.36, 0.68), icon_cefu),
     "xiangqi": ("apps/xiangqi/assets/xiangqi-icon.png", (0x14 / 255.0, 0x11 / 255.0, 0x0E / 255.0), icon_xiangqi),
     "gbcode":  ("apps/gbcode/assets/gbcode-icon.png",   (0.33, 0.42, 0.95), icon_gbcode),
-    "jianmu":  ("apps/jianmu/assets/jianmu-icon.png",   (0x2F / 255.0, 0x6E / 255.0, 0x52 / 255.0), icon_jianmu),
+"jianmu":  ("apps/jianmu/assets/jianmu-icon.png",   (0x2F / 255.0, 0x6E / 255.0, 0x52 / 255.0), icon_jianmu),
+"xiaobai": ("apps/xiaobai/assets/xiaobai-icon.png", (0.08, 0.46, 0.78), icon_xiaobai),
 }
 
 

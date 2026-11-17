@@ -1554,15 +1554,26 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.justify.has_value()) style.justify = *props.justify;
   if (props.align_items.has_value()) style.align_items = *props.align_items;
   if (props.align_self.has_value()) style.align_self = *props.align_self;
+  if (props.direction.has_value()) style.direction = *props.direction;
   if (props.text_align.has_value()) style.text_align = *props.text_align;
   if (props.radius >= 0.0f) style.radius = props.radius;
+  if (props.max_width != kAuto) style.max_width = props.max_width;
+  if (props.max_height != kAuto) style.max_height = props.max_height;
+  if (props.radius_max > 0.0f) style.radius_max = props.radius_max;
+  if (props.border_width > 0.0f) style.border_width = props.border_width;
+  if (props.border_color.a != 0U) style.border_color = props.border_color;
+  // 直接填充色：走 `set_solid_background`（它同时清渐变，避免“先铺渐变后写纯色”的残影）。
+  if (props.fill.a != 0U) style.set_solid_background(props.fill);
   // 叠放（绝对定位）：四个量一起落，否则会出现“写了 absolute 但没给偏移”的诡异总在左上角。
+  //
+  // 偏移是**可选**的（`-1` = 不锚定）：只给 `bottom` 就是“贴底 + 尺寸跟内容”，
+  // 而 `left`+`right` 同时给才是横向拉伸——这里逐项判再写，不要无条件覆盖。
   if (props.absolute) {
     style.absolute = true;
-    style.left = props.left;
-    style.top = props.top;
-    style.right = props.right;
-    style.bottom = props.bottom;
+    if (props.left >= 0.0f) style.left = props.left;
+    if (props.top >= 0.0f) style.top = props.top;
+    if (props.right >= 0.0f) style.right = props.right;
+    if (props.bottom >= 0.0f) style.bottom = props.bottom;
   }
   // 输入穿透（典型场景：叠在上层的文字层）
   if (!props.intercepts) element.set_intercepts_input(false);

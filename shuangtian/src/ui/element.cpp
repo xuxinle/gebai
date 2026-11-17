@@ -1023,8 +1023,8 @@ void Element::place_absolute(const RenderContext& context, Element& child, math:
   math::Size size = child.measured_size();
   if (child_style.width != kAuto) size.width = child_style.width;
   if (child_style.height != kAuto) size.height = child_style.height;
-  float x = content.x + child_style.left;
-  float y = content.y + child_style.top;
+  float x = child_style.left >= 0.0f ? content.x + child_style.left : content.x;
+  float y = child_style.top >= 0.0f ? content.y + child_style.top : content.y;
   // 右/下缘锚定：优先于 left/top（两者同给时以**具体边**为准，与 CSS 的
   // “left+right 同时给则由宽度反解”不同——这里选择更可预测的那个：
   // 贴右缘是常见需求，而“又贴左又贴右”等于让别人替你算宽，不如用 width）。
@@ -1047,8 +1047,18 @@ void Element::place_absolute(const RenderContext& context, Element& child, math:
   //
   // 为何拉伸判定必须在右锚**之前**：右锚会先算出 `x`（此时用的还是测量宽度），
   // 随后再按那条 `x` 反解宽度只会得到原测量值——成为一个静默的空操作。
-  const bool stretches_x = child_style.width == kAuto && child_style.right >= 0.0f;
-  const bool stretches_y = child_style.height == kAuto && child_style.bottom >= 0.0f;
+  //
+  // ## 拉伸必须**两端都锚定**（2026-11-17 修）
+  //
+  // 旧判据只要求“给了 `right`/`bottom`”，于是“只给 `bottom` + 高度 auto”也会被纵向
+  // 拉到父高——而那正是“贴底”的最常见写法（内容自适应的悬浮输入框、贴底状态条）。
+  // 现象极隐蔽：`get` 回来的属性全对，只是控件莫名其妙铺满整块。
+  // 修法与 CSS 对齐：`left+right`（或 `top+bottom`）同时给且尺寸为 auto 才拉伸；
+  // 只给一侧 = 贴边 + 按内容定尺寸。
+  const bool stretches_x = child_style.width == kAuto && child_style.right >= 0.0f &&
+                           child_style.left >= 0.0f;
+  const bool stretches_y = child_style.height == kAuto && child_style.bottom >= 0.0f &&
+                           child_style.top >= 0.0f;
   if (stretches_x) {
     // 左边改用边框盒原点：左右同基准才能“归零 = 铺满”。
     x = bounds_.x + child_style.left;
@@ -1343,6 +1353,14 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   const Style& style = paint_style();
   const auto& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
+  // **本帧生效圆角**：`radius_max` 上限（若设）之后再交给绘制层——
+  // 绘制层还有一步“夹到短边一半”（CSS 语义），两步合起来就是：
+  // `min(radius, radius_max>0 ? radius_max : ∞)` 再夹到半边长。
+  // 为何要 `radius_max`：胶囊随高度自适应时，单靠“夹到半高”会让多行的胶囊
+  // 两端变成半径 = 半个高度的大半圆（看着像椭圆）；加上上限才能“矮时胶囊、
+  // 长高后圆角矩形”。
+  const float radius = style.radius_max > 0.0f ? std::min(style.radius, style.radius_max)
+                                                : style.radius;
   // 悬浮进度（0..1）：未开特效的组件恒为 0，走的是原有路径，零额外开销
   const float hover_t = hover_effect_.enabled ? advance_hover(context) : 0.0f;
   const bool hovering = hover_t > 0.001f;
@@ -1431,12 +1449,12 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     bool glass_done = false;
     if (style.backdrop_refraction > 0.0f && canvas.supports_refraction()) {
       glass_done = canvas.refract_region(box, style.backdrop_blur, style.backdrop_refraction,
-                                         style.backdrop_dispersion, style.radius);
+                                         style.backdrop_dispersion, radius);
     }
     if (!glass_done) {
-      if (style.radius > 0.0f) canvas.push_clip_rounded_rect(box, style.radius);
+      if (radius > 0.0f) canvas.push_clip_rounded_rect(box, radius);
       glass_done = canvas.blur_region(box, style.backdrop_blur);
-      if (style.radius > 0.0f) canvas.pop_clip();
+      if (radius > 0.0f) canvas.pop_clip();
     }
     if (glass_done) backdrop_tint = style.backdrop_tint;
   }
@@ -1446,7 +1464,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     const math::Color glow{colors.glow.r, colors.glow.g, colors.glow.b,
                            static_cast<std::uint8_t>(colors.glow.a * hover_t)};
     canvas.fill_rect(box.inflate(spread), raster::Paint::solid(glow),
-                     style.radius + spread, raster::DrawOptions{.opacity = style.opacity});
+                     radius + spread, raster::DrawOptions{.opacity = style.opacity});
   }
   if (style.shadow.visible() && !style.shadow.inset) {
     // 上浮时阴影跟着走（否则“抬起”会被阴影钉在原地，看着像两层错位）
@@ -1468,7 +1486,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     const auto options = raster::DrawOptions{
         .opacity = style.opacity,
         .covered_region = can_skip_covered ? box : math::Rect{},
-        .covered_radius = can_skip_covered ? style.radius : 0.0f,
+        .covered_radius = can_skip_covered ? radius : 0.0f,
     };
     // **走 `draw_shadow_layered`，不是调两次 `draw_shadow`**：
     // 两层的遮罩都只取决于几何，后端可以把它们预合成成**一张**缓存贴图、只做一次
@@ -1480,7 +1498,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     // 单层路径，行为与以前逐像素相同。
     const bool has_ambient = style.shadow.second_visible();
     canvas.draw_shadow_layered(
-        shadow_box, style.radius, style.shadow.color, style.shadow.blur,
+        shadow_box, radius, style.shadow.color, style.shadow.blur,
         math::Point{style.shadow.offset_x, style.shadow.offset_y},
         has_ambient ? style.shadow.color2 : math::Color{0, 0, 0, 0},
         has_ambient ? style.shadow.blur2 : 0.0f,
@@ -1553,13 +1571,13 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
         mapped = raster::Gradient::sweep(map_point(source.start()), std::move(stops));
         break;
     }
-    canvas.fill_rect(box, raster::Paint::with_gradient(std::move(*mapped)), style.radius,
+    canvas.fill_rect(box, raster::Paint::with_gradient(std::move(*mapped)), radius,
                      raster::DrawOptions{.opacity = style.opacity * style.gradient_opacity *
                                                      backdrop_tint});
     painted_gradient = true;
   }
   if (!painted_gradient && background.a != 0U) {
-    canvas.fill_rect(box, raster::Paint::solid(background), style.radius,
+    canvas.fill_rect(box, raster::Paint::solid(background), radius,
                      raster::DrawOptions{.opacity = style.opacity * backdrop_tint});
   }
   // **内阴影（`inset`）在底色之后画**——它要压在底色之上才看得见。
@@ -1592,7 +1610,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     const float left_len = spread * (1.0f - ox * 0.5f);
     const float right_len = spread * (1.0f + ox * 0.5f);
 
-    canvas.push_clip_rounded_rect(box, style.radius);
+    canvas.push_clip_rounded_rect(box, radius);
     const auto band = [&](math::Point from, math::Point to, math::Rect rect) {
       if (rect.width <= 0.0f || rect.height <= 0.0f) return;
       canvas.fill_rect(
@@ -1648,10 +1666,10 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
                                                                                 edge.a / 3))},
                                           raster::GradientStop{1.0f, fading}});
     // 裁剪到圆角内：半径大于 0 时顶边那段会被圆角削掉，不裁就会在角上多出一小块。
-    if (style.radius > 0.0f) canvas.push_clip_rounded_rect(box, style.radius);
+    if (radius > 0.0f) canvas.push_clip_rounded_rect(box, radius);
     canvas.fill_rect(band, raster::Paint::with_gradient(gradient), 0.0f,
                      raster::DrawOptions{.opacity = style.opacity});
-    if (style.radius > 0.0f) canvas.pop_clip();
+    if (radius > 0.0f) canvas.pop_clip();
   }
   if (style.border_width > 0.0f && border.a != 0U) {
     // **环形填充**而不是描边：卡片边框是界面里出现次数最多的描边，而 `stroke_path`
@@ -1671,7 +1689,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
         std::max(0.0f, std::round(box.right()) - std::round(box.x)),
         std::max(0.0f, std::round(box.bottom()) - std::round(box.y))};
     canvas.fill_path(
-        math::make_rounded_border_ring(snapped, style.radius, style.border_width),
+        math::make_rounded_border_ring(snapped, radius, style.border_width),
         raster::Paint::solid(border),
         raster::DrawOptions{.opacity = style.opacity});
   }

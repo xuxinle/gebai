@@ -249,6 +249,53 @@ ST_TEST(md_view_stream_append_matches_oneshot) {
   ST_CHECK(partial.semantics_text().find("int x = 1;") != std::string::npos);
 }
 
+ST_TEST(md_view_shrink_to_fit_narrows_to_content) {
+  // `set_shrink_to_fit(true)`：控件宽从“容器给的上限”缩到“内容实际需要”。
+  //
+  // 现场：流式气泡里放一段“你好”，MarkdownView 占满整行（宽 416），
+  // 两侧大片空白——因为它的 `desired_width` 优先取约束上界（那是对的：
+  // 文档页需要稳定行宽），但气泡需要按内容收缩。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+  st::ui::Constraints constraints;
+  constraints.max_width = 600.0f;
+  constraints.available_width = 600.0f;
+  constraints.max_height = st::ui::kUnbounded;
+  constraints.available_height = 400.0f;
+
+  // 短文本：开启收缩后必须明显窄于上限。
+  {
+    st::ui::MarkdownView view{std::string("你好")};
+    view.measure(context, constraints);
+    const float full = view.measured_size().width;
+    view.set_shrink_to_fit(true);
+    view.measure(context, constraints);
+    const float shrunk = view.measured_size().width;
+    ST_CHECK(full >= 600.0f - 0.5f);              // 未开收缩 = 占满上界
+    ST_CHECK(shrunk < full - 1.0f);               // 开收缩 = 比满宽窄
+    ST_CHECK(shrunk > 0.0f);
+  }
+
+  // 短文本 vs 长文本：收缩后的宽度应随内容变长而变宽（不是“一律缩到同一个值”）。
+  {
+    st::ui::MarkdownView short_view{std::string("你好")};
+    short_view.set_shrink_to_fit(true);
+    short_view.measure(context, constraints);
+    st::ui::MarkdownView long_view{std::string("你好，这是一句明显更长的话，用来验证气泡宽度随内容变化")};
+    long_view.set_shrink_to_fit(true);
+    long_view.measure(context, constraints);
+    ST_CHECK(long_view.measured_size().width > short_view.measured_size().width + 1.0f);
+  }
+
+  // 默认（未开收缩）行为不变：仍占满上界。
+  {
+    st::ui::MarkdownView view{std::string("你好")};
+    ST_CHECK(!view.shrink_to_fit());
+    view.measure(context, constraints);
+    ST_CHECK(view.measured_size().width >= 600.0f - 0.5f);   // 默认仍铺满
+  }
+}
+
 ST_TEST(md_view_layout_width_follows_real_control_geometry) {
   // 回归：**排版宽 == 控件宽**（用户报“选中背景错位、没随窗口大小适应”）。
   //

@@ -111,6 +111,16 @@ class MarkdownView : public Element {
   [[nodiscard]] auto hovered_link() const -> const std::string& { return hovered_link_; }
   /// 排版宽度上限（`<= 0` 表示不限制，取容器给的最大宽度）。
   void set_max_width(float width);
+  /// **按内容收缩宽度**（默认关）。
+  ///
+  /// 关（默认）时宽度 = 容器给的最大可用宽（整行铺满，适合阅读器/文档页）。
+  /// 开时宽度 = 内容自然宽（不超过约束上限）——气泡/卡片里放一段短文字时用它，
+  /// 否则短句也会得到一个整宽的文本框（两侧大片空白）。
+  ///
+  /// 为何不做成总是按内容：长文档类界面的行宽需要稳定（否则每段宽度各异）。
+  /// 两种形态各有用途，所以做成显式开关而不改默认行为。
+  void set_shrink_to_fit(bool enabled);
+  [[nodiscard]] auto shrink_to_fit() const noexcept -> bool { return shrink_to_fit_; }
   /// 正文基准字号（`<= 0` 表示用主题 `font_base`）。
   void set_base_font_size(float size);
   /// 代码字号（`<= 0` 表示用主题 `font_sm`；端口无等宽能力，仅字号不同）。
@@ -368,6 +378,8 @@ class MarkdownView : public Element {
  float view_height_{0.0f};
   float scroll_offset_{0.0f};
   float max_width_{0.0f};
+  /// 按内容收缩宽度（见 `set_shrink_to_fit`）。
+  bool shrink_to_fit_{false};
   float base_font_size_{0.0f};
   float code_font_size_{0.0f};
   bool needs_layout_{true};
@@ -434,6 +446,8 @@ class MarkdownView : public Element {
   void rebuild_rows(const RenderContext& context, float width);
   /// 按**给定控件宽**重排内容（`measure` 与 `arrange` 共用唯一入口）。
   void set_layout_width(const RenderContext& context, float width);
+  /// 当前排好的行里，内容实际用到的最右 x（`shrink_to_fit` 用）。
+  [[nodiscard]] auto intrinsic_content_width() const noexcept -> float;
   /// 本组件想要的排版宽（`max_width` → `available_width` → 兑底常量）。
   [[nodiscard]] auto desired_width(const Constraints& constraints) const noexcept -> float;
   /// 一行的垂直几何（**全部委托框架原语 `layout_line`**，见定义处的说明）。
