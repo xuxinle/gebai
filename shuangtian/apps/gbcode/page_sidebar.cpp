@@ -239,7 +239,9 @@ namespace gbcode_ui {
     (void)custom<Input>(c, [this](Input& field) {
       field.set_id("search-input");
       field.set_placeholder("搜索（回车执行）");
-      field.set_icon_prefix("search");
+      // 与分支筛选框同一形态：与侧栏同底、保留描边。
+      // 不带前置图标：placeholder 已说明用途，图标在窄侧栏里只占宽度。
+      field.set_seamless_background(true);
       field.on_submit = [this](std::string_view query) { apply_search(std::string(query)); };
     }, {.key = "search-input"});
     // 选项行：glob 过滤 + 大小写 / 全词 / 正则（与 VSCode 的查找条同族）
@@ -253,6 +255,7 @@ namespace gbcode_ui {
         search_glob_ = std::string(glob);
         apply_search(last_query_);
       };
+      field.set_seamless_background(true);
     }, {.key = "search-glob"});
     (void)row(c, {.gap = 4.0f}, [&] {
       toggle_chip(c, "search-case", "Aa", search_case_.value(), [this] {

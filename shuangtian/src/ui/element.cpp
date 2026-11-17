@@ -1838,6 +1838,16 @@ void Element::paint_animated(const RenderContext& context, raster::Surface& canv
 void Element::paint_impl(const RenderContext& context, raster::Surface& canvas) const {
   paint_box(context, canvas);
   paint_content(context, canvas);
+  // 文本选区高亮：**盖在内容之上**（半透明主色），不改变组件的绘制逻辑。
+  //
+  // 为何用叠加而不是让各组件自己画：这是基类统一能力（`set_text_selectable`），
+  // 十几个展示型组件各有自己的排版，逐个插“选区分段”必然漏几个；
+  // 而它们需要的只是“整块看起来被选中了”。
+  if (text_selectable_ && text_selected_ && !bounds_.is_empty()) {
+    const math::Color accent = context.theme.colors().primary;
+    canvas.fill_rect(bounds_, raster::Paint::solid(math::Color{accent.r, accent.g, accent.b, 56}),
+                     style_.radius);
+  }
   if (style_.clip_children) {
     canvas.push_clip_rounded_rect(bounds_, style_.radius);
     for (const auto& child : children_) child->paint(context, canvas);
@@ -1849,9 +1859,68 @@ void Element::paint_impl(const RenderContext& context, raster::Surface& canvas) 
 
 auto Element::on_event(const RenderContext& context, Event& event) -> bool {
   (void)context;
+  if (text_selectable_ && enabled() && event.kind == EventKind::MouseDown &&
+      event.button == 1 && bounds_.contains(event.position)) {
+    // 点击即拿焦点（同 `Text::on_event` 的理由：不拿就收不到 `Ctrl+C`）。
+    // 这里把整块标为已选——这批展示型组件没有字级选区，整块选中就是它们的语义。
+    if (auto* h = host(); h != nullptr) (void)h->set_keyboard_focus(this);
+    text_selected_ = true;
+    mark_dirty();
+    event.handled = true;
+    return true;
+  }
+  // **文本可选复制**（基类能力，默认关）：三个键位，内容取 `semantics_text()`。
+  //
+  // 认领规则与组件层契约一致：只处理自己认识的组合键，其余一律**放行**
+  //（否则全局快捷键 `Ctrl+S` 没落点）。
+  if (text_selectable_ && enabled() && event.kind == EventKind::KeyDown) {
+    const bool mod = event.ctrl || event.meta;
+    if (mod && (event.key == "a" || event.key == "A")) {
+      text_selected_ = true;
+      mark_dirty();
+      event.handled = true;
+      return true;
+    }
+    if (mod && (event.key == "c" || event.key == "C")) {
+      const std::string text = semantics_text();
+      if (!text.empty()) {
+        // 写失败**如实上报**（无宿主剪贴板时），不假装成功。
+        // 剪贴板是**平台**能力，经窄接口 `HostFocus::host_set_clipboard_text` 下发。
+        if (auto* h = host(); h != nullptr) (void)h->host_set_clipboard_text(text);
+      }
+      event.handled = true;
+      return true;
+    }
+    if (event.key == "Escape" && text_selected_) {
+      clear_text_selection();
+      event.handled = true;
+      return true;
+    }
+  }
   // 基类不消费；但行为注入的 handler 仍要给机会（组件覆写若已消费则不会走到这里）。
   if (event_handler_) return event_handler_(event);
   return false;
+}
+
+void Element::set_text_selectable(bool selectable) {
+  if (text_selectable_ == selectable) return;
+  text_selectable_ = selectable;
+  if (!selectable) text_selected_ = false;
+  // 开关一变就把自己变成**可聚焦**：`Ctrl+A`/`Ctrl+C` 是键盘事件，
+  // 而键盘事件先走焦点链——不可聚焦的元素永远收不到它们（实测：
+  // 只设开关不加焦点，按键全部落到别处，看起来就像“这个功能没实现”）。
+  if (selectable) set_focusable(true);
+  mark_dirty();
+}
+
+auto Element::has_text_selection() const noexcept -> bool {
+  return text_selectable_ && text_selected_;
+}
+
+void Element::clear_text_selection() {
+  if (!text_selected_) return;
+  text_selected_ = false;
+  mark_dirty();
 }
 
 // —— Panel / Spacer ——

@@ -24,9 +24,11 @@ constexpr float kAsteriskWidth = 8.0f;
 
 }  // namespace
 
-FormRow::FormRow() = default;
+FormRow::FormRow() { set_text_selectable(true); }
 
-FormRow::FormRow(std::string label) : label_(std::move(label)) {}
+FormRow::FormRow(std::string label) : label_(std::move(label)) {
+  set_text_selectable(true);
+}
 
 // ————————————————————————————————————————————————————————————————————————————
 // 数据

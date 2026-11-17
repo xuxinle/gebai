@@ -141,6 +141,20 @@ void Input::set_icon_prefix(std::string_view icon_name) {
   mark_dirty();
 }
 
+void Input::set_seamless_background(bool seamless) {
+  if (seamless_bg_ == seamless) return;
+  seamless_bg_ = seamless;
+  // 无缝模式立即把主题落的底色/描边清成透明（不等下一帧 `apply_theme`）：
+  // `paint_box` 读的是 `style_`，留给它一份不透明底就等于“还画了一块底色”。
+  // 同时复位 `theme_style_owned_`，让切回普通模式时主题能重新接管。
+  theme_style_owned_ = false;
+  if (seamless_bg_) {
+    // 只清底色；描边留给 `apply_theme`/`sync_control_style` 按主题落。
+    style_.background = math::Color{0, 0, 0, 0};
+  }
+  mark_dirty();
+}
+
 void Input::set_cursor_index(std::size_t index) {
   cursor_ = snap_index(text_, index);
   mark_dirty();
@@ -322,7 +336,8 @@ void Input::apply_theme(const Theme& theme) {
   // 已被 `measure` 的 “未设则填” 写成某个具体色。若只看“是否等于我方上次写的值”，
   // 首轮就会判为“被别人改过”→ 永远不更新 → 主题切换完全无效。
   // 用 `theme_style_owned_` 记“这份色是我们落的”这个事实。
-  const math::Color next_bg = theme.colors().surface_sunken;
+  // 无缝背景**只管底色**：描边仍随主题走（它是“可输入”的视觉线索）。
+  const math::Color next_bg = seamless_bg_ ? math::Color{0, 0, 0, 0} : theme.colors().surface_sunken;
   const math::Color next_border = theme.colors().border;
   const auto untouched = [](math::Color current, math::Color mine) {
     return current.r == mine.r && current.g == mine.g && current.b == mine.b &&
@@ -353,7 +368,10 @@ void Input::apply_theme(const Theme& theme) {
 }
 
 void Input::measure(const RenderContext& context, const Constraints& constraints) {
-  sync_control_style(*this, context);
+  // 无缝模式下**不跑 `sync_control_style`**：它的判据是“透明 = 未设过”，
+  // 于是会把无缝模式故意留空的底色重新填成凹陷色（实测：
+  // `style.bg` 又变回 (233,234,240,255)，绕过一切都白设）。
+  if (!seamless_bg_) sync_control_style(*this, context);
   const Metrics& metrics = context.theme.metrics();
   const TextPort& port = text_port_of(context);
 
@@ -402,13 +420,18 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
   // 状态色（聚焦 primary / 悬停 border_strong / 禁用 surface_alt）只在**与通用
   // 路径已画的色不同**时补画：底色不同（禁用）先铺底，再补一道边框环覆盖
   //（环是 path 填充，远轻于整块 fill_rect）。像素结果与双绘路径一致。
+  //
+  // 无缝背景（`set_seamless_background`）**只去掉底色**，边框照画：
+  // 底色要跟父级一致（否则一行控件里就它凹下去），而边框是这个控件
+  // “可输入”的唯一视觉线索——两者都没有的话，它在工具栏里与一片空白无异
+  //（用户原话：“颜色相同了，边框线要留着”）。
   if (usable && focused()) {
     paint_focus_ring(context, canvas, bounds_, radius);
     if (border != style_.border_color) {
       paint_border(canvas, bounds_, radius, border, metrics.border_width);
     }
   } else if (border != style_.border_color || background != style_.background) {
-    if (background != style_.background) {
+    if (!seamless_bg_ && background != style_.background) {
       canvas.fill_rect(bounds_, raster::Paint::solid(background), radius);
     }
     paint_border(canvas, bounds_, radius, border, metrics.border_width);

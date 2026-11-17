@@ -16,9 +16,11 @@ namespace st::ui {
 
 using components_internal::text_port_of;
 
-DividerLabel::DividerLabel() = default;
+DividerLabel::DividerLabel() { set_text_selectable(true); }
 
-DividerLabel::DividerLabel(std::string text) : text_(std::move(text)) {}
+DividerLabel::DividerLabel(std::string text) : text_(std::move(text)) {
+  set_text_selectable(true);
+}
 
 // ————————————————————————————————————————————————————————————————————————————
 // 数据

@@ -105,6 +105,15 @@ class Button : public Element {
       -> bool override;
 
   std::function<void()> on_click{};
+  /// **右键按钮**回调（参数 = 最后鼠标位置，供菜单定位）。
+  ///
+  /// 与 `Tree::on_context_menu` / `Tabs::on_context_menu` 同一形态：
+  /// 组件只报“在这里右键了”，菜单条目与行为全归调用方。
+  ///
+  /// 为何需要它：列表里的行如果只靠一行尾部的图标按钮做操作（删除/重命名…），
+  /// 图标占宽、且一屏十几行时右侧排一列垃圾桶非常嘴。主流 IDE 与
+  /// 文件管理器都是“右键出菜单”，那也要求按钮能报告右键。
+  std::function<void(math::Point)> on_context_menu{};
   /// 图标在左（默认）或右。
   bool icon_leading{true};
 

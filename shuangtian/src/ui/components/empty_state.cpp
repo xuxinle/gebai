@@ -32,10 +32,12 @@ constexpr float kGapAction = 16.0f;
 
 }  // namespace
 
-EmptyState::EmptyState() = default;
+EmptyState::EmptyState() { set_text_selectable(true); }
 
 EmptyState::EmptyState(std::string title, std::string description)
-    : title_(std::move(title)), description_(std::move(description)) {}
+    : title_(std::move(title)), description_(std::move(description)) {
+  set_text_selectable(true);
+}
 
 // ————————————————————————————————————————————————————————————————————————————
 // 数据

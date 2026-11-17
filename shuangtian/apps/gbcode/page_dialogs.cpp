@@ -1047,6 +1047,209 @@ namespace gbcode_ui {
   }
 
 
+  /// 分支行右键菜单：**分支的全部操作都收在这张菜单里**。
+  ///
+  /// 为何从“行尾图标按钮”改成右键菜单：
+  /// * 一屏十几条分支时，右侧那列删除图标会抢走分支名的注意力，
+  ///   而且每条都占一份横向空间（分支名普遍较长，被挤得换行/截断）；
+  /// * 行尾只能摆下一两个图标，而分支操作不只一个（检出/删除/强删/复制名）；
+  /// * 主流 IDE（IDEA / VS Code 的 GitLens）都是右键出菜单。
+  ///
+  /// 条目按分支种类裁剪：
+  /// * 当前分支：不能检出（已经在那儿了）、不能删（删了就没地方站）；
+  /// * 远程分支：不能检出（检出会进 detached HEAD，误导性强）、不能删本地（那是远端的事）；
+  /// * 其余本地分支：全部条目。
+  void CodeEditorPage::build_branch_context(Composer& c) {
+    if (!branch_menu_open_.value()) return;
+    (void)overlay(c, "branch-context", {}, [&] {
+      (void)custom<ContextMenu>(c, [this](ContextMenu& menu) {
+        menu.anchor_ = branch_menu_anchor_;
+        if (menu.panel() != nullptr) {
+          // 目标分支从**当前分支列表**里重新取（不能捕获指针：列表会随刷新换一份）。
+          const std::string target = branch_menu_target_.value();
+          const gbcode::BranchInfo* found = nullptr;
+          for (const gbcode::BranchInfo& branch : git_branches_) {
+            if (branch.name == target) { found = &branch; break; }
+          }
+          if (found == nullptr) {
+            // 快照里已经没有这条分支（刚被删/刷新掉了）：给一条提示项，
+            // 而不是弹一张空菜单（空菜单看起来像“右键没反应”）。
+            menu.panel()->set_items({{.id = "gone", .label = "这条分支已不存在"}});
+            menu.panel()->on_activate = [this](std::size_t) { branch_menu_open_.set(false); };
+            menu.panel()->on_close = [this] { branch_menu_open_.set(false); };
+            menu.on_close = [this] { branch_menu_open_.set(false); };
+            return;
+          }
+          gbcode::BranchInfo branch = *found;
+          const bool is_current = branch.is_current;
+          const bool is_remote = branch.is_remote;
+
+          std::vector<MenuItem> items;
+          if (!is_current && !is_remote) {
+            items.push_back({.id = "checkout", .label = "检出（切到这条分支）"});
+            items.push_back({.separator = true});
+          }
+          if (!is_remote) {
+            items.push_back({.id = "filter", .label = "只看这条分支的日志"});
+            items.push_back({.id = "copy", .label = "复制分支名"});
+          }
+          if (!is_current) {
+            if (!items.empty()) { items.push_back({.separator = true}); }
+            items.push_back({.id = "delete", .label = "删除分支"});
+            items.push_back({.id = "force-delete", .label = "强制删除（会丢提交）"});
+          }
+          if (items.empty()) { items.push_back({.id = "none", .label = "（无可用操作）"}); }
+
+          menu.panel()->set_items(std::move(items));
+          menu.panel()->on_activate = [this, branch, panel = menu.panel()](std::size_t index) {
+            branch_menu_open_.set(false);
+            // ⚠ **按条目 id 派发，不看下标**（同上）：分隔符占下标，
+            // `switch(index)` 会整体错位（实测踩过：点“重命名”实际删了文件）。
+            const std::string id(panel != nullptr ? panel->item_id(index) : "");
+            if (id == "checkout") {
+              checkout_branch(branch);
+            } else if (id == "filter") {
+              filter_log_by_branch(branch);
+            } else if (id == "copy") {
+              const bool ok = clipboard_writer && clipboard_writer(branch.name);
+              status_.set(ok ? std::format("已复制分支名：{}", branch.name)
+                             : "复制失败（当前后端无剪贴板）");
+            } else if (id == "delete") {
+              ask_delete_branch(branch.name);
+            } else if (id == "force-delete") {
+              ask_force_delete_branch(branch.name);
+            }
+          };
+          menu.panel()->on_close = [this] { branch_menu_open_.set(false); };
+        }
+        menu.on_close = [this] { branch_menu_open_.set(false); };
+      }, {.id = "branch-context-menu"});
+    });
+  }
+
+
+  /// 日志工具栏的四个下拉面板（分支 / 用户 / 日期 / 路径）+「显示选项」。
+  ///
+  /// 四个面板形态一致：`ContextMenu` 锚在触发按钮下方，条目选中即生效。
+  /// 这里用一个辅助 lambda 统一造型，只传“条目 + 选中后做什么”。
+  void CodeEditorPage::build_log_filter_menus(Composer& c) {
+    /// 一个下拉面板：
+    /// ・`key` = overlay 身份（也是面板元素 id 前缀）
+    /// ・`anchor` = **打开那一刻**拍的按钮左上（ContextMenu 的正规用法：`anchor_` 为面板左上角）
+    const auto panel = [&](std::string_view key, const st::math::Point& anchor, State<bool>& open,
+                           std::vector<MenuItem> items, std::function<void(std::string)> on_pick) {
+      if (!open.value()) return;
+      (void)overlay(c, std::string(key), {}, [&] {
+        // 用 `dsl::context_menu`（正规入口）：它会写入锚点与条目，
+        // 并且**构造走注册表**（`ContextMenu` 没有无参构造，用 `custom<T>` 只会
+        // 得到 `panel_ == nullptr` 的空壳——实测：`menu.panel() != nullptr` 永远假，
+        // 面板根本不会出现，而 overlay 节点却真实存在，“有节点无画面”最难查）。
+        auto& menu = dsl::context_menu(c, st::math::Point{anchor.x, anchor.y + 26.0f},
+                                       std::move(items), {.id = std::string(key) + "-menu"});
+        if (auto* menu_panel = menu.panel()) {
+          menu_panel->on_activate = [this, &open, menu_panel, on_pick](std::size_t index) {
+            open.set(false);
+            // ⚠ **按条目 id 派发**（分隔符占下标，按 index 会整体错位）。
+            const std::string id(menu_panel->item_id(index));
+            if (!id.empty() && on_pick) on_pick(id);
+          };
+          menu_panel->on_close = [&open] { open.set(false); };
+        }
+        menu.on_close = [&open] { open.set(false); };
+      });
+    };
+
+    // —— ② 分支：HEAD 开关 + 全部本地/远程分支 ——
+    {
+      std::vector<MenuItem> items;
+      items.push_back({.id = "clear", .label = "（不筛选）"});
+      items.push_back({.separator = true});
+      items.push_back({.id = "only-head", .label = "仅当前分支（HEAD）"});
+      if (!git_branches_.empty()) items.push_back({.separator = true});
+      for (const gbcode::BranchInfo& branch : git_branches_) {
+        // 条目 id 用下标：分支名里可能有任何字符（`feature/x`、中文），
+        // 直接拼进 id 会让控制通道的选择器难写，而且重名远程/本地会撞。
+        const std::size_t index = static_cast<std::size_t>(&branch - git_branches_.data());
+        std::string label = std::string(gbcode::short_branch_name(branch));
+        if (branch.is_remote) label += "  ☁";
+        if (branch.is_current) label += "  ●";
+        items.push_back({.id = "branch:" + std::to_string(index), .label = std::move(label)});
+      }
+      panel("log-branch", log_branch_menu_anchor_, log_branch_menu_open_, std::move(items),
+            [this](std::string id) {
+              if (id == "clear") {
+                log_filter_current_branch_.set(false);
+                clear_log_branch_filter();
+              } else if (id == "only-head") {
+                clear_log_branch_filter();
+                log_filter_current_branch_.set(true);
+              } else if (id.rfind("branch:", 0) == 0) {
+                const std::size_t index = static_cast<std::size_t>(std::stoul(id.substr(7)));
+                if (index < git_branches_.size()) filter_log_by_branch(git_branches_[index]);
+              }
+            });
+    }
+
+    // —— ③ 用户：从当前日志里出现的作者去重 ——
+    {
+      std::vector<std::string> authors;
+      for (const gbcode::LogEntry& entry : git_log_) {
+        if (entry.author.empty()) continue;
+        if (std::find(authors.begin(), authors.end(), entry.author) == authors.end()) {
+          authors.push_back(entry.author);
+        }
+      }
+      std::vector<MenuItem> items;
+      items.push_back({.id = "clear", .label = "（不筛选）"});
+      if (!authors.empty()) items.push_back({.separator = true});
+      for (std::size_t index = 0; index < authors.size(); ++index) {
+        items.push_back({.id = "author:" + std::to_string(index), .label = authors[index]});
+      }
+      if (authors.empty()) items.push_back({.id = "none", .label = "（日志里没有作者）"});
+      panel("log-author", log_author_menu_anchor_, log_author_menu_open_, std::move(items),
+            [this, authors](std::string id) {
+              if (id == "clear") {
+                log_filter_author_.set(std::string{});
+              } else if (id.rfind("author:", 0) == 0) {
+                const std::size_t index = static_cast<std::size_t>(std::stoul(id.substr(7)));
+                if (index < authors.size()) log_filter_author_.set(authors[index]);
+              }
+            });
+    }
+
+    // —— ④ 日期：滚动窗口（天）——
+    {
+      std::vector<MenuItem> items{{.id = "clear", .label = "（不限）"},
+                                  {.separator = true},
+                                  {.id = "days:1", .label = "最近 1 天"},
+                                  {.id = "days:7", .label = "最近 7 天"},
+                                  {.id = "days:30", .label = "最近 30 天"},
+                                  {.id = "days:90", .label = "最近 90 天"}};
+      panel("log-date", log_date_menu_anchor_, log_date_menu_open_, std::move(items),
+            [this](std::string id) {
+              if (id == "clear") {
+                log_filter_days_.set(0);
+              } else if (id.rfind("days:", 0) == 0) {
+                log_filter_days_.set(std::stoi(id.substr(5)));
+              }
+            });
+    }
+
+    // —— ⑤ 「显示选项」：列显隐 ——
+    {
+      std::vector<MenuItem> items{{.id = "author", .label = "作者列", .checked = log_show_author_.value()},
+                                  {.id = "date", .label = "时间列", .checked = log_show_date_.value()},
+                                  {.id = "hash", .label = "哈希列", .checked = log_show_hash_.value()}};
+      panel("log-columns", log_columns_menu_anchor_, log_columns_menu_open_, std::move(items),
+            [this](std::string id) {
+              if (id == "author") log_show_author_.set(!log_show_author_.value());
+              else if (id == "date") log_show_date_.set(!log_show_date_.value());
+              else if (id == "hash") log_show_hash_.set(!log_show_hash_.value());
+            });
+    }
+  }
+
+
   /// 构建补全弹层（overlay；条件声明）。
   void CodeEditorPage::build_completion_popup(Composer& c) {
     if (!completion_open_.value()) return;

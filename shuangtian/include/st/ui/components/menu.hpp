@@ -71,7 +71,18 @@ class MenuPanel : public Element {
   static constexpr float kItemHeight{32.0f};
   static constexpr float kItemPaddingX{12.0f};
   static constexpr float kMinPanelWidth{160.0f};
-  static constexpr float kMaxPanelWidth{280.0f};
+  /// 勾选/图标位宽（左侧固定列；无勾也占位，文本才对得齐）。
+  ///
+  /// **测量与绘制必须引用同一个常量**：两侧各写一份魔法数字时，
+  /// 少算这个位宽会让每个条目都被截掉 16px（实测代价见 `paint_content`）。
+  static constexpr float kCheckSlotWidth{16.0f};
+  /// 面板宽度上限（自适应，按最宽条目算）。
+  ///
+  /// 它只是**保护上限**（防止一条错到离谱的条目把菜单拉到满屏宽），
+  /// 不应成为常见标签的“截断器”：280px 装不下中文长条目
+  /// （实测「强制删除（丢未合并提交）」被截成「强制删除（丢未合并提…」），
+  /// 而菜单被截断比菜单略宽难受得多——后者只是多占点空间。
+  static constexpr float kMaxPanelWidth{420.0f};
 
   explicit MenuPanel(std::vector<MenuItem> items);
 

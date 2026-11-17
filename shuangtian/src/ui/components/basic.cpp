@@ -473,6 +473,10 @@ void Text::set_selectable(bool selectable) {
   if (selectable == selectable_) return;
   selectable_ = selectable;
   if (!selectable_) clear_selection();
+  // 可选中 ⇒ **可聚焦**：`Ctrl+A`/`Ctrl+C` 是键盘事件，而键盘事件先走焦点链；
+  // 不可聚焦的元素永远收不到（实测：只设开关不加焦点时 Ctrl+A 完全无反应，
+  // 看起来就像“这个功能没做”）。与基类 `set_text_selectable` 同一约定。
+  if (selectable) set_focusable(true);
   mark_dirty();
 }
 
@@ -576,6 +580,9 @@ auto Text::on_event(const RenderContext& context, Event& event) -> bool {
   switch (event.kind) {
     case EventKind::MouseDown: {
       if (event.button != 1 || !bounds_.contains(event.position)) return false;
+      // 点击即拿焦点：不拿的话键盘事件（`Ctrl+A`/`Ctrl+C`）永远到不了这里——
+      // 而“鼠标点了一下文字、按 Ctrl+C 却什么都没发生”会被当成功能没做。
+      if (auto* h = host(); h != nullptr) (void)h->set_keyboard_focus(this);
       const auto [row, offset] = caret_at(context, event.position);
       selecting_ = true;
       select_begin_line_ = row;
@@ -1053,6 +1060,17 @@ auto Button::on_event(const RenderContext& context, Event& event) -> bool {
       mark_dirty();
       return false;
     case EventKind::MouseDown:
+      // **右键**：只报“右键了这个按钮（在这个位置）”，既不激活也不按下去。
+      //
+      // 为何不等 `Click`：右键是否产生 `Click` 取决于后端，而“按下”在所有
+      // 后端上都是确定的（`Tree` / `Tabs` 已因同一个原因这样做）。
+      // `mark_dirty()` / `pressed_` 也不动：右键不是“按了一下”。
+      if (event.button == 2) {
+        if (!on_context_menu) return false;
+        on_context_menu(event.position);
+        event.handled = true;
+        return true;
+      }
       mark_dirty();
       return true;
     case EventKind::KeyDown: {
@@ -1306,6 +1324,7 @@ void Divider::paint_content(const RenderContext& context, raster::Surface& canva
 KeyValueRow::KeyValueRow(std::string key, std::string value)
     : label_(std::move(key)), value_(std::move(value)) {
   style_.direction = FlexDirection::Row;
+  set_text_selectable(true);
 }
 
 void KeyValueRow::set_value(std::string value) {

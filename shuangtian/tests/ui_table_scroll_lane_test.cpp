@@ -101,6 +101,54 @@ constexpr int kCanvasH = 260;
 
 }  // namespace
 
+/// **clear_rows + 重新填同一批数据**不得重置纵向滚动位置。
+///
+/// ## 为何要钉
+///
+/// `clear_rows()` 曾经无条件 `scroll_offset_y_ = 0`，理由是“行没了，偏移跟着归零”。
+/// 但最常见的调用形态恰恰是「clear + 重新填一份更新过的同一批数据」：
+/// 声明式列表每帧重建、日志按筛选重算。那样**每点一下就跳回顶部**。
+///
+/// 实测（gbcode 日志表）：滚到 scroll_y=1176 后点一条提交看详情，
+/// 列表瞬间回到第 1 行——用户没法连着看几条提交。
+///
+/// 争点：行数**真的变少**时仍要夹到合法范围（不能停在越界位置）。
+ST_TEST(table_clear_rows_preserves_scroll_when_refilling) {
+  const Theme theme = Theme::dark();
+  auto table = make_table(50);
+  st::ui::RenderContext context{theme, nullptr, 0.0};
+  table->apply_theme(theme);
+  table->arrange(context, Rect{0.0f, 0.0f, 300.0f, 160.0f});
+
+  table->set_scroll_offset_y(400.0f);
+  const float before = table->scroll_offset_y();
+  st::log::out("[table] 滚动前={}\n", static_cast<double>(before));
+  ST_REQUIRE(before > 1.0f);
+
+  // 重新填同样多的行（实际场景：数据更新了一版）。
+  table->clear_rows();
+  for (std::size_t index = 0; index < 50; ++index) {
+    table->add_row({std::format("row {}", index), "x"});
+  }
+  table->arrange(context, Rect{0.0f, 0.0f, 300.0f, 160.0f});
+
+  const float after = table->scroll_offset_y();
+  st::log::out("[table] 重填后={}（旧实现会变 0）\n", static_cast<double>(after));
+  ST_CHECK(std::abs(after - before) < 0.5f);
+
+  // **行数变少时必须夹紧**：只剩 3 行时装不下那么多，偏移要落回合法范围。
+  table->clear_rows();
+  for (std::size_t index = 0; index < 3; ++index) {
+    table->add_row({std::format("row {}", index), "x"});
+  }
+  table->arrange(context, Rect{0.0f, 0.0f, 300.0f, 160.0f});
+  const float clamped = table->scroll_offset_y();
+  st::log::out("[table] 只剩 3 行时={} max={}\n", static_cast<double>(clamped),
+               static_cast<double>(table->max_scroll_y()));
+  ST_CHECK(clamped <= table->max_scroll_y() + 0.01f);
+  ST_CHECK(clamped >= 0.0f);
+}
+
 /// 纵向可滚量 = 内容高 −（视口高 − 表头高）；表头**不参与滚动**。
 ST_TEST(table_vertical_scroll_range_excludes_header) {
   const Theme theme = Theme::dark();

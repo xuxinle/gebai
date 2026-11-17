@@ -2164,6 +2164,29 @@ auto Application::start() -> Status {
                       : "未确认");
     }
   }
+  // ## 先把卡**画好**，再让窗口现身（顺序不能反）
+  //
+  // ⚠ 踩过的坑：旧码是 `show_early()` → 然后才 emplace + 画卡。那中间几十微秒里
+  // 窗口已经在屏幕上，而它的表面还是**未绘制状态**——用户先看到一个**白框**，
+  // 然后才被卡盖上（用户直指“启动动画最开始怎么有个白框”）。
+  // 窗口一旦可见，任何“稍后再画”都会漏出那个中间态；唯一的正解是先画后显。
+  std::optional<SplashPump> splash_pump;
+  if (splash_active) {
+    const ui::Theme& theme = root_.theme();
+    SplashState state{};
+    state.background = theme.colors().bg;
+    state.accent = theme.colors().accent;
+    state.backdrop_blur = impl_->splash_backdrop_ == shell::BackdropSupport::Active;
+    // 纯分层档：卡外真透明（只看到卡悬浮在桌面上）。
+    state.transparent_outside = !state.backdrop_blur && impl_->splash_layered_;
+    state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
+    splash_pump.emplace(*impl_->backend, state, options_.splash_style);
+    // **上屏之前**先画一帧：窗口一出现就已经有卡了，没有空白中间态。
+    splash_pump->tick();
+    // 顺序取证：这条日志在 `show_early()` **之前**打，
+    // 排障时看它就知“卡先画、窗后显”是否真的成立。
+    ST_LOG_INFO("启动卡：首帧已画（{} 帧），即将显窗", splash_pump->frames());
+  }
   impl_->backend->show_early();
   // 记下“卡开始露在屏幕上”的时刻：启动卡自适应要量的正是“从这里到主界面就绪”。
   // 详见 `splash_shown_ns` 处那张三种口径的对照表。
@@ -2179,21 +2202,8 @@ auto Application::start() -> Status {
   // 所以现在：先画一帧（窗口一出现就有卡）+ 在首帧前后各泵几帧。
   // 净代价 ≈ 每帧 10ms（绘制 9 + 上屏 1，小窗）——相对于 667ms 总启动是 3% 量级，
   // 换来的是一个持续在呼吸的卡，而不是一张定住的图。
-  std::optional<SplashPump> splash_pump;
-  if (splash_active) {
-    const ui::Theme& theme = root_.theme();
-    SplashState state{};
-    state.background = theme.colors().bg;
-    state.accent = theme.colors().accent;
-    state.backdrop_blur = impl_->splash_backdrop_ == shell::BackdropSupport::Active;
-    // 纯分层档：卡外真透明（只看到卡悬浮在桌面上）。
-    state.transparent_outside = !state.backdrop_blur && impl_->splash_layered_;
-    state.logo = std::span<const std::uint8_t>(options_.window_icon_png);
-    splash_pump.emplace(*impl_->backend, state, options_.splash_style);
-    // 首帧之前：先把卡画出来（窗口一出现就有东西可看）。
-    splash_pump->tick();
-    // 挂上**首帧期间的泵点**：让卡在 `layout()` 腾出的缝里继续呼吸。
-    // 为何不在 `paint` 之后泵：那时画布上已是界面内容（见 `startup_frame_pump` 的说明）。
+  if (splash_pump.has_value()) {
+    // 首帧之前：卡已画好（见上面的“先画后显”），这里只接泵点与预泵几帧。
     impl_->startup_frame_pump = [&pump = *splash_pump] {
       // ⚠ **不受帧间隔限制**：这个泵只在启动期拿几次机会，
       // 而 `tick()` 里的 max_fps 门限是为“持续循环”设的——

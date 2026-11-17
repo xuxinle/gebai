@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <functional>
+#include <set>
 #include <map>
 #include <memory>
 #include <string>
@@ -344,13 +345,20 @@ struct CodeEditorPage : Component {
   State<std::size_t> git_tab_{1};
   /// 分支面板的搜索词（IDEA 顶部「分支或标签」）：对**短名**过滤（不带 `origin/`）。
   State<std::string> branch_filter_text_{};
-  /// 分支面板三个组的展开态（HEAD / 本地 / 远程）。
+  /// 分支面板两个组的展开态（本地 / 远程）。
   ///
-  /// 默认：HEAD 与本地展开、远程收起——一个仓库的远程分支往往几十条，
+  /// HEAD 不在其中：它是一行事实（“我现在在哪”），不是一组可折叠的列表。
+  ///
+  /// 默认：本地展开、远程收起——一个仓库的远程分支往往几十条，
   /// 全展开会把它下面真正要切的本地分支顶出视口。
-  State<bool> branch_head_open_{true};
   State<bool> branch_local_open_{true};
   State<bool> branch_remote_open_{false};
+  /// **每个 remote 父节点的展开态**（元素 = 被收起的 remote 名）。
+  ///
+  /// 为何用“收起的集合”而不是“展开的集合”：默认应当是**展开**（点开远程组就
+  /// 能看到具体分支，不用再点一次），于是空集合天然就是正确默认值。
+  /// 收起多个 remote 时也能各自独立折叠（IDEA 同）。
+  State<std::set<std::string>> branch_remote_collapsed_{};
   /// 日志的**分支筛选**：空 = 不筛；非空 = 只看从该引用可达的提交。
   ///
   /// 与 `log_filter_current_branch_`（只看 HEAD 那条）不同：那个是开关，
@@ -359,11 +367,49 @@ struct CodeEditorPage : Component {
   State<std::string> log_filter_branch_{};
   /// `log_filter_branch_` 对应的提交 hash 集合（读取结果缓存；分支或刷新时重算）。
   std::vector<std::string> log_filter_branch_commits_{};
-  /// 日志过滤（提交信息 / 作者 / 路径）与“只显示当前分支”。
+  /// 日志过滤（提交信息 / 作者 / 日期）与“只显示当前分支”。
   State<std::string> log_filter_text_{};
   State<std::string> log_filter_author_{};
-  State<std::string> log_filter_path_{};
   State<bool> log_filter_current_branch_{false};
+
+  // —— 日志工具栏的下拉面板（三个筛选器 + 显示选项）——
+  //
+  // 每个面板一个开关。
+  // 为何不用 `Select` 组件：它要求调用方注入 `overlay_host`（把面板挂到 root），
+  // 而声明式里已经有 `dsl::overlay`——直接用它，面板内容就能跟随帧重组，
+  // 也省一份“组件自己做浮层”的生命周期。
+  State<bool> log_branch_menu_open_{false};
+  State<bool> log_author_menu_open_{false};
+  State<bool> log_date_menu_open_{false};
+  /// 三个筛选面板的锚点（**打开那一刻拍的按钮左上**，不是每帧求值）。
+  ///
+  /// 为何拍快照而不是用 `panel()->set_anchor_source()`：后者是给 `MenuBar`
+  /// 那条“挂 Stack overlay、只拿到左上矩形”的路径用的；而在 `ContextMenu` 下，
+  /// `MenuPanel::arrange` 会用 `anchor_source_()` **整个覆盖** `bounds_`，
+  /// 把 ContextMenu 算好的“越界向左/向上翻转”全丢掉——实测现象是
+  /// 面板跑到屏幕左上角，而不是贴着按钮。两条路径的定位责任不同，不能混用。
+  st::math::Point log_branch_menu_anchor_{};
+  st::math::Point log_author_menu_anchor_{};
+  st::math::Point log_date_menu_anchor_{};
+
+  /// 日期范围筛选（IDEA 的「日期」下拉）：0 = 不限。
+  ///
+  /// 单位是**天**而不是日期时间：日志筛选要的就是“最近一周/一月”这类粒度，
+  /// 存绝对日期会让“明天再看”变成另一个筛选条件（而用户要的是滚动窗口）。
+  State<int> log_filter_days_{0};
+
+  /// 「显示选项」面板：列显隐（作者/时间/哈希）。
+  ///
+  /// 提交信息列始终在（它是主列，关掉就只剩哈希与时间，没有意义）。
+  State<bool> log_columns_menu_open_{false};
+  st::math::Point log_columns_menu_anchor_{};
+  State<bool> log_show_author_{true};
+  State<bool> log_show_date_{true};
+  State<bool> log_show_hash_{true};
+
+  /// 大小写不敏感的子串包含（作者筛选用；中文不受影响）。
+  [[nodiscard]] static auto contains_ci(std::string_view haystack, std::string_view needle)
+      -> bool;
   State<gbcode::ChangeGroup> git_selected_group_{gbcode::ChangeGroup::Staged};
   /// 危险操作确认浮层（放弃更改/删除未跟踪/重置/强推）。
   State<bool> git_confirm_open_{false};
@@ -430,6 +476,20 @@ struct CodeEditorPage : Component {
   std::string git_selected_date_{};
   /// 选中提交的文件清单（`path, +N, −N`）——渲染期只消费（读在 `show_commit` 里）。
   std::vector<std::tuple<std::string, std::size_t, std::size_t>> git_commit_files_{};
+  /// 选中提交的**完整提交信息**（`%B`，含正文；Markdown 渲染用）。
+  std::string git_commit_message_{};
+
+  /// 提交修改文件的视图形态：单行列表 vs 按目录缩进的树。
+  ///
+  /// 两种都要的理由：扫“一共改了哪些文件”看列表最快（一屏能看二十多条），
+  /// 而“改动集中在哪个目录”只有树能一眼看出（几十个文件排成树的形状）。
+  enum class FileViewMode : std::uint8_t { List, Tree };
+  State<FileViewMode> commit_files_view_{FileViewMode::List};
+  /// 文件树里被**收起**的目录（空集 = 全展开）。
+  ///
+  /// 存“收起的集合”而不是“展开的集合”：默认应当展开（改动文件本来就少），
+  /// 于是空集天然就是正确默认值。
+  State<std::set<std::string>> commit_tree_collapsed_{};
   // —— 任意两端比较（已下线，2026-10-13；保留字段仅为 git_service 能力占位）——
   /// 比较视图是否开启（已无入口，恒 false）。
   State<bool> compare_open_{false};
@@ -599,6 +659,17 @@ struct CodeEditorPage : Component {
   State<bool> explorer_menu_open_{false};
   st::math::Point explorer_menu_anchor_{};
   State<std::string> context_key_{};
+
+  // —— 分支行右键菜单 ——
+  //
+  // 分支的所有操作（检出/删除/复制名…）都在这张菜单里，行尾不再排一列图标：
+  // 一屏十几条分支时，右侧那列垃圾桶会抢走分支名的注意力，也把每一行撑宽。
+  //
+  // `branch_menu_target_` 存**被右键的那条分支名**（右键不改选中）——
+  // 菜单动作必须作用于“当初右键的那条”，而不是“当前选中的那条”。
+  State<bool> branch_menu_open_{false};
+  st::math::Point branch_menu_anchor_{};
+  State<std::string> branch_menu_target_{};
 
   /// 「转到符号」面板的数据源：当前文件大纲 vs 工作区符号。
   enum class SymbolKind : std::uint8_t { Document, Workspace };
@@ -1153,6 +1224,9 @@ auto open_recent(const std::string& path) -> void;
   /// 而“改了什么”是**当前唯一要看的东西**——把它压在日志下面会被迫滚动。
    void build_commit_detail(Composer& c);
 
+  /// 提交详情里的**文件清单**（列表 / 树 两种视图，可切换）。
+  void build_commit_files(Composer& c);
+
 
   /// 确认一个**不可逆/需确认**的写操作（统一入口：弹确认 → 批准后才执行）。
   ///
@@ -1161,8 +1235,11 @@ auto open_recent(const std::string& path) -> void;
    void ask_write(const gbcode::WriteIntent& intent, std::string title, std::string body);
 
 
-  /// 删分支（`-d` 拒删未合并——想强删得再点一次）。
-   void ask_delete_branch(const std::string& name);
+    /// 删分支（`-d` 拒删未合并——想强删得再点一次）。
+  void ask_delete_branch(const std::string& name);
+
+  /// Cherry-pick 当前选中的提交到当前分支（需要先选中一条提交）。
+  void ask_cherry_pick_selected();
 
 
   /// 强删分支（`-D`）——丢掉未合并的提交，必须说清楚。
@@ -1856,6 +1933,15 @@ auto shutdown() -> void;
   /// 为何不复用 `context_open_`：两个菜单的锚点与条目完全不同，共享一个开关会让
   /// “在编辑器里右键”与“在树里右键”互相触发对方的菜单。
    void build_explorer_context(Composer& c);
+
+  /// 分支行右键菜单（检出 / 复制名 / 删除；当前分支与远程分支各自减去不该有的项）。
+  void build_branch_context(Composer& c);
+
+  /// 日志工具栏的三个下拉面板（分支 / 用户 / 日期）+「显示选项」。
+  ///
+  /// 四者共一个函数：它们的形态完全一致（一个锚点 + 一排可点条目），
+  /// 拆成四个函数只会把同一段布局代码拄四遍。
+  void build_log_filter_menus(Composer& c);
 
 
   // —— 搜索命中的跳转（打开文件 + 选中命中）——

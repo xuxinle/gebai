@@ -46,8 +46,20 @@ class Input : public Element {
   void set_placeholder(std::string text);
   /// 密码模式：显示掩码 `•`（`value()` 仍返回明文）。
   void set_password(bool value) noexcept;
-  /// 前缀图标名（图标集由后续模块提供；当前仅预留占位宽度，不绘制图形）。
+  /// 前缀图标名（图标集名，如 `"search"`；为空则不占格子也不画）。
   void set_icon_prefix(std::string_view icon_name);
+  /// **背景与父级一致**：不铺凹陷底色（**描边照画**）。
+  ///
+  /// 用途：把输入框放进一行密集的控件里（如日志工具栏）时，凹陷底色会把它
+  /// 从那一排里“扒”出来，看着不像同一个工具条。
+  ///
+  /// 为何**保留描边**：底色抹平后，1px 描边是这个控件“可以输入”的唯一视觉线索；
+  /// 两者都不画的话，它在工具栏里与一片空白无异。
+  ///
+  /// 为何不是“自己改一个颜色”：颜色得随主题变，而这里要的是**不画底色**——
+  /// 透明底让父级背景自然透出，主题切换无需额外同步。
+  void set_seamless_background(bool seamless);
+  [[nodiscard]] auto seamless_background() const noexcept -> bool { return seamless_bg_; }
   /// 设置光标字节位置（自动夹取到合法 UTF-8 码点边界）。
   void set_cursor_index(std::size_t index);
   /// 选区（字节偏移，**已归一化**且已夹到码点边界）；无选择时 `begin == end`。
@@ -107,8 +119,10 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
  /// 后者不能动。仅看 `a == 0` 不够：首轮填充后它就再也分不清两者了。
  math::Color applied_theme_bg_{};
  math::Color applied_theme_border_{};
- /// 底色/描边是否已由主题接管（首轮无条件接管一次，之后才看“有没有被调用方改过”）。
- bool theme_style_owned_{false};
+   /// 底色/描边是否已由主题接管（首轮无条件接管一次，之后才看“有没有被调用方改过”）。
+  bool theme_style_owned_{false};
+  /// 无缝背景（不画底/不画边，透出父级）。
+  bool seamless_bg_{false};
  [[nodiscard]] auto inner_box(const RenderContext& context) const -> math::Rect;
   [[nodiscard]] auto display_text() const -> std::string;
   [[nodiscard]] auto cursor_x(const RenderContext& context) const -> float;

@@ -30,9 +30,11 @@ constexpr float kUnderlineThicknessHover{1.6f};
 
 }  // namespace
 
-Link::Link() = default;
+Link::Link() { set_text_selectable(true); }
 
-Link::Link(std::string text) : text_(std::move(text)) {}
+Link::Link(std::string text) : text_(std::move(text)) {
+  set_text_selectable(true);
+}
 
 // ————————————————————————————————————————————————————————————————————————————
 // 数据

@@ -160,6 +160,53 @@ ST_TEST(ui_input_disabled_background_differs_from_enabled) {
 }
 
 // ————————————————————————————————————————————————————————————————————————————
+// 无缝背景（`set_seamless_background`）
+// ————————————————————————————————————————————————————————————————————————————
+
+/// 无缝模式下**不铺底色、不画边框**：整块区域与背景完全一致（alpha 保持 0）。
+///
+/// 为何要钉：这个开关的用途是“把输入框放进一行密集控件里”（日志工具栏），
+/// 而它一旦失效，失败方式是**静默的**——输入框又凹陷下去，看着不像同一个工具条
+/// （用户报的“输入框背景色和主背景统一”）。
+///
+/// ⚠ **它只去除底色，描边必须留着**（用户第二轮：“颜色相同了，边框线要留着”）：
+/// 底色抹平后，1px 描边是这个控件“可以输入”的**唯一**视觉线索。
+/// 所以这条用例有**两个成对断言**：中心无底（alpha 0）+ 边框有像素（alpha > 0）。
+/// 只测前一个的话，“什么都不画”也能过——而那个结果看起来就是一条空白。
+ST_TEST(ui_input_seamless_drops_background_but_keeps_border) {
+  Fixture fixture;
+  Input input;
+  input.set_text("文本或哈希");
+  input.set_seamless_background(true);
+  render(input, fixture);
+
+  // 中心 = 底色（应无），左缘中点 = 描边（应有）。
+  // 左缘取 `border_width` 覆盖的像素带内（1~2px），避开圆角。
+  const Color middle = fixture.canvas.pixel_at(kWidth / 2, kHeight / 2);
+  const Color left_edge = fixture.canvas.pixel_at(0, kHeight / 2);
+  const st::math::Color style_bg = input.style().background;
+  st::log::out("[input] seamless middle.a={} left_edge.a={} style.bg=({},{},{},{})\n",
+               middle.a, left_edge.a, style_bg.r, style_bg.g, style_bg.b, style_bg.a);
+  ST_CHECK_EQ(middle.a, 0);       // **无底色**
+  ST_CHECK(left_edge.a > 0);      // **有描边**
+}
+
+/// 对照：**普通**输入框除了描边，还要有可见**底色**（凹陷感）。
+///
+/// 这一对是必须的：它同时证明了“背景开关真的改了底色”，
+/// 而不是“本来就两边一样”。
+ST_TEST(ui_input_normal_background_paints_something) {
+  Fixture fixture;
+  Input input;
+  input.set_text("文本或哈希");
+  render(input, fixture);
+
+  const Color middle = fixture.canvas.pixel_at(kWidth / 2, kHeight / 2);
+  st::log::out("[input] normal middle.a={}\n", middle.a);
+  ST_CHECK(middle.a > 0);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
 // 动作面（invoke submit/activate/clear）
 // ————————————————————————————————————————————————————————————————————————————
 

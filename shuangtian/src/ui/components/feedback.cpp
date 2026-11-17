@@ -259,7 +259,9 @@ auto Spinner::property_names() const -> std::vector<std::string_view> {
 
 // —— Badge ——
 
-Badge::Badge(std::string text, Tone tone) : text_(std::move(text)), tone_(tone) {}
+Badge::Badge(std::string text, Tone tone) : text_(std::move(text)), tone_(tone) {
+  set_text_selectable(true);
+}
 
 void Badge::set_text(std::string text) {
   if (text_ == text) return;
@@ -338,6 +340,7 @@ auto Badge::property_names() const -> std::vector<std::string_view> {
 
 Chip::Chip(std::string text, bool closable) : text_(std::move(text)), closable_(closable) {
   style_.background = math::Color{0, 0, 0, 0};
+  set_text_selectable(true);
 }
 
 void Chip::set_text(std::string text) {

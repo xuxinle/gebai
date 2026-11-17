@@ -281,6 +281,9 @@ MarkdownView::MarkdownView(std::string markdown) {
   metrics_.base = 14.0f;
   metrics_.code = 13.0f;
   metrics_.table = 12.0f;
+  // 内边距默认值只在这里给一次（`apply_theme` 不再覆盖它）：
+  // 独立使用时（如 gallery 的「关于」页）需要一圈留白；而嵌进某栏里的调用方
+  // 可以用 `style().padding` 改成自己的值，且**不会被下一帧盖回**。
   style_.background = math::Color{0, 0, 0, 0};
   style_.padding = math::Insets::symmetric(16.0f, 12.0f);
   style_.font_size = metrics_.base;
@@ -385,7 +388,13 @@ void MarkdownView::apply_theme(const Theme& theme) {
   style_.background = math::Color{0, 0, 0, 0};
   style_.color = theme.colors().text;
   style_.font_size = metrics_.base;
-  style_.padding = math::Insets::symmetric(16.0f, 12.0f);
+  // **不要每帧重置内边距**：它归**调用方**管（它才知道自己在一栏里、左右已让出多少）。
+  // 旧实现在这里无条件写 `Insets::symmetric(16, 12)`，于是：
+  // ① 调用方设的 padding 每帧被盖回（gbcode 的 md 预览设了 12/16，从未生效）；
+  // ② 与外部布局的 padding 叠加后，Markdown 正文比同栏文字多缩进一段——
+  //    实测同一右栏里正文首字 x=11、元信息首字 x=36，两行明显不对齐，
+  //    看着就像“Markdown 的字号比界面小一号”（用户报的观感问题）。
+  // 默认值改在**构造函数**里给（不改就吃构造值，改了就以调用方为准）。
   apply_text_overrides();
 }
 

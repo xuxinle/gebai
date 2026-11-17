@@ -178,7 +178,10 @@ void MenuPanel::measure(const RenderContext& context, const Constraints& constra
     text_width = std::max(text_width, port.measure_width(item.label, metrics.font_base));
     if (!item.children.empty()) text_width += 16.0f;  // 子菜单箭头位
   }
-  float width = text_width + kItemPaddingX * 2.0f + 20.0f;  // 勾选位留白
+  // 宽度口径（与 `paint_content` 的文字框**严格对称**）：
+  //   面板宽 = 文字宽 + 左内边距 + 勾选位 + 右内边距
+  // 少算任一项，文字框就会比文字窄、末尾被省略号吃掉。
+  float width = text_width + kItemPaddingX * 2.0f + kCheckSlotWidth;
   width = std::max(width, kMinPanelWidth);
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
   width = std::clamp(width, kMinPanelWidth, kMaxPanelWidth);
@@ -265,11 +268,18 @@ void MenuPanel::paint_content(const RenderContext& context, raster::Surface& can
                       metrics.radius_sm, raster::Paint::solid(colors.primary_soft));
     }
     // 勾选位（固定左列；无勾也占位，文本对齐一致）。
-    const math::Rect check_box{row.x + kItemPaddingX, row.y, 16.0f, row.height};
+    const math::Rect check_box{row.x + kItemPaddingX, row.y, kCheckSlotWidth, row.height};
     if (item.checked) draw_check(canvas, check_box, metrics.font_base, colors.primary);
+    // 文字框：右侧只留 `kItemPaddingX`，**左侧刚好接管勾选位**。
+    //
+    // 这里的表达式与 `measure` 里的宽度公式必须同口径：
+    // `文字宽 = 面板宽 − kItemPaddingX(左) − kCheckSlotWidth − kItemPaddingX(右)`。
+    // 两侧曾各写一份魔法数字（绘制 `− kItemPaddingX − 20 − (kItemPaddingX + 16)`，
+    // 测量 `+ kItemPaddingX*2 + 20`）——少算一个 16 的勾选位，于是
+    // **每个菜单条都必然被截掉 16px**（实测：「强制删除（会丢提交）」显示成
+    // 「强制删除（会丢提…」，而上限调多大都没用）。
     const math::Rect text_box{check_box.right(), row.y,
-                              std::max(0.0f, row.width - kItemPaddingX - 20.0f -
-                                                 (check_box.right() - row.x)),
+                              std::max(0.0f, row.width - kItemPaddingX * 2.0f - kCheckSlotWidth),
                               row.height};
     draw_line(context, canvas, item.label, text_box, metrics.font_base,
               highlighted ? colors.primary : colors.text);
@@ -712,6 +722,12 @@ void ContextMenu::measure(const RenderContext& context, const Constraints& const
 void ContextMenu::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
   // 面板定位：锚点右下展开 → 越界翻转（先水平后垂直）→ 仍越界夹入。
+  //
+  // ⚠ 本路径**不要**给面板给 `set_anchor_source()`：`MenuPanel::arrange`
+  // 开头就用 `anchor_source_()` **整个覆盖** `bounds_`，会把这里算好的
+  // 越界翻转与夹取全丢掉——实测现象是“面板跑到屏幕左上角”。
+  // `anchor_source_` 是给 `MenuBar` 那条路径用的（它挂 Stack overlay，
+  // 只拿到“左上对齐 + 自身尺寸”的矩形）。两条路径的定位责任不同。
   const math::Size size = panel_->measured_size();
   float x = anchor_.x;
   float y = anchor_.y;

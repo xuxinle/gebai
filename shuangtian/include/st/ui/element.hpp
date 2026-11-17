@@ -1220,6 +1220,28 @@ class Element {
   /// 组件层契约：只对**自己认识的键/事件**返回 true——未识别的组合键必须放行冒泡，
   /// 否则全局快捷键（如 Ctrl+S 保存）没有落点。
   virtual auto on_event(const RenderContext& context, Event& event) -> bool;
+
+  /// **文本可选中复制**（一个开关覆盖整类能力，与 `Text::set_selectable` 同语义）。
+  ///
+  /// 开启后本元素处理三件键/手势，内容取 `semantics_text()`：
+  /// * `Ctrl/Cmd + A` → 全选（高亮本元素整个矩形的文字区域）；
+  /// * `Ctrl/Cmd + C` → 复制（写宿主剪贴板）；
+  /// * `Esc` → 清除选区。
+  ///
+  /// 为何做成**基类能力**而不是每个组件各写一份：展示型文本组件有十几个
+  ///（`Chip`/`Link`/`Badge`/`EmptyState`/`KeyValueRow`/`Breadcrumb`/`StatusBar`…），
+  /// 逐个体积性地重写选中派发、高亮绘制、剪贴板接线，必然漏几个；而它们
+  /// 共同需要的“选中”只是一个**整块选中**（不需要跨行拖选——那是 `Text`/`CodeEditor`
+  /// 的细粒度选区，已各自实现）。
+  ///
+  /// 默认**关**：静态标签遍布界面，默认抢 `Ctrl+A` / `Ctrl+C` 会破全局快捷键
+  ///（“全选文件树”之类），这与 `Text::set_selectable` 的默认值同一理由。
+  void set_text_selectable(bool selectable);
+  [[nodiscard]] auto text_selectable() const noexcept -> bool { return text_selectable_; }
+  /// 是否有活动选区（整块选中时 = `text_selectable_` 为真）。
+  [[nodiscard]] auto has_text_selection() const noexcept -> bool;
+  /// 清掉选区（未开启时为无操作）。
+  void clear_text_selection();
   /// 键盘激活（Enter/Space）。
   virtual void activate() {}
   /// 本元素（含子树）是否参与命中拦截：`hit_test` 与浮层键盘派发都先问它。
@@ -1535,6 +1557,10 @@ class Element {
   /// 实例级的“不拦截输入”覆盖（见 `set_intercepts_input`）；空 = 跟随虚函数。
   std::optional<bool> intercepts_input_override_{};
   bool focusable_{false};
+  /// 文本可选中复制（见 `set_text_selectable`）。
+  bool text_selectable_{false};
+  /// 当前是否有一块活动选区（整块选中）。
+  bool text_selected_{false};
   bool hovered_{false};
   /// 上一帧本元素**子树**的绘制耗时（纳秒；仅剖析时非零）。
   ///

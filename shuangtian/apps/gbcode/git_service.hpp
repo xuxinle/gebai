@@ -133,6 +133,11 @@ struct LogEntry {
   std::string hash{};          ///< 完整 hash（操作用）；`short_hash` 给显示
   std::string short_hash{};
   std::string subject{};       ///< 首行
+  /// **完整提交信息**（含标题与正文，`%B`）。读详情时才填（列表不用）。
+  ///
+  /// 为何不直接用 `subject`：提交说明常常是多段（变更动机、影响面、关联 issue），
+  /// 只显示首行就等于把“为什么改”丢了——而详情栏里的 Markdown 渲染就是为了它。
+  std::string message{};
   std::string author{};
   std::string date{};          ///< 原样（`%ad`，格式 `--date=format:` 已定）
   /// refs（HEAD/分支/标签），已解析成逐个胶囊。
@@ -156,7 +161,7 @@ struct LogEntry {
 /// 只返回**提交**（不包含任何“行”概念）——供“按提交维度”做的逻辑（详情/选中）用。
 /// 泳道与边由 `git_graph.*` 的 `read_commit_graph` 单独提供。
 [[nodiscard]] auto read_log(const std::string& cwd, std::size_t limit,
-                            const std::string& ref = {}) -> std::vector<LogEntry>;
+                           const std::string& ref = {}) -> std::vector<LogEntry>;
 
 /// 读一个提交的详情（变更文件 + numstat；写入 `entry.files` 并返回 diff 文本）。
 [[nodiscard]] auto read_commit_detail(const std::string& cwd, LogEntry& entry) -> std::string;

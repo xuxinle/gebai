@@ -352,6 +352,10 @@ namespace gbcode_ui {
     (void)custom<Input>(c, [this](Input& input) {
       input.set_id("git-branch-filter");
       input.set_placeholder("分支或标签");
+      // 与日志工具栏的筛选框**同一形态**（与侧栏同底、保留描边），
+      // 但不带前置图标：侧栏窄，图标白占一格宽度，而 placeholder
+      // 已经把“这里能筛什么”说清楚了。
+      input.set_seamless_background(true);
       input.set_text(branch_filter_text_.value());
       input.on_change = [this](std::string_view text) { branch_filter_text_.set(std::string(text)); };
     }, {.height = 26.0f, .key = "git-branch-filter"});
@@ -404,46 +408,39 @@ namespace gbcode_ui {
 
           // —— 组的公共构件 ——
           //
-          // 一组的形态：`[▾/▸] [图标] 标题 (计数)` + 展开时的条目。
+          // 一组的形态：`[▾/▸] [图标] 标题` + 展开时的条目。
           // 折叠箭头在左（IDEA 同位置），整行可点（点击目标远大于那个小三角）。
+          //
+          // **不显示计数**：分支数量不是读者要看的信息（IDEA 也不显示），
+          // 而它占在标题右侧会与分支名抢注意力，还让每组标题长短不一。
           const auto group_header = [&](std::string_view key, std::string_view title,
-                                        std::size_t count, State<bool>& open,
-                                        std::string_view icon_name) {
-            (void)custom<Button>(c, [&open, key, title, count, icon_name](Button& button) {
+                                        State<bool>& open, std::string_view icon_name) {
+            (void)custom<Button>(c, [&open, key, title, icon_name](Button& button) {
               button.set_id("git-group-" + std::string(key));
               button.set_align(Button::Align::Start);
-              // 箭头 + 图标 + 标题 + 计数：全在一个 label 里（`Button` 只画一行）。
-              button.set_label(std::format("{} {}  {} ({})", open.value() ? "▾" : "▸",
-                                           icon_name, title, count));
+              button.set_label(std::format("{} {}  {}", open.value() ? "▾" : "▸",
+                                           icon_name, title));
               button.set_variant(Button::Variant::Ghost);
               button.set_size(Button::Size::Small);
               button.on_click = [&open] { open.set(!open.value()); };
             }, {.height = 24.0f, .grow = true, .key = "group:" + std::string(key)});
           };
 
-          // —— ① HEAD（只有一条：当前分支）——
+          // —— ① HEAD ——
           //
-          // IDEA 把它单列一组的原因：它是唯一“已经在用”的东西，点它应当是**查看**
-          // 而非切换。这里给 Soft 变体（与其余条目区分）+ 不可删除。
+          // **一行呈现，不下钻、不计入列表**：HEAD 不是“一组分支”，它就是
+          // “我现在在哪”这一个事实。做成可展开的组会在下面再排一条分支，
+          // 与“本地”组里的同一条分支重复，读者要自己判断“这俩是不是一回事”。
+          // 这里直接写成 `HEAD → master`，点它仍是“只看当前分支的历史”。
           if (head != nullptr) {
-            group_header("head", "HEAD", 1, branch_head_open_, "●");
-            if (branch_head_open_.value()) {
-              // ⚠ key 与 id 都带 **`head:` 前缀**：同一条分支在下方的“本地”组里
-              // 还会再出现一次（职责不同，见本段注释）。两处若用同一 key，
-              // 声明式会按 key 把两个位置对齐到同一个实例——两行共用一份状态，
-              // 表现为“点 HEAD 里那条，高亮跑到了本地组”这类错位。
-              (void)row(c, {.gap = 4.0f, .key = "head:" + head->name}, [&] {
-                (void)custom<Button>(c, [this, branch = *head](Button& button) {
-                  button.set_id("git-branch-head-" + branch.name);
-                  button.set_align(Button::Align::Start);
-                  button.set_label("    " + std::string(gbcode::short_branch_name(branch)));
-                  button.set_variant(Button::Variant::Soft);
-                  button.set_size(Button::Size::Small);
-                  // HEAD 也走同一套：点它就是“只看当前分支的历史”（等价于打开“仅当前分支”）。
-                  button.on_click = [this, branch] { filter_log_by_branch(branch); };
-                }, {.height = 24.0f, .grow = true});
-              });
-            }
+            (void)custom<Button>(c, [this, branch = *head](Button& button) {
+              button.set_id("git-branch-head");
+              button.set_align(Button::Align::Start);
+              button.set_label("●  HEAD  →  " + std::string(gbcode::short_branch_name(branch)));
+              button.set_variant(Button::Variant::Soft);
+              button.set_size(Button::Size::Small);
+              button.on_click = [this, branch] { filter_log_by_branch(branch); };
+            }, {.height = 24.0f, .grow = true, .key = "head-line"});
           }
 
           // —— ② 本地 ——
@@ -454,30 +451,28 @@ namespace gbcode_ui {
           // 早期实现在这里 `continue` 跳过当前分支，结果本地组少一条、
           // 用户在本地清单里找不到自己在用的那条（目录与计数都对不上）。
           if (!locals.empty()) {
-            group_header("local", "本地", locals.size(), branch_local_open_, "⏣");
+            group_header("local", "本地", branch_local_open_, "⏣");
             if (branch_local_open_.value()) {
               for (const gbcode::BranchInfo* branch : locals) {
-                const bool current = branch->is_current;
-                (void)row(c, {.gap = 4.0f, .key = "branch:" + branch->name}, [&] {
-                  (void)custom<Button>(c, [this, branch = *branch, current](Button& button) {
-                    button.set_id("git-branch-" + branch.name);
-                    button.set_align(Button::Align::Start);
-                    button.set_label("    " + std::string(gbcode::short_branch_name(branch)));
-                    // 当前分支**高亮**（Soft = 主题主色的浅底，与 HEAD 组一致）。
-                    // 不给高亮就只剩缩进，一屏十几条时看不出自己在哪条上。
-                    button.set_variant(current ? Button::Variant::Soft
-                                               : Button::Variant::Ghost);
-                    button.set_size(Button::Size::Small);
-                    // 点击 = **筛日志**（不是检出）：检出会改工作区，是写操作，
-                    // 不该由“在侧栏看一眼这条分支的历史”触发。
-                    button.on_click = [this, branch] { filter_log_by_branch(branch); };
-                  }, {.height = 24.0f, .grow = true});
-                  // 当前分支不可删（删了就没地方站了）；远程分支的删除在别处管。
-                  if (!current) {
-                    scm_icon_button(c, "delbranch-" + branch->name, "trash", "删除分支",
-                                    [this, name = branch->name] { ask_delete_branch(name); });
-                  }
-                });
+                (void)custom<Button>(c, [this, branch = *branch](Button& button) {
+                  button.set_id("git-branch-" + branch.name);
+                  button.set_align(Button::Align::Start);
+                  button.set_label("    " + std::string(gbcode::short_branch_name(branch)));
+                  // 当前分支**高亮**（Soft = 主题主色的浅底，与 HEAD 行一致）。
+                  // 不给高亮就只剩缩进，一屏十几条时看不出自己在哪条上。
+                  button.set_variant(branch.is_current ? Button::Variant::Soft
+                                                       : Button::Variant::Ghost);
+                  button.set_size(Button::Size::Small);
+                  // 左键 = **筛日志**（不是检出）：检出会改工作区，是写操作，
+                  // 不该由“在侧栏看一眼这条分支的历史”触发。
+                  button.on_click = [this, branch] { filter_log_by_branch(branch); };
+                  // 右键 = **全部分支操作**（检出/只看日志/复制名/删除）。
+                  button.on_context_menu = [this, name = branch.name](st::math::Point at) {
+                    branch_menu_target_.set(name);
+                    branch_menu_anchor_ = st::math::Point{at.x + 4.0f, at.y + 4.0f};
+                    branch_menu_open_.set(true);
+                  };
+                }, {.height = 24.0f, .grow = true, .key = "branch:" + branch->name});
               }
             }
           }
@@ -488,7 +483,7 @@ namespace gbcode_ui {
           // 一个仓库常配多个 remote（origin / upstream / 同事的 fork），
           // 平铺时 `origin/xxx` 与 `upstream/xxx` 混在一起，看不出谁是同一台远端。
           if (!remotes.empty()) {
-            group_header("remote", "远程", remotes.size(), branch_remote_open_, "☁");
+            group_header("remote", "远程", branch_remote_open_, "☁");
             if (branch_remote_open_.value()) {
               // 按 remote 名分组（保持首次出现顺序）。
               std::vector<std::pair<std::string, std::vector<const gbcode::BranchInfo*>>> by_remote;
@@ -503,12 +498,28 @@ namespace gbcode_ui {
                 slot->second.push_back(branch);
               }
               for (const auto& [remote, entries] : by_remote) {
-                // remote 父节点：图标 + 名字 + 计数（IDEA 只显示名字，计数帮判断“有没有同步过”）。
-                (void)text(c, [remote, count = entries.size()] {
-                  return std::format("  ▾ {} ({})", remote, count);
-                }, {.color = Tone::Muted, .id = "git-remote-" + remote});
+                // remote 父节点：**可点开/收起**（IDEA 同）。
+                //
+                // 不用 `group_header`（它绑一个 State<bool>，而这里是**每个 remote 一个**
+                // 折叠态）：所有 remote 共用一份开关，收起 github 时会连 origin 一起没了。
+                const bool collapsed = branch_remote_collapsed_.value().contains(remote);
+                (void)custom<Button>(c, [this, remote, collapsed](Button& button) {
+                  button.set_id("git-remote-" + remote);
+                  button.set_align(Button::Align::Start);
+                  button.set_label(std::format("{} {}", collapsed ? "  ▸" : "  ▾", remote));
+                  button.set_variant(Button::Variant::Ghost);
+                  button.set_size(Button::Size::Small);
+                  button.on_click = [this, remote] {
+                    auto next = branch_remote_collapsed_.value();
+                    if (!next.insert(remote).second) { next.erase(remote); }
+                    branch_remote_collapsed_.set(std::move(next));
+                  };
+                }, {.height = 24.0f, .grow = true, .key = "remote:" + remote});
+                if (collapsed) { continue; }
                 for (const gbcode::BranchInfo* branch : entries) {
-                  (void)row(c, {.gap = 4.0f, .key = "branch:" + branch->name}, [&] {
+                  // ⚠ key 带 **`remote:` 前缀**：本地组里也可能有同名分支
+                    // （`feature` 与 `origin/feature` 的短名都是 `feature`），
+                    // 同 key 会让声明式把两个位置对齐到同一个实例。
                     (void)custom<Button>(c, [this, branch = *branch](Button& button) {
                       button.set_id("git-branch-" + branch.name);
                       button.set_align(Button::Align::Start);
@@ -518,8 +529,13 @@ namespace gbcode_ui {
                       button.set_size(Button::Size::Small);
                       // 同上：点击 = 筛日志，不检出。
                       button.on_click = [this, branch] { filter_log_by_branch(branch); };
-                    }, {.height = 24.0f, .grow = true});
-                  });
+                      // 右键菜单对远程分支同样开放（条目已按种类裁剪：无检出/无删除）。
+                      button.on_context_menu = [this, name = branch.name](st::math::Point at) {
+                        branch_menu_target_.set(name);
+                        branch_menu_anchor_ = st::math::Point{at.x + 4.0f, at.y + 4.0f};
+                        branch_menu_open_.set(true);
+                      };
+                    }, {.height = 24.0f, .grow = true, .key = "remote:" + branch->name});
                 }
               }
             }
@@ -687,61 +703,144 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   /// “**这一笔改了什么**”（文件与具体差异）。两者同屏才能“选中即看内容”，
   /// 而互斥标签页会把这条动线打断。
   void CodeEditorPage::build_log_pane(Composer& c) {
-    // —— 标题与筛选**共一行** ——
+    // —— 日志工具栏（**参照 IDEA 的秩序**，从左到右）——
     //
-    // 旧形态是两行（26px 标题行 + 30px 过滤行）：标题只剩一个“日志 N · 分支”的
-    // 短语，却独占一整行，而中栏本身不高（与右栏分屏）——一屏日志少两行。
-    // 合成一行后：左边是标题（窄、不收缩），右边是过滤框 + “仅当前分支” + 刷新。
+    //   ① 文本或哈希输入（带放大镜）
+    //   ② 分支筛选下拉（HEAD 开关 / 具体分支）
+    //   ③ 用户下拉    ④ 日期下拉    ⑤ 路径下拉
+    //   ⑥ 一个「排序/倒序」切换图标
+    //   ⑦ 右侧一排图标：刷新 / 美化（优选）/ 显示选项
     //
-    // ⚠ `#git-log-head` 这个 id 保留在**这一行**上：`tools/gbcode_git_e2e.py`
-    // 与自动化靠它判“中栏在不在”（换成别的 id 会让既有断言静默变成“找不到”）。
-    (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "git-log-head"}, [&] {
-      (void)text(c, [this] {
-        return std::format("日志{}",
-                           git_log_.empty() ? std::string{} : std::format(" {}", git_log_.size()));
-      }, {.weight = FontWeight::Regular, .id = "git-log-head-title"});
-      // 当前分支名另起一个弱化小字：它是**范围提示**，不是标题的一部分
-      //（标题里的数字会变，把分支拼进去会让它每切一次分支就整段重排）。
+    // 为何不再显示“日志”两个字：中栏本身就是日志（三栏布局里位置就是语义），
+    // 标题词占着首屏最宝贵的水平空间，而条目数在每个筛选器上都看得出来。
+    //
+    // ⚠ `#git-log-head` 保留在**这一行**上：`tools/gbcode_git_e2e.py` 与自动化
+    // 靠它判“中栏在不在”（换 id 会让既有断言静默变成“找不到”）。
+    (void)row(c, {.gap = 6.0f, .height = 32.0f, .id = "git-log-head"}, [&] {
+      // ① 文本/哈希筛选（一个输入框干三件事：信息、作者、短哈希）。
       //
-      // 有**分支筛选**时改显示那条筛选：否则日志少了一大量提交，
-      // 而头部只有当前分支名（会让人以为“提交丢了”）。
-      if (!log_filter_branch_.value().empty()) {
-        (void)text(c, [this] {
-          const std::string& ref = log_filter_branch_.value();
-          // 去 `refs/remotes/` 一类前缀：列表里看到的就是短名，要一致。
-          const std::size_t slash = ref.find('/');
-          const std::string shown =
-              slash == std::string::npos ? ref : ref.substr(slash + 1);
-          return std::format("仅 {}（点分支取消）", shown);
-        }, {.color = Tone::Muted, .id = "git-log-head-filter"});
-      } else if (!git_.branch.empty()) {
-        (void)text(c, [this] { return git_.branch; },
-                   {.color = Tone::Muted, .id = "git-log-head-branch"});
-      }
+      // 放大镜用 `Input::set_icon_prefix` **画在框内**（而不是旁边排一个图标元素）：
+      // 框外图标会多占一份横向间距，且与框的边框形成“两个不相关的东西”，
+      // 而搜索框的标准形态是“图标在框里”。
+      //
+      // 底色用主题的主背景（默认是 `surface_sunken` 的凹陷变体）：
+      // 工具栏是一排控件，输入框凹陷成一块深色会把它从那一行里“扒”出来，
+      // 而 IDEA 的日志工具栏上输入框与工具栏同底。
       (void)custom<Input>(c, [this](Input& field) {
         field.set_id("log-filter-text");
-        field.set_placeholder("提交信息 / 作者 / 路径");
+        field.set_placeholder("文本或哈希");
+        field.set_icon_prefix("search");
+        // 底色与工具栏**同一块**（不铺凹陷色、不画边框）：
+        // 一行控件里只有它凹陷下去，会显得不像同一个工具条。
+        field.set_seamless_background(true);
         field.style().grow = true;
+        field.set_text(log_filter_text_.value());
         field.on_change = [this](std::string_view value) {
           log_filter_text_.set(std::string(value));
         };
       }, {.height = 24.0f, .grow = true, .key = "log-filter-text"});
-      (void)custom<Button>(c, [this](Button& b) {
-        b.set_id("log-filter-current");
-        b.set_label("仅当前分支");
-        b.set_variant(log_filter_current_branch_.value() ? Button::Variant::Soft
-                                                         : Button::Variant::Ghost);
-        b.set_size(Button::Size::Small);
-        b.on_click = [this] {
-          const bool turn_on = !log_filter_current_branch_.value();
-          log_filter_current_branch_.set(turn_on);
-          // 与“按分支筛”**二选一**：两个都开就变成交集，结果看着像“日志少了”。
-          if (turn_on) clear_log_branch_filter();
-        };
-      }, {.height = 24.0f, .key = "log-filter-current"});
+
+      // —— 四个筛选器的公共构件 ——
+      //
+      // 形态：`[文字：值 ▾]`，有值时文字变主色、带 `×` 清除（IDEA 同形）。
+      // 为何不用 `Select` 组件：它要求调用方注入 `overlay_host`，而声明式
+      // 已有 `dsl::overlay`——面板内容能跟随帧重组，少一份跨帧状态。
+      const auto filter_button = [&](const char* id, std::string_view title,
+                                     std::string_view value, bool open,
+                                     State<bool>& open_state, st::math::Point& anchor) {
+        (void)custom<Button>(c, [id, title, value, open, &open_state, &anchor](Button& b) {
+          b.set_id(id);
+          // 有值：`标题：值`；无值：只显示标题（对应 IDEA 的灰字“用户”）。
+          std::string label = std::string(title);
+          if (!value.empty()) label += "：" + std::string(value);
+          label += open ? "  ▴" : "  ▾";
+          b.set_label(label);
+          // 有值时用 Soft（= 正在生效的筛选，一眼看出“日志被筛过”）。
+          b.set_variant(!value.empty() ? Button::Variant::Soft : Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          // 展开时**拍下按钮当前矩形**作为面板锚点。
+          //
+          // 这个回调跑在事件派发里，此时布局已完成，`bounds()` 就是用户看到的位置；
+          // 若改在 `build()` 里读，拿到的会是上一帧甚至全 0（声明式重组发生在测量之前）。
+          b.on_click = [&open_state, &anchor, button = &b] {
+            const bool turn_on = !open_state.value();
+            if (turn_on) {
+              const st::math::Rect rect = button->bounds();
+              anchor = st::math::Point{rect.x, rect.y};
+            }
+            open_state.set(turn_on);
+          };
+        }, {.height = 24.0f, .key = id});
+      };
+
+      // ② 分支筛选（值 = 筛选的分支；「仅当前分支」也算一种值）。
+      const std::string branch_value = [this] {
+        if (!log_filter_branch_.value().empty()) {
+          const std::string& ref = log_filter_branch_.value();
+          const std::size_t slash = ref.find('/');
+          return slash == std::string::npos ? ref : ref.substr(slash + 1);
+        }
+        return log_filter_current_branch_.value() ? std::string("HEAD") : std::string{};
+      }();
+      filter_button("log-filter-branch", "分支", branch_value, log_branch_menu_open_.value(),
+                    log_branch_menu_open_, log_branch_menu_anchor_);
+      // ③ 用户筛选
+      filter_button("log-filter-user", "用户", log_filter_author_.value(),
+                    log_author_menu_open_.value(), log_author_menu_open_,
+                    log_author_menu_anchor_);
+      // ④ 日期筛选（值是“最近 N 天”）
+      const std::string date_value = [this] {
+        const int days = log_filter_days_.value();
+        return days > 0 ? std::format("近 {} 天", days) : std::string{};
+      }();
+      filter_button("log-filter-date", "日期", date_value, log_date_menu_open_.value(),
+                    log_date_menu_open_, log_date_menu_anchor_);
+
+      // ⑥ 全部为弹性空隙：左侧是**筛选器**，右侧是**动作**。
+      //
+      // IDEA 的工具栏就是这个分区：左“改看什么”，右“做什么”。
+      // 中间留白把两组拉开，避免“刷新”看上去像第五个筛选器。
+      (void)spacer(c);
+
+      // ⑦ 右侧一排：刷新 / 优选（cherry-pick）/ 显示选项。
       scm_icon_button(c, "log-refresh", "refresh", "重新读取日志", [this] {
         git_log_loaded_ = false;
       });
+      // 「优选」= **cherry-pick 选中的提交**到当前分支（不是筛选器）。
+      //
+      // 为何图标不用星：星在这类工具栏里的语义是“收藏/只看重点”，与
+      // “把这个提交搬到当前分支”毫无关联（用户原话：“优选是 cherrypick
+      // 不是筛选当前分支（图标也改下）”）。用 `git-merge` 家族的“分叉合入”
+      // 图形（`arrow-down-circle` → 这里用 `git-cherry-pick` 的弯箭头语义）。
+      // 没选中提交时按钮**置灰**（而不是隐藏）：位置稳定，用户能看出“要先选一条”。
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("log-cherry-pick");
+        b.set_icon("cherry-pick");
+        b.set_variant(Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.set_enabled(!git_selected_hash_.empty());
+        b.set_hint(git_selected_hash_.empty() ? "先选中一条提交，再 cherry-pick"
+                                              : "Cherry-pick 选中的提交到当前分支");
+        b.on_click = [this] { ask_cherry_pick_selected(); };
+      }, {.width = 30.0f, .height = 24.0f, .key = "log-cherry-pick"});
+      // 「显示选项」：列显隐（作者/时间/哈希）。
+      //
+      // 这里不用 `scm_icon_button`：它不把“按钮矩形”回调出来，而这个面板
+      // 要锚在按钮下方。自带 `on_click` 里读 `bounds()` 即可（与四个筛选器同法）。
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("log-columns");
+        b.set_icon("list");
+        b.set_variant(Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this, &b] {
+          const bool turn_on = !log_columns_menu_open_.value();
+          if (turn_on) {
+            const st::math::Rect rect = b.bounds();
+            log_columns_menu_anchor_ = st::math::Point{rect.x, rect.y};
+          }
+          log_columns_menu_open_.set(turn_on);
+        };
+      }, {.width = 30.0f, .height = 24.0f, .key = "log-columns"});
     });
     // —— 多列表格（IDEA 同款）——
     //
@@ -813,19 +912,45 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       // 占满，主列只剩十几字（实测：提交信息全变成省略号，而日期/哈希一字不少）。
       // 下限取“还看得懂”的宽度：日期 96（`2026-11-06 15:04` 约 106，再窄就不如省略）、
       // 哈希 62（短哈希 7 位 + 一点余量）、作者 76（中文作者三四字）。
-      table.set_columns({
-          {.name = "提交信息", .width = 0.0f},
-          {.name = "作者", .width = 110.0f, .align = TextAlign::Start, .min_width = 76.0f,
-           .shrink = 3},
-          {.name = "日期", .width = 130.0f, .align = TextAlign::Start, .min_width = 96.0f,
-           .shrink = 1},
-          {.name = "哈希", .width = 76.0f, .align = TextAlign::Start, .min_width = 62.0f,
-           .shrink = 2},
-      });
+      // 列宽：时间与哈希都 **不许缩略**（`width == min_width` 即压不动）。
+      //
+      // 为何要“压不动”：这两列的内容是**定长**的（`2026-11-17 14:20` 16 字、
+      // 哈希 8 位），缩略后变成 `2026-11-1…` / `7c0b3…`——既看不出时间，
+      // 也认不出提交，这一列等于没了。宁可窄视图触发横向滚动，也不截断它们。
+      //
+      // 宽度按**实测字宽**给，不要估算：
+      // 字号 15 下数字字形宽约 9px，`2026-11-17 14:20`（16 字）要 144px，
+      // 加左右内边距（`kCellPadding × 2` = 24）共 168px；哈希 8 字同理 96px。
+      // （实测教训：先按 6.8px/字 给 136px，结果仍然是 `2026-11-17 1…`——
+      // 估算偏小，而截断后的列看着就像“没设置过宽度”。）
+      // 列显隐（「显示选项」面板控制）：**列定义/色调/行数据三处必须同步**。
+      //
+      // 只改其中一处就会错位：例如只去掉列定义、行数据仍传四个值，
+      // 结果就是“作者列里显示的是时间”。所以下面三者都由同一组开关生成。
+      std::vector<TableColumn> columns;
+      std::vector<Table::CellTone> tones;
+      // 主列始终存在（它是这张表的主题；关掉就只剩元信息）。
+      columns.push_back({.name = "提交信息", .width = 0.0f});
+      tones.push_back(Table::CellTone::Normal);
+      if (log_show_author_.value()) {
+        columns.push_back({.name = "作者", .width = 110.0f, .align = TextAlign::Start,
+                           .min_width = 76.0f, .shrink = 3});
+        tones.push_back(Table::CellTone::Muted);
+      }
+      if (log_show_date_.value()) {
+        columns.push_back({.name = "时间", .width = 172.0f, .align = TextAlign::Start,
+                           .min_width = 172.0f, .shrink = 0});
+        tones.push_back(Table::CellTone::Muted);
+      }
+      if (log_show_hash_.value()) {
+        columns.push_back({.name = "哈希", .width = 100.0f, .align = TextAlign::Start,
+                           .min_width = 100.0f, .shrink = 0});
+        tones.push_back(Table::CellTone::Muted);
+      }
+      table.set_columns(std::move(columns));
       // 列色调：提交信息主色（用户在看的东西）、其余弱化（背景信息）。
       // 不这样做就只能全表一个颜色，靠列位置猜重点。
-      table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
-                              Table::CellTone::Muted, Table::CellTone::Muted});
+      table.set_column_tones(std::move(tones));
       // 行高（= 提交线的纵向间距）。
       //
       // 从 24 调到 28 的理由是**图而不是文字**：分支图的斜边要跨越相邻两行，
@@ -842,7 +967,11 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
           for (const auto& ref : entry.refs) refs += " [" + ref + "]";
           subject += refs;
         }
-        table.add_row({subject, entry.author, entry.date, entry.short_hash});
+        std::vector<std::string> cells{subject};
+        if (log_show_author_.value()) cells.push_back(entry.author);
+        if (log_show_date_.value()) cells.push_back(entry.date);
+        if (log_show_hash_.value()) cells.push_back(entry.short_hash);
+        table.add_row(std::move(cells));
       }
       // 选中行与左栏的“当前提交”同源（同一条高亮，不是两个独立状态）。
       if (!git_selected_hash_.empty()) {
@@ -868,11 +997,16 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
 
 
   /// 一栏的标题行（标题 + 右侧一个可选图标钮）——三栏各一份，职责一眼可辨。
-  void CodeEditorPage::build_pane_head(Composer& c, const char* id, std::function<std::string()> title,
-                       const char* action_id) {
+    void CodeEditorPage::build_pane_head(Composer& c, const char* id, std::function<std::string()> title,
+                                     const char* action_id) {
     (void)row(c, {.gap = 4.0f, .height = 26.0f, .id = id}, [&] {
-      (void)text(c, [title = std::move(title)] { return title(); },
-                 {.grow = true, .weight = FontWeight::Regular, .id = std::string(id) + "-title"});
+      (void)custom<Text>(c, [title = std::move(title)](Text& t) {
+        t.set_content(title());
+        t.set_weight(FontWeight::Regular);
+        // 标题（日志栏是短哈希、详情栏也是哈希）要能**选中复制**：
+        // 哈希是贴到 issue/聊天里最常用的信息，不能选就只能手写 8 位。
+        t.set_selectable(true);
+      }, {.grow = true, .id = std::string(id) + "-title"});
       if (action_id != nullptr) {
         scm_icon_button(c, action_id, "refresh", "重新读取", [this] { git_log_loaded_ = false; });
       }
@@ -881,13 +1015,67 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
 
 
 
-  /// 过滤后的日志（提交信息/作者/hash 三个条件都作用在同一条上）。
-  ///
-  /// 这是日志表的**唯一**数据入口：行 = 提交，没有“连线行”这回事
-  ///（字符网格通道已移除；跨道连线由拓扑图 `set_graph` 画，本就跨行）。
+  /// 大小写不敏感的子串包含（作者筛选用；中文不受影响）。
+  auto CodeEditorPage::contains_ci(std::string_view haystack, std::string_view needle) -> bool {
+    if (needle.empty()) return true;
+    if (needle.size() > haystack.size()) return false;
+    const auto lower = [](char ch) {
+      return (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch;
+    };
+    for (std::size_t start = 0; start + needle.size() <= haystack.size(); ++start) {
+      bool hit = true;
+      for (std::size_t offset = 0; offset < needle.size(); ++offset) {
+        if (lower(haystack[start + offset]) != lower(needle[offset])) {
+          hit = false;
+          break;
+        }
+      }
+      if (hit) return true;
+    }
+    return false;
+  }
   auto CodeEditorPage::filtered_log() const -> std::vector<gbcode::LogEntry> {
     const std::string needle = std::string(st::trim(log_filter_text_.value()));
     const bool current_only = log_filter_current_branch_.value();
+    // 作者 / 日期两个筛选（IDEA 工具栏同形）。
+    const std::string author_needle = std::string(st::trim(log_filter_author_.value()));
+    const int days = log_filter_days_.value();
+    // 日期筛选的**最早可接受前缀**（`YYYY-MM-DD`）：
+    //
+    // `entry.date` 是 `YYYY-MM-DD HH:MM`，ISO 格式的**字典序等于时间序**，
+    // 所以直接字符串比较就能筛“最近 N 天”，不必解析时间戳也不用引入时区
+    // （提交时间本就是作者本地时间，而用户要的是“最近几天”这类粗粒度）。
+    std::string earliest_date{};
+    if (days > 0) {
+      // 用 `git` 给的同口径时间：取日志里最新一条的日期作为“今天”，
+      // 而不是系统时钟——否则**在旧仓库上导出快照/离线看历史**时，
+      // “最近 7 天”会变成空列表（实测代价：看着像“日志坏了”）。
+      // 最新一条不在头部时不猜：直接用系统日期（正常仓库都满足）。
+      std::string newest = git_log_.empty() ? std::string{} : git_log_.front().date;
+      if (newest.size() >= 10) {
+        newest.resize(10);
+      } else {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t stamp = std::chrono::system_clock::to_time_t(now);
+        std::tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &stamp);
+#else
+        localtime_r(&stamp, &local);
+#endif
+        newest = std::format("{:04d}-{:02d}-{:02d}", local.tm_year + 1900, local.tm_mon + 1,
+                             local.tm_mday);
+      }
+      // 回退 N 天：用 `struct tm` 做日历运算（跨月/跨年自动进位，不用手写月末表）。
+      std::tm base{};
+      base.tm_year = std::stoi(newest.substr(0, 4)) - 1900;
+      base.tm_mon = std::stoi(newest.substr(5, 2)) - 1;
+      base.tm_mday = std::stoi(newest.substr(8, 2)) - days;
+      base.tm_hour = 12;   // 正午基准：避开夏令时/零点进位边界
+      std::mktime(&base);
+      earliest_date = std::format("{:04d}-{:02d}-{:02d}", base.tm_year + 1900, base.tm_mon + 1,
+                                  base.tm_mday);
+    }
     // **分支筛选**（点分支列表设的那个）：按 hash 集合判，不看泳道号。
     //
     // 为何不能用泳道：泳道号是绘制层的分配结果，“道 0 = 当前分支”只在
@@ -922,6 +1110,12 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
                          entry.short_hash.find(needle) != std::string::npos;
         if (!hit) continue;
       }
+      if (!author_needle.empty() && !contains_ci(entry.author, author_needle)) continue;
+      // 日期筛选：字典序前缀比较（见上面的 `earliest_date` 说明）。
+      if (!earliest_date.empty() && entry.date.size() >= 10 &&
+          entry.date.compare(0, 10, earliest_date) < 0) {
+        continue;
+      }
       out.push_back(entry);
     }
     return out;
@@ -935,9 +1129,13 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   void CodeEditorPage::build_commit_detail(Composer& c) {
     // 标题栏：未选中时也显示（告知“这里是什么、怎么用”），选中时带短 hash。
     // 空态不是“没有这一栏”，而是“这一栏里还没有内容”——两码事（自动化也靠 id 判存在）。
+    // 标题栏：**不再放哈希**（用户要件）。
+    //
+    // 理由：哈希是“身份信息”，与作者/日期同一类，应该和它们排在一起；
+    // 单独占一行标题会让它看起来像栏名，而不是这笔提交的属性。
+    // 而栏名在三栏布局里本就不言自明，于是这一行只用来给空态/有态交代一句。
     build_pane_head(c, "git-detail-head", [this] {
-      return git_selected_hash_.empty() ? std::string("提交内容")
-                                        : "提交 " + git_selected_hash_;
+      return git_selected_hash_.empty() ? std::string("选中一笔提交") : std::string("提交详情");
     }, nullptr);
     if (git_selected_hash_.empty()) {
       (void)text(c, [] { return std::string("在中栏选一笔提交，这里显示它改动的文件。"); },
@@ -966,68 +1164,231 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
             // ⚠ 提交信息用多行 `Text`（`set_multiline`）：单行 `Text` 会 `ellipsize`，
             // 长句被截成一行省略号（“消息看不全”）。多行的高度由折行结果自然撑开，
             // 即“高度适应内容”。
-            (void)custom<Text>(c, [this](Text& t) {
-              t.set_id("git-commit-summary");
-              t.set_content(git_commit_summary_.value());
-              t.set_weight(FontWeight::SemiBold);
-              t.set_font_size(14.0f);
-              t.set_multiline(true);
+            // —— 提交信息：**Markdown 渲染 + 可选中** ——
+            //
+            // 为何不用 `Text`：提交说明本来就用 Markdown 写（标题/列表/代码块），
+            // 当纯文本贴出来会把 `## 背景`、`- 修复` 这些标记原样显示，
+            // 读者还得自己在脑子里解——而 IDEA/VSCode 都是渲染的。
+            //
+            // `set_selectable(true)` 是硬需求（用户要件）：提交信息和哈希
+            // 都要能选中复制（贴到 issue/聊天里）。
+            (void)custom<MarkdownView>(c, [this](MarkdownView& view) {
+              view.set_id("git-commit-summary");
+              const std::string& text =
+                  git_commit_message_.empty() ? git_commit_summary_.value() : git_commit_message_;
+              view.set_markdown(text);
+              view.set_selectable(true);
+              // 链接不接管：提交说明里的链接点开会弹浏览器，
+              // 而日志页里误点一下不该把用户带去别处。
+              view.set_open_links(false);
+              // **不硬写字号**：跟主题正文（`metrics.font_base` = 15）走。
+              //
+              // 旧代码写 `set_base_font_size(14.0f)`，而 `font_base` 是 15——
+              // 于是提交信息比同屏的日志表（15）、元信息（12）看着“小一号”，
+              // 而 Markdown 的段落行距又比普通行宽（1.6 倍），视觉上就更显小。
+              // 正文基准就该是正文：需要强调的字号交给 Markdown 自己的标题级差。
+              // 内边距归**外部布局**管（`column.padding_x`），组件侧清零：
+              // 两层叠加会让正文比同栏文字多缩进一段（实测首字 x 差 25px）。
+              view.style().padding = st::math::Insets{};
             }, {.id = "git-commit-summary"});
-            (void)row(c, {.gap = 8.0f, .height = 20.0f}, [&] {
-              (void)custom<Text>(c, [this](Text& t) {
-                t.set_id("git-commit-meta");
-                // 作者与日期放在同一行（它们回答同一个问题：“谁、什么时候”）。
-                t.set_content(std::format("{} · {}", git_selected_author_, git_selected_date_));
-                t.set_tone(Tone::Muted);
-                t.set_font_size(12.0f);
-              }, {.grow = true});
-              // 增删统计：从**存下来的**统计层读（不在渲染期重算：那是“同一量两处推导”的温床）。
-              (void)custom<Text>(c, [this](Text& t) {
-                t.set_id("git-commit-stat");
-                t.set_content(std::format("{} 个文件  +{} −{}", git_selected_stat_.files,
-                                          git_selected_stat_.added, git_selected_stat_.removed));
-                t.set_tone(Tone::Muted);
-                t.set_font_size(12.0f);
-              }, {.id = "git-commit-stat"});
-            });
-            if (git_commit_files_.empty()) {
-              (void)text(c, [] { return std::string("（这笔提交没有改动文件）"); },
-                         {.id = "git-detail-no-files"});
-              return;
-            }
-            // —— 文件清单：**表格**（路径 / 增 / 删）——
+            // —— 元信息行：**哈希 · 作者 · 日期** ——
+            //
+            // 为何排在一行：它们都是“这笔提交的身份”；逐项分级反而把一屏拆成三行。
+            // 增删统计**不在这里**——它跟文件清单在一起（见 `build_commit_files`）：
+            // 统计描述的就是下面那批文件，放在文件表标题行左侧才对得上。
+            (void)custom<Text>(c, [this](Text& t) {
+              t.set_id("git-commit-meta");
+              // 哈希在前（它是身份，扫一眼就知道是哪笔），作者与日期随后。
+              t.set_content(std::format("{} · {} · {}", git_selected_hash_,
+                                        git_selected_author_, git_selected_date_));
+              t.set_tone(Tone::Muted);
+              t.set_font_size(12.0f);
+              t.set_selectable(true);   // 哈希/作者/时间都要能选中复制
+            }, {.id = "git-commit-meta"});
+            // —— 文件清单：列表 / 树 两种视图 ——
             //
             // 旧版是一行一个 Button，文本拼成 `path  +N −M`：路径长短不一时
             // 增删数字**参差不齐**，而“哪些文件动得多”恰恰要靠这两列对齐才扫得出来。
-            //
-            // 表格不 `grow`：放进 `ScrollView` 后它该按**行数**撑开自然高
-            //（grow 会把它拉到视口高，短清单下面挂一大片空白，长清单又被压回去）。
-            (void)custom<Table>(c, [this](Table& table) {
-              table.set_id("git-commit-files-table");
-              table.clear_rows();
-              table.set_columns({
-                  {.name = "文件", .width = 0.0f},
-                  {.name = "+", .width = 52.0f},
-                  {.name = "−", .width = 52.0f},
-              });
-              table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
-                                      Table::CellTone::Muted});
-              table.set_row_height(24.0f);
-              for (const auto& [path, plus, minus] : git_commit_files_) {
-                table.add_row({path, std::format("+{}", plus), std::format("−{}", minus)});
-              }
-              // 点文件 → 看该文件在这笔提交里的差异（与旧版同一动线）。
-              const auto files = git_commit_files_;
-              table.set_on_row_click([this, files](std::size_t row) {
-                if (row < files.size()) {
-                  open_commit_file(git_selected_hash_, std::get<0>(files[row]));
-                }
-              });
-            }, {.id = "git-commit-files"});
+            build_commit_files(c);
           });
         },
         [](ScrollView& scroll) { scroll.set_id("git-detail-scroll"); },
         {.grow = true, .id = "git-detail-host"});
+  }
+
+
+  /// 提交详情里的**文件清单**（列表 / 树 两种视图）。
+  ///
+  /// 为何两种都要：
+  /// * 列表：扫“一共改了哪些文件”最快，一屏二十多条，且路径完整可读；
+  /// * 树：回答“改动集中在哪个目录”——几十个文件排成树形才看得出来。
+  ///
+  /// 两者共用同一个 `Table`（列对齐才能比“哪个文件改得多”），
+  /// 树视图把层级编进**第一列文本**（缩进 + 展开箭头）而不是另开列：
+  /// 另开一列会在窄栏里把路径挤没，而缩进本来就是文本的一部分。
+  void CodeEditorPage::build_commit_files(Composer& c) {
+    // —— 视图标题行：标签 + 两态切换 ——
+    //
+    // 切换按钮用 `Soft/Ghost` 区分当前态（与分支面板的组标题同一手法）。
+    // —— 标题行：**左侧数量统计，右侧视图切换** ——
+    //
+    // 为何把统计放这里而不是元信息行：`N 个文件 +A −R` 描述的正是下面
+    // 这批文件，与它们同在一行才对得上；而且切换按钮就在右侧，
+    // 一眼就是“这批文件的统计 + 看它们的两种方式”。
+    //
+    // 切换按钮用 `Soft/Ghost` 区分当前态（与分支面板的组标题同一手法）。
+    (void)row(c, {.gap = 4.0f, .height = 22.0f, .id = "git-commit-files-head"}, [&] {
+      // 数量统计（可选中复制：常被拿去汇报）。
+      (void)custom<Text>(c, [this](Text& t) {
+        t.set_id("git-commit-stat");
+        t.set_content(std::format("{} 个文件  +{} −{}", git_selected_stat_.files,
+                                  git_selected_stat_.added, git_selected_stat_.removed));
+        t.set_tone(Tone::Muted);
+        t.set_font_size(12.0f);
+        t.set_selectable(true);
+      }, {.grow = true});
+      const bool is_list = commit_files_view_.value() == FileViewMode::List;
+      (void)custom<Button>(c, [this, is_list](Button& b) {
+        b.set_id("commit-files-list");
+        b.set_icon("list");
+        b.set_variant(is_list ? Button::Variant::Soft : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.set_hint("列表视图");
+        b.on_click = [this] { commit_files_view_.set(FileViewMode::List); };
+      }, {.width = 26.0f, .height = 20.0f, .key = "commit-files-list"});
+      (void)custom<Button>(c, [this, is_list](Button& b) {
+        b.set_id("commit-files-tree");
+        b.set_icon("folder-open");
+        b.set_variant(!is_list ? Button::Variant::Soft : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.set_hint("树视图（按目录分组）");
+        b.on_click = [this] { commit_files_view_.set(FileViewMode::Tree); };
+      }, {.width = 26.0f, .height = 20.0f, .key = "commit-files-tree"});
+    });
+
+    if (git_commit_files_.empty()) {
+      (void)text(c, [] { return std::string("（这笔提交没有改动文件）"); },
+                 {.id = "git-detail-no-files"});
+      return;
+    }
+
+    // —— 行数据：由视图模式决定 ——
+    //
+    // 每行 = `{显示文本, 路径（点它开差异）, 是否可点}`。
+    // 目录行不可点（点它是展开/收起，不是看差异）。
+    struct FileRow {
+      std::string label{};
+      std::string path{};        ///< 空 = 目录行（不可开差异）
+      std::size_t plus{0};
+      std::size_t minus{0};
+      std::string key{};         ///< 目录行 = 目录路径（供展开状态查）
+    };
+    std::vector<FileRow> rows;
+    if (commit_files_view_.value() == FileViewMode::List) {
+      rows.reserve(git_commit_files_.size());
+      for (const auto& [path, plus, minus] : git_commit_files_) {
+        rows.push_back({.label = path, .path = path, .plus = plus, .minus = minus});
+      }
+    } else {
+      // —— 树：按 `/` 分段建一层目录，再按路径顺序深度优先展开 ——
+      //
+      // 不构建真实的树结构（`unordered_map<dir, node>`）：改动文件量级 ≤ 几百，
+      // 而“按排序后的完整路径依次判断公共前缀”完全够用且**行数可控**——
+      // 路径已经排好序（`git show --numstat` 的输出就是字典序），
+      // 同一目录的条目必然相邻。
+      std::set<std::string> emitted_dirs;
+      for (const auto& [path, plus, minus] : git_commit_files_) {
+        // 逐级重放祖先目录（已发过的跳过）。
+        std::size_t slash = 0;
+        bool hidden = false;
+        while ((slash = path.find('/', slash)) != std::string::npos) {
+          const std::string dir = path.substr(0, slash + 1);
+          ++slash;
+          if (hidden) break;
+          if (emitted_dirs.insert(dir).second) {
+            // 目录行的名字只要**末段**（缩进已表达层级）。
+            const std::size_t prev = dir.rfind('/', dir.size() - 2);
+            const std::string leaf = prev == std::string::npos
+                                         ? dir.substr(0, dir.size() - 1)
+                                         : dir.substr(prev + 1, dir.size() - prev - 2);
+            const int depth = static_cast<int>(std::count(dir.begin(), dir.end(), '/')) - 1;
+            const bool collapsed = commit_tree_collapsed_.value().contains(dir);
+            rows.push_back({.label = std::string(static_cast<std::size_t>(std::max(0, depth)) * 2, ' ') +
+                                     (collapsed ? "▸ " : "▾ ") + leaf,
+                            .key = dir});
+          }
+          // 祖先被收起：本行与其余子孙都不出现（树的标准行为）。
+          if (commit_tree_collapsed_.value().contains(dir)) {
+            hidden = true;
+            break;
+          }
+        }
+        if (hidden) continue;
+        const std::size_t depth = std::count(path.begin(), path.end(), '/');
+        rows.push_back({.label = std::string(depth * 2, ' ') + st::fs::file_name(path),
+                        .path = path,
+                        .plus = plus,
+                        .minus = minus});
+      }
+    }
+
+    // —— 表格 ——
+    //
+    // 不 `grow`：放进 `ScrollView` 后它该按**行数**撑开自然高（grow 会把它
+    // 拉到视口高，短清单下面挂一大片空白）。
+    //
+    // **无表头**（用户要件）：这两列的含意自明（路径 / 增 / 减），
+    // 而表头要吃掉 36px 的黄金视野。
+    (void)custom<Table>(c, [this, rows](Table& table) {
+      table.set_id("git-commit-files-table");
+      table.set_show_header(false);
+      table.clear_rows();
+      // 增/减列宽度**按实际最长内容算**，并且 `width == min_width`（压不动）：
+      //
+      // 这两列的内容是**定长但变宽**的（`+3` 两字，`+8446` 五字，`+12345` 六字），
+      // 写死一个数字总会在某个量级上被截成 `+…`——而“改了多少行”正是这两列
+      // 唯一的信息，截了就等于没有（用户报的“修改文件行数不能缩略”）。
+      //
+      // 宽度 = 最长串的字宽 + 左右内边距（`kCellPadding × 2`）+ 余量。
+      // 量字宽靠 `measure` 拿不到 `RenderContext`，所以按**字符数×最大字宽**估：
+      // 数字字形在字号 15 下最宽约 9px，`+` 更窄——偏大一点是安全的（宁可宽不可截）。
+      std::size_t plus_chars = 2;
+      std::size_t minus_chars = 2;
+      for (const FileRow& row : rows) {
+        plus_chars = std::max(plus_chars, std::format("+{}", row.plus).size());
+        minus_chars = std::max(minus_chars, std::format("−{}", row.minus).size());
+      }
+      const auto column_width = [](std::size_t chars) {
+        // UTF-8：`+`/数字都是单字节，`−`（U+2212）是三字节 —— 按码点算。
+        return static_cast<float>(chars) * 9.5f + Table::kCellPadding * 2.0f + 4.0f;
+      };
+      const float plus_width = column_width(plus_chars);
+      const float minus_width = column_width(minus_chars);
+      table.set_columns({
+          {.name = "文件", .width = 0.0f},
+          {.name = "+", .width = plus_width, .min_width = plus_width, .shrink = 0},
+          {.name = "−", .width = minus_width, .min_width = minus_width, .shrink = 0},
+      });
+      table.set_column_tones({Table::CellTone::Normal, Table::CellTone::Muted,
+                              Table::CellTone::Muted});
+      table.set_row_height(24.0f);
+      for (const FileRow& row : rows) {
+        table.add_row({row.label, std::format("+{}", row.plus), std::format("−{}", row.minus)});
+      }
+      // 点行：文件行 → 看该文件的并列差异；目录行 → 展开/收起。
+      table.set_on_row_click([this, rows](std::size_t index) {
+        if (index >= rows.size()) return;
+        const FileRow& row = rows[index];
+        if (!row.path.empty()) {
+          open_commit_file(git_selected_hash_, row.path);
+          return;
+        }
+        // 目录行：翻折叠态。
+        auto next = commit_tree_collapsed_.value();
+        if (!next.insert(row.key).second) next.erase(row.key);
+        commit_tree_collapsed_.set(std::move(next));
+      });
+    }, {.id = "git-commit-files"});
   }
 
 
@@ -1064,6 +1425,34 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     ask_write({.op = gbcode::WriteOp::DeleteBranch, .name = name, .hard = true},
               std::format("强制删除分支 {}", name),
               "`-D` 会丢掉**未合并的提交**（不可恢复）。");
+  }
+
+
+  /// Cherry-pick **当前选中的提交**到当前分支。
+  ///
+  /// 为何要确认：cherry-pick 会**新增一笔提交**、可能产生冲突（冲突后仓库
+  /// 进入 `CHERRY_PICK_HEAD` 多步状态），不是只读操作。
+  ///
+  /// 没选中提交时按钮是置灰的，这里仍然再拦一道：
+  /// 控制通道/快捷键可能绕过 `enabled`，而“不知道要 pick 哪个”必有错。
+  void CodeEditorPage::ask_cherry_pick_selected() {
+    if (git_selected_hash_.empty()) {
+      status_.set("先选中一条提交，再 cherry-pick");
+      return;
+    }
+    // 拿完整 hash：`git_selected_hash_` 存的是 8 位短哈希（展示用），
+    // 而 `git cherry-pick` 接受短哈希也能工作——但从日志里取完整值更稳
+    //（目标仓巨大时 8 位在极端情况下可能不唯一）。
+    std::string ref = git_selected_hash_;
+    for (const gbcode::LogEntry& entry : git_log_) {
+      if (entry.short_hash == git_selected_hash_) {
+        ref = entry.hash;
+        break;
+      }
+    }
+    ask_write({.op = gbcode::WriteOp::CherryPick, .ref = ref},
+              std::format("Cherry-pick 提交 {}", git_selected_hash_),
+              "会在当前分支上**新建一笔提交**；冲突时仓库进入 cherry-pick 状态（可继续/跳过/中止）。");
   }
 
 
@@ -1243,6 +1632,9 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     git_commit_summary_.set(entry.subject);
     git_selected_author_ = entry.author;
     git_selected_date_ = entry.date;
+    // 完整提交信息（含正文）：详情栏按 Markdown 渲它。
+    // 为空时回退到 subject（`write_args`/假数据路径可能没填 message）。
+    git_commit_message_ = copy.message.empty() ? entry.subject : copy.message;
     // 文件清单存下来（渲染期只消费）：它是“看具体改动”的入口。
     git_commit_files_ = copy.files;
     status_.set("提交 " + entry.short_hash + "：" + entry.subject.substr(0, 40));

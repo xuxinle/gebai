@@ -233,6 +233,16 @@ auto run_app(int argc, char** argv) -> int {
   app_options.title = "歌白代码 · 霜天";
   app_options.enable_script = options.common.app.enable_script;
   app_options.text_gamma_small = options.text_gamma_small;
+  // **界面字号整体小一号**（用户定位：gbcode 的文字比 IDE 习惯偏大）。
+  //
+  // 用框架的 `ui_font_scale`（整条字号阶梯同乘，间距/控件高不动）：
+  // 这样只是“字小了一号”，不是把布局挤扁——而各档的**相对级差**不变，
+  // 标题仍然比正文大、弱化文字仍然比正文小。
+  //
+  // 0.93：15px → 14px、17px → 16px、12px → 11px（取整后都是“小一号”，
+  // 而不是 14.7 这种半档），同时不会小到影响小字号可读性。
+  // 显式给了 `--ui-font-scale` 的仍然听用户的（`auto` 才取这个默认）。
+  if (app_options.ui_font_scale == "auto") app_options.ui_font_scale = "0.93";
   // `--theme` 既接受明暗两档，也接受内置主题名（与 gallery 同口径）。
   app_options.theme = options.common.app.theme_name == "dark" ? ThemeMode::Dark
                                                              : ThemeMode::Light;

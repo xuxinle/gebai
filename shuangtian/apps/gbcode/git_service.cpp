@@ -158,6 +158,9 @@ auto read_snapshot(const std::string& cwd) -> RepoSnapshot {
   return snapshot;
 }
 
+/// 把 `git log --pretty=format:` 的输出解析成条目（两个读日志的入口共用）。
+[[nodiscard]] auto parse_log_entries(std::string_view out) -> std::vector<LogEntry>;
+
 auto read_log(const std::string& cwd, std::size_t limit, const std::string& ref)
     -> std::vector<LogEntry> {
   std::vector<LogEntry> entries;
@@ -176,8 +179,14 @@ auto read_log(const std::string& cwd, std::size_t limit, const std::string& ref)
                         (ref.empty() ? std::string("--all") : ref)},
                        nullptr);
   if (!out.has_value()) return entries;
+  return parse_log_entries(*out);
+}
 
-  for (const std::string_view line : lines_of(*out)) {
+auto parse_log_entries(std::string_view out_view) -> std::vector<LogEntry> {
+  const std::string out(out_view);
+  std::vector<LogEntry> entries;
+
+  for (const std::string_view line : lines_of(out)) {
     if (line.empty()) continue;
     // 拆 \x1f 字段。
     std::array<std::string_view, 6> fields{};
@@ -193,7 +202,12 @@ auto read_log(const std::string& cwd, std::size_t limit, const std::string& ref)
     }
     LogEntry entry{};
     entry.hash = std::string(fields[0]);
-    entry.short_hash = std::string(fields[1]);
+    // **短哈希固定 8 位**（从完整 hash 截，不信 `%h`）：
+    //
+    // git 的 `%h` 会随仓库规模自动伸缩（小仓 7 位、大仓 8~9 位），于是同一个
+    // 列表里哈希列宽度会忽长忽短，对不齐。而“唯一性”不需要向 git 让步：
+    // 8 位在几十万提交的仓里也足够区分（前端只用于展示与筛选，操作一律用完整 hash）。
+    entry.short_hash = entry.hash.substr(0, 8);
     entry.subject = std::string(fields[2]);
     entry.author = std::string(fields[3]);
     entry.date = std::string(fields[4]);
@@ -219,6 +233,16 @@ auto read_log(const std::string& cwd, std::size_t limit, const std::string& ref)
 
 auto read_commit_detail(const std::string& cwd, LogEntry& entry) -> std::string {
   entry.files.clear();
+  entry.message.clear();
+  // 完整提交信息（`%B` = 标题 + 空行 + 正文）：详情栏要按 Markdown 渲它。
+  if (const auto full = git(cwd, {"show", "--no-color", "--format=%B", "-s", entry.hash})) {
+    entry.message = *full;
+    // 去掉尾部的多余空行（`%B` 总以换行结尾，多留几行会让渲染出的布局多一块空白）。
+    while (!entry.message.empty() &&
+           (entry.message.back() == '\n' || entry.message.back() == '\r')) {
+      entry.message.pop_back();
+    }
+  }
   // numstat：`3\t1\tsrc/a.cpp`（重命名带 `=>`，按原样显示）。
   if (const auto stats = git(cwd, {"show", "--no-color", "--numstat", "--format=", entry.hash})) {
     for (const std::string_view line : lines_of(*stats)) {
@@ -706,7 +730,7 @@ auto read_file_history(const std::string& cwd, const std::string& path, std::siz
     if (fields.size() < 5) continue;
     LogEntry entry;
     entry.hash = fields[0];
-    entry.short_hash = fields[1];
+    entry.short_hash = entry.hash.substr(0, 8);   // 固定 8 位（同上：不信 `%h`）
     entry.subject = fields[2];
     entry.author = fields[3];
     entry.date = fields[4];

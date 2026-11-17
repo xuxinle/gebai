@@ -263,6 +263,8 @@ namespace gbcode_ui {
     build_tab_context(c);   // 标签栏右键菜单（关闭其他/右侧/全部、复制路径）
   build_editor_context(c);
     build_explorer_context(c);
+  build_branch_context(c);   // 分支行右键（检出/只看日志/复制名/删除）
+  build_log_filter_menus(c); // 日志工具栏的四个筛选器 + 显示选项
     build_close_confirm(c);
     build_shortcuts_card(c);
     build_open_dialog(c);

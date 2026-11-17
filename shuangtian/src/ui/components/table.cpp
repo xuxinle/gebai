@@ -239,7 +239,17 @@ void Table::clear_rows() {
   lane_columns_ = 0;
   hovered_row_ = kNoRow;
   selected_row_ = std::nullopt;  // 数据没了：选中索引必然悬空
-  scroll_offset_y_ = 0.0f;      // 行没了，纵向偏移跟着归零（否则下次填充会从中间开始）
+  // **纵向滚动位置不当场归零**：
+  //
+  // 旧实现直接 `scroll_offset_y_ = 0`，理由是“行没了，偏移跟着归零”——
+  // 但最常见的调用形态恰恰是**clear + 重新填同一批数据的更新版**
+  //（声明式列表每帧重建、日志按筛选重算）。那样每点一下就跳回顶部：
+  // 实测 gbcode 日志表滚到第 44 行点开提交详情，`scroll_y` 从 1176 瞬间变 0，
+  // 用户没法连着看几条提交。
+  //
+  // 正确做法是“夹取”而不是“清零”：下次 `measure`/`arrange` 会用新的
+  // 行数把越界的偏移夹回范围内（行确实变少时照样落到合法位置，
+  // 行全空时 `max_scroll_y()==0` 也会自然归零）。这里不动它。
   row_offsets_valid_ = false;
   mark_layout_dirty();
 }
