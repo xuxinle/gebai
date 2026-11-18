@@ -275,6 +275,10 @@ void UiRoot::layout(bool force) {
   geometry_signature(geometry_signature, *content_, after);
   // 抽开单独比对覆层：覆层重排同样只会影响它自己（保守起见一并纳入签名）
   if (after != before) pending_full_ = true;
+  // **几何变了就刷新输入法锚点**：窗口缩放 / 面板开合 / 消息区滚动都会挪动输入框，
+  // 而候选窗靠这个坐标。不管的话：开完设置面板再输入，候选窗还在旧位置。
+  // `publish_ime_caret` 自身做相等早退，几何没变时是一次矩形比较。
+  if (after != before) publish_ime_caret();
   ++version_;
 }
 
@@ -1100,12 +1104,17 @@ void UiRoot::apply_cursor(MouseCursor wanted) {
 void UiRoot::publish_ime_caret() {
   if (!ime_caret_sink) return;
   const math::Rect caret = focused_ != nullptr ? focused_->caret_rect() : math::Rect{};
-  // 只在**几何真的变了**才下发：鼠标在编辑器里划过、或每帧都会走的派发收尾
-  // 若无条件调，等于每帧一次 `ImmSetCandidateWindow`（那是跨进程的输入法调用）。
-  if (caret.x == ime_caret_.x && caret.y == ime_caret_.y && caret.width == ime_caret_.width &&
-      caret.height == ime_caret_.height) {
+  // **首次必须下发**（`ime_caret_published_` 为假时）。
+  //
+  // 为何不能只靠“矩形相等早退”：`ime_caret_` 初值就是 `(0,0,0,0)`，
+  // 于是“当前也没有插入点”的第一次上报会被当成“无变化”静默吞掉；
+  // 随后输入法来问位置时后端 `last_ime_caret_` 仍是 `nullopt`，
+  // 候选窗就落到客户区左上角（实测截图：候选窗压在标题栏上）。
+  if (ime_caret_published_ && caret.x == ime_caret_.x && caret.y == ime_caret_.y &&
+      caret.width == ime_caret_.width && caret.height == ime_caret_.height) {
     return;
   }
+  ime_caret_published_ = true;
   ime_caret_ = caret;
   ime_caret_sink(caret);
 }

@@ -10,7 +10,10 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
+#include "st/math/geometry.hpp"
 #include "st/ui/component_registry.hpp"
+#include "st/ui/components/select_panel.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/blink.hpp"
 
@@ -48,6 +51,44 @@ class Input : public Element {
   void set_password(bool value) noexcept;
   /// 前缀图标名（图标集名，如 `"search"`；为空则不占格子也不画）。
   void set_icon_prefix(std::string_view icon_name);
+
+  // —— 内嵌下拉（输入框右侧的下拉按钮 + 选项面板）——
+  //
+  // 适用场景：值既**可手填**又可**从列表选**（如模型名、分支名、环境名）。
+  // 两个需求共存，所以不能做成“纯下拉”，也不能把两个控件并排拼——
+  // 那会得到“输入框 + 旁边的按钮”两个视觉体，而用户心里它是一个字段。
+  // 本组接口让下拉按钮**长在输入框里**（右侧预留槽位，命中区在框内）。
+  //
+  // 生命周期：**选项由调用方填**（`set_dropdown_options`）。面板的挂载/摘除
+  // 走 `overlay_host`/`overlay_remove`（与 `Select` 同一约定，宿主通常是 UiRoot）。
+
+  /// 启用/关闭内嵌下拉按钮。关闭时右侧槽位被收回（文字可用宽度变宽）。
+  void set_dropdown(bool enabled);
+  [[nodiscard]] auto has_dropdown() const noexcept -> bool { return dropdown_enabled_; }
+  /// 选项表（`label` 为空时显示 `value`）。空表时按钮不展开，
+  /// 而是先调 `on_dropdown_need_options`（见下）。
+  void set_dropdown_options(std::vector<SelectOption> options);
+  [[nodiscard]] auto dropdown_options() const noexcept -> const std::vector<SelectOption>& {
+    return dropdown_options_;
+  }
+  /// **选项尚未就绪时用户点了箭头**：回调里启动拉取即可。
+  ///
+  /// 选项到位后若用户当时确实点过箭头，会自动展开（无需再点一次）。
+  /// 设了这个回调时，“空表”不再意味着“点了没反应”。
+  std::function<void()> on_dropdown_need_options{};
+  /// 展开/收起选项面板（未启用/无选项/未设 `overlay_host` 时无效）。
+  void set_dropdown_open(bool value);
+  [[nodiscard]] auto dropdown_open() const noexcept -> bool { return dropdown_open_; }
+  /// 右侧按钮命中矩形（测试/自动化定位用；未启用时为空矩形）。
+  [[nodiscard]] auto dropdown_rect() const noexcept -> math::Rect { return dropdown_rect_; }
+
+  /// 列表项被选定：实参是选项的 `value`。**选中后已自动回填 `set_text`**，
+  /// 本回调只用于“选择之后还想做点什么”（发请求、刷新依赖等）。
+  std::function<void(std::string_view)> on_dropdown_pick{};
+  /// 面板挂载回调（**必需**，否则无法展开）。
+  std::function<void(std::unique_ptr<Element>)> overlay_host{};
+  /// 面板摘除回调（可选）。
+  std::function<void(Element*)> overlay_remove{};
   /// **背景与父级一致**：不铺凹陷底色（**描边照画**）。
   ///
   /// 用途：把输入框放进一行密集的控件里（如日志工具栏）时，凹陷底色会把它
@@ -83,8 +124,16 @@ class Input : public Element {
   [[nodiscard]] auto cursor_index() const noexcept -> std::size_t { return cursor_; }
 
   void measure(const RenderContext& context, const Constraints& constraints) override;
+  void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
+  /// 按**光标位置**决定指针：内嵌下拉箭头处是可点击区（`Hand`），
+  /// 其余是文本编辑区（`Text`）。
+  ///
+  /// 为何不能只在构造里 `set_cursor(MouseCursor::Text)` 就完事：那是**元素级**
+  /// 的静态值，于是整个输入框（包括那个按钮）都是 I-beam，
+  /// 鼠标移到箭头上看着像可以选中文字、实际点下去却是展开下拉——两者不一致。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override;
   void activate() override;
   [[nodiscard]] auto semantics_text() const -> std::string override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
@@ -136,11 +185,66 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   std::string text_{};
   std::string placeholder_{};
   std::string icon_prefix_{};
+
+  // —— 内嵌下拉（右侧按钮 + 选项面板）——
+  bool dropdown_enabled_{false};
+  bool dropdown_open_{false};
+  /// 用户点过箭头、但当时选项未就绪：选项到位后自动展开。
+  bool dropdown_pending_open_{false};
+  std::vector<SelectOption> dropdown_options_{};
+  /// 右侧按钮命中区（`measure` 时算定；绘制与命中都用它，单一真源）。
+  math::Rect dropdown_rect_{};
+  /// 已挂上的面板（非拥有；`overlay_remove` 后置空）。
+  ///
+  /// 存 `SelectPanel*` 而不是 `Element*`：`arrange` 里要调它的
+  /// `set_anchor`（重排后面板要跟着控件走）。
+  SelectPanel* dropdown_panel_{nullptr};
+  /// 面板延迟摘除（见 `flush_dropdown_dismiss`）。
+  mutable bool dropdown_dismiss_pending_{false};
+  /// 延迟摘除期间待摘的面板（`flush_dropdown_dismiss` 是 const，
+  /// 而它要改 `dropdown_panel_`；用一个 mutable 中转）。
+  mutable SelectPanel* dropdown_pending_remove_{nullptr};
+
+  void open_dropdown_panel();
+  void close_dropdown_panel();
+  void flush_dropdown_dismiss() const;
+  void pick_dropdown_item(std::size_t index);
+  [[nodiscard]] auto dropdown_slot_width(const RenderContext& context) const -> float;
+  /// 按当前排版状态算插入点矩形（客户区逻辑坐标）。
+  ///
+  /// 抽成函数是因为**两个时机都要用**：`arrange`（几何刚定，缓存它供输入法用）
+  /// 与 `paint_content`（绘制时光标就在这里）。两处各写一遍算式必然漂移。
+  [[nodiscard]] auto caret_rect_now(const RenderContext& context) const -> math::Rect;
   std::size_t cursor_{0};
   /// 输入法预编辑串（显示态；**不进 `text_`**）。
   std::string preedit_{};
   /// 上一帧绘制的插入点矩形（`caret_rect()` 用；它拿不到 `RenderContext`）。
   mutable math::Rect last_caret_rect_{};
+ public:
+  /// **输入法候选窗的锚点**（客户区逻辑坐标）。
+  ///
+  /// 为何不能只返回 `last_caret_rect_`：那个缓存只在 `paint_content` 里写，
+  /// 而 `publish_ime_caret()` 在**聚焦时**与**事件派发后**就会被调——
+  /// 首次聚焦/刚切开面板那一帧，本元素还没画过，缓存是空矩形，
+  /// 上报出去就是 `(0,0,0,0)` ⇒ 系统把候选窗放屏幕上角（这就是
+  /// “候选窗没对到光标”的直接原因）。
+  ///
+  /// 兜底：缓存无效时按当前 `bounds_` 推出“首行行首”的位置。
+  /// 它不依赖文字排版（拿不到 `RenderContext`），所以横向只能给行首——
+  /// 但**纵向一定对**，而候选窗贴不贴光标行主要由纵坐标决定；
+  /// 下一帧画过之后缓存就接管，横向也跟着准。
+  [[nodiscard]] auto caret_rect() const -> math::Rect override {
+    if (!last_caret_rect_.is_empty()) return last_caret_rect_;
+    if (bounds_.is_empty()) return math::Rect{};
+    // 行盒估算：与 `paint_content` 同一套内边距，但不知道字号——
+    // 用可用高度的最小行（`style_.font_size` 是最接近的可信值）。
+    const float line = style_.font_size > 0.0f ? style_.font_size * 1.45f : 18.0f;
+    const float x = bounds_.x + style_.padding.left + 4.0f;
+    const float y = bounds_.y + (bounds_.height - line) * 0.5f;
+    return math::Rect{x, y, 2.0f, line};
+  }
+
+ private:
   bool password_{false};
   /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
   mutable BlinkCursor caret_blink_{};

@@ -13,6 +13,7 @@
 
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/input.hpp"
+#include "st/ui/components/select_panel.hpp"
 #include "st/ui/dsl.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
@@ -117,6 +118,102 @@ ST_TEST(ui_input_text_box_shifts_right_for_icon) {
   // 图标槽位完全在输入框内部（不越界），且不触及右端
   ST_CHECK(slot.x > with_icon.bounds().x);
   ST_CHECK(slot.right() < with_icon.bounds().right());
+}
+
+ST_TEST(ui_input_embedded_dropdown_draws_arrow_inside_box) {
+  // 内嵌下拉：箭头必须画在**输入框内部**的右端（不是旁边的第二个控件）。
+  //
+  // 判据是像素，而且必须**只属于箭头**：取样区要内缩避开控件自身的描边
+  //（否则边框像素会把“没画箭头”也算成“有差异”——实测：把绘制删掉后
+  // 本条仍绿，因为取样区吃到了边框）。
+  Fixture fixture;
+  Input input;
+  input.set_dropdown(true);
+  st::ui::SelectOption option;
+  option.value = "alpha";
+  option.label = "alpha";
+  input.set_dropdown_options({option});
+  render(input, fixture);
+
+  const Rect box = input.bounds();
+  const Rect arrow = input.dropdown_rect();
+  ST_REQUIRE(!arrow.is_empty());
+  // ① 在框内（左右都在内部，且不越出右缘）
+  ST_CHECK(arrow.x > box.x);
+  ST_CHECK(arrow.right() <= box.right());
+  // ② 箭头**真的被画了**：取样区按箭头槽体积算，再向内缩 4px
+  //    （避开输入框上下描边与右侧描边）。底色取 `surface_sunken`。
+  const Rect inner{arrow.x + 4.0f, arrow.y + 4.0f, std::max(1.0f, arrow.width - 8.0f),
+                   std::max(1.0f, arrow.height - 8.0f)};
+  const int inked = differing_pixels(fixture.canvas, inner, fixture.theme.colors().surface_sunken);
+  ST_CHECK(inked > 8);
+
+  // ③ 对照：同一个取样区在**未启用下拉**的输入框上必须是纯底——
+  //    两条一起才能证明“差异来自箭头”而不是“这块区域本来就有别的东西”。
+  Fixture plain_fixture;
+  Input plain;
+  render(plain, plain_fixture);
+  const int plain_inked =
+      differing_pixels(plain_fixture.canvas, inner, plain_fixture.theme.colors().surface_sunken);
+  ST_CHECK(plain_inked == 0);
+  // ④ 默认关闭：未开下拉时没有这个箭头区
+  ST_CHECK(Input{}.dropdown_rect().is_empty());
+}
+
+ST_TEST(ui_input_embedded_dropdown_narrows_text_area) {
+  // 开关下拉会改变**文字可用宽**（否则文字会盖在箭头上）。
+  // 判据：同一文本下，开启下拉的版本实测宽度更宽（自动宽度要把槽位算进去），
+  // 且在相同控件尺寸下文字被裁得更早——两者用“右边界”间接钉。
+  Fixture fixture;
+  Input plain;
+  Input with_dropdown;
+  with_dropdown.set_dropdown(true);
+  render(plain, fixture);
+  render(with_dropdown, fixture);
+  // 同一 `kWidth` 下两个控件宽相等，但下拉版的命中区占掉右侧一段：
+  // 用 `dropdown_rect` 证明这块区域属于按钮而非文字。
+  ST_CHECK(with_dropdown.bounds().width == plain.bounds().width);
+  const Rect arrow = with_dropdown.dropdown_rect();
+  ST_CHECK(!arrow.is_empty());
+  ST_CHECK(arrow.right() <= with_dropdown.bounds().right());
+}
+
+ST_TEST(ui_input_embedded_dropdown_pick_fills_text) {
+  // 选中列表项 ⇒ 回填输入框 + 通知 `on_change` + `on_dropdown_pick`。
+  // 这是本控件存在的意义（手填与选择共用一个字段），必须钉住。
+  Fixture fixture;
+  Input input;
+  input.set_dropdown(true);
+  st::ui::SelectOption a;
+  a.value = "alpha";
+  a.label = "alpha";
+  st::ui::SelectOption b;
+  b.value = "beta";
+  b.label = "beta";
+  input.set_dropdown_options({a, b});
+  std::string changed;
+  std::string picked;
+  input.on_change = [&changed](std::string_view text) { changed = std::string(text); };
+  input.on_dropdown_pick = [&picked](std::string_view text) { picked = std::string(text); };
+  render(input, fixture);
+
+  // 面板挂载回调：收集面板（不真进树，但要能拿到它并模拟“点选”）
+  std::unique_ptr<st::ui::Element> mounted;
+  input.overlay_host = [&mounted](std::unique_ptr<st::ui::Element> spawned) {
+    mounted = std::move(spawned);
+  };
+  input.set_dropdown_open(true);
+  ST_REQUIRE(mounted != nullptr);
+  ST_CHECK(input.dropdown_open());
+  // 选中第一项（走面板的 on_pick，与用户点选同一条路径）
+  auto* list_panel = static_cast<st::ui::SelectPanel*>(mounted.get());
+  ST_REQUIRE(list_panel->on_pick != nullptr);
+  list_panel->on_pick(0);
+
+  ST_CHECK_EQ(input.value(), std::string("alpha"));
+  ST_CHECK_EQ(changed, std::string("alpha"));
+  ST_CHECK_EQ(picked, std::string("alpha"));
+  ST_CHECK(!input.dropdown_open());   // 选完即收起
 }
 
 ST_TEST(ui_input_placeholder_color_is_readable) {

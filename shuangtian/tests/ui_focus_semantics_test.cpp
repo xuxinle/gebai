@@ -322,8 +322,59 @@ ST_TEST(text_area_show_border_false_draws_no_border_or_focus_ring) {
   ST_CHECK(area->style().border_width > 0.0F);
 }
 
-ST_TEST(text_area_seamless_background_only_clears_fill_not_border) {
-  // `set_seamless_background` 的语义是**只去底色**（与 `Input` 对齐）；
+// ————————————————————————————————————————————————————————————————————————————
+// 点击后不拖 = 无选区（打字不该把首个字符选中）
+//
+// 缺陷（2026-11-17，小白输入框实测）：`MouseDown` 无条件设 `select_anchor_`
+// （为拖动选做准备），而 `MouseUp` 只清 `selecting_`、**不清锚点**。
+// 于是“点一下（不拖）”留下一个 `anchor == cursor` 的零长选区，
+// **下一次插字就现形**：`cursor_` 前移而 anchor 停在原位，凭空多出一段选区——
+// 用户看到的就是“输入第一个字符后它被选中，再输一个就把它覆盖掉”。
+ST_TEST(click_without_drag_leaves_no_selection_so_typing_appends) {
+  for (const bool use_area : {true, false}) {
+    UiRoot root;
+    mount(root, use_area ? std::unique_ptr<Element>(std::make_unique<st::ui::TextArea>())
+                         : std::unique_ptr<Element>(std::make_unique<st::ui::Input>()));
+    Element* field = root.content();
+    ST_REQUIRE(field != nullptr);
+
+    // 点击聚焦（真实路径：MouseDown → MouseUp）。
+    st::ui::Event down;
+    down.kind = st::ui::EventKind::MouseDown;
+    down.button = 1;
+    down.position = field->bounds().center();
+    (void)root.dispatch(down);
+
+    st::ui::Event up;
+    up.kind = st::ui::EventKind::MouseUp;
+    up.button = 1;
+    up.position = down.position;
+    (void)root.dispatch(up);
+
+    // 输入两个字符：第二个不能把第一个覆盖掉。
+    const auto send_text = [&root](const char* text) {
+      st::ui::Event input;
+      input.kind = st::ui::EventKind::TextInput;
+      input.text = text;
+      (void)root.dispatch(input);
+    };
+    send_text("a");
+    send_text("b");
+
+    // 两个面都钉：控件值（行为） + 选区为空（根因）。
+    if (auto* area = dynamic_cast<st::ui::TextArea*>(field); area != nullptr) {
+      ST_CHECK_EQ(area->value(), std::string("ab"));
+      ST_CHECK(!area->has_selection());
+    } else if (auto* input = dynamic_cast<st::ui::Input*>(field); input != nullptr) {
+      ST_CHECK_EQ(input->value(), std::string("ab"));
+      ST_CHECK(!input->has_selection());
+    } else {
+      ST_CHECK(false);
+    }
+  }
+}
+
+ST_TEST(text_area_seamless_background_only_clears_fill_not_border) {  // `set_seamless_background` 的语义是**只去底色**（与 `Input` 对齐）；
   // 边框仍在——要连边框也不要，用另一个开关 `set_show_border(false)`。
   // 两个开关正交是刻意的：改一个不代表另一个跟着变。
   UiRoot root;

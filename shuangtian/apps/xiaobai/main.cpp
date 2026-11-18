@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <memory>
@@ -29,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "../app_icon.hpp"
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"
 #include "st/core/entry.hpp"
@@ -37,12 +39,15 @@
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
 #include "st/core/net.hpp"
+#include "st/core/process.hpp"
 #include "st/core/time.hpp"
 #include "st/net/http.hpp"
 #include "st/net/tls.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/input.hpp"
 #include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/scroll.hpp"
+#include "st/ui/components/select_box.hpp"
 #include "st/ui/components/text.hpp"
 #include "st/ui/components/text_area.hpp"
 #include "st/ui/components/title_bar.hpp"
@@ -63,15 +68,86 @@ inline constexpr std::size_t kComposerMaxLines = 6;
 /// 该值只是“预留得够用”，不影响胶囊本身（那个自适应）。
 inline constexpr float kComposerReserve = 160.0f;
 
-/// 气泡最大宽度（逻辑像素）：气泡按**内容**自适应，只卡一个上限——
-/// 写死宽度会让短句启大片空白、长句又被砍。窗口宽 720 时约 2/3 屏。
-inline constexpr float kMaxBubbleWidth = 520.0f;
+/// 气泡最大宽度：**不设固定上限**（取 `kUnbounded`），让它能长到消息区的可用宽
+/// （再往外就是窗口边距，由外层容器决定）。
+///
+/// 为何不限定一个固定像素（如 520）：那会把“一行就放得下的话”在 520 处硬折行，
+/// 即使窗口中还有大片空白——用户看到的是一只被挤窄的气泡，而不是“随内容宽”。
+/// 气泡的宽度语义是：**短内容随内容变窄，长内容铺满可用宽**；
+/// 后一半只需交给父级约束，不需要额外的魔数。
+inline constexpr float kMaxBubbleWidth = st::ui::kUnbounded;
 
 // 默认模型：应用内置的兜底值（不是密钥，也不是部署配置）。
-// 真正的部署参数走环境变量（见 `env_or`）或 `~/.xiaobai/config.json`，
-// **不要把端点/密钥写进代码**——代码只提供中性的默认值。
+//
+// 真正的部署参数有两条路，**都不依赖运行时环境变量**：
+//   ① **构建期宏**（推荐）：`st build --define 'XIAOBAI_*="…"'`，由下面的
+//      `XIAOBAI_PRESET_*` 条件编译进二进制——产物开箱即用，不用在目标机器
+//      配任何环境变量，也不会把密钥留在磁盘上。
+//   ② `~/.xiaobai/config.json`（用户在设置窗里填）。
+// 环境变量仍支持（优先级最高）——便于临时切换/调试。
 inline constexpr const char* kDefaultModel = "deepseek-v4.1-flash";
 inline constexpr const char* kDefaultBaseUrl = "https://api.deepseek.com/v1";
+
+// ———————————————————————————————————————————————————————————————
+// 构建期预置（条件编译）
+//
+// 三者各自独立：给了哪个宏就预置哪个，没给的那项退回默认/配置文件。
+// 判“宏是否给出”只用 `#if defined`——`sizeof` 在预处理指令里不可用。
+// 空串宏（`XIAOBAI_MODEL=""`）在 `#if` 里与未定义等价地有用：
+// 运行时用 `preset_string()` 再判一次长度，空串就退回默认值。
+// ———————————————————————————————————————————————————————————————
+#if defined(XIAOBAI_MODEL)
+#define XIAOBAI_HAS_PRESET_MODEL 1
+#define XIAOBAI_PRESET_MODEL XIAOBAI_MODEL
+#else
+#define XIAOBAI_PRESET_MODEL kDefaultModel
+#endif
+
+#if defined(XIAOBAI_BASE_URL)
+#define XIAOBAI_HAS_PRESET_BASE_URL 1
+#define XIAOBAI_PRESET_BASE_URL XIAOBAI_BASE_URL
+#else
+#define XIAOBAI_PRESET_BASE_URL kDefaultBaseUrl
+#endif
+
+#if defined(XIAOBAI_API_KEY)
+#define XIAOBAI_HAS_PRESET_API_KEY 1
+#define XIAOBAI_PRESET_API_KEY XIAOBAI_API_KEY
+#else
+#define XIAOBAI_PRESET_API_KEY ""
+#endif
+
+/// 预置字符串非空才算“预置了”（空串 = 没预置）。
+[[nodiscard]] constexpr auto preset_nonempty(const char* text) noexcept -> bool {
+  return text != nullptr && *text != '\0';
+}
+
+/// 模型名是否在**构建期**定死（决定设置窗要不要暴露模型字段）。
+[[nodiscard]] constexpr auto model_preset_at_build() noexcept -> bool {
+#if defined(XIAOBAI_HAS_PRESET_MODEL)
+  return preset_nonempty(XIAOBAI_MODEL);
+#else
+  return false;
+#endif
+}
+
+/// 端点是否在构建期定死。
+[[nodiscard]] constexpr auto base_url_preset_at_build() noexcept -> bool {
+#if defined(XIAOBAI_HAS_PRESET_BASE_URL)
+  return preset_nonempty(XIAOBAI_BASE_URL);
+#else
+  return false;
+#endif
+}
+
+/// API Key 是否在构建期定死。
+[[nodiscard]] constexpr auto api_key_preset_at_build() noexcept -> bool {
+#if defined(XIAOBAI_HAS_PRESET_API_KEY)
+  return preset_nonempty(XIAOBAI_API_KEY);
+#else
+  return false;
+#endif
+}
 
 /// 读环境变量（不存在或空串 → 返回 `fallback`）。
 [[nodiscard]] auto env_or(const char* name, const std::string& fallback) -> std::string {
@@ -81,93 +157,121 @@ inline constexpr const char* kDefaultBaseUrl = "https://api.deepseek.com/v1";
 }
 
 // ———————————————————————————————————————————————————————————————
-// 配置
+// 配置（**纯内存，不落盘**）
 //
-// 三层来源（后者盖前者）：
-//   ① 代码内置默认值（中性：公开的默认端点 + 默认模型名）；
-//   ② 环境变量 `XIAOBAI_BASE_URL` / `XIAOBAI_API_KEY` / `XIAOBAI_MODEL`；
-//   ③ `~/.xiaobai/config.json`（用户在设置窗里填的）。
-// 为何要有②：部署/打包时注入配置不应该改代码或往仓库里塞密钥——
-// 环境变量是标准做法，且本应用启动时就把它们吃进内存，不落盘。
+// 来源只有两个（后者盖前者）：
+//   ① **构建期宏**预置（`XIAOBAI_BASE_URL` / `XIAOBAI_API_KEY` / `XIAOBAI_MODEL`）；
+//   ② 环境变量（同名）；
+//   ③ 设置面板里现填的（仅本次运行有效）。
+//
+// 为何**不写配置文件**：这个应用的定位是“每次打开都是新的”——
+// 不在用户机器上留任何状态文件。因此也没有 `~/.xiaobai/config.json` 这条链；
+// 关掉窗口，设置就没了（预置值下次启动会自动回来）。
 // ———————————————————————————————————————————————————————————————
+
+/// 预置字符串的取值入口（未预置时返回默认值/空串）。
+///
+/// 为何包一层而不直接在 `Config` 里写宏：宏可能未定义，
+/// 而 `#if` 只能在预处理期分支——包成函数后调用点就干净了。
+[[nodiscard]] constexpr auto preset_base_url() noexcept -> const char* {
+#if defined(XIAOBAI_HAS_PRESET_BASE_URL)
+  return XIAOBAI_BASE_URL;
+#else
+  return kDefaultBaseUrl;
+#endif
+}
+
+[[nodiscard]] constexpr auto preset_api_key() noexcept -> const char* {
+#if defined(XIAOBAI_HAS_PRESET_API_KEY)
+  return XIAOBAI_API_KEY;
+#else
+  return "";
+#endif
+}
+
+[[nodiscard]] constexpr auto preset_model() noexcept -> const char* {
+#if defined(XIAOBAI_HAS_PRESET_MODEL)
+  return XIAOBAI_MODEL;
+#else
+  return kDefaultModel;
+#endif
+}
+
 struct Config {
-  std::string base_url{kDefaultBaseUrl};
-  std::string api_key{};
-  std::string model{kDefaultModel};
+  std::string base_url{base_url_preset_at_build() ? preset_base_url() : kDefaultBaseUrl};
+  std::string api_key{api_key_preset_at_build() ? preset_api_key() : std::string{}};
+  std::string model{model_preset_at_build() ? preset_model() : kDefaultModel};
 
   [[nodiscard]] auto ready() const -> bool {
     return !base_url.empty() && !api_key.empty() && !model.empty();
   }
-  [[nodiscard]] auto as_json() const -> Json {
-    // 必须显式 Json::object()：Json{{{...}}} 会被初始化列表规则解成「数组里一个对」，
-    // 实测写出过 `[{...}]` 而读回时对象字段全落空 → 表现为“保存了但重启后配置丢失”。
-    Json out = Json::object();
-    out["base_url"] = base_url;
-    out["api_key"] = api_key;
-    out["model"] = model;
-    return out;
-  }
-  [[nodiscard]] static auto from_json(const Json& j) -> Config {
-    Config c;
-    // 容错：早先版本可能写出过单元素数组形态，遇到时取第一个元素。
-    const Json* root = &j;
-    if (j.is_array() && !j.empty()) root = &j[0];
-    c.base_url = st::json_get_string(*root, "base_url", c.base_url);
-    c.api_key = st::json_get_string(*root, "api_key", c.api_key);
-    c.model = st::json_get_string(*root, "model", c.model);
-    return c;
-  }
   [[nodiscard]] auto operator==(const Config& other) const -> bool = default;
 };
 
-/// 模型名是否为“部署注入”（环境变量给了值）。
+/// 模型名是否已被“定死”（构建期宏或环境变量）。
 ///
-/// 用来决定设置窗要不要暴露模型字段：部署方已经定死时，让用户在界面上改它只会
-/// 造成“改完不生效”（下一个启动又回到环境变量）——不如不展示。
-[[nodiscard]] auto model_injected_by_env() -> bool {
+/// 用来决定设置窗要不要暴露模型字段：定死后让用户在界面上改它只会造成
+/// “改完不生效”——不如不展示。
+[[nodiscard]] auto model_locked() -> bool {
+  if (model_preset_at_build()) return true;   // 构建期宏：编译进二进制的值
   const char* raw = std::getenv("XIAOBAI_MODEL");
   return raw != nullptr && *raw != '\0';
 }
 
-[[nodiscard]] auto config_dir() -> std::string {
-  const std::string home = st::fs::home_dir();
-  return st::fs::join(home.empty() ? std::string(".") : home, ".xiaobai");
-}
-[[nodiscard]] auto config_path() -> std::string { return st::fs::join(config_dir(), "config.json"); }
-
-/// 加载配置：内置默认 → 环境变量 → 配置文件（后者盖前者）。
+/// 加载配置：**纯内存**，不读也不写任何磁盘文件。
 ///
-/// 环境变量优先于配置文件，是为了让“打包/部署注入”能压过用户本地存的值——
-/// 否则用户机器上旧的一份配置会让分发出去的新包看着没生效。
+/// 优先级（后者盖前者）：构建期宏预置 → 环境变量。
+/// 环境变量盖过宏，是为了让临时调试（换端点/换密钥）不用重编；
+/// 生产分发时只给宏、不给环境变量，产物就是开箱即用的。
 [[nodiscard]] auto load_config() -> Config {
   Config c;
   c.base_url = env_or("XIAOBAI_BASE_URL", c.base_url);
   c.api_key = env_or("XIAOBAI_API_KEY", c.api_key);
   c.model = env_or("XIAOBAI_MODEL", c.model);
-  if (const auto parsed = st::json_parse_file(config_path()); parsed.has_value()) {
-    Config file_cfg = Config::from_json(*parsed);
-    // 环境变量给了值的项不被文件覆盖（上面那两句已经把 env 盖到 c 上了）。
-    if (env_or("XIAOBAI_BASE_URL", "").empty()) c.base_url = file_cfg.base_url;
-    if (env_or("XIAOBAI_API_KEY", "").empty()) c.api_key = file_cfg.api_key;
-    if (env_or("XIAOBAI_MODEL", "").empty()) c.model = file_cfg.model;
-  }
   return c;
-}
-
-void save_config(const Config& c) {
-  (void)st::fs::create_directories(config_dir());
-  if (auto status = st::json_write_file(config_path(), c.as_json()); !status) {
-    st::log::out("[xiaobai] 配置写盘失败（{}）：{}\n", config_path(), status.error().message);
-  }
 }
 
 // ———————————————————————————————————————————————————————————————
 // 消息
+//
+// 一份消息要同时服务两件事：**界面展示**（气泡/推理块/工具卡片）与
+// **回传给模型的上下文**（OpenAI `/v1/chat/completions` 的 messages 结构）。
+// 这两件事字段并不相同（界面不关心 `tool_call_id`，模型不关心 `stamp`），
+// 所以同一个结构里放两套字段，`to_api()` 负责投影出对外的那个。
 // ———————————————————————————————————————————————————————————————
+struct ToolCall {
+  std::string id{};        ///< 模型给的调用 id（回传 `tool` 消息时必须原样带回）
+  std::string name{};      ///< 工具名（sh / read / write / edit）
+  std::string arguments{}; ///< JSON 字符串（流式下是分片拼起来的）
+
+  [[nodiscard]] auto operator==(const ToolCall& other) const -> bool = default;
+};
+
 struct Message {
-  std::string role;  ///< "user" | "assistant"
+  /// `user` | `assistant` | `tool`
+  std::string role;
   std::string content;
   std::string stamp;  ///< HH:MM（展示用）
+  /// 推理过程（`reasoning_content`）：只展示，**不回传给模型**——
+  /// DeepSeek / vLLM 系对已完成的推理链不再要求上传，回传反而多花 token。
+  std::string reasoning{};
+  /// 本消息的思维链是否还在流（决定界面上要不要显示“思考中”）。
+  bool reasoning_streaming{false};
+  /// 助手要求调用的工具（可能多个，一轮可并行）。
+  std::vector<ToolCall> tool_calls{};
+  /// 工具结果消息所属的调用 id（`role == "tool"` 时有效）。
+  std::string tool_call_id{};
+  /// 工具名（`role == "tool"` 时用于展示）。
+  std::string tool_name{};
+  /// 工具调用入参（JSON 字符串，`role == "tool"` 时用于展示摘要）。
+  ///
+  /// 为何要存：界面需要告诉用户“这个工具被要求做什么”，
+  /// 只有工具名与输出时看不清意图（尤其是 `sh` 跑了什么命令）。
+  std::string tool_arguments{};
+  /// 工具/命令输出（展示用；可能就是 `content` 的一份拷贝，但两者语义不同）
+  std::string output{};
+  /// 工具执行是否失败（展示用红色标记）。
+  bool tool_failed{false};
 
   [[nodiscard]] auto operator==(const Message& other) const -> bool = default;
 };
@@ -175,33 +279,58 @@ struct Message {
 // ———————————————————————————————————————————————————————————————
 // 后台流式任务
 //
-// 只做两件事：把收到的增量文本塞进 `buffer`（互斥保护），把结束/错误标记置位。
-// UI 状态一律由主线程（build 里）从 buffer 取走后写——跨线程写 State 会与
-// 遍历中的元素树竞争（框架硬约束）。
+// 线程只做三件事：把**已解析的结构化增量**塞进队列（互斥保护），
+// 把结束/错误标记置位，把排空的调用信息记下。UI 状态一律由主线程
+// （每帧 `pump_stream_into_state`）取走后写——跨线程写 State 会与遍历中的
+// 元素树竞争（框架硬约束）。
+//
+// 为何要把解析放在**后台**：SSE 行可能被 TCP 分片截断，拼行是状态机的事，
+// 放主线程每帧做会把“拼到一半的半行”反复搬运。
 // ———————————————————————————————————————————————————————————————
+
+/// 一条结构化增量（流式解析的产物）。
+struct StreamDelta {
+  std::string content{};    ///< 正文增量
+  std::string reasoning{};  ///< 推理增量（`reasoning_content`）
+  /// 工具调用增量：`index` 是模型给的**序号**（同一工具的分片同名次）；
+  /// `id`/`name` 只在首片出现，`args` 是参数 JSON 的分片。
+  struct ToolChunk {
+    std::size_t index{0};
+    std::string id{};
+    std::string name{};
+    std::string args{};
+  };
+  std::vector<ToolChunk> tools{};
+  /// 本轮的结束原因（`finish_reason`；空 = 还没给）。
+  std::string finish_reason{};
+};
+
+/// 解析一条 SSE `data:` 行为结构化增量（定义在下面；模板 `pump_stream` 要用）。
+[[nodiscard]] auto parse_sse_delta(std::string_view line) -> std::optional<StreamDelta>;
+
 struct StreamJob {
   std::mutex mutex{};
-  std::string buffer{};
+  std::vector<StreamDelta> deltas{};
   std::string error{};
   std::atomic<bool> finished{false};
   std::atomic<bool> cancelled{false};
   std::thread worker{};
 
-  void push(std::string piece) {
+  void push(StreamDelta delta) {
     const std::lock_guard<std::mutex> guard(mutex);
-    buffer += piece;
+    deltas.push_back(std::move(delta));
   }
   void fail(std::string message) {
     const std::lock_guard<std::mutex> guard(mutex);
     if (error.empty()) error = std::move(message);
   }
   /// 取走已收增量（错误也一并通过 `error` 字段返回）。
-  [[nodiscard]] auto drain(std::string& out_error) -> std::string {
+  void drain(std::vector<StreamDelta>& out, std::string& out_error) {
     const std::lock_guard<std::mutex> guard(mutex);
-    std::string out = std::move(buffer);
-    buffer.clear();
+    out.insert(out.end(), std::make_move_iterator(deltas.begin()),
+               std::make_move_iterator(deltas.end()));
+    deltas.clear();
     out_error = error;
-    return out;
   }
 };
 
@@ -220,6 +349,12 @@ void pump_stream(Stream& stream, StreamJob& job, const std::string& wire) {
   }
   std::vector<std::uint8_t> buf(32 * 1024);
   std::string pending;
+  // HTTP 头与正文的分界：头里有 `Transfer-Encoding: chunked` 时正文是
+  // “十六进制长度行 + 数据”的分块格式，必须剥掉否则 SSE 行会被长度行切断。
+  bool headers_done = false;
+  bool chunked = false;
+  // 分块解码的剩余字节数（0 = 等下一块的长度行）。
+  std::size_t chunk_left = 0;
   while (!job.cancelled.load()) {
     auto read = stream.read_some(std::span<std::uint8_t>(buf.data(), buf.size()));
     if (!read.has_value()) {
@@ -228,15 +363,188 @@ void pump_stream(Stream& stream, StreamJob& job, const std::string& wire) {
     }
     if (*read == 0) break;  // 对端关闭 = 正常结束
     pending.append(reinterpret_cast<const char*>(buf.data()), *read);
-    // 交付使用方（SSE 解析在外部按行处理，这里只负责把字节流推出去）
-    job.push(std::move(pending));
-    pending.clear();
+
+    if (!headers_done) {
+      const auto split = pending.find("\r\n\r\n");
+      if (split == std::string::npos) continue;   // 头还没收齐
+      chunked = pending.substr(0, split).find("chunked") != std::string::npos;
+      pending.erase(0, split + 4);
+      headers_done = true;
+    }
+
+    // —— 分块解码（先剥壳再按行切 SSE）——
+    if (chunked) {
+      std::string body;
+      while (true) {
+        if (chunk_left == 0) {
+          const auto line_end = pending.find("\r\n");
+          if (line_end == std::string::npos) break;
+          std::size_t size = 0;
+          try {
+            size = static_cast<std::size_t>(
+                std::stoul(pending.substr(0, line_end), nullptr, 16));
+          } catch (const std::exception&) {
+            pending.clear();
+            break;
+          }
+          pending.erase(0, line_end + 2);
+          if (size == 0) { pending.clear(); break; }   // 末分块
+          chunk_left = size;
+        }
+        if (pending.size() < chunk_left) break;   // 半块：等更多数据
+        body.append(pending, 0, chunk_left);
+        pending.erase(0, chunk_left);
+        chunk_left = 0;
+        // 块尾的 `\r\n`
+        if (pending.size() >= 2 && pending.compare(0, 2, "\r\n") == 0) pending.erase(0, 2);
+      }
+      pending = std::move(body) + pending;
+    }
+
+    // —— 按行切 SSE（一条 `data:` 行 = 一个 delta）——
+    std::size_t line_start = 0;
+    while (true) {
+      const auto line_end = pending.find('\n', line_start);
+      if (line_end == std::string::npos) break;
+      std::string line = pending.substr(line_start, line_end - line_start);
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      line_start = line_end + 1;
+      if (auto delta = parse_sse_delta(line); delta.has_value()) {
+        if (delta->finish_reason == "done") break;   // `[DONE]`
+        job.push(std::move(*delta));
+      }
+    }
+    pending.erase(0, line_start);
   }
 }
 
+// ———————————————————————————————————————————————————————————————
+// 模型列表拉取（`GET /v1/models`）
+//
+// 与流式对话同样跑在后台线程：UI 线程只管每帧把结果取走。
+// 为什么这个要单独一个类型而不复用 `StreamJob`：它要的是**一次性收齐**
+// （典型响应几百字节），且必须等到完整报文才能解析——不需要增量。
+// ———————————————————————————————————————————————————————————————
+struct ModelListJob {
+  std::mutex mutex{};
+  std::vector<std::string> models{};
+  std::string error{};
+  std::atomic<bool> finished{false};
+  std::thread worker{};
+
+  [[nodiscard]] auto drain(std::vector<std::string>& out_models, std::string& out_error) -> bool {
+    if (!finished.load()) return false;
+    const std::lock_guard<std::mutex> guard(mutex);
+    out_models = models;
+    out_error = error;
+    return true;
+  }
+};
+
+template <class Stream>
+void fetch_model_list(Stream& stream, ModelListJob& job, const std::string& wire) {
+  if (auto status = stream.write_all(std::span<const std::uint8_t>(
+          reinterpret_cast<const std::uint8_t*>(wire.data()), wire.size()));
+      !status) {
+    const std::lock_guard<std::mutex> guard(job.mutex);
+    job.error = "发送请求失败：" + status.error().message;
+    job.finished.store(true);
+    return;
+  }
+  std::vector<std::uint8_t> buf(16 * 1024);
+  std::string raw;
+  while (true) {
+    auto read = stream.read_some(std::span<std::uint8_t>(buf.data(), buf.size()));
+    if (!read.has_value()) {
+      const std::lock_guard<std::mutex> guard(job.mutex);
+      if (job.error.empty()) job.error = "读取失败：" + read.error().message;
+      break;
+    }
+    if (*read == 0) break;
+    raw.append(reinterpret_cast<const char*>(buf.data()), *read);
+  }
+  // 拆头部/正文：兼容 `\r\n\r\n` 与 `\n\n` 两种分隔。
+  std::string body;
+  const auto split = raw.find("\r\n\r\n");
+  if (split != std::string::npos) {
+    body = raw.substr(split + 4);
+  } else if (const auto alt = raw.find("\n\n"); alt != std::string::npos) {
+    body = raw.substr(alt + 2);
+  }
+  // 分块传输（`Transfer-Encoding: chunked`）：只取十六进制长度行之后的载荷。
+  if (raw.find("chunked") != std::string::npos) {
+    std::string joined;
+    std::size_t at = 0;
+    while (at < body.size()) {
+      const auto line_end = body.find("\r\n", at);
+      if (line_end == std::string::npos) break;
+      std::size_t size = 0;
+      try {
+        size = static_cast<std::size_t>(std::stoul(body.substr(at, line_end - at), nullptr, 16));
+      } catch (const std::exception&) {
+        break;
+      }
+      if (size == 0) break;
+      const std::size_t from = line_end + 2;
+      joined.append(body.substr(from, std::min(size, body.size() - from)));
+      at = from + size + 2;
+    }
+    body = std::move(joined);
+  }
+  {
+    const std::lock_guard<std::mutex> guard(job.mutex);
+    if (job.error.empty()) {
+      const auto parsed = st::json_parse(body);
+      if (!parsed.has_value()) {
+        job.error = "模型列表响应不是合法 JSON";
+      } else {
+        const Json* data = st::json_find(*parsed, "data");
+        if (data == nullptr || !data->is_array()) {
+          job.error = "模型列表响应缺少 data 数组";
+        } else {
+          for (const auto& item : *data) {
+            const Json* id = st::json_find(item, "id");
+            if (id != nullptr && id->is_string()) {
+              job.models.push_back(st::json_as_string(*id));
+            }
+          }
+          std::ranges::sort(job.models);
+          if (job.models.empty()) job.error = "该端点未返回任何模型";
+        }
+      }
+    }
+  }
+  job.finished.store(true);
+}
+
+/// 构造模型列表请求（`GET {base}/models`，同基础地址与认证）。
+[[nodiscard]] auto build_models_request(const std::string& base_url, const std::string& api_key,
+                                        std::string& out_url) -> std::string {
+  std::string url = base_url;
+  while (!url.empty() && url.back() == '/') url.pop_back();
+  // 用户可能填的是完整 chat/completions：从那里截到根再拼 models。
+  const auto chat_at = url.find("/chat/");
+  if (chat_at != std::string::npos) url.resize(chat_at);
+  if (url.find("/models") == std::string::npos) url += "/models";
+  out_url = url;
+
+  http::HttpRequest req;
+  req.method = http::Method::Get;
+  const auto parsed = http::Url::parse(url);
+  req.path = (parsed.has_value() && !parsed->path.empty()) ? parsed->path : "/v1/models";
+  req.host = parsed.has_value() ? parsed->host : std::string{};
+  req.port = parsed.has_value() ? parsed->port : 80;
+  req.headers.set("Authorization", "Bearer " + api_key);
+  req.headers.set("Accept", "application/json");
+  req.headers.set("Connection", "close");
+  return http::serialize_request(req);
+}
+
 /// 把 URL 与请求体拼成 OpenAI 兼容的完整报文。
+///
+/// `tools` 非空时带上工具声明（模型据此才会返回 `tool_calls`）。
 [[nodiscard]] auto build_request(const Config& cfg, const std::vector<Json>& messages,
-                                 std::string& out_url) -> std::string {
+                                 const Json& tools, std::string& out_url) -> std::string {
   std::string url = cfg.base_url;
   while (!url.empty() && url.back() == '/') url.pop_back();
   // 端点已含路径就不再拼（允许用户直接填完整的 .../chat/completions）
@@ -247,6 +555,8 @@ void pump_stream(Stream& stream, StreamJob& job, const std::string& wire) {
   payload["model"] = cfg.model;
   payload["messages"] = messages;
   payload["stream"] = true;
+  // `tools` 是数组；空数组不要发（部分网关对空数组报 400）。
+  if (tools.is_array() && !tools.empty()) payload["tools"] = tools;
   const std::string body = st::json_dump(payload, false);
 
   http::HttpRequest req;
@@ -266,21 +576,156 @@ void pump_stream(Stream& stream, StreamJob& job, const std::string& wire) {
   return wire;
 }
 
-/// 从 SSE 行里取出增量文本；`[DONE]` 返回 nullopt 并置结束标记。
-[[nodiscard]] auto parse_sse_line(std::string_view line) -> std::optional<std::string> {
+/// 解析一条 SSE `data:` 行为结构化增量。
+///
+/// `[DONE]` 以 `finish_reason = "done"` 告知调用方（而不是返回 nullopt——
+/// nullopt 同时表示“这行不是数据行”，两者必须可分辨）。
+[[nodiscard]] auto parse_sse_delta(std::string_view line) -> std::optional<StreamDelta> {
   if (!line.starts_with("data:")) return std::nullopt;
   std::string_view data = line.substr(5);
   while (!data.empty() && (data.front() == ' ' || data.front() == '\t')) data.remove_prefix(1);
-  if (data.empty() || data == "[DONE]") return std::nullopt;
+  if (data.empty()) return std::nullopt;
+  if (data == "[DONE]") {
+    StreamDelta done;
+    done.finish_reason = "done";
+    return done;
+  }
   const auto parsed = st::json_parse(data);
   if (!parsed.has_value()) return std::nullopt;
   const Json* choices = st::json_find(*parsed, "choices");
   if (choices == nullptr || !choices->is_array() || choices->empty()) return std::nullopt;
-  const Json* delta = st::json_find((*choices)[0], "delta");
-  if (delta == nullptr) return std::nullopt;
-  const Json* content = st::json_find(*delta, "content");
-  if (content == nullptr || !content->is_string()) return std::nullopt;
-  return st::json_as_string(*content);
+  const Json& choice = (*choices)[0];
+
+  StreamDelta out;
+  if (const Json* reason = st::json_find(choice, "finish_reason");
+      reason != nullptr && reason->is_string()) {
+    out.finish_reason = st::json_as_string(*reason);
+  }
+
+  const Json* delta = st::json_find(choice, "delta");
+  if (delta == nullptr) return out;
+
+  // 正文
+  if (const Json* content = st::json_find(*delta, "content");
+      content != nullptr && content->is_string()) {
+    out.content = st::json_as_string(*content);
+  }
+  // 推理过程：DeepSeek / vLLM 用 `reasoning_content`，部分网关用 `reasoning`。
+  for (const char* key : {"reasoning_content", "reasoning"}) {
+    if (const Json* reasoning = st::json_find(*delta, key);
+        reasoning != nullptr && reasoning->is_string()) {
+      out.reasoning = st::json_as_string(*reasoning);
+      break;
+    }
+  }
+  // 工具调用分片
+  if (const Json* calls = st::json_find(*delta, "tool_calls");
+      calls != nullptr && calls->is_array()) {
+    for (const auto& call : *calls) {
+      StreamDelta::ToolChunk chunk;
+      if (const Json* index = st::json_find(call, "index");
+          index != nullptr && index->is_number()) {
+        chunk.index = static_cast<std::size_t>(st::json_as_i64(*index));
+      }
+      if (const Json* id = st::json_find(call, "id"); id != nullptr && id->is_string()) {
+        chunk.id = st::json_as_string(*id);
+      }
+      if (const Json* fn = st::json_find(call, "function"); fn != nullptr) {
+        if (const Json* name = st::json_find(*fn, "name");
+            name != nullptr && name->is_string()) {
+          chunk.name = st::json_as_string(*name);
+        }
+        if (const Json* args = st::json_find(*fn, "arguments");
+            args != nullptr && args->is_string()) {
+          chunk.args = st::json_as_string(*args);
+        }
+      }
+      out.tools.push_back(std::move(chunk));
+    }
+  }
+  return out;
+}
+
+// ———————————————————————————————————————————————————————————————
+// 工具（sh / read / write / edit）
+//
+// 四个工具都是「模型说要做什么 → 我们在本机做 → 把结果成文本回传」。
+// 设计约束：
+//
+// - **共享一个工作目录**（`tool_root_`）：应用当前目录。模型给的路径一律
+//   当作相对它解析——"读 project/a.txt" 与用户心里的那个位置一致。
+// - **输出有上限**：模型上下文很贵，一个 `ls -R /` 能直接撑爆。超限截断并
+//   明确告知（截断标记本身就是给模型的信息）。
+// - **失败不抛异常**：工具错也是给模型的输入（它要据此改正），
+//   所以统一返回 `ToolResult{ok, text}` 而不是错误码。
+// - **不弹控制台**：`sh` 走捕获管道（`capture_output`），窗口应用无控制台。
+// ———————————————————————————————————————————————————————————————
+
+/// 工具执行结果。
+struct ToolResult {
+  bool ok{false};
+  std::string text{};   ///< 回传给模型的内容（已截断到上限）
+};
+
+/// 单个工具输出的字符上限。超了截断并注明——
+/// 不截断的代价是上下文被一条命令撑满（实测 `ls -R` 很容易几十万字符）。
+inline constexpr std::size_t kToolOutputLimit = 16 * 1024;
+/// `sh` 命令超时（毫秒）：防一条挂住的命令卡住整个会话。
+inline constexpr int kToolShellTimeoutMs = 60 * 1000;
+
+[[nodiscard]] auto truncate_tool_output(std::string text) -> std::string {
+  if (text.size() <= kToolOutputLimit) return text;
+  const std::size_t kept = text.size() - kToolOutputLimit;
+  text.resize(kToolOutputLimit);
+  text += "\n…（输出过大，已截断 " + std::to_string(kept) + " 字符）";
+  return text;
+}
+
+/// 解析工具参数（模型给的是 JSON 字符串）。
+[[nodiscard]] auto tool_arg(const Json& args, std::string_view key) -> std::string {
+  const Json* value = st::json_find(args, std::string(key));
+  if (value == nullptr || !value->is_string()) return {};
+  return st::json_as_string(*value);
+}
+
+/// 把相对路径解析到工具根目录（绝对路径原样返回）。
+[[nodiscard]] auto resolve_tool_path(const std::string& root, const std::string& path)
+    -> std::string {
+  if (path.empty()) return root;
+  if (path.find(":\\") != std::string::npos || path.find(":/") != std::string::npos ||
+      (!path.empty() && (path.front() == '/' || path.front() == '\\'))) {
+    return path;   // 已经是绝对路径
+  }
+  return st::fs::join(root, path);
+}
+
+/// `edit`：把文件里的 `old` 全数替换为 `new`。
+///
+/// 为何要强制“必须命中”：常见的失败是模型猜了不存在的原文，
+/// 而默默写回一份未改动的文件会让它以为改成功了（这是最贵的失败模式）。
+[[nodiscard]] auto tool_edit_text(const std::string& path, const std::string& old_text,
+                                  const std::string& new_text) -> ToolResult {
+  auto loaded = st::fs::read_text(path);
+  if (!loaded.has_value()) {
+    return ToolResult{false, "读取失败：" + loaded.error().message + "（路径：" + path + "）"};
+  }
+  std::string content = std::move(*loaded);
+  if (old_text.empty()) return ToolResult{false, "old_string 不能为空"};
+  std::size_t count = 0;
+  std::size_t at = content.find(old_text);
+  if (at == std::string::npos) {
+    return ToolResult{false,
+                      "未找到要替换的内容（文件未改动）。请先用 read 确认原文。路径：" + path};
+  }
+  while (at != std::string::npos) {
+    content.replace(at, old_text.size(), new_text);
+    ++count;
+    at = content.find(old_text, at + new_text.size());
+  }
+  if (auto status = st::fs::write_text(path, content); !status) {
+    return ToolResult{false, "写入失败：" + status.error().message};
+  }
+  return ToolResult{true, "已替换 " + std::to_string(count) + " 处。文件：" + path};
 }
 
 // ———————————————————————————————————————————————————————————————
@@ -293,7 +738,8 @@ struct AgentPage : st::ui::dsl::Component {
   st::ui::dsl::State<std::vector<Message>> messages{std::vector<Message>{}};
   st::ui::dsl::State<std::string> draft{""};
   st::ui::dsl::State<bool> busy{false};
-  st::ui::dsl::State<std::string> status{"就绪"};
+  /// 生成中 / 出错的提示；**空串 = 不显示**（就绪态一律为空，界面上没有状态行）。
+  st::ui::dsl::State<std::string> status{""};
   st::ui::dsl::State<bool> settings_open{false};
   st::ui::dsl::State<Config> config{load_config()};
   // 设置弹窗的编辑缓冲（打开时从 config 拷贝，保存时写回）
@@ -301,15 +747,45 @@ struct AgentPage : st::ui::dsl::Component {
   st::ui::dsl::State<std::string> draft_key{};
   st::ui::dsl::State<std::string> draft_model{};
 
+  /// 真值树根（下拉面板需要挂叠加层）；由 main 在 mount 时注入。
+  st::ui::UiRoot* root_host{nullptr};
+
+  /// 工具的工作目录（模型给的相对路径一律相对它）。main 在启动时设成进程当前目录。
+  std::string tool_root{};
+  /// 当前是否允许使用工具（界面上可关——关掉就是一个纯聊天窗）。
+  st::ui::dsl::State<bool> tools_enabled{true};
+  /// 当前这一轮已经跑了多少个工具调用（防无限循环的硬护栏）。
+  std::size_t tool_rounds{0};
+
+  /// 单会话最多几轮「模型要工具 → 我们执行 → 回传」。
+  ///
+  /// 上限不是为了省，而是防模型卡在“重复调同一个失败工具”的循环里（实测常见）。
+  /// 到了就停下来并把控制交回用户，而不是默默转下去。
+  static constexpr std::size_t kMaxToolRounds = 32;
+
   /// 当前请求（非空 = 正在流式生成）。
   std::unique_ptr<StreamJob> job{};
+  /// 模型列表拉取（非空 = 正在拉）。
+  std::unique_ptr<ModelListJob> models_job{};
+  /// 拉回来的可选模型（供设置面板的模型下拉用）。
+  st::ui::dsl::State<std::vector<std::string>> model_options{std::vector<std::string>{}};
+  /// 拉取中的提示（空 = 空闲）；展示在模型字段旁。
+  st::ui::dsl::State<std::string> models_hint{""};
+  /// 标题栏上的模型标签（非本页声明树里的元素，由 main 装配时建）。
+  /// 每帧由 `sync_title_badge()` 把当前模型写进去。
+  st::ui::Element* model_badge{nullptr};
   /// 流式输出累积的正文（主线程侧，属于当前助手消息）。
   std::string stream_text{};
+  /// 流式累积的推理过程（同上，只展示）。
+  std::string stream_reasoning{};
+  /// 本轮已拼好的工具调用（流式分片按 `index` 合并到这里）。
+  std::vector<ToolCall> pending_calls{};
 
   AgentPage() {
-    // 首条欢迎消息
+    // 首条欢迎消息。提示语只说“做什么”，不提已经不存在的入口
+    //（旧文案让人去「设置」里填，而那个按钮已被删掉）。
     messages.set(std::vector<Message>{
-        Message{"assistant", "你好，我是小白。\n\n先在「设置」里填好 OpenAI 兼容端点与 API Key，然后在下方输入问题。", ""}});
+        Message{"assistant", "你好，我是小白。有什么需要帮助的吗？", ""}});
   }
 
   // —— 声明式构建 ——
@@ -317,22 +793,9 @@ struct AgentPage : st::ui::dsl::Component {
     using namespace st::ui::dsl;
 
     (void)column(c, {.gap = 0, .grow = true, .key = "root"}, [&] {
-      // ── 顶栏 ──
-      (void)row(c, {.gap = 8, .padding_x = 12, .padding_y = 8,
-                    .surface = st::ui::Element::Surface::Alt, .key = "topbar"}, [&] {
-        (void)icon(c, "sparkles", 18, {.color = st::ui::Tone::Accent, .key = "brand-icon"});
-        (void)text(c, [] { return std::string("小白"); },
-                   {.size = 13.0f, .weight = st::ui::FontWeight::Bold,
-                    .id = "app-name", .key = "app-name"});
-        (void)text(c, [&] {
-                     const auto model = config.value().model;
-                     return model.empty() ? std::string("（未绑定模型）") : ("· " + model);
-                   },
-                   {.color = st::ui::Tone::Muted, .size = 12.0f,
-                    .id = "model-label", .key = "model-label"});
-        (void)spacer(c);
-      });
-      (void)divider(c, false);
+      // 不再有顶栏：模型名放**标题栏**（`TitleBar::add_trailing`，见 main 的装配），
+      // 状态信息（生成中/出错）放在消息流末尾。这样聊天区从窗口顶部直接开始，
+      // 少一条常驻横带——与歌白主界面同一取向。
 
       // ── 消息区 ──
       //
@@ -342,17 +805,33 @@ struct AgentPage : st::ui::dsl::Component {
           [](st::ui::ScrollView& s) {
             s.set_id("msg-scroll");
             s.set_show_scrollbar(true);
+            // **跟随底部**：流式输出/新消息到达时自动跟到底。
+            //
+            // 为何不自己 `scroll_to(1e9)`（`set_follow_end` 就是为此而存在）：
+            // `max_scroll()` 取的是**上一次布局**的 `content_height_`，刚追加就滚
+            // 会被旧上限夹住；等布局把内容量成新值、重新夹取时，那个偏移已经
+            // 变成“合法”了——于是每次都差新长出来的那几行
+            // （实测：长回答的末尾永远看不到）。
+            s.set_follow_end(true);
+            // 用户往上翻 ⇒ 关掉跟随（否则每长出一行就把他拉回底部）；
+            // 自己滚回底部 ⇒ 重新开启。回调拿到的是**新偏移**，与 `max_scroll()`
+            // 一比就知道在不在底部。
+            st::ui::ScrollView* self = &s;
+            s.set_on_scroll([self](float offset) {
+              const bool at_bottom = offset >= self->max_scroll() - 2.0f;
+              if (self->follow_end() != at_bottom) self->set_follow_end(at_bottom);
+            });
           },
           {.grow = true, .key = "msg-scroll"});
       {
         BuildScope scope(c, &scroll);
         (void)column(c, {.gap = 10, .padding_x = 14, .padding_y = 14,
                          .key = "msg-list"}, [&] {
-          for (const auto& m : messages.value()) bubble(c, m);
-          // 生成/错误状态显示在消息流**末尾**（原顶栏那条状态行已去掉，
-          // 因为常驻一行状态看着像多余的仪表盘；而这两类信息与对话上下文相关，
-          // 放在气泡后面更自然）。
-          if (!status.value().empty() && status.value() != "就绪") {
+          const auto all = messages.value();
+          for (std::size_t i = 0; i < all.size(); ++i) bubble(c, all[i], i);
+          // 生成/错误状态：**只在非空时出现**（就绪是常态，不该占一行）。
+          // 正常态下这里什么都不声明，于是界面里没有状态条。
+          if (!status.value().empty()) {
             (void)text(c, [&] { return status.value(); },
                        {.color = st::ui::Tone::Muted, .size = 12.0f,
                         .id = "status-line", .key = "status-line"});
@@ -437,20 +916,60 @@ struct AgentPage : st::ui::dsl::Component {
     });
   }
 
-  /// 一条消息气泡：用户靠右、助手靠左；正文用 MarkdownView 渲染。
+  /// 一条消息：用户靠右气泡、助手靠左（推理块 + 正文）、工具是独立的小卡片。
   ///
-  /// 宽度**按内容自适应**（短句就是小气泡），只设一个上限（`kMaxBubbleWidth`）：
-  /// 写死像素会让短句留大片空白、长句又被封顶后浪费空间。
-  void bubble(st::ui::dsl::Composer& c, const Message& m) {
+  /// 三类消息形态差别很大，所以不做一个万能气泡：
+  /// - `user`：普通文本气泡（靠右）
+  /// - `assistant`：可选推理块（暗色、等宽）+ Markdown 正文
+  /// - `tool`：工具名 + 成败标记 + 等宽输出（截断展示）
+  /// `index` 是**消息在列表里的位置**，用来生成唯一 key。
+  ///
+  /// 为何必须唯一（实测事故）：同一 role 的多条消息若共用 `body-assistant`
+  /// 这类固定 key，声明式对账会按 key 复用元素——**后一条把前一条的元素偷走**，
+  /// 于是“读了 A 的内容、显示了 B 的位置”。表现极像渲染 bug（高度/内容对不上），
+  /// 而根因在 key 冲突。`row-` 那层之前还用 `messages.size()` 当后缀，
+  /// 消息变多时同一个 key 会指向不同位置，同样不稳定。
+  void bubble(st::ui::dsl::Composer& c, const Message& m, std::size_t index) {
     using namespace st::ui::dsl;
+    if (m.role == "tool") {
+      tool_card(c, m, index);
+      return;
+    }
     const bool is_user = m.role == "user";
-    (void)row(c, {.gap = 0, .key = "row-" + m.role + "-" + std::to_string(messages.value().size())},
+    const std::string uid = std::to_string(index);
+    // **完全空白的助手消息不画气泡**。
+    //
+    // 什么时候会出现：模型一轮只发工具调用、没写任何正文（它只“想了”+“调工具”），
+    // 而应用会为下一轮预建一个空助手消息。旧实现照样画出气泡骨架，
+    // 屏幕上就是一个只有“AI 14:31”的**空气泡**（实测截图里能看到）。
+    // 用户消息不适用此规则：空输入的 user 消息本来就不会产生。
+    if (!is_user && m.content.empty() && m.reasoning.empty()) return;
+    // **推理过程单独一个气泡**（不埋在答复气泡里）。
+    //
+    // 为何要拆开（用户直接提的诉求）：推理是**过程**、答复是**结果**，
+    // 两者混在同一张卡片里时：“这段是模型说的还是模型想的”分不清，
+    // 且推理很长时把答复挤到看不见的地方。它们是两个消息主体，
+    // 宽度也该各算各的（推理往往比答复长得多）。
+    if (!is_user && !m.reasoning.empty()) reasoning_bubble(c, m, index);
+    // **用 `justify` 对齐，不用 `spacer`**：
+    //
+    // `spacer` 是一个 `grow` 的空元素，它会把行内的剩余宽**全部占掉**——
+    // 气泡于是永远只能长到“行宽的一半”左右（实测：窗口 1178、气泡封顶 520）。
+    // 而两侧留白应该由消息区自身的 `padding_x` 提供（那是窗口边距，要保留），
+    // 对齐则只是“靠左/靠右”的位置问题，两者不该用同一个机制。
+    (void)row(c, {.gap = 0, .max_height = st::ui::kUnbounded,
+                  .justify = is_user ? st::ui::Justify::End : st::ui::Justify::Start,
+                  .key = "row-" + m.role + "-" + uid},
               [&] {
-                if (is_user) (void)spacer(c);
-                (void)card(c, {.gap = 4, .padding = 10, .max_width = kMaxBubbleWidth,
+                (void)card(c, {.gap = 6, .padding = 10, .max_width = kMaxBubbleWidth,
+                               // **气泡不限高**：内容多高它就多高（外层消息区滚动）。
+                               // 不限高的后果是“长回答在气泡内部出滚动条”——
+                               // 那既遮住末尾、又需要用户在一个小框里拖，
+                               // 与聊天气泡的阅读习惯相反。
+                               .max_height = st::ui::kUnbounded,
                                .surface = is_user ? st::ui::Element::Surface::Sunken
                                                   : st::ui::Element::Surface::Base,
-                               .key = "bubble-" + m.role},
+                               .key = "bubble-" + m.role + "-" + uid},
                            [&] {
                              (void)row(c, {.gap = 6, .key = "meta"}, [&] {
                                (void)icon(c, is_user ? "user" : "sparkles", 12,
@@ -460,29 +979,208 @@ struct AgentPage : st::ui::dsl::Component {
                                (void)text(c, [&] { return is_user ? std::string("你") : std::string("AI"); },
                                           {.size = 11.0f, .weight = st::ui::FontWeight::Bold,
                                            .key = "meta-name"});
+                               // 推理中/已推理的标记：有推理内容就亮一个“思考”标签，
+                               // 流式期间文字是“思考中”，结束后变“已思考”。
+                               if (!is_user && !m.reasoning.empty()) {
+                                 (void)text(
+                                     c,
+                                     [&]() -> std::string {
+                                       return m.reasoning_streaming ? std::string("思考中…")
+                                                                    : std::string("已思考");
+                                     },
+                                     {.color = st::ui::Tone::Accent, .size = 10.0f,
+                                      .key = "reasoning-badge"});
+                               }
                                if (!m.stamp.empty()) {
                                  (void)text(c, [&]() -> std::string { return m.stamp; },
                                             {.color = st::ui::Tone::Muted, .size = 10.0f,
                                              .key = "meta-time"});
                                }
                              });
-                             // 用 `custom<MarkdownView>` 而不 `markdown()`：需要
+                             // 正文：用 `custom<MarkdownView>` 而不 `markdown()`：需要
                              // “按内容收缩宽度”（气泡随短消息变窄）。
                              // 代价：`markdown()` 的惰性 source 闭包（自动订阅）要手动补——
                              // 先在该帧读一次 State 登记依赖，再把值写进去。
                              const std::string body = m.content;   // 读值 = 登记依赖
+                             if (!body.empty()) {
+                               (void)custom<st::ui::MarkdownView>(
+                                   c,
+                                   [body](st::ui::MarkdownView& view) {
+                                     view.set_shrink_to_fit(true);
+                                     view.set_base_font_size(13.0f);
+                                     // `set_markdown` 自带相等早退，逐帧重设不贵。
+                                     view.set_markdown(body);
+                                   },
+                                   // **`max_height` 必须显式给无界**：气泡里的正文
+                                   // 要**全部展开**（长回答不能内部滚动），而默认继承的
+                                   // 约束会让它停在某个高度、内部出滚动条——
+                                   // 表现就是“最后一段被切掉”（实测：内容 297px、
+                                   // 只给 235px，剩下 62px 得内滚才看得到）。
+                                   {.max_height = st::ui::kUnbounded,
+                                    .key = "body-" + m.role + "-" + uid});
+                             }
+                           });
+              });
+  }
+
+  /// 推理过程的**独立气泡**（与答复气泡平级，靠在左）。
+  ///
+  /// 为何单独一个气泡而不塞进答复卡片：推理是**过程**、答复是**结果**。
+  /// 混在一起时既分不清“这句是说的还是想的”，推理很长时还会把答复顶到
+  /// 看不见的地方；分开后两者各自自适应宽度（推理通常比答复长很多）。
+  ///
+  /// 视觉上弱于正文（暗底 + 小一号字），因为它是背景信息而不是回答。
+  void reasoning_bubble(st::ui::dsl::Composer& c, const Message& m, std::size_t index) {
+    using namespace st::ui::dsl;
+    const std::string uid = std::to_string(index);
+    const std::string trace = m.reasoning;
+    (void)row(c, {.gap = 0, .max_height = st::ui::kUnbounded,
+                  .justify = st::ui::Justify::Start,
+                  .key = "row-reasoning-" + uid},
+              [&] {
+                (void)card(c, {.gap = 4, .padding = 9, .max_width = kMaxBubbleWidth,
+                               .max_height = st::ui::kUnbounded,
+                               .surface = st::ui::Element::Surface::Sunken,
+                               .key = "reasoning-block-" + uid},
+                           [&] {
+                             (void)row(c, {.gap = 5, .align_items = st::ui::Align::Center,
+                                           .key = "reasoning-meta-" + uid}, [&] {
+                               (void)icon(c, "sparkles", 11,
+                                          {.color = st::ui::Tone::Muted,
+                                           .key = "reasoning-icon-" + uid});
+                               (void)text(
+                                   c,
+                                   [&]() -> std::string {
+                                     return m.reasoning_streaming ? "思考中…" : "思考过程";
+                                   },
+                                   {.color = st::ui::Tone::Muted, .size = 10.5f,
+                                    .key = "reasoning-title-" + uid});
+                             });
                              (void)custom<st::ui::MarkdownView>(
                                  c,
-                                 [body](st::ui::MarkdownView& view) {
+                                 [trace](st::ui::MarkdownView& view) {
                                    view.set_shrink_to_fit(true);
-                                   view.set_base_font_size(13.0f);
-                                   // `set_markdown` 自带相等早退，逐帧重设不贵。
-                                   view.set_markdown(body);
+                                   view.set_base_font_size(12.0f);
+                                   view.set_markdown(trace);
                                  },
-                                 {.key = "body-" + m.role});
+                                 {.max_height = st::ui::kUnbounded,
+                                  .key = "reasoning-" + uid});
                            });
-                if (!is_user) (void)spacer(c);
               });
+  }
+
+  /// 工具名的**中文显示名**（界面上给人看的）。
+  ///
+  /// 为何要映射而不是直接用原名：`sh` / `read` / `write` / `edit` 是给模型看的
+  /// 函数名，直接当标题显示对用户没有任何含义。未登记的名字原样返回
+  /// （新增工具时忘补映射也不至于界面上凭空消失）。
+  [[nodiscard]] static auto tool_label(std::string_view name) -> std::string {
+    if (name == "sh") return "执行命令";
+    if (name == "read") return "读取文件";
+    if (name == "write") return "写入文件";
+    if (name == "edit") return "修改文件";
+    return std::string(name);
+  }
+
+  /// 把工具入参摊成一行可读摘要（“执行命令 · `npm test`”的那种）。
+  ///
+  /// 为何要摘要而不直接打整份 JSON：���数里常带整个文件内容（`write`/`edit`），
+  /// 原样展示会把卡片撑成一面墙。只需让人看出“对它做了什么”。
+  [[nodiscard]] static auto tool_arguments_brief(std::string_view name, std::string_view arguments)
+      -> std::string {
+    // 多行内容在摘要里压成一行（否则首行之后的内容全被截掉，看不出参数是谁）。
+    const auto one_line = [](std::string_view text) {
+      std::string out;
+      out.reserve(text.size());
+      for (const char ch : text) out.push_back(ch == '\n' || ch == '\r' ? ' ' : ch);
+      return out;
+    };
+    // **失败也要给出原文**：参数解析不出来时，让用户看到模型到底传了什么
+    // （否则只能看到“参数无效”却不知道哪里错）。
+    const auto parsed = st::json_parse(arguments);
+    if (!parsed.has_value()) return one_line(arguments);
+    const Json& args = *parsed;
+    // 每个工具只抽“最能说明动作”的那一两个字段。
+    std::string brief;
+    if (name == "sh") {
+      brief = tool_arg(args, "command");
+    } else if (name == "read" || name == "write") {
+      brief = tool_arg(args, "path");
+    } else if (name == "edit") {
+      const std::string path = tool_arg(args, "path");
+      const std::string from = tool_arg(args, "old_string");
+      brief = path;
+      if (!from.empty()) brief += "  「" + from + "」";
+    } else {
+      // 未知工具：把整个 JSON 压成一行（总比什么都没有强）。
+      brief = one_line(arguments);
+    }
+    if (brief.size() > 160U) {
+      brief.resize(160U);
+      brief += "…";
+    }
+    return one_line(brief);
+  }
+
+  /// 工具调用结果卡片：图标 + 中文工具名 + 参数摘要 + 输出（等宽代码块）。
+  ///
+  /// 输出截到 1200 字符只是为了**界面**不被一条日志撑爆；回传给模型的
+  /// 内容仍是完整的（已由 `kToolOutputLimit` 控住）。
+  void tool_card(st::ui::dsl::Composer& c, const Message& m, std::size_t index) {
+    using namespace st::ui::dsl;
+    const std::string uid = std::to_string(index);
+    std::string preview = m.output;
+    if (preview.size() > 1200) {
+      preview.resize(1200);
+      preview += "\n…（界面预览已截断）";
+    }
+    const std::string label = tool_label(m.tool_name);
+    const std::string brief = tool_arguments_brief(m.tool_name, m.tool_arguments);
+    (void)row(c, {.gap = 0, .max_height = st::ui::kUnbounded,
+                  .justify = st::ui::Justify::Start,
+                  .key = "row-tool-" + uid}, [&] {
+      (void)card(c,
+                 {.gap = 5, .padding = 9, .max_width = kMaxBubbleWidth,
+                  // 与气泡同理：工具输出也全高展开（外层消息区滚）。
+                  .max_height = st::ui::kUnbounded,
+                  .surface = st::ui::Element::Surface::Sunken,
+                  .key = "tool-" + m.tool_name + "-" + uid},
+                 [&] {
+                   (void)row(c, {.gap = 6, .align_items = st::ui::Align::Center,
+                                 .key = "tool-meta"}, [&] {
+                     (void)icon(c, m.tool_failed ? "error" : "check", 12,
+                                {.color = m.tool_failed ? st::ui::Tone::Danger
+                                                        : st::ui::Tone::Success,
+                                 .key = "tool-icon"});
+                     // 标题用**中文工具名**（`sh` → “执行命令”）：给用户看的是意图。
+                     (void)text(c, [label] { return label; },
+                                {.size = 11.5f, .weight = st::ui::FontWeight::Bold,
+                                 .key = "tool-name"});
+                     (void)text(c, [&] { return m.tool_failed ? "失败" : "完成"; },
+                                {.color = st::ui::Tone::Muted, .size = 10.0f,
+                                 .key = "tool-state"});
+                   });
+                   // 执行参数摘要：让用户看出“对它做了什么”。
+                   if (!brief.empty()) {
+                     (void)text(c, [brief] { return brief; },
+                                {.color = st::ui::Tone::Muted, .size = 10.5f,
+                                 .key = "tool-args"});
+                   }
+                   if (!preview.empty()) {
+                     (void)custom<st::ui::MarkdownView>(
+                         c,
+                         [preview](st::ui::MarkdownView& view) {
+                           view.set_shrink_to_fit(true);
+                           view.set_base_font_size(11.0f);
+                           // 包成代码块：工具输出不该被当成 Markdown 渲染（缩进/`*` 会变形）。
+                           view.set_markdown("```\n" + preview + "\n```");
+                         },
+                         // 与气泡正文同理：内容全高展开，不在卡片内出滚动条。
+                         {.max_height = st::ui::kUnbounded,
+                          .key = "tool-output-" + uid});
+                   }
+                 });
+    });
   }
 
   /// 配置面板（overlay 内容）。
@@ -501,21 +1199,14 @@ struct AgentPage : st::ui::dsl::Component {
                  (void)text(c, [] { return std::string("仅支持 OpenAI /v1/chat/completions 规范"); },
                             {.color = st::ui::Tone::Muted, .size = 12.0f, .key = "cfg-hint"});
 
-                 settings_field(c, "Base URL", "（如 https://api.openai.com/v1）",
-                                draft_url.value(),
+                 settings_field(c, "Base URL", "", draft_url.value(),
                                 [this](std::string v) { draft_url.set(std::move(v)); },
                                 "cfg-url");
-                 settings_field(c, "API Key", "（Bearer 令牌）", draft_key.value(),
+                 settings_field(c, "API Key", "", draft_key.value(),
                                 [this](std::string v) { draft_key.set(std::move(v)); },
                                 "cfg-key", /*password=*/true);
-                 // 模型名：部署方用 `XIAOBAI_MODEL` 环境变量定死时不展示
-                 // （展示也改不动——下次启动又回到环境变量的值）。
-                 if (!model_injected_by_env()) {
-                   settings_field(c, "模型", "（模型名，如 deepseek-v4.1-flash）",
-                                  draft_model.value(),
-                                  [this](std::string v) { draft_model.set(std::move(v)); },
-                                  "cfg-model");
-                 }
+                 // 模型字段：输入框内嵌下拉按钮（框架 `Input` 的能力）。
+                 model_field(c);
 
                  (void)row(c, {.gap = 8, .justify = st::ui::Justify::End,
                                .key = "cfg-actions"}, [&] {
@@ -526,6 +1217,14 @@ struct AgentPage : st::ui::dsl::Component {
                });
   }
 
+  /// 一行设置字段：标签 + 输入框 +（可选）说明。
+  ///
+  /// `hint` 为空时**不声明那一行文本**：空占位符没信息量，还会把相邻字段
+  /// 推远（屏幕上看着像“报错提示区永远是空的”）。
+  ///
+  /// `extra` 非空时在输入框**右侧**并排一个控件（如模型列表的下拉按钮）：
+  /// 必须是“输入框 + 附件”横排，因为模型名既要**能手动输入**（自定义/私有模型），
+  /// 又要**能从端点拉列表选**——两个需求共存只能并排，不能拆成两个区域。
   void settings_field(st::ui::dsl::Composer& c, const std::string& label, const std::string& hint,
                       const std::string& value, std::function<void(std::string)> on_input,
                       const std::string& field_id, bool password = false) {
@@ -535,9 +1234,133 @@ struct AgentPage : st::ui::dsl::Component {
                                                 .key = field_id + "-label"});
       (void)input(c, value, std::move(on_input),
                   {.id = field_id, .key = field_id}, password);
-      (void)text(c, [hint] { return hint; }, {.color = st::ui::Tone::Muted, .size = 11.0f,
-                                              .key = field_id + "-hint"});
+      if (!hint.empty()) {
+        (void)text(c, [hint] { return hint; }, {.color = st::ui::Tone::Muted, .size = 11.0f,
+                                                .key = field_id + "-hint"});
+      }
     });
+  }
+
+  // —— 模型选择：输入框**内嵌**下拉按钮 ——
+
+  /// 模型字段的专用构造：`Input`（可手填）+ 框内右侧下拉按钮。
+  ///
+  /// 为何不用“Input + Select 并排”：那在视觉上是**两个控件**，而用户心里
+  /// “模型”是一个字段。框架侧为此新增了 `Input::set_dropdown` /
+  /// `set_dropdown_options`（箭头长在框内、命中区在框内、选中即回填）。
+  ///
+  /// 拉取时机：点箭头时若还没拉过列表，先拉一次（拉完自动能展开）。
+  void model_field(st::ui::dsl::Composer& c) {
+    using namespace st::ui::dsl;
+    (void)column(c, {.gap = 4, .key = "cfg-model-wrap"}, [&] {
+      (void)text(c, [] { return std::string("模型"); },
+                 {.size = 12.0f, .weight = st::ui::FontWeight::Bold, .key = "cfg-model-label"});
+      auto options = model_options.value();
+      (void)custom<st::ui::Input>(
+          c,
+          [this, options](st::ui::Input& in) {
+            in.set_id("cfg-model");
+            in.set_placeholder("模型名，可手填");
+            // 逐帧同步值（不 gegen 用户正在输入的那一帧：只在值真变了时才写）。
+            if (in.value() != draft_model.value()) in.set_text(draft_model.value());
+            in.on_change = [this](std::string_view text) { draft_model.set(std::string(text)); };
+            in.set_dropdown(true);
+            std::vector<st::ui::SelectOption> select_options;
+            select_options.reserve(options.size());
+            for (const auto& name : options) {
+              st::ui::SelectOption option;
+              option.value = name;
+              option.label = name;
+              select_options.push_back(std::move(option));
+            }
+            in.set_dropdown_options(std::move(select_options));
+            // **选项还没拉过时点箭头也要有反应**：启动拉取，拉到后自动展开。
+            //
+            // 首次填配置就是这个情形：`open_settings` 里那份预拉取用的是
+            // **已保存的** 配置（此时是空的），所以不会触发；用户随后手填
+            // URL/Key，但没有任何时机再去拉。旧实现在这里直接“点了没反应”。
+            in.on_dropdown_need_options = [this] {
+              if (models_job != nullptr) return;   // 已在拉，等它回来就行
+              start_model_fetch();
+            };
+            if (root_host != nullptr) {
+              st::ui::UiRoot* host = root_host;
+              in.overlay_host = [host](std::unique_ptr<st::ui::Element> panel) {
+                host->add_overlay(std::move(panel));
+              };
+              in.overlay_remove = [host](st::ui::Element* panel) {
+                host->remove_overlay(panel);
+              };
+            }
+          },
+          {.key = "cfg-model"});
+      // 提示行：拉取中/失败信息，或“点右侧箭头拉取列表”。
+      (void)text(c, [this] { return models_hint.value(); },
+                 {.color = st::ui::Tone::Muted, .size = 11.0f, .key = "cfg-model-hint"});
+    });
+  }
+
+  /// 拉取模型列表（后台线程）：`GET {base}/models`。
+  void start_model_fetch() {
+    if (models_job != nullptr) return;   // 已有在跑
+    std::string base_url = draft_url.value();
+    std::string api_key = draft_key.value();
+    if (base_url.empty() || api_key.empty()) {
+      models_hint.set("先填 Base URL 与 API Key");
+      return;
+    }
+    models_hint.set("正在拉取…");
+    auto next = std::make_unique<ModelListJob>();
+    ModelListJob* raw = next.get();
+    raw->worker = std::thread([raw, base_url = std::move(base_url),
+                                api_key = std::move(api_key)] {
+      std::string url;
+      const std::string wire = build_models_request(base_url, api_key, url);
+      const auto parsed = http::Url::parse(url);
+      if (!parsed.has_value()) {
+        const std::lock_guard<std::mutex> guard(raw->mutex);
+        raw->error = "Base URL 非法：" + url;
+        raw->finished.store(true);
+        return;
+      }
+      if (parsed->scheme == "https") {
+        auto tls = st::net::TlsStream::connect(parsed->host, parsed->port, 15000);
+        if (!tls.has_value()) {
+          const std::lock_guard<std::mutex> guard(raw->mutex);
+          raw->error = "TLS 连接失败：" + tls.error().message;
+          raw->finished.store(true);
+          return;
+        }
+        fetch_model_list(*tls, *raw, wire);
+      } else {
+        auto tcp = st::net::connect_tcp(parsed->host, parsed->port, 15000);
+        if (!tcp.has_value()) {
+          const std::lock_guard<std::mutex> guard(raw->mutex);
+          raw->error = "TCP 连接失败：" + tcp.error().message;
+          raw->finished.store(true);
+          return;
+        }
+        fetch_model_list(*tcp, *raw, wire);
+      }
+    });
+    models_job = std::move(next);
+  }
+
+  /// 每帧收取拉取结果（主线程）。
+  [[nodiscard]] auto pump_model_list() -> bool {
+    if (models_job == nullptr) return false;
+    std::vector<std::string> list;
+    std::string error;
+    if (!models_job->drain(list, error)) return false;
+    if (models_job->worker.joinable()) models_job->worker.join();
+    models_job.reset();
+    if (!error.empty()) {
+      models_hint.set(error);
+      return true;
+    }
+    model_options.set(std::move(list));
+    models_hint.set({});
+    return true;
   }
 
   // —— 行为 ——
@@ -546,6 +1369,12 @@ struct AgentPage : st::ui::dsl::Component {
     draft_url.set(cfg.base_url);
     draft_key.set(cfg.api_key);
     draft_model.set(cfg.model);
+    // 打开面板时顺手拉一次模型列表：用户点箭头就能直接选，
+    // 不用先“点一下拉取、再点一下展开”两步。已有列表/正在拉则不动。
+    if (model_options.value().empty() && models_job == nullptr &&
+        !cfg.base_url.empty() && !cfg.api_key.empty()) {
+      start_model_fetch();
+    }
     settings_open.set(true);
   }
 
@@ -553,11 +1382,241 @@ struct AgentPage : st::ui::dsl::Component {
     Config cfg = config.value();
     cfg.base_url = draft_url.value();
     cfg.api_key = draft_key.value();
-    if (!model_injected_by_env()) cfg.model = draft_model.value();  // 环境变量注入的模型不被界面覆盖
+    if (!model_locked()) cfg.model = draft_model.value();  // 预置的模型不被界面覆盖
     config.set(cfg);
-    save_config(cfg);
+    // **不落盘**：设置只在本进程内存里生效（关窗即忘）。
     settings_open.set(false);
     status.set(cfg.ready() ? std::string{} : "配置不完整（需要 base_url / api_key）");
+  }
+
+  // ————————————————— 工具声明与执行 —————————————————
+
+  /// 工具的 OpenAI `tools` 声明。四个工具：sh / read / write / edit。
+  ///
+  /// ⚠ **不要用`{{"k", v}}`这样的嵌套花括号去初始化 `Json`**：
+  /// nlohmann 会把它解成**数组**（`[{"k": v}]` 这种），而不是对象。
+  /// 实测代价：构造出来的 `parameters` 不是对象，发出去后模型侧不认；
+  /// 本地把 `index` 当数字读时还会抛 `type must be number, but is object`
+  /// 直接打死进程。所以这里全程 `Json::object()` + 逐键赋值。
+  [[nodiscard]] auto tool_declarations() -> Json {
+    if (!tools_enabled.value()) return Json::array();
+    const auto field = [](const std::string& type, const std::string& desc) {
+      Json spec = Json::object();
+      spec["type"] = type;
+      spec["description"] = desc;
+      return spec;
+    };
+    /// 组一个 `{type: object, properties: {...}, required: [...]}`。
+    const auto schema = [](const std::vector<std::pair<std::string, Json>>& props,
+                           const std::vector<std::string>& required) {
+      Json properties = Json::object();
+      for (const auto& [name, spec] : props) properties[name] = spec;
+      Json req = Json::array();
+      for (const auto& name : required) req.push_back(name);
+      Json out = Json::object();
+      out["type"] = "object";
+      out["properties"] = std::move(properties);
+      out["required"] = std::move(req);
+      return out;
+    };
+    const auto declare = [](const std::string& name, const std::string& desc, Json parameters) {
+      Json fn = Json::object();
+      fn["name"] = name;
+      fn["description"] = desc;
+      fn["parameters"] = std::move(parameters);
+      Json tool = Json::object();
+      tool["type"] = "function";
+      tool["function"] = std::move(fn);
+      return tool;
+    };
+
+    Json tools = Json::array();
+    tools.push_back(declare(
+        "sh",
+        "在本机执行一条 shell 命令（Windows 上是 PowerShell，POSIX 上是 bash），返回输出与退出码。"
+        "用于查看目录、跑测试、执行构建等。",
+        schema({{"command", field("string", "要执行的命令")}}, {"command"})));
+    tools.push_back(declare(
+        "read",
+        "读取一个文本文件（输出带行号）。路径相对工作目录；绝对路径原样使用。",
+        schema({{"path", field("string", "文件路径")},
+                 {"offset", field("integer", "从第几行开始（1 起，可省）")},
+                 {"limit", field("integer", "最多读多少行（可省）")}},
+               {"path"})));
+    tools.push_back(declare(
+        "write", "写入（覆盖）一个文本文件，父目录不存在会自动创建。整个文件内容都要给出。",
+        schema({{"path", field("string", "文件路径")},
+                 {"content", field("string", "完整文件内容")}},
+               {"path", "content"})));
+    tools.push_back(declare(
+        "edit",
+        "把文件中的 old_string 全部替换为 new_string。old_string 必须在文件里存在"
+        "（建议先用 read 确认原文）。",
+        schema({{"path", field("string", "文件路径")},
+                 {"old_string", field("string", "要被替换的原文（必须存在）")},
+                 {"new_string", field("string", "替换后的内容")}},
+               {"path", "old_string", "new_string"})));
+    return tools;
+  }
+
+  /// 执行一次工具调用。**永远返回结果**（失败也是给模型的信息）。
+  [[nodiscard]] auto run_tool(const ToolCall& call) -> ToolResult {
+    const auto parsed = st::json_parse(call.arguments);
+    if (!parsed.has_value()) {
+      return ToolResult{false, "参数不是合法 JSON：" + call.arguments};
+    }
+    const Json& args = *parsed;
+
+    if (call.name == "sh") {
+      const std::string command = tool_arg(args, "command");
+      if (command.empty()) return ToolResult{false, "command 不能为空"};
+      st::process::Options options;
+      options.cwd = tool_root;
+      options.capture_output = true;
+      options.merge_stderr = true;   // 顺序敏感的日志：stderr 混在 stdout 里才对得上
+      options.timeout_ms = kToolShellTimeoutMs;
+#if defined(_WIN32)
+      auto ran = st::process::run("powershell", {"-NoProfile", "-NonInteractive",
+                                                "-Command", command}, options);
+#else
+      auto ran = st::process::run("bash", {"-lc", command}, options);
+#endif
+      if (!ran.has_value()) {
+        return ToolResult{false, "执行失败：" + ran.error().message};
+      }
+      std::string text = ran->stdout_text;
+      if (text.empty()) text = "（无输出）";
+      text += "\n[exit " + std::to_string(ran->exit_code) + "]";
+      return ToolResult{ran->exit_code == 0, truncate_tool_output(std::move(text))};
+    }
+
+    if (call.name == "read") {
+      const std::string path = resolve_tool_path(tool_root, tool_arg(args, "path"));
+      auto loaded = st::fs::read_text(path);
+      if (!loaded.has_value()) {
+        return ToolResult{false, "读取失败：" + loaded.error().message + "（路径：" + path + "）"};
+      }
+      std::string content = std::move(*loaded);
+      // 行号 + 可选切片：与常见编辑器/工具的输出形状一致，模型能直接引用行号。
+      std::size_t offset = 1;
+      std::size_t limit = 0;
+      if (const Json* value = st::json_find(args, "offset");
+          value != nullptr && value->is_number()) {
+        offset = static_cast<std::size_t>(std::max<std::int64_t>(1, st::json_as_i64(*value)));
+      }
+      if (const Json* value = st::json_find(args, "limit");
+          value != nullptr && value->is_number()) {
+        limit = static_cast<std::size_t>(std::max<std::int64_t>(0, st::json_as_i64(*value)));
+      }
+      std::string out;
+      std::size_t line_no = 0;
+      std::size_t taken = 0;
+      std::size_t at = 0;
+      while (at <= content.size()) {
+        const auto end = content.find('\n', at);
+        const std::string_view line =
+            end == std::string::npos ? std::string_view(content).substr(at)
+                                     : std::string_view(content).substr(at, end - at);
+        ++line_no;
+        if (line_no >= offset && (limit == 0 || taken < limit)) {
+          out += std::to_string(line_no);
+          out += "\t";
+          out.append(line);
+          out += '\n';
+          ++taken;
+        }
+        if (end == std::string::npos) break;
+        at = end + 1;
+      }
+      if (out.empty()) out = "（空文件或范围超出）";
+      return ToolResult{true, truncate_tool_output(std::move(out))};
+    }
+
+    if (call.name == "write") {
+      const std::string path = resolve_tool_path(tool_root, tool_arg(args, "path"));
+      const std::string content = tool_arg(args, "content");
+      if (auto made = st::fs::ensure_parent(path); !made) {
+        return ToolResult{false, "创建父目录失败：" + made.error().message};
+      }
+      if (auto wrote = st::fs::write_text(path, content); !wrote) {
+        return ToolResult{false, "写入失败：" + wrote.error().message};
+      }
+      return ToolResult{true, "已写入 " + std::to_string(content.size()) + " 字节。" + path};
+    }
+
+    if (call.name == "edit") {
+      const std::string path = resolve_tool_path(tool_root, tool_arg(args, "path"));
+      return tool_edit_text(path, tool_arg(args, "old_string"), tool_arg(args, "new_string"));
+    }
+
+    return ToolResult{false, "未知工具：" + call.name};
+  }
+
+  /// 把界面消息投影成 OpenAI `messages` 数组（回传给模型的那份）。
+  ///
+  /// 三个要点：
+  /// - **推理过程不回传**（`reasoning_content` 只在界面上看）；
+  /// - 带 `tool_calls` 的助手消息必须原样回传（模型据此知道“我说过要调什么”）；
+  /// - `tool` 消息必须带 `tool_call_id`（少了网关会 400）。
+  [[nodiscard]] auto history_for_api() -> std::vector<Json> {
+    std::vector<Json> out;
+    std::size_t rounds = 0;
+    for (const auto& m : messages.value()) {
+      if (m.role == "tool") {
+        Json entry = Json::object();
+        entry["role"] = "tool";
+        entry["tool_call_id"] = m.tool_call_id;
+        entry["content"] = m.content;
+        out.push_back(std::move(entry));
+        continue;
+      }
+      if (m.role == "assistant") {
+        // 完全空的助手消息（正在流式的那条）不进上下文。
+        if (m.content.empty() && m.tool_calls.empty()) continue;
+        Json entry = Json::object();
+        entry["role"] = "assistant";
+        entry["content"] = m.content;
+        if (!m.tool_calls.empty()) {
+          Json calls = Json::array();
+          for (const auto& call : m.tool_calls) {
+            Json fn = Json::object();
+            fn["name"] = call.name;
+            fn["arguments"] = call.arguments;
+            Json item = Json::object();
+            item["id"] = call.id;
+            item["type"] = "function";
+            item["function"] = std::move(fn);
+            calls.push_back(std::move(item));
+          }
+          entry["tool_calls"] = std::move(calls);
+        }
+        out.push_back(std::move(entry));
+        continue;
+      }
+      if (m.content.empty()) continue;
+      Json entry = Json::object();
+      entry["role"] = m.role;
+      entry["content"] = m.content;
+      out.push_back(std::move(entry));
+      (void)rounds;
+    }
+    return out;
+  }
+
+  /// 发起一次模型请求（后台线程）。**多轮循环的单一入口**：
+  /// 首轮、工具执行后的续轮都走这里。
+  void start_request() {
+    const Config cfg = config.value();
+    auto next = std::make_unique<StreamJob>();
+    StreamJob* raw = next.get();
+    Config cfg_copy = cfg;
+    Json tools = tool_declarations();
+    std::vector<Json> context = history_for_api();
+    raw->worker = std::thread([raw, cfg_copy, tools = std::move(tools),
+                                context = std::move(context)] {
+      run_request(raw, cfg_copy, tools, context);
+    });
+    job = std::move(next);
   }
 
   void send() {
@@ -565,35 +1624,20 @@ struct AgentPage : st::ui::dsl::Component {
     if (text.empty() || busy.value()) return;
     const Config cfg = config.value();
     if (!cfg.ready()) {
-      status.set("请先完成连接配置");
       if (!settings_open.value()) open_settings();
       return;
     }
 
-    append_message(Message{"user", text, now_stamp()});
-    append_message(Message{"assistant", "", now_stamp()});
+    append_message(Message{.role = "user", .content = text, .stamp = now_stamp()});
+    append_message(Message{.role = "assistant", .content = "", .stamp = now_stamp()});
     draft.set({});
     stream_text.clear();
-    status.set("正在连接…");
+    stream_reasoning.clear();
+    pending_calls.clear();
+    tool_rounds = 0;
+    status.set("正在思考…");
     busy.set(true);
-
-    // 上下文 = 全部历史（去掉最后那条空的助手占位）
-    std::vector<Json> context;
-    for (const auto& m : messages.value()) {
-      if (m.content.empty()) continue;
-      Json entry = Json::object();
-    entry["role"] = m.role;
-    entry["content"] = m.content;
-    context.push_back(std::move(entry));
-    }
-
-    auto next = std::make_unique<StreamJob>();
-    StreamJob* raw = next.get();
-    Config cfg_copy = cfg;
-    raw->worker = std::thread([this, raw, cfg_copy, context = std::move(context)] {
-      run_request(raw, cfg_copy, context);
-    });
-    job = std::move(next);
+    start_request();
   }
 
   void stop_stream() {
@@ -608,39 +1652,147 @@ struct AgentPage : st::ui::dsl::Component {
     if (job == nullptr) return false;
     bool touched = false;
 
+    std::vector<StreamDelta> deltas;
     std::string error;
-    std::string chunk = job->drain(error);
-    if (!chunk.empty()) {
-      stream_text += chunk;
-      auto list = messages.value();
-      if (auto updated = last_assistant_index(&list); updated.has_value()) {
-        list[*updated].content = stream_text;
-        messages.set(std::move(list));
+    job->drain(deltas, error);
+    if (!deltas.empty()) {
+      bool content_changed = false;
+      bool reasoning_changed = false;
+      for (auto& delta : deltas) {
+        if (!delta.content.empty()) {
+          stream_text += delta.content;
+          content_changed = true;
+        }
+        if (!delta.reasoning.empty()) {
+          stream_reasoning += delta.reasoning;
+          reasoning_changed = true;
+        }
+        for (auto& chunk : delta.tools) {
+          // 同一 `index` 的分片要拼到同一条上（首片带 id/name，后续只带参数）。
+          while (pending_calls.size() <= chunk.index) pending_calls.push_back(ToolCall{});
+          ToolCall& slot = pending_calls[chunk.index];
+          if (!chunk.id.empty()) slot.id = chunk.id;
+          if (!chunk.name.empty()) slot.name = chunk.name;
+          slot.arguments += chunk.args;
+          touched = true;
+        }
       }
-      status.set("生成中…（" + std::to_string(stream_text.size()) + " 字符）");
-      touched = true;
-    }
-
-    if (job->finished.load()) {
-      if (!error.empty() && error != "cancelled") {
+      if (content_changed || reasoning_changed) {
         auto list = messages.value();
         if (auto updated = last_assistant_index(&list); updated.has_value()) {
-          list[*updated].content = stream_text.empty() ? "**请求失败**：" + error : stream_text;
+          if (content_changed) list[*updated].content = stream_text;
+          if (reasoning_changed) {
+            list[*updated].reasoning = stream_reasoning;
+            list[*updated].reasoning_streaming = true;
+          }
           messages.set(std::move(list));
         }
-        status.set("请求失败：" + error);
-      } else if (error == "cancelled") {
-        status.set("已停止");
-      } else {
-        status.set({});   // 生成结束即清空：常态不占状态文字
+        if (content_changed) {
+          status.set("生成中…（" + std::to_string(stream_text.size()) + " 字符）");
+        } else if (reasoning_changed) {
+          status.set("思考中…");
+        }
+        touched = true;
       }
-      if (job->worker.joinable()) job->worker.join();
-      job.reset();
-      stream_text.clear();
-      busy.set(false);
-      touched = true;
     }
-    return touched;
+
+    if (!job->finished.load()) return touched;
+
+    // —— 本轮结束：收尾并决定要不要进入下一轮（工具调用）——
+    if (job->worker.joinable()) job->worker.join();
+    job.reset();
+
+    auto list = messages.value();
+    const auto index = last_assistant_index(&list);
+    if (!error.empty() && error != "cancelled") {
+      if (index.has_value()) {
+        list[*index].content = stream_text.empty() ? "**请求失败**：" + error : stream_text;
+        list[*index].reasoning_streaming = false;
+        messages.set(std::move(list));
+      }
+      status.set("请求失败：" + error);
+      stream_text.clear();
+      stream_reasoning.clear();
+      pending_calls.clear();
+      busy.set(false);
+      return true;
+    }
+    if (error == "cancelled") {
+      status.set("已停止");
+      stream_text.clear();
+      stream_reasoning.clear();
+      pending_calls.clear();
+      busy.set(false);
+      return true;
+    }
+
+    // 把本轮的工具调用落到助手消息上（回传上下文时要原样带上）。
+    const bool has_calls = !pending_calls.empty();
+    if (index.has_value()) {
+      list[*index].tool_calls = pending_calls;
+      list[*index].reasoning_streaming = false;
+      messages.set(std::move(list));
+    }
+
+    if (!has_calls) {
+      // 没有工具调用 = 这一轮就是最终答复。
+      status.set({});
+      stream_text.clear();
+      stream_reasoning.clear();
+      busy.set(false);
+      return true;
+    }
+
+    // 有工具调用：执行 → 回传结果 → 再请求（多轮交互的核心）。
+    if (++tool_rounds > kMaxToolRounds) {
+      append_message(Message{.role = "assistant",
+                             .content = "工具调用轮数已达上限（" +
+                                        std::to_string(kMaxToolRounds) + "），已停下来。",
+                             .stamp = now_stamp()});
+      status.set({});
+      stream_text.clear();
+      stream_reasoning.clear();
+      pending_calls.clear();
+      busy.set(false);
+      return true;
+    }
+
+    const std::vector<ToolCall> calls = pending_calls;
+    pending_calls.clear();
+    stream_text.clear();
+    stream_reasoning.clear();
+
+    // **同步执行**工具：工具本身很快（read/write/edit 是毫秒级，sh 有 60s 起限），
+    // 而产出必须紧接着回传才能进入下一轮。界面在下一帧才重组，所以这里不卡帧。
+    for (const auto& call : calls) {
+      status.set("执行工具：" + call.name + "…");
+      ToolResult result = run_tool(call);
+      Message tool_msg{.role = "tool", .content = result.text, .stamp = now_stamp()};
+      tool_msg.tool_call_id = call.id;
+          tool_msg.tool_name = call.name;
+    tool_msg.tool_arguments = call.arguments;
+    tool_msg.output = result.text;
+      tool_msg.tool_failed = !result.ok;
+      append_message(std::move(tool_msg));
+    }
+
+    // 为下一轮留一个空助手气泡（流式往它里面写）。
+    append_message(Message{.role = "assistant", .content = "", .stamp = now_stamp()});
+    status.set("正在思考…");
+    start_request();
+    return true;
+  }
+
+  /// 把当前模型名同步到标题栏按钮。
+  ///
+  /// 为何手动推：那个按钮是 `TitleBar::add_leading` 挂的壳层元素，不在本页的
+  /// 声明树里，重组不会碰它。每帧写一次不贵（`set_label` 有相等早退）。
+  void sync_title_badge() {
+    if (model_badge == nullptr) return;
+    if (auto* button = dynamic_cast<st::ui::Button*>(model_badge); button != nullptr) {
+      const std::string wanted = config.value().model;
+      if (button->label() != wanted) button->set_label(wanted);
+    }
   }
 
   [[nodiscard]] static auto last_assistant_index(const std::vector<Message>* list)
@@ -659,9 +1811,10 @@ struct AgentPage : st::ui::dsl::Component {
   }
 
   // —— 后台线程主体 ——
-  static void run_request(StreamJob* raw, const Config& cfg, const std::vector<Json>& context) {
+  static void run_request(StreamJob* raw, const Config& cfg, const Json& tools,
+                          const std::vector<Json>& context) {
     std::string url;
-    const std::string wire = build_request(cfg, context, url);
+    const std::string wire = build_request(cfg, context, tools, url);
     const auto parsed = http::Url::parse(url);
     if (!parsed.has_value()) {
       raw->fail("Base URL 非法：" + url);
@@ -677,7 +1830,7 @@ struct AgentPage : st::ui::dsl::Component {
         raw->finished.store(true);
         return;
       }
-      pump_tls(*tls, *raw, wire);
+      pump_stream(*tls, *raw, wire);
     } else {
       auto tcp = st::net::connect_tcp(parsed->host, parsed->port, 15000);
       if (!tcp.has_value()) {
@@ -685,82 +1838,9 @@ struct AgentPage : st::ui::dsl::Component {
         raw->finished.store(true);
         return;
       }
-      pump_tcp(*tcp, *raw, wire);
+      pump_stream(*tcp, *raw, wire);
     }
     raw->finished.store(true);
-  }
-
-  static void pump_tcp(st::net::TcpStream& stream, StreamJob& raw, const std::string& wire) {
-    if (auto status = stream.write_all(std::span<const std::uint8_t>(
-            reinterpret_cast<const std::uint8_t*>(wire.data()), wire.size()));
-        !status) {
-      raw.fail("发送请求失败：" + status.error().message);
-      return;
-    }
-    std::vector<std::uint8_t> buf(16 * 1024);
-    std::string pending;
-    while (!raw.cancelled.load()) {
-      if (auto ready = stream.wait_readable(200); !ready.has_value() || !*ready) continue;
-      auto read = stream.read_some(std::span<std::uint8_t>(buf.data(), buf.size()));
-      if (!read.has_value()) {
-        raw.fail("读取失败：" + read.error().message);
-        return;
-      }
-      if (*read == 0) break;
-      pending.append(reinterpret_cast<const char*>(buf.data()), *read);
-      consume_sse_lines(pending, raw);
-    }
-    if (raw.cancelled.load()) {
-      const std::lock_guard<std::mutex> guard(raw.mutex);
-      if (raw.error.empty()) raw.error = "cancelled";
-    }
-  }
-
-  static void pump_tls(st::net::TlsStream& stream, StreamJob& raw, const std::string& wire) {
-    if (auto status = stream.write_all(std::span<const std::uint8_t>(
-            reinterpret_cast<const std::uint8_t*>(wire.data()), wire.size()));
-        !status) {
-      raw.fail("发送请求失败：" + status.error().message);
-      return;
-    }
-    std::vector<std::uint8_t> buf(16 * 1024);
-    std::string pending;
-    while (!raw.cancelled.load()) {
-      auto read = stream.read_some(std::span<std::uint8_t>(buf.data(), buf.size()));
-      if (!read.has_value()) {
-        raw.fail("读取失败：" + read.error().message);
-        return;
-      }
-      if (*read == 0) break;
-      pending.append(reinterpret_cast<const char*>(buf.data()), *read);
-      consume_sse_lines(pending, raw);
-    }
-    if (raw.cancelled.load()) {
-      const std::lock_guard<std::mutex> guard(raw.mutex);
-      if (raw.error.empty()) raw.error = "cancelled";
-    }
-  }
-
-  /// 从 `pending` 中切出完整行，解析 SSE 增量并推给 job；剩余半行留在 `pending`。
-  static void consume_sse_lines(std::string& pending, StreamJob& raw) {
-    std::size_t start = 0;
-    while (true) {
-      const std::size_t newline = pending.find('\n', start);
-      if (newline == std::string::npos) break;
-      std::string_view line(pending.data() + start, newline - start);
-      start = newline + 1;
-      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-      // HTTP 头与空行：空行表示头部结束，之后才是事件体；两者都直接跳过。
-      if (line.empty() || line.find(':') == std::string_view::npos) continue;
-      if (line.starts_with("data:")) {
-        if (line.find("[DONE]") != std::string_view::npos) {
-          raw.finished.store(true);
-          break;
-        }
-        if (auto piece = parse_sse_line(line); piece.has_value()) raw.push(std::move(*piece));
-      }
-    }
-    pending.erase(0, start);
   }
 
   // —— 小工具 ——
@@ -771,9 +1851,18 @@ struct AgentPage : st::ui::dsl::Component {
     return text;
   }
 
+  /// 消息时间戳：**北京时间（UTC+8）**，`HH:MM`。
+  ///
+  /// 为何不直接用本地时区：部署环境可能是任何时区（CI、容器里常是 UTC），
+  /// 而用户要看的是北京时间——时区固定成常量才与运行环境无关。
+  /// 折算本身在 `st::time::hhmm_at_offset`（与应用外共用同一入口，便于测试）。
+  ///
+  /// 为何用 `unix_ms()` 而不是 `now_ms()`：后者是**单调时钟**（进程内相对基准，
+  /// 从 0 附近起算），拿它除 3600 得到的“小时”与真实时刻无关
+  /// （实测：屏幕上恒显示 04:41，恰好是进程启动至今的小时数）。
   [[nodiscard]] static auto now_stamp() -> std::string {
-    const std::int64_t seconds = st::time::now_ms() / 1000;
-    return std::format("{:02}:{:02}", (seconds / 3600) % 24, (seconds / 60) % 60);
+    constexpr std::int64_t kBeijingOffsetSeconds = 8 * 3600;
+    return st::time::hhmm_at_offset(st::time::unix_ms(), kBeijingOffsetSeconds);
   }
 };
 
@@ -790,8 +1879,7 @@ int run_app(int argc, char** argv) {
     return 1;
   }
   if (common.show_help) {
-    std::printf("小白（xiaobai）——极简 AI 智能体\n用法：xiaobai [通用选项]\n配置写入：%s\n",
-                config_path().c_str());
+    std::printf("小白（xiaobai）——极简 AI 智能体\n用法：xiaobai [通用选项]\n");
     return 0;
   }
 
@@ -799,14 +1887,48 @@ int run_app(int argc, char** argv) {
   if (options.width <= 0) options.width = 720;
   if (options.height <= 0) options.height = 560;
   if (options.title.empty()) options.title = "小白 · 霜天";
+  // —— 窗口/任务栏图标 ——
+  //
+  // 这里和 `st.pkg` 的 `"icon": "*.ico"` **不是同一件事**：
+  // `.ico` 进的是 PE 资源（资源管理器/快捷方式看到的），而**任务栏用的是窗口的
+  // `WM_SETICON`**，只能由运行期位图给。只配 `.ico` 不设 `window_icon_png`，
+  // 任务栏就是个空白默认图标（本应用之前就是这个状态）。
+  st::app::icon::attach_png(options.window_icon_png,
+                            b::embed<"apps/xiaobai/assets/xiaobai-icon.png">());
 
   st::app::Application app("xiaobai", "0.1.0", options);
 
   auto page = std::make_shared<AgentPage>();
-  auto frame = std::make_unique<st::ui::WindowFrame>("小白");
+  // 窗口标题：标题栏上已经显示 icon + 模型按钮，窗口标题保持为空，
+  // 不会与品牌/模型名重复两个字（系统任务栏的标题仍由 `AppOptions::title` 给）。
+  auto frame = std::make_unique<st::ui::WindowFrame>("");
   frame->set_id("window-frame");
   frame->set_window_control(&app);
-  if (frame->title_bar() != nullptr) frame->title_bar()->set_id("titlebar");
+  if (frame->title_bar() != nullptr) {
+    frame->title_bar()->set_id("titlebar");
+    // 品牌标记：火箭（SVG，与任务栏的 PNG 同一记号）。
+    // 必须在首帧前注册——注册表是显式装载的，`TitleBar` 只在重绘时取图形。
+    st::app::icon::register_svg("xiaobai",
+                                b::embed<"apps/xiaobai/assets/xiaobai-logo.svg">());
+    st::app::icon::apply_brand(frame->title_bar(), "xiaobai");
+    // 标题栏从左到右：**[火箭图标][小白][模型]**。
+    // “小白”走品牌名（紧跟在图标后），模型名跟在它后面（`leading` 槽）：
+    // 两者都是 `TitleBar` 的既有位置语义，不另造容器。
+    frame->title_bar()->set_brand("小白");
+
+    // 模型名**可点击**：它同时是“当前模型”与“配置入口”，点一下开配置面板。
+    // 图标只留文字（不要齿轮：那是“设置”的通用记号，而这里表达的是“当前模型”）。
+    auto badge = std::make_unique<st::ui::Button>(page->config.value().model);
+    badge->set_id("model-label");
+    badge->set_key("model-label");
+    badge->set_label(page->config.value().model);
+    badge->set_variant(st::ui::Button::Variant::Ghost);
+    badge->set_size(st::ui::Button::Size::Small);
+    badge->set_hint("点击配置模型连接");
+    badge->on_click = [page] { page->open_settings(); };
+    auto* badge_raw = frame->title_bar()->add_leading(std::move(badge));
+    page->model_badge = badge_raw;
+  }
   st::ui::Element* slot = frame->content();
   app.set_content(std::move(frame));
 
@@ -814,6 +1936,16 @@ int run_app(int argc, char** argv) {
   if (host == nullptr) {
     std::fprintf(stderr, "声明式挂载失败\n");
     return 1;
+  }
+  // 下拉面板需要真值树根（挂叠加层）：在首帧前注入。
+  page->root_host = &app.root();
+  // 工具的工作目录 = 进程当前目录（模型给的相对路径都相对它）。
+  // 用标准库 `std::filesystem` 取：它不是平台 API（跨平台同一行），
+  // 而 `st::fs` 没暴露 cwd。
+  {
+    std::error_code ec;
+    const auto cwd = std::filesystem::current_path(ec);
+    if (!ec) page->tool_root = cwd.string();
   }
   (void)host->tick();
 
@@ -826,9 +1958,9 @@ int run_app(int argc, char** argv) {
   // 必须在 start() 之后：弹窗走声明式 overlay，需要 UiRoot 与脚本宿主就绪。
   const Config cfg = page->config.value();
   if (cfg.ready()) {
-    page->status.set({});   // 就绪是常态：不显示状态行
+    page->status.set({});
   } else {
-    page->status.set("请先完成连接配置");
+    // 未配置时直接弹面板，不另写状态行（界面上不保留状态文字）。
     page->open_settings();
   }
 
@@ -837,6 +1969,10 @@ int run_app(int argc, char** argv) {
     // 为何不放在 build() 里：build 只在重组时跑，而重组又靠“状态脏了”触发——
     // 谁先动的问题会变成静默死锁（实测：状态永远停在「正在连接…」）。
     if (page->pump_stream_into_state()) app.request_repaint();
+    // 模型列表拉取结果（同样必须先于重组落地）。
+    if (page->pump_model_list()) app.request_repaint();
+    // 标题栏模型标签同步（壳层元素，重组不碰它）+ 尺寸/换行变化后重排。
+    page->sync_title_badge();
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
   }

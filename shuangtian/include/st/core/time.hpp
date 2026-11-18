@@ -28,6 +28,16 @@ using SystemClock = std::chrono::system_clock;
 /// MSVC/MinGW 无 `localtime_r`，用 `localtime_s`）；失败时返回全零字段（不抛异常）。
 [[nodiscard]] auto local_fields(std::time_t unix_seconds) -> std::tm;
 
+/// Unix 毫秒 → **指定固定时区偏移**下的 `HH:MM`（与运行环境时区无关）。
+///
+/// 为何不用 `local_fields`：部署环境可能是任何时区（CI、容器常是 UTC），
+/// 而“北京时间”是用户要看的口径——时区必须固定成常量，不能跟随宿主机。
+/// `offset_seconds` 为东八区就传 `8 * 3600`。
+///
+/// 负值（1970 之前 / 时钟回拨）已归一化到当天，不会出现负号或越界时分。
+[[nodiscard]] auto hhmm_at_offset(std::int64_t unix_millis, std::int64_t offset_seconds)
+    -> std::string;
+
 /// 当前时间按简单占位模板格式化：`YYYY-MM-DD HH:MM:SS` 与 `HH:MM:SS` 两个预设
 /// （`kFormatDateTime` / `kFormatTime`），模板里 `Y m d H M S` 逐字替换
 /// （其余字符原样）。状态栏/日志前缀够用，不做完整 strftime。

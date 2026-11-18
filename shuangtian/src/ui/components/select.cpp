@@ -13,6 +13,7 @@
 #include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
+#include "st/ui/wheel.hpp"
 
 #include "components_internal.hpp"
 
@@ -54,31 +55,20 @@ void paint_line(const RenderContext& context, raster::Surface& canvas, std::stri
 SelectPanel::SelectPanel(std::vector<SelectOption> options, std::optional<std::size_t> selected)
     : options_(std::move(options)), selected_(selected) {}
 
-void SelectPanel::set_anchor(math::Point anchor) {
-  anchor_ = anchor;
-  mark_layout_dirty();
-}
-
-void SelectPanel::set_panel_width(float width) {
-  if (panel_width_ == width) return;
-  panel_width_ = width;
-  mark_layout_dirty();
-}
-
-void SelectPanel::set_selected(std::optional<std::size_t> index) {
-  selected_ = index;
-  mark_dirty();
-}
-
 auto SelectPanel::option_rect(std::size_t index) const -> math::Rect {
   if (index >= options_.size()) return math::Rect{};
   const math::Rect content = bounds_.inset(style_.padding);
-  const float y = content.y + static_cast<float>(index) * k_row_height;
+  // 减去滚动偏移：面板限高后内容可能比可见区高（见 `measure`）。
+  const float y = content.y + static_cast<float>(index) * k_row_height - scroll_offset_;
   return math::Rect{content.x, y, content.width, k_row_height};
 }
 
 auto SelectPanel::index_at(math::Point point) const -> int {
   if (point.x < bounds_.x || point.x >= bounds_.right()) return -1;
+  // 先排除可见区之外：面板限高后，滚出上下边的行**看不见但矩形还存在**，
+  // 不先判就会“点到没显示的那个选项”（实测：滚动后点击错位）。
+  const math::Rect visible = bounds_.inset(style_.padding);
+  if (point.y < visible.y || point.y >= visible.bottom()) return -1;
   for (std::size_t index = 0; index < options_.size(); ++index) {
     const math::Rect row = option_rect(index);
     if (point.y >= row.y && point.y < row.bottom()) return static_cast<int>(index);
@@ -115,9 +105,25 @@ void SelectPanel::measure(const RenderContext& context, const Constraints& const
     width = widest + metrics.space_md * 2.0f + k_chevron_size;
   }
   const float rows = static_cast<float>(options_.size());
-  float height = rows * k_row_height + style_.padding.vertical();
+  content_height_ = rows * k_row_height + style_.padding.vertical();
+  float height = content_height_;
   width = std::clamp(width, style_.min_width, style_.max_width);
   height = std::clamp(height, style_.min_height, style_.max_height);
+  // **限制在“锚点往下还剩多少”之内**。
+  //
+  // 浮层宿主传下来的是**整个窗口矩形**（`OverlayHost::arrange` 用满幅重测），
+  // 所以 `constraints.max_height` 就是窗口高——它不直接等于“从锚点往下还剩多少”，
+  // 但两者一减就得到了。按选项数硬算高度会直接溢出窗口底边
+  //（实测：模型下拉 12 项越出屏幕，底部选项永远看不到也滚不到）。
+  const float viewport_height =
+      viewport_height_ > 0.0f ? viewport_height_
+                              : (constraints.max_height < kUnbounded ? constraints.max_height : 0.0f);
+  if (viewport_height > 0.0f) {
+    const float below = viewport_height - anchor_.y - style_.padding.vertical();
+    // 至少留一行的高度，否则“向下展开”退化成一条细缝（不如向上翻）。
+    const float usable = std::max(below, k_row_height);
+    if (height > usable) height = usable;
+  }
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
   if (constraints.max_height < kUnbounded) height = std::min(height, constraints.max_height);
   measured_ = math::Size{width, height};
@@ -128,6 +134,8 @@ void SelectPanel::arrange(const RenderContext& context, math::Rect rect) {
   const float height = measured_.height > 0.0f ? measured_.height : rect.height;
   // 叠加层容器只负责尺寸与生命周期，面板按锚点自行定位（贴控件下沿）。
   Element::arrange(context, math::Rect{anchor_.x, anchor_.y, width, height});
+  // 限制在量完新几何之后：`max_scroll()` 依赖 `bounds_.height`。
+  clamp_scroll();
 }
 
 void SelectPanel::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -136,6 +144,8 @@ void SelectPanel::paint_content(const RenderContext& context, raster::Surface& c
   const Metrics& metrics = context.theme.metrics();
   const float radius = metrics.radius_sm;
 
+  // 面板限高后内容可能比可见区高：超出部分必须裁剪，否则会画到面板之外。
+  canvas.push_clip_rect(bounds_.inset(style_.padding));
   for (std::size_t index = 0; index < options_.size(); ++index) {
     const math::Rect row = option_rect(index);
     const bool is_selected = selected_.has_value() && *selected_ == index;
@@ -160,11 +170,24 @@ void SelectPanel::paint_content(const RenderContext& context, raster::Surface& c
       Icon::draw(canvas, "check", box, colors.primary);
     }
   }
+  canvas.pop_clip();
 }
 
 auto SelectPanel::on_event(const RenderContext& context, Event& event) -> bool {
-  (void)context;
   switch (event.kind) {
+    case EventKind::Wheel: {
+      // 面板被限高后内容可能超高（见 `measure`）：让滚轮能看底下的选项。
+      // 自身不可滚时返回 false，把滚轮让给外层（嵌套滚动的正解）。
+      const float next = wheel_target(scroll_offset_, event, max_scroll(), context.theme);
+      if (next < 0.0f) return false;
+      if (next != scroll_offset_) {
+        scroll_offset_ = next;
+        // 滚动后行位置变了：悬停项重新按光标算，否则高亮会停在别的行上。
+        mark_layout_dirty();
+        mark_dirty();
+      }
+      return true;
+    }
     case EventKind::MouseMove: {
       const int index = index_at(event.position);
       if (index != hover_index_) {

@@ -78,6 +78,16 @@ struct BuildOptions {
   bool use_pch{true};                 ///< 使用预编译头（`include/st/pch.hpp`）加速
   std::vector<std::string> extra_include_dirs{};
   std::vector<std::string> extra_flags{};
+  /// **命令行宏**（`st build --define NAME=VALUE`）：裸名，不加 `-D`。
+  ///
+  /// 为何单独一个字段而不往 `extra_flags` 里塞 `-D...`：
+  /// `build_language_flags` 只把 `defines` 拼成 `-D`，`extra_flags` 是原样拼的；
+  /// 两者都能做到，但把宏放进 `extra_flags` 会**按位置生效**（在清单宏之后、
+  /// 包含路径之前），而在这里它跟清单宏一视同仁、位置稳定，也自然进缓存键。
+  ///
+  /// 用途：打包出“配置已预置”的产物（如 `--define 'XIAOBAI_MODEL="…"'`），
+  /// 而不往仓库里的 `st.pkg` 写部署参数。
+  std::vector<std::string> extra_defines{};
 };
 
 struct BuildStats {

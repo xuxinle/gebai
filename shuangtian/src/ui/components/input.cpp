@@ -29,6 +29,11 @@ constexpr float k_icon_slot_width = 18.0f;
 /// 前置图标绘制尺寸（比槽位小一点，四周留白；与 `IconView` 的 18 保持同一光学尺度）
 constexpr float k_icon_size = 16.0f;
 constexpr float k_input_min_width = 160.0f;
+/// 输入框内嵌下拉按钮的槽宽（逻辑 px）：桂格图标 + 两侧留白。
+/// 未启用下拉时这个宽度**不占**（`inner_box` 不扣它）。
+constexpr float k_dropdown_slot_width = 26.0f;
+/// 下拉按钮里的桂格图标边长（比 `k_icon_size` 小一点：它在本就窄的槽里）
+constexpr float k_dropdown_icon_size = 14.0f;
 constexpr float k_textarea_default_lines = 4.0f;
 
 [[nodiscard]] constexpr auto is_continuation(char value) noexcept -> bool {
@@ -107,7 +112,18 @@ Input::Input() {
   set_focusable(true);
   // 输入框 = 可编辑文字 → I-beam 指针（原生应用的通用约定：
   // 看到插入点光标就知道“这里能打字/能选字”）。
+  // 下拉箭头那块的例外见 `cursor_at`。
   set_cursor(MouseCursor::Text);
+}
+
+auto Input::cursor_at(math::Point point) const noexcept -> MouseCursor {
+  if (!visible() || !enabled_) return MouseCursor::Arrow;
+  if (!bounds_.contains(point)) return MouseCursor::Arrow;
+  // 箭头区 = 按钮（“可点”），其余 = 文本（“可选/可输入”）。
+  if (dropdown_enabled_ && !dropdown_rect_.is_empty() && dropdown_rect_.contains(point)) {
+    return MouseCursor::Hand;
+  }
+  return MouseCursor::Text;
 }
 
 void Input::set_text(std::string text) {
@@ -138,6 +154,117 @@ void Input::set_password(bool value) noexcept {
 
 void Input::set_icon_prefix(std::string_view icon_name) {
   icon_prefix_ = std::string(icon_name);
+  mark_dirty();
+}
+
+// ————————————————— 内嵌下拉 —————————————————
+
+void Input::set_dropdown(bool enabled) {
+  if (dropdown_enabled_ == enabled) return;
+  dropdown_enabled_ = enabled;
+  if (!enabled) close_dropdown_panel();
+  // 槽位变化会改变可用文字宽 → 必须重排，不只是重绘。
+  mark_layout_dirty();
+}
+
+void Input::set_dropdown_options(std::vector<SelectOption> options) {
+  dropdown_options_ = std::move(options);
+  // 已展开时选项变了：收起（旧面板里的下标会与新的对不上）。
+  if (dropdown_open_) close_dropdown_panel();
+  // **用户刚点过箭头、但当时选项还没到位** ⇒ 选项到了就自动展开。
+  // 否则他会看到一个“点了没反应”的箭头（拉取是异步的，耗时几百 ms）。
+  if (dropdown_pending_open_ && !dropdown_options_.empty()) {
+    dropdown_pending_open_ = false;
+    open_dropdown_panel();
+  }
+  mark_dirty();
+}
+
+void Input::set_dropdown_open(bool value) {
+  if (value == dropdown_open_) return;
+  if (value) {
+    open_dropdown_panel();
+  } else {
+    close_dropdown_panel();
+  }
+  mark_dirty();
+}
+
+auto Input::dropdown_slot_width(const RenderContext& context) const -> float {
+  (void)context;
+  if (!dropdown_enabled_) return 0.0f;
+  return k_dropdown_slot_width;
+}
+
+void Input::open_dropdown_panel() {
+  if (dropdown_dismiss_pending_) flush_dropdown_dismiss();
+  if (dropdown_panel_ != nullptr) return;
+  if (dropdown_options_.empty() || !overlay_host) {
+    // **选项还没准备好：先告诉调用方“用户想展开”**。
+    //
+    // 没这个回调时的症状（实测）：首次填配置时列表还没拉过，
+    // 用户点箭头——`open_dropdown_panel` 因选项为空直接 return，
+    // 于是“点了没反应”，看起来就是“没有下拉”。
+    // 回调让调用方能在这个时机启动拉取，拉到后 `set_dropdown_options`
+    // 看到 `dropdown_pending_open_` 就自动展开。
+    if (on_dropdown_need_options) {
+      dropdown_pending_open_ = true;   // 记下“用户想展开”，选项到位后自动开
+      on_dropdown_need_options();
+    }
+    return;
+  }
+  dropdown_pending_open_ = false;
+  auto panel = std::make_unique<SelectPanel>(dropdown_options_, std::nullopt);
+  panel->set_panel_width(bounds_.width);
+  panel->set_anchor(math::Point{bounds_.x, bounds_.bottom() + 4.0f});
+  panel->on_pick = [this](std::size_t index) { pick_dropdown_item(index); };
+  panel->on_dismiss = [this]() {
+    dropdown_open_ = false;
+    dropdown_dismiss_pending_ = true;
+    // 面板自己要求收起（点外部/Esc）：同样走延后摘除，
+    // 因为这里也在它的派发栈里。
+    dropdown_pending_remove_ = dropdown_panel_;
+    mark_dirty();
+  };
+  dropdown_panel_ = panel.get();
+  dropdown_open_ = true;
+  overlay_host(std::move(panel));
+}
+
+void Input::close_dropdown_panel() {
+  dropdown_open_ = false;
+  if (dropdown_panel_ == nullptr) return;
+  // **不在事件回调里直接拆树**：面板可能正在派发自己的点击（`on_pick` 就是从
+  // 它的派发栈里回来的），当场 `remove_overlay` 会让栈上还持着裸引用——
+  // 与声明式重组里“派发期间移除子树”同一类悬垂。改为**延后到下一帧**
+  // （`flush_dropdown_dismiss` 在 `arrange` 里调），那时派发已结束。
+  dropdown_dismiss_pending_ = true;
+  dropdown_pending_remove_ = dropdown_panel_;
+  mark_dirty();
+}
+
+void Input::flush_dropdown_dismiss() const {
+  if (!dropdown_dismiss_pending_) return;
+  dropdown_dismiss_pending_ = false;
+  SelectPanel* panel = dropdown_pending_remove_;
+  dropdown_pending_remove_ = nullptr;
+  if (panel == nullptr) return;
+  // 这两个成员在 const 方法里要改：`dropdown_panel_` 声明成 mutable 不划算
+  // （它本是普通状态），所以用 `const_cast` 改自己的可变成员。
+  auto* self = const_cast<Input*>(this);
+  if (self->dropdown_panel_ == panel) self->dropdown_panel_ = nullptr;
+  panel->set_visible(false);
+  if (overlay_remove) overlay_remove(panel);
+}
+
+void Input::pick_dropdown_item(std::size_t index) {
+  if (index >= dropdown_options_.size()) return;
+  const std::string value = dropdown_options_[index].value;
+  // 选中即回填：这是本控件存在的意义（手填与选择共用一个字段）。
+  set_text(value);
+  close_dropdown_panel();
+  if (on_change) on_change(text_);
+  if (on_dropdown_pick) on_dropdown_pick(text_);
   mark_dirty();
 }
 
@@ -172,6 +299,17 @@ auto Input::get_property(std::string_view name) const -> std::optional<std::stri
     // 选中文本（只读快照）；无选区/密码框 → 空串。
     return selected_text();
   }
+  if (name == "dropdown") return dropdown_enabled_ ? "true" : "false";
+  if (name == "dropdown_open") return dropdown_open_ ? "true" : "false";
+  if (name == "dropdown_options") {
+    // `a|b|c`：与 `Select` 的 `options` 属性同一格式，自动化一视同仁。
+    std::string joined;
+    for (const auto& option : dropdown_options_) {
+      if (!joined.empty()) joined.push_back('|');
+      joined.append(option.value);
+    }
+    return joined;
+  }
   return Element::get_property(name);
 }
 
@@ -195,6 +333,33 @@ auto Input::set_property(std::string_view name, std::string_view value) -> bool 
     set_password(value == "true" || value == "1");
     return true;
   }
+  if (name == "dropdown") {
+    set_dropdown(value == "true" || value == "1");
+    return true;
+  }
+  if (name == "dropdown_open") {
+    set_dropdown_open(value == "true" || value == "1");
+    return true;
+  }
+  if (name == "dropdown_options") {
+    std::vector<SelectOption> options;
+    std::size_t at = 0;
+    while (at <= value.size()) {
+      const std::size_t bar = value.find('|', at);
+      const std::string_view part =
+          bar == std::string_view::npos ? value.substr(at) : value.substr(at, bar - at);
+      if (!part.empty()) {
+        SelectOption option;
+        option.value = std::string(part);
+        option.label = std::string(part);
+        options.push_back(std::move(option));
+      }
+      if (bar == std::string_view::npos) break;
+      at = bar + 1;
+    }
+    set_dropdown_options(std::move(options));
+    return true;
+  }
   if (name == "enabled") {
     set_enabled(value == "true" || value == "1");
     return true;
@@ -208,7 +373,9 @@ auto Input::set_property(std::string_view name, std::string_view value) -> bool 
 
 auto Input::property_names() const -> std::vector<std::string_view> {
   // 只列**可读写**属性（契约见 `Element::property_names`）。
-  return Element::with_universal({"value", "placeholder", "password", "enabled", "visible"});
+  return Element::with_universal(
+      {"value", "placeholder", "password", "enabled", "visible",
+       "dropdown", "dropdown_open", "dropdown_options"});
 }
 
 auto Input::readonly_property_names() const -> std::vector<std::string_view> {
@@ -245,6 +412,18 @@ auto Input::invoke_action(std::string_view action, std::string_view argument) ->
     mark_dirty();
     return true;
   }
+  if (action == "paste") {
+    // 控制通道/脚本驱动的粘贴：与 `Ctrl+V` 走**同一条**路
+    //（单行框降换行为空格）。无宿主/无内容时如实返回 false。
+    if (host() == nullptr) return false;
+    std::string pasted = host()->host_clipboard_text();
+    if (pasted.empty()) return false;
+    for (char& ch : pasted) {
+      if (ch == '\n' || ch == '\r') ch = ' ';
+    }
+    insert_text(pasted);
+    return true;
+  }
   if (action == "copy") {
     // 有选区 → 拷选区；无选区 → 保持旧语义（拷全文，兼容既有调用方）。
     // 密码框拒绝：把真实文本写进剪贴板等于把密码泄露到任何能读剪贴板的地方。
@@ -261,7 +440,9 @@ auto Input::inner_box(const RenderContext& context) const -> math::Rect {
   const Metrics& metrics = context.theme.metrics();
   const float leading =
       metrics.space_md + (icon_prefix_.empty() ? 0.0f : k_icon_slot_width + metrics.space_sm);
-  const math::Insets insets{leading, metrics.space_xs, metrics.space_md, metrics.space_xs};
+  // 右侧下拉槽：扣在**文字可用宽**里（否则文字会盖到箭头上）。
+  const float trailing = metrics.space_md + dropdown_slot_width(context);
+  const math::Insets insets{leading, metrics.space_xs, trailing, metrics.space_xs};
   return bounds_.inset(style_.padding).inset(insets);
 }
 
@@ -367,6 +548,46 @@ void Input::apply_theme(const Theme& theme) {
   // `mark_dirty_all()` 负责——那才是“全局变化”的正确入口。
 }
 
+auto Input::caret_rect_now(const RenderContext& context) const -> math::Rect {
+  const math::Rect box = inner_box(context);
+  if (box.is_empty()) return math::Rect{};
+  const TextPort& port = text_port_of(context);
+  const float size = style_.font_size > 0.0f ? style_.font_size : context.theme.metrics().font_base;
+  const float line = port.line_height(size);
+  const float height = std::min(line, box.height);
+  return math::Rect{cursor_x(context), box.y + (box.height - height) * 0.5f, k_cursor_width,
+                    height};
+}
+
+void Input::arrange(const RenderContext& context, math::Rect rect) {
+  Element::arrange(context, rect);
+  // **在这里就把插入点算好**（输入法候选窗要用）。
+  //
+  // 为何不能等 `paint_content`：`publish_ime_caret()` 在**聚焦时**与**几何变化后**
+  // 都会被调，而那些时刻往往比首次绘制早——缓存为空就上报 `(0,0,0,0)`，
+  // 输入法把候选窗摆到客户区左上角（实测截图：候选窗压在标题栏上）。
+  // `arrange` 拿得到 `RenderContext`（能算真实文字宽）且 `bounds_` 已确定，
+  // 是唯一同时具备两者的时机。
+  last_caret_rect_ = caret_rect_now(context);
+  // 下拉按钮命中区：贴**输入框右内边缘**，高撑满
+  // （宽 = 槽宽；右侧图标的 12px 右边距与 `inner_box` 的 trailing 同源）。
+  if (dropdown_enabled_) {
+    const Metrics& metrics = context.theme.metrics();
+    const float w = k_dropdown_slot_width;
+    dropdown_rect_ = math::Rect{bounds_.right() - style_.padding.right - metrics.space_md - w,
+                                bounds_.y, w, bounds_.height};
+  } else {
+    dropdown_rect_ = math::Rect{};
+  }
+  // 已展开的面板跟随控件移动（窗口缩放/重排后锚点不能停在旧坐标）。
+  if (dropdown_panel_ != nullptr && dropdown_open_) {
+    dropdown_panel_->set_anchor(
+        math::Point{bounds_.x, bounds_.bottom() + context.theme.metrics().space_xs});
+  }
+  // 上一帧的“收起”到这里才真摘除（见 `close_dropdown_panel` 的说明）。
+  flush_dropdown_dismiss();
+}
+
 void Input::measure(const RenderContext& context, const Constraints& constraints) {
   // 无缝模式下**不跑 `sync_control_style`**：它的判据是“透明 = 未设过”，
   // 于是会把无缝模式故意留空的底色重新填成凹陷色（实测：
@@ -383,7 +604,7 @@ void Input::measure(const RenderContext& context, const Constraints& constraints
     const float leading =
         metrics.space_md + (icon_prefix_.empty() ? 0.0f : k_icon_slot_width + metrics.space_sm);
     width = port.measure_width(sample, style_.font_size) + leading + metrics.space_md +
-            k_cursor_width + style_.padding.horizontal();
+            k_cursor_width + dropdown_slot_width(context) + style_.padding.horizontal();
     width = std::max(width, k_input_min_width);
   }
   float height = style_.has_explicit_height() ? style_.height : metrics.control_height;
@@ -457,6 +678,20 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
     Icon::draw(canvas, icon_prefix_, glyph, icon_color, 0.0f);
   }
 
+  // —— 内嵌下拉按钮（右侧桂格箭头）——
+  //
+  // 画在 clip **之前**：它在控件本体的一角，与文字区的裁剪矩形无关。
+  // 展开时箭头翻转（指向上的桂格），让“点一下会打开/收起”的语义
+  // 在静态截图里也能看出来。
+  if (dropdown_enabled_ && !dropdown_rect_.is_empty()) {
+    const math::Color arrow_color = usable ? colors.text_muted : colors.text_faint;
+    const math::Rect glyph{
+        dropdown_rect_.x + (dropdown_rect_.width - k_dropdown_icon_size) * 0.5f,
+        dropdown_rect_.y + (dropdown_rect_.height - k_dropdown_icon_size) * 0.5f,
+        k_dropdown_icon_size, k_dropdown_icon_size};
+    Icon::draw(canvas, dropdown_open_ ? "chevron-up" : "chevron-down", glyph, arrow_color, 0.0f);
+  }
+
   canvas.push_clip_rect(box);
   // —— 选区高亮（2026-10-14）——
   // 画在文本**之下**，且用与光标同一套「字节索引 → x」映射（`index_to_x`）——
@@ -493,9 +728,8 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
     // 只在相位真翻转的那帧上报损坏区（每帧报会与帧间损坏判据互相触发成续帧循环）。
     if (blink.needs_damage()) record_damage();
     if (blink.visible) {
-    const float height = std::min(line, box.height);
-    const math::Rect caret{cursor_x(context), box.y + (box.height - height) * 0.5f, k_cursor_width,
-                          height};
+    // 与 `arrange` 用**同一个**函数算插入点：两处各写一遍必然漂移。
+    const math::Rect caret = caret_rect_now(context);
     // 缓存给 `caret_rect()`（输入法候选窗用它对齐插入点）。
     last_caret_rect_ = caret;
     // 预编辑串（输入法组合中）：画在光标处，带一条下划线标“尚未确定”。
@@ -534,8 +768,25 @@ auto Input::handle_key(const Event& event) -> bool {
     (void)erase_selection();
     return true;
   }
-  if (ctrl && (key == "a" || key == "A")) {
-    if (password_) return true;   // 密码框不做选区
+        if (ctrl && (key == "v" || key == "V")) {
+        // 粘贴：剪贴板是**平台**能力，从宿主读（无宿主/无内容 = 无事发生）。
+        // 走 `replace_selection_with`：有选区就替换——那是所有文本插入的
+        // 唯一入口（与 `TextInput` 同一条路）。
+        if (host() != nullptr) {
+          std::string pasted = host()->host_clipboard_text();
+          if (!pasted.empty()) {
+            // 单行框：换行符一律降为空格。直接插 `\n` 会得到一个“看不见但存在”
+            // 的换行——单行框不折行、不显示它，而提交时它还在串里。
+            for (char& ch : pasted) {
+              if (ch == '\n' || ch == '\r') ch = ' ';
+            }
+            insert_text(pasted);
+          }
+        }
+        return true;
+      }
+      if (ctrl && (key == "a" || key == "A")) {
+        if (password_) return true;   // 密码框不做选区
     select_anchor_ = 0U;
     cursor_ = text_.size();
     mark_dirty();
@@ -609,6 +860,17 @@ auto Input::on_event(const RenderContext& context, Event& event) -> bool {
   switch (event.kind) {
     case EventKind::MouseDown: {
       if (event.button != 1) return false;
+      // 下拉按钮优先：命中它就不能走“定位光标”那条路
+      //（否则点箭头会先把光标里斯到文末，看着像“点错了”）。
+      if (dropdown_enabled_ && !dropdown_rect_.is_empty() &&
+          dropdown_rect_.contains(event.position)) {
+        // **不在这里判空表**：空表时要走 `open_dropdown_panel`，
+        // 那里会调 `on_dropdown_need_options` 让调用方去拉选项。
+        // 旧写法 `if (!options.empty())` 把空表情形整个吞掉了，
+        // 于是首次填配置点箭头“完全没反应”（回调根本到不了）。
+        set_dropdown_open(!dropdown_open_);
+        return true;
+      }
       const std::size_t hit = index_at_x(context, event.position.x);
       // —— 连击判定（双击选词 / 三击整行）——
       // 时间取自 `RenderContext::time_seconds`（事件不带时间戳）。
@@ -664,6 +926,10 @@ auto Input::on_event(const RenderContext& context, Event& event) -> bool {
     }
     case EventKind::MouseUp:
       selecting_ = false;
+      // 零长度选区要清掉（与 `TextArea::on_event` 同一缺陷与修法，见那里的说明）：
+      // `MouseDown` 无条件设锚点，点击不拖时 `anchor == cursor`，下一次插字就会
+      // 多出一段选区（首字符被选中）。
+      if (select_anchor_ == cursor_) select_anchor_ = kNoSelection;
       return true;
     case EventKind::Click: {
       // `Click` 与 `MouseDown` 可能同名事件重复送入：不重复做连击计数。
@@ -1014,6 +1280,27 @@ void TextArea::move_to_line_edge(const RenderContext& context, bool to_end) {
 void TextArea::arrange(const RenderContext& context, math::Rect rect) {
   Element::arrange(context, rect);
   sync_scroll(context);
+  // **在这里就把插入点算好**（输入法候选窗要用）。
+  //
+  // 为何不能等 `paint_content`：`publish_ime_caret()` 在**聚焦时**与**几何变化后**
+  // 都会被调，而那些时刻往往比首次绘制早——缓存为空就上报 `(0,0,0,0)`，
+  // 输入法把候选窗摆到客户区左上角（实测：候选窗压在标题栏上，光标却在底部输入框）。
+  const math::Rect box = inner_box(context);
+  if (!box.is_empty()) {
+    const TextPort& port = text_port_of(context);
+    const float size =
+        style_.font_size > 0.0f ? style_.font_size : context.theme.metrics().font_base;
+    const float line = port.line_height(size);
+    // 口径与 `paint_content` 里的插入点**逐字一致**（行内前缀宽 + 行偏移 - 滚动）。
+    const std::string whole = text_;
+    const std::vector<Line> lines = layout_lines(context, box.width);
+    const std::size_t row = lines.empty() ? 0U : row_of(lines, cursor_);
+    const Line& entry = lines[row];
+    const float caret_x =
+        box.x + port.measure_width(whole.substr(entry.begin, cursor_ - entry.begin), size);
+    const float caret_y = box.y + static_cast<float>(row) * line - scroll_;
+    last_caret_rect_ = math::Rect{caret_x, caret_y, k_cursor_width, line};
+  }
 }
 
 void TextArea::measure(const RenderContext& context, const Constraints& constraints) {
@@ -1332,6 +1619,13 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
     }
     case EventKind::MouseUp:
       selecting_ = false;
+      // **零长度选区要清掉**（2026-11-17 修，实测缺陷）：
+      // `MouseDown` 会无条件设 `select_anchor_ = hit`（为拖动选做准备），而这里原先
+      // 只清 `selecting_`——于是“点一下（没拖）”会在控件里留下一个
+      // `anchor == cursor` 的零长选区。它本身不被 `has_selection()` 看见，
+      // 但**下一次插字就现形**：`cursor_` 前移而 anchor 停在原位，凭空多出一段选区
+      //——表现正是“输入第一个字符后它被选中，再输一个就把它覆盖掉”。
+      if (select_anchor_ == cursor_) select_anchor_ = kNoSelection;
       return true;
     case EventKind::Click:
       return true;   // 与 MouseDown 不重复连击计数
@@ -1361,6 +1655,29 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
       // Ctrl+C：有选区 → 拷选区；无选区 → 拷全文（只读展示也能复制）。
       if (ctrl && (key == "c" || key == "C")) {
         return invoke_action("copy", {});
+      }
+      // Ctrl+V：粘贴（多行框**保留换行**——与单行框的降级处理相反）。
+      if (ctrl && (key == "v" || key == "V")) {
+        if (read_only_) return true;
+        if (host() != nullptr) {
+          const std::string pasted = host()->host_clipboard_text();
+          if (!pasted.empty()) {
+            // 统一行尾：剪贴板里 Windows 的 `\r\n` 与裸 `\r` 都归成 `\n`，
+            // 否则会多出看不见的 `\r`（`layout_lines` 只认 `\n`）。
+            std::string normalized;
+            normalized.reserve(pasted.size());
+            for (std::size_t i = 0; i < pasted.size(); ++i) {
+              if (pasted[i] == '\r') {
+                if (i + 1 < pasted.size() && pasted[i + 1] == '\n') continue;
+                normalized.push_back('\n');
+              } else {
+                normalized.push_back(pasted[i]);
+              }
+            }
+            insert_text(normalized);
+          }
+        }
+        return true;
       }
       // Ctrl+X / Ctrl+A：与 `Input` 同一组语义（只读下不剪切）。
       if (ctrl && (key == "x" || key == "X")) {
@@ -1542,6 +1859,24 @@ auto TextArea::invoke_action(std::string_view action, std::string_view argument)
     return true;
   }
   // —— 文本选择（2026-10-14）与 `Input` 同一组动作名 ——
+  if (action == "paste") {
+    // 与 `Ctrl+V` 同一条路（多行：保留换行，只归一化行尾）。
+    if (read_only_ || host() == nullptr) return false;
+    const std::string raw = host()->host_clipboard_text();
+    if (raw.empty()) return false;
+    std::string normalized;
+    normalized.reserve(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      if (raw[i] == '\r') {
+        if (i + 1 < raw.size() && raw[i + 1] == '\n') continue;
+        normalized.push_back('\n');
+      } else {
+        normalized.push_back(raw[i]);
+      }
+    }
+    insert_text(normalized);
+    return true;
+  }
   if (action == "select_all") {
     select_anchor_ = 0U;
     cursor_ = text_.size();

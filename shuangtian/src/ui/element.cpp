@@ -910,9 +910,30 @@ auto Element::content_box() const noexcept -> math::Rect { return bounds_.inset(
 void Element::measure(const RenderContext& context, const Constraints& constraints) {
   const float horizontal_padding = style_.padding.horizontal();
   const float vertical_padding = style_.padding.vertical();
-  const float available_width =
-      std::max(0.0f, (style_.has_explicit_width() ? style_.width : constraints.max_width) -
-                         horizontal_padding);
+  // **可用尺寸要回退到 `available_*`**（不能直接取 `max_*`）。
+  //
+  // `max_*` 是**上界**，而行布局给子节点的上界是 `kUnbounded`（1e9）——
+  // 直接拿它算可用宽，无界就会一层层传下去：Row(avail=1150) → Card(max=1e9
+  // avail=1150) → 内层容器(max=1e9 avail=**1e9**)，下游再也拿不到真实宽度。
+  // 后果是自适应的文本/视图只能回退到兑底宽（或把内容压成细条），
+  // 而父级仍按行宽摆位——**宽度不随内容走**（实测：161 字符的推理块只有 80px 宽）。
+  //
+  // 这正是 `fill_width` 存在的理由（`Constraints` 旁有它的说明）：
+  // “`available_*` 才是父级**实际可用**的尺寸”。
+  const float own_width_constraint =
+      style_.has_explicit_width() ? style_.width : kAuto;
+  float available_width =
+      fill_width(constraints, own_width_constraint, constraints.available_width);
+  // **本元素自己的 `max_width`/`min_width` 也要约束给子元素的可用宽**。
+  //
+  // 遗漏它的后果（实测 2026-11-18）：气泡 `Card` 声明了 `max_width=520`
+  // （气泡上限），但它给子元素的「可用宽」仍是父级的 1106——子控件按 1106 排版
+  // （行少、内容矮），而 `arrange` 只拿到真实 488（行多、内容高）。
+  // 两边口径分家 ⇒ 内容末行被裁、*且多轮重排不收敛*（每轮都各自按自己的宽排）。
+  //
+  // 口径与全仓其它夹取一致：先父级上界，再自己的 `min/max`（显式声明优先）。
+  available_width = std::clamp(available_width, style_.min_width, style_.max_width);
+  available_width = std::max(0.0f, available_width - horizontal_padding);
   const float available_height =
       style_.has_explicit_height() ? style_.height - vertical_padding : constraints.max_height;
 
@@ -1078,6 +1099,14 @@ void Element::place_absolute(const RenderContext& context, Element& child, math:
 }
 
 void Element::arrange(const RenderContext& context, math::Rect rect) {
+  // **自己的 `max_width`/`min_width` 也要夹住自己的矩形**。
+  //
+  // 与 `measure` 里夹「给子元素的可用宽」是同一件事的两端：那边算约束给子元素，
+  // 这边落实到自己实际占据的矩形。只做前一半时，父级（如 `Row`，主轴无界）
+  // 给多宽就摆多宽——容器自己声明了 `max_width` 也不生效（实测：气泡上限 520
+  // 形同虚设），而里面的 `grow` 子项照样填满整幅。
+  if (rect.width > style_.max_width) rect.width = style_.max_width;
+  if (rect.width < style_.min_width) rect.width = style_.min_width;
   bounds_ = rect;
   layout_children(context, content_box());
   layout_dirty_ = false;

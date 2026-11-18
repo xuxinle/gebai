@@ -5,7 +5,6 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
 #include <format>
 #include <stop_token>
@@ -98,6 +97,14 @@ constexpr float kNestedGap{6.0f};
 constexpr float kDefaultViewWidth{640.0f};
 constexpr float kMinViewWidth{80.0f};
 constexpr float kMinTextWidth{48.0f};
+/// “这一行已经顶到可用宽”的容差（逻辑 px）：顶到就说明它在折行。
+constexpr float kShrinkEpsilon{1.0f};
+/// 选中高亮带的四周留白（逻辑 px）。
+///
+/// 紧贴字形墨迹的色块看起来像“文字被关在框里”（直边字符尤其明显）；
+/// 留一点点边距后读感接近原生控件的选择高亮。
+constexpr float kSelectionPadX{2.5f};
+constexpr float kSelectionPadY{1.0f};
 /// “还没有画过任何组”的哨兵（组首行下标空间里的无效值）。
 constexpr std::size_t kNoGroupHead{static_cast<std::size_t>(-1)};
 /// 滚轮/箭头键每格的**兑底**步长（优先取主题 `Metrics::wheel_step`，见 on_event；
@@ -802,12 +809,13 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
   std::vector<std::pair<float, float>> line_x{};
 
   const auto flush = [&rows = rows_, &line, &line_x, &line_width, &y, x, width, line_height,
-                      kind]() {
+                      kind](bool wrapped) {
     Row row;
     row.kind = kind;
     row.box = math::Rect{x, y, width, line_height};
     row.line_height = line_height;
     row.text_x = x;
+    row.wrapped = wrapped;   // 自动折行的绖行（供“内容自然宽”判定，见 `intrinsic_content_width`）
     row.spans = std::move(line);
     row.span_x = std::move(line_x);
     // 行内扁平文本（字符级选择的坐标系）：排版期只拼串（零测量）——
@@ -853,7 +861,7 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
     if (span.text.empty()) continue;
     for (const WordToken& word : tokenize(span.text)) {
       if (word.hard_break) {
-        flush();  // 硬换行：显式另起一行（空行照留）
+        flush(false);  // 硬换行：显式另起一行（空行照留；不是自动折行）
         continue;
       }
       if (word.space) {
@@ -862,7 +870,7 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
         continue;
       }
       const float word_width = port.measure_width(word.text, span.size);
-      if (!line.empty() && line_width + word_width > width) flush();
+      if (!line.empty() && line_width + word_width > width) flush(true);   // 自动折行
       if (word_width > width) {
         // 单词/URL 超宽：按码点硬拆，保证不越界也不丢内容
         std::string piece;
@@ -873,7 +881,7 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
           const float one_width = port.measure_width(one, span.size);
           if (!piece.empty() && piece_width + one_width > width) {
             append_piece(span, piece, piece_width);
-            flush();
+            flush(true);   // 超宽单词的码点硬拆也是自动折行
             piece.clear();
             piece_width = 0.0f;
           }
@@ -886,7 +894,7 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
       append_piece(span, word.text, word_width);
     }
   }
-  if (!line.empty()) flush();
+  if (!line.empty()) flush(false);   // 收尾：本段最后一行（不是折行）
 }
 
 auto MarkdownView::inline_spans(const std::vector<st::md::Inline>& inlines, ColorRole role,
@@ -978,6 +986,19 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
       for (Span& span : row.spans) span.code = true;
       // 扁平文本与正文行同一口径：排版期只拼串，前缀宽懒算（`flat_ready`）。
       for (const Span& span : row.spans) markdown_append_flat_text(row.flat, span);
+      // **代码行不折行（超宽靠 `clip` 裁），但“超宽”必须让收缩逻辑知道**。
+      //
+      // 否则 `intrinsic_content_width` 会拿“被裁掉一半的代码”当真值去收缩，
+      // 结果长代码把气泡压得比内容还窄、右侧被截断（实测：40 行长代码
+      // 本该铺满可用宽，却缩成了一细条）。用 `wrapped` 这一位表达同一件事：
+      // “本行内容比排版宽还宽 ⇒ 自然宽无意义”。
+      if (port_ptr != nullptr) {
+        float line_width = 0.0f;
+        for (const Span& span : row.spans) {
+          line_width += port_ptr->measure_width(span.text, span.size > 0.0f ? span.size : size);
+        }
+        if (line_width > text_width + kShrinkEpsilon) row.wrapped = true;
+      }
     }
     rows_.push_back(std::move(row));
   };
@@ -1672,10 +1693,11 @@ void MarkdownView::paint_selection(const RenderContext& context, raster::Surface
     // 表格行没有 `flat`（单元格各自折行）：退化为**整行高亮**
     //（与复制行为一致——表格一行是一个整体，不支持格内字符级选择）。
     if (row.kind == RowKind::TableRow || row.flat.empty()) {
-      const math::Rect view{origin_x, band_top,
-                            std::min(row.box.width, bounds_.width - style_.padding.horizontal()),
-                            band};
-      fill_rect_shape(canvas, view, colors.selection, 2.0f);
+      const float width = std::min(row.box.width, bounds_.width - style_.padding.horizontal());
+      const math::Rect raw{origin_x, band_top, width, band};
+      const math::Rect view{raw.x - kSelectionPadX, raw.y - kSelectionPadY,
+                            raw.width + kSelectionPadX * 2.0f, raw.height + kSelectionPadY * 2.0f};
+      fill_rect_shape(canvas, view, colors.selection, 2.5f);
       continue;
     }
     const std::size_t from = index == begin.line ? begin.offset : 0U;
@@ -1685,8 +1707,13 @@ void MarkdownView::paint_selection(const RenderContext& context, raster::Surface
     // 基准必须与 `caret_at` 一致：内容坐标 x = `origin_x + row.text_x + 行内偏移`。
     const float x0 = origin_x + row.text_x + offset_to_x(row, from);
     const float x1 = origin_x + row.text_x + offset_to_x(row, to);
-    const math::Rect view{std::min(x0, x1), band_top, std::max(x1 - x0, 1.0f), band};
-    fill_rect_shape(canvas, view, colors.selection, 2.0f);
+    // **高亮带四周留白**：紧贴墨迹的矩形看起来像“文字被关在框里”。
+    // 横向给 2.5px（首尾字符的直边不至于贴到色块边缘），
+    // 纵向上下各 1px（字形的升部/降部不会顶到色块边）。
+    const math::Rect raw{std::min(x0, x1), band_top, std::max(x1 - x0, 1.0f), band};
+    const math::Rect view{raw.x - kSelectionPadX, raw.y - kSelectionPadY,
+                          raw.width + kSelectionPadX * 2.0f, raw.height + kSelectionPadY * 2.0f};
+    fill_rect_shape(canvas, view, colors.selection, 2.5f);
   }
 }
 
@@ -1759,29 +1786,62 @@ void MarkdownView::measure(const RenderContext& context, const Constraints& cons
   settle_scroll();
 }
 
-/// 已排行模型里内容实际用到的最右 x（含左侧缩进/项目符号）。
+/// 已排行模型里内容实际需要的最右 x（含左侧缩进/项目符号）。
 ///
 /// 为何从 `rows_` 反推而不重新量：`rows_` 就是“按当前宽排出来的真值”，
 /// 每行 `box.right()` 已经是合并了缩进/标记/表格列后的结果；另写一套宽度估算
 /// 必然与实际绘制分家（那样“气泡刚好包住文字”就永远是碰运气）。
+///
+/// **只在“内容本来就没折行”时才返回真值**（见下方 `wrapped` 判定）——
+/// 折行后的每行都是碎片，取最大值得到的是“最宽那行碎片”，而不是内容自然宽。
+/// 拿它去收缩会把多行正文压得更窄、行数暴涨，
+/// 而外层（卡片）按**旧高度**定尺寸 —— 表现为气泡把后几行裁掉。
 auto MarkdownView::intrinsic_content_width() const noexcept -> float {
   // 关键：不能取 `row.box.right()`——行框已被排成“可用满宽”，那个值恒等于上限。
   // 要的是**文字实际占到的 x**：`text_x`（含缩进/项目符号）+ 各 Span 的排版宽之和。
   const TextPort* port = layout_port_;
   if (port == nullptr) return 0.0f;
   float right = 0.0f;
+  bool saw_code = false;
   for (const Row& row : rows_) {
     if (row.kind == RowKind::Divider) continue;   // 分隔线本来就铺满
-    if (row.kind == RowKind::CodeLine || row.kind == RowKind::TableRow) {
-      // 代码/表格的底板会横向铺满，用它们算“内容宽”只会恒等于上限。
-      continue;
-    }
+    if (row.wrapped) return 0.0f;
+    // **任何一行是自动折行的绖行 ⇒ 放弃收缩**（返回 0 = 保持满宽）。
+    // 折行后的行碎片没有“自然宽”可言：取最大值只会得到最宽那块碎片，
+    // 拿它去重排会把内容压成一细长条，而外层按旧高度定尺寸 ⇒ 末尾被裁。
     float x = row.text_x;
     for (const Span& span : row.spans) {
       x += port->measure_width(span.text, span.size > 0.0f ? span.size : base_font_size_);
     }
+    // 代码/表格：底框本来铺满，但**文字**仍有自然宽。
+    //
+    // 旧实现这里直接 `return 0`（“底板会铺满所以算不出”），代价是**任何含代码
+    // 块的内容都放弃收缩**：工具卡片里一条 `echo hello` 的输出也会把卡片
+    // 撑到整行宽（实测：23 字符的内容 → 1106px 宽）。
+    // 现在只要**没有折行**就算得出自然宽。
+    //
+    // 右侧补一份 `kCodePad`：`x` 已经是 `text_x + 文字宽`（左边距含在 `text_x` 里），
+    // 底板右边还有同样大小的内边距。补少了就会**裁掉行尾**
+    // （实测：`[exit 0]` 显示成 `[exit 0`）。
+    if (row.kind == RowKind::CodeLine || row.kind == RowKind::TableRow) {
+      saw_code = true;
+      // 右侧留白 = 底板内边距 + **一个字符宽**的余量。
+      //
+      // 那一个字符不是保守系数：等宽字体的行尾常有一个“看不见的”占位
+      //（行尾空格/未被 token 化的字形边界），严格按各 span 宽相加会少算一格，
+      // 于是最后一个字被裁（实测：`[exit 0]` 显示成 `[exit 0`）。
+      const float code_size =
+          row.spans.empty() ? base_font_size_
+                            : (row.spans.front().size > 0.0f ? row.spans.front().size
+                                                            : base_font_size_);
+      x += kCodePad + port->measure_width("M", code_size);
+    }
+    // 单行已经顶到可用宽 ⇒ 它在折行边缘，不是“自然宽”（护栏，双保险）。
+    if (x + kShrinkEpsilon >= layout_width_) return 0.0f;
     if (x > right) right = x;
   }
+  // 只有底板行时，宽度不应小于一个可读的最小值（否则短输出会被压成窄条）。
+  if (saw_code && right < kMinTextWidth) right = kMinTextWidth;
   return right > 0.0f ? right : 0.0f;
 }
 

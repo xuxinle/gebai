@@ -1033,6 +1033,9 @@ struct LanguageFlags {
   for (const auto& item : options.extra_flags) out.cxx.push_back(item);
   for (const auto& item : manifest.defines) out.cxx.push_back(std::format("-D{}", item));
   for (const auto& item : target_defines) out.cxx.push_back(std::format("-D{}", item));
+  // **命令行宏**（`st build --define …`）。放在清单宏之后：编译器看最后一个 `-D`，
+  // 所以命令行能覆盖清单里的同名宏——那正是“不改清单也能预置配置”的语义。
+  for (const auto& item : options.extra_defines) out.cxx.push_back(std::format("-D{}", item));
   for (const auto& dir : include_dirs) out.cxx.push_back(std::format("-I{}", dir));
   for (const auto& item : profile_flags_list) out.cxx.push_back(item);
   // 工具链专属告警收敛**必须在档位标志之后**：它是"最后一道收敛"，语义上覆盖前面所有来源
@@ -1043,6 +1046,7 @@ struct LanguageFlags {
   for (const auto& item : options.extra_flags) out.c.push_back(item);
   for (const auto& item : manifest.defines) out.c.push_back(std::format("-D{}", item));
   for (const auto& item : target_defines) out.c.push_back(std::format("-D{}", item));
+  for (const auto& item : options.extra_defines) out.c.push_back(std::format("-D{}", item));
   for (const auto& dir : include_dirs) out.c.push_back(std::format("-I{}", dir));
   for (const auto& item : profile_flags_list) out.c.push_back(item);
   for (const auto& item : toolchain.suppressions) out.c.push_back(item);
@@ -3008,8 +3012,16 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // 恰好相等（同一个清单），只有独立工程引用时才暴露——见 `make_framework_flags` 的注释。
   std::optional<FrameworkFlags> framework_flags;
   if (framework.has_value()) {
+    // 框架单元用**框架自己的**标志集：**不传工程侧的 `flags`**。
+    //
+    // 为何要与工程标志分开（2026-11-18，`--define` 机制暴露）：
+    // `make_framework_flags` 会把传入的工程 flags 并进去，而工程 flags 现在含
+    // `--define` 的命令行宏——那会让**框架对象缓存被某个工程的宏污染**：
+    // 用 `--define XIAOBAI_MODEL=…` 构建过一次后，框架单元的缓存键就变了，
+    // 下次不带该宏的构建又得全量重编框架源（实测 366 单元全重编、耗时 2m20s）。
+    // 框架源不该知道应用私有宏，所以这里传空。
     framework_flags = make_framework_flags(manifest, framework->include_dirs, framework->c_flags,
-                                           *flags, *toolchain);
+                                           {}, *toolchain);
   }
   std::size_t rebuilt = 0;
   // check 模式：收集本次实际查过（哈希变化/首次）的单元源路径，用于状态写回。
@@ -3418,6 +3430,14 @@ if (target->kind == "group") {
       material.append("\t").append(meta.value_or("missing"));
     }
     for (const auto& flag : *flags) material.append("\n@").append(flag);
+    // **命令行宏必须入指纹**（2026-11-18 修，实测缺陷）：
+    // `*flags` 里只有**档位标志**（`-O1 -g1 …`）——编译宏是 `compile_units`
+    // 内部另行组装的，不在这个向量里。于是“只改 `--define`”时：
+    // 对象会因为缓存键含宏而重编，但链接指纹不变 → “链接已跳过” →
+    // **产物还是上一个宏的值**（实测：`--define XIAOBAI_MODEL="A"` 之后换成 "B"，
+    // `.link` 戳一字未变，exe 里仍是 A）。
+    // 这类缺陷完全静默（构建报“完成”），只能把宏自己纳入指纹。
+    for (const auto& define : options.extra_defines) material.append("\n-D").append(define);
     // 链接期专属旗标：同属“只改链接参数”的静默风险面（见下方 system/icon 注释），
     // 2026-11-09 补入（实测：`-static` 改了不重链，libwinpthread-1.dll 一直在产物里）。
     for (const auto& flag : applied_link_flags) material.append("\n&").append(flag);

@@ -123,6 +123,27 @@ JIANMU = svg("#2F6E52", '''    <path d="M12 10.359 L16.547 12.984 L12 15.609 L7.
     "       坐标与 tools/make_icons.py 的 icon_jianmu 同源：256 画布按 21/255 映射进\n"
     "       1.5..22.5 的家族底，两边改一边必改另一边。")
 
+XIAOBAI = svg("#1475C7", '''    <!-- 坐标按 make_icons.py 的 icon_xiaobai 换算：256 画布 →
+         1.5..22.5 家族底（scale = 21/255, offset = 1.5）。两边改一边必改另一边。 -->
+    <!-- 尾焰（先画，被机身压住根部） -->
+    <g stroke="#FFFFFF" stroke-linecap="round">
+      <path d="M11.218 17.641 L9.571 20.276" stroke-width="0.906" opacity="0.75"/>
+      <path d="M12.865 17.641 L14.512 20.276" stroke-width="0.906" opacity="0.75"/>
+      <path d="M12.041 17.806 L12.041 20.606" stroke-width="0.824" opacity="0.45"/>
+    </g>
+    <!-- 尾翼：左右各一个向外张开三角（与机身重叠一截，避免 16px 下露缝） -->
+    <path d="M9.9 12.371 L9.9 16.159 L6.935 17.641 Z" opacity="0.92"/>
+    <path d="M14.182 12.371 L14.182 16.159 L17.147 17.641 Z" opacity="0.92"/>
+    <!-- 机身：尖头（上）+ 主体（下），两条圆角矩形叠出尖头圆柱 -->
+    <rect x="10.806" y="4.3" width="2.471" height="5.106" rx="1.153"/>
+    <rect x="9.9" y="6.606" width="4.282" height="10.541" rx="1.482"/>
+    <!-- 舷窗：用 even-odd 真挖洞（拿底色盖会在换主题时露馅） -->
+    <circle cx="12.041" cy="9.076" r="1.235" fill="#1475C7"/>''',
+    "xiaobai —— 小白（AI 对话窗）。圆角方底 + 白色火箭（机身 + 尾翼 + 舷窗 + 尾焰）。\n"
+    "       底色 = `make_icons.py` 里 `icon_xiaobai` 的主色 `(0.08, 0.46, 0.78)`\n"
+    "       = `#1475C7`——标题栏标记与任务栏 PNG 必须**同一记号**，否则用户看到两个东西。\n"
+    "       几何逐点按同源换算，不另外手搓形状（手搓那次直接用成了“实心黑火箭”）。")
+
 APPS = {
     "gallery": ("apps/gallery/assets/gallery-logo.svg", GALLERY),
     "louyue":  ("apps/louyue/assets/louyue-logo.svg",   LOUYUE),
@@ -131,6 +152,7 @@ APPS = {
     "cefu":    ("apps/cefu/assets/cefu-logo.svg",       CEFU),
     "xiangqi": ("apps/xiangqi/assets/xiangqi-logo.svg", XIANGQI),
     "jianmu":  ("apps/jianmu/assets/jianmu-logo.svg",   JIANMU),
+    "xiaobai": ("apps/xiaobai/assets/xiaobai-logo.svg", XIAOBAI),
 }
 
 

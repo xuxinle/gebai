@@ -727,6 +727,12 @@ class UiRoot : public Element::HostFocus {
   MouseCursor cursor_{MouseCursor::Arrow};
   /// 最近一次上报给宿主的输入法插入点（变化才下发，同 `cursor_`）。
   math::Rect ime_caret_{};
+  /// 是否已经下发过一次插入点。
+  ///
+  /// 为何需要：`ime_caret_` 初值是空矩形，而“当前没有插入点”的**首次**上报值
+  /// 也是空矩形——单看相等就当成“无变化”吞掉，于是后端永远没拿到过位置，
+  /// 输入法把候选窗放到客户区左上角。
+  bool ime_caret_published_{false};
   /// 最近一次 MouseMove 的位置与它是否仍有效。
   ///
   /// 为何要记：悬浮/光标平时只随鼠标事件重算，但有三类时刻**指针不动而命中

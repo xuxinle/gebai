@@ -270,11 +270,19 @@ struct CandidateForm {
 };
 
 constexpr DWORD kCfsPoint{0x0002};
+/// `CFS_CANDIDATEPOS`（0x0040）：`current_pos` 是**屏幕坐标**，按它钉住候选窗。
 constexpr DWORD kCfsCandidatePos{0x0040};
-constexpr DWORD kCfsExclude{0x0080};
 constexpr DWORD kGcsCompStr{0x0008};
 constexpr DWORD kGcsCursorPos{0x0080};
 constexpr DWORD kGcsResultStr{0x0800};
+/// `WM_IME_REQUEST` 的子请求（`wParam`）。
+///
+/// **TSF 系输入法（搜狗/微软拼音/QQ 拼音）靠它问“光标在哪”**，
+/// 而 `ImmSetCandidateWindow` 是 IMM32 老接口——只做后者时现代输入法
+/// 拿不到位置，会把候选窗摆在窗口左上角（实测截图：候选窗压在标题栏上）。
+constexpr WPARAM kImrQueryCharPosition{0x0005};
+constexpr WPARAM kImrCandidatePosition{0x0006};
+constexpr WPARAM kImrCompositionWindow{0x0007};
 /// `WM_IME_SETCONTEXT` 的 lParam 位：让系统自己画组合窗。
 constexpr LPARAM kIscShowUiCompositionWindow{0x80000000L};
 
@@ -3283,17 +3291,28 @@ class Win32Backend final : public Backend {
   }
 
   /// 把插入点告诉 IME：组合窗与候选窗都贴在光标所在行。
+  /// 把插入点告诉 IME：组合窗与候选窗都贴在光标所在行。
   ///
-  /// 坐标转换两步：逻辑像素 `× scale_` 得物理/客户区像素，再 `ClientToScreen`
-  /// 得屏幕坐标——IME 要的是**屏幕**坐标，而 UI 层给的是客户区**逻辑**坐标。
-  /// 少了任何一步候选窗都会偏（典型现象：高 DPI 下候选窗偏到左上方）。
+  /// 坐标转换两步：UI 给的是客户区**逻辑**坐标，`× scale_` 得**物理**客户区像素
+  /// （本进程是 PER_MONITOR_AWARE，系统 API 一律按物理像素），再 `ClientToScreen`
+  /// 得屏幕坐标——IME 要的是屏幕坐标。两步少一步都会偏。
+  ///
+  /// **不要拿外部进程的 `GetClientRect` 当依据**（实测代价：一轮修正方向跑反）：
+  /// PowerShell 等 DPI-unaware 进程问到的是虚拟化后的逻辑尺寸（1884×1023），
+  /// 而本进程自己问同一 API 得到物理尺寸（2355×1279）。
   void apply_ime_forms() {
     const ImmApi& api = imm_api();
     if (window_ == nullptr || !api.ok()) return;
     if (!last_ime_caret_.has_value()) return;
     const math::Rect caret = *last_ime_caret_;
     const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
-    POINT origin{static_cast<LONG>(caret.x * safe_scale), static_cast<LONG>(caret.y * safe_scale)};
+    // **下移一个行高**：IME 把 `current_pos` 当作候选窗的**顶边**，
+    // 而 UI 给的 `caret.y` 是光标行的**顶边**——原样交出去候选窗就盖住光标行
+    // （实测：候选窗顶边比输入框底边高 8~9px，正好压在正在输入的那一行上）。
+    // 加上行高，候选窗就从下一行开始。
+    const float line_h = caret.height > 0.0f ? caret.height : 20.0f;
+    POINT origin{static_cast<LONG>(caret.x * safe_scale),
+                 static_cast<LONG>((caret.y + line_h) * safe_scale)};
     if (::ClientToScreen(window_, &origin) == 0) return;
     void* context = api.get_context(window_);
     if (context == nullptr) return;
@@ -3302,14 +3321,13 @@ class Win32Backend final : public Backend {
     composition.current_pos = origin;
     (void)api.set_composition_window(context, &composition);
     CandidateForm candidate{};
-    candidate.style = kCfsCandidatePos | kCfsExclude;
+    // **只给 `CFS_CANDIDATEPOS`**：把候选窗钉在 `current_pos`。
+    //
+    // 不要加 `CFS_EXCLUDE` + `rcArea`：那是“请避开这块矩形”的语义，
+    // 输入法据此在周边找位，于是位置会随**横向**空间而变（实测：光标越靠右，
+    // 候选窗越会往左/往下躲——看起来就像“被 x 坐标干扰”）。
+    candidate.style = kCfsCandidatePos;
     candidate.current_pos = origin;
-    // 排除区=当前光标行：让候选窗**避开**正在看的那一行，而不是盖住它。
-    // （`CFS_EXCLUDE` 不生效时系统会退回 `current_pos` 定位，两种都不差。）
-    const long line_height = static_cast<LONG>(
-        std::max(1.0f, caret.height > 0.0f ? caret.height : 20.0f) * safe_scale);
-    candidate.exclude = RECT{origin.x, origin.y, origin.x + static_cast<LONG>(static_cast<float>(line_height) * 0.6f),
-                             origin.y + line_height};
     (void)api.set_candidate_window(context, &candidate);
     if (api.release_context != nullptr) (void)api.release_context(window_, context);
   }
@@ -3767,6 +3785,7 @@ class Win32Backend final : public Backend {
       }
 
       case WM_KEYDOWN:
+
       case WM_SYSKEYDOWN:
         pending_key_ = wparam;
         push_key(ui::EventKind::KeyDown);
@@ -3777,6 +3796,7 @@ class Win32Backend final : public Backend {
         push_key(ui::EventKind::KeyUp);
         return 0;
       case WM_CHAR: {
+
         ui::Event event;
         event.kind = ui::EventKind::TextInput;
         // 控制字符（\r \t \b 等）不是"文本输入"，由键事件表达
@@ -3807,14 +3827,72 @@ class Win32Backend final : public Backend {
       // 这四条消息是“中文输入能在窗口里用”的全部。旧实现一条都不处理，
       // 于是：组合串不显示、候选窗飘在系统默认位置（屏幕左上角），
       // 用户看到的是“打字没反应、突然蹦出一串字在某处”。
+      case WM_IME_REQUEST: {
+
+
+        // **TSF 系输入法询问位置就在这里**。
+        //
+        // 为何必须有：`ImmSetCandidateWindow` 是 IMM32 老接口，而搜狗/微软拼音/
+        // QQ 拼音这些走 TSF 的输入法通过 `WM_IME_REQUEST` 问“光标在哪”。
+        // 不回应就视为“不知道位置”——候选窗与组合窗全摆到客户区 (0,0)，
+        // 也就是窗口左上角（实测截图：候选窗压在标题栏上，而光标在底部输入框）。
+        if (!last_ime_caret_.has_value()) break;
+        const math::Rect caret = *last_ime_caret_;
+        // 与 `apply_ime_forms` 同一口径（含下移一个行高）。
+        // 两条路径的位置必须完全一致：一个给“行顶”一个给“行底”，
+        // 输入法按最后一次拿到的值定位，交替收到就会跳。
+        const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
+        const float line_h = caret.height > 0.0f ? caret.height : 20.0f;
+        POINT origin{static_cast<LONG>(caret.x * safe_scale),
+                     static_cast<LONG>((caret.y + line_h) * safe_scale)};
+        if (::ClientToScreen(window, &origin) == 0) break;
+        const long line_height = static_cast<LONG>(line_h * safe_scale);
+        if (wparam == kImrQueryCharPosition) {
+          // 返回插入点所在字符的屏幕矩形（输入法把候选窗挂在这个矩形下方）。
+          auto* info = reinterpret_cast<CandidateForm*>(lparam);
+          if (info == nullptr) break;
+          // 同样要给 `style`：不给等于“没有意见”，输入法退回自己的推算。
+          info->style = kCfsCandidatePos;
+          info->index = 0;
+          info->current_pos = origin;
+          info->area = RECT{origin.x, origin.y, origin.x + 1, origin.y + line_height};
+          return TRUE;
+        }
+        if (wparam == kImrCandidatePosition || wparam == kImrCompositionWindow) {
+          auto* form = reinterpret_cast<CandidateForm*>(lparam);
+          if (form == nullptr) break;
+          // **`style` 必须给**：回填 `CANDIDATEFORM` 时只有 `CFS_CANDIDATEPOS`
+          // 才表示“按我给的 `current_pos` 放”。留 0 时输入法视为没有有效位置，
+          // 退回它自己的推算（实测：候选窗纵向偏出输入框一百多像素，
+          // 而 `ImmSetCandidateWindow` 返回成功，看不出任何异常）。
+          form->style = kCfsCandidatePos;
+          form->index = 0;
+          form->current_pos = origin;
+          // **`area` 全零**：真正“不给排除区”的写法是零矩形，而不是一条零宽线。
+          // 零宽线仍会被当成“有一块区域占着”，输入法据此向下找个空位
+          //（实测：候选窗固定被推到光标下方一百多像素）。
+          form->area = RECT{0, 0, 0, 0};
+          return TRUE;
+        }
+        break;
+      }
+
       case WM_IME_SETCONTEXT:
+
         // 让系统自己画组合窗（我们只负责把位置告诉它）；
         // 不清 `ISC_SHOWUICOMPOSITIONWINDOW` 的话组合串不显示。
         // 同时告知后端“有人要编辑了”让默认 IME 窗口（DefWindowProc 不做）。
+        //
+        // **这里也要定位一次**：系统正是在本消息前后才决定候选窗/组合窗的第一帧位置。
+        // 只在 `WM_IME_STARTCOMPOSITION` 里定位时，某些输入法（搜狗/微软拼音的弹窗）
+        // 会先用系统默认位置画一帧、后续 COMPOSITION 才纠正——
+        // 用户看到的就是“候选窗没对准光标”。
+        apply_ime_forms();
         return ::DefWindowProcW(window, message, wparam,
                                 lparam | kIscShowUiCompositionWindow);
 
       case WM_IME_STARTCOMPOSITION:
+
         composing_ = true;
         preedit_.clear();
         // 组合一开始就把候选窗定位到光标的当前行：这是“首次弹出就对”的关键，
@@ -3823,6 +3901,7 @@ class Win32Backend final : public Backend {
         return 0;
 
       case WM_IME_COMPOSITION: {
+
         // 结果串（用户选定）→ 作为一条正常的 `TextInput` 送出（走既有编辑路径，
         // 进撤销栈的是**一次完整的插入**，而不是每个组合步一条）。
         if ((lparam & kGcsResultStr) != 0) {

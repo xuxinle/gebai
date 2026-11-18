@@ -43,9 +43,20 @@ struct Arguments {
   std::vector<std::string> positional{};
   std::map<std::string, std::string> options{};
   std::vector<std::string> flags{};
+  /// **可重复选项**的多次取值（如 `--define A=1 --define B=2`）。
+  ///
+  /// 为何另开一份：`options` 是 map，同名会被**静默覆盖**——
+  /// `--define A --define B` 只剩最后一个，编译器那边就少一个宏，
+  /// 而这个丢失**不报错**（构建成功、只是行为不对）。
+  std::map<std::string, std::vector<std::string>> repeated{};
 
   [[nodiscard]] auto has(std::string_view name) const -> bool {
     return std::ranges::find(flags, name) != flags.end();
+  }
+  /// 同名选项的全部取值（没给过 = 空）。
+  [[nodiscard]] auto all(std::string_view name) const -> std::vector<std::string> {
+    const auto iterator = repeated.find(std::string(name));
+    return iterator != repeated.end() ? iterator->second : std::vector<std::string>{};
   }
   [[nodiscard]] auto get(std::string_view name, std::string fallback = {}) const -> std::string {
     const auto iterator = options.find(std::string(name));
@@ -88,6 +99,15 @@ constexpr const char* kStpmVersion = "0.1.0";
   return std::ranges::find(kBooleanOptions, name) != std::end(kBooleanOptions);
 }
 
+/// **可重复选项**名单：同名可以给多次，值全部保留（见 `Arguments::repeated`）。
+///
+/// 只列“天然可累积”的：`--define`（多个宏）、`--include`（多个包含目录）。
+/// 其余有值选项保持“最后一个生效”（如 `--profile`）。
+[[nodiscard]] auto is_repeatable_option(std::string_view name) -> bool {
+  static constexpr std::string_view kRepeatable[] = {"define", "include"};
+  return std::ranges::find(kRepeatable, name) != std::end(kRepeatable);
+}
+
 [[nodiscard]] auto parse_arguments(int argc, char** argv) -> Arguments {
   Arguments arguments;
   for (int index = 1; index < argc; ++index) {
@@ -96,7 +116,10 @@ constexpr const char* kStpmVersion = "0.1.0";
       const std::string_view body = raw.substr(2);
       const std::size_t equals = body.find('=');
       if (equals != std::string_view::npos) {
-        arguments.options[std::string(body.substr(0, equals))] = std::string(body.substr(equals + 1));
+        const std::string name(body.substr(0, equals));
+        const std::string value(body.substr(equals + 1));
+        arguments.options[name] = value;
+        if (is_repeatable_option(name)) arguments.repeated[name].push_back(value);
         continue;
       }
       // 布尔选项：直接记 flag，**绝不吃下一个参数**（见 `is_boolean_option`）。
@@ -107,7 +130,10 @@ constexpr const char* kStpmVersion = "0.1.0";
       // 下一个参数只要以 `-` 开头就不当值：否则 `--san -j 6` 会把 `-j` 吃成 `--san` 的值
       // （表现为"档位变成 debug + filter 变成 6"，两处都不报错，极难察觉）。
       if (index + 1 < argc && !std::string_view(argv[index + 1]).starts_with("-")) {
-        arguments.options[std::string(body)] = std::string(argv[index + 1]);
+        const std::string name(body);
+        const std::string value(argv[index + 1]);
+        arguments.options[name] = value;
+        if (is_repeatable_option(name)) arguments.repeated[name].push_back(value);
         ++index;
         continue;
       }
@@ -121,8 +147,10 @@ constexpr const char* kStpmVersion = "0.1.0";
       const std::string_view body = raw.substr(1);
       const std::size_t equals = body.find('=');
       if (equals != std::string_view::npos) {
-        arguments.options[std::string(body.substr(0, equals))] =
-            std::string(body.substr(equals + 1));
+        const std::string name(body.substr(0, equals));
+        const std::string value(body.substr(equals + 1));
+        arguments.options[name] = value;
+        if (is_repeatable_option(name)) arguments.repeated[name].push_back(value);
         continue;
       }
       // 短布尔选项（`-v`）同理不吃下一个参数。
@@ -131,7 +159,10 @@ constexpr const char* kStpmVersion = "0.1.0";
         continue;
       }
       if (index + 1 < argc && !std::string_view(argv[index + 1]).starts_with("-")) {
-        arguments.options[std::string(body)] = std::string(argv[index + 1]);
+        const std::string name(body);
+        const std::string value(argv[index + 1]);
+        arguments.options[name] = value;
+        if (is_repeatable_option(name)) arguments.repeated[name].push_back(value);
         ++index;
         continue;
       }
@@ -161,8 +192,12 @@ void print_usage() {
                         -j N，--verbose，--force）
                         `st build all` = 构建**全部真实应用**（清单里的 `kind: "group"` 合成目标；
                         不含 ~140 个一次性探针）。新增应用时把它加进 `all` 的 libraries。
-                                                --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
-                        产物本体可小 ~94%；gdb 会自动找分离符号）
+                                                  --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
+  产物本体可小 ~94%；gdb 会自动找分离符号）
+  --define NAME=VALUE 追加编译宏（可重复；只作用于本次构建，不改 st.pkg）
+  用途：打包“配置已预置”的产物而不把部署参数提交进仓库。
+  例：st build xiaobai --define 'XIAOBAI_MODEL=\"deepseek-v4.1-flash\"'
+  同名宏会覆盖清单里的（命令行写在清单宏之后）。
                         --no-tests 不刷新过期的测试二进制（默认会**只构建不运行**地
                         同步一次，避免「改了断言→st build→直跑 st_tests→验旧代码」）
                         并发默认按**内存预算**推导（读 cgroup 上限，不再默认吃满核数）；
@@ -316,6 +351,10 @@ auto command_build(const Arguments& arguments) -> int {
   options.target = arguments.positional.empty() ? std::string{} : arguments.positional.front();
   // 交叉编译：--toolchain=<名>（命中 st.pkg 的 toolchains 段）
   options.toolchain = arguments.get("toolchain", "");
+  // 命令行宏（可重复）：`st build xiaobai --define 'XIAOBAI_MODEL="deepseek-v4.1-flash"'`
+  // 用途：构建“配置已预置”的产物，而不把部署参数写进仓库里的 st.pkg。
+  options.extra_defines = arguments.all("define");
+  options.extra_include_dirs = arguments.all("include");
   options.verbose = arguments.has("verbose") || arguments.has("v");
   options.force = arguments.has("force");
   const auto jobs = arguments.number_any({"j", "jobs"}, 0.0);

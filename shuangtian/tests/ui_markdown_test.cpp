@@ -296,6 +296,40 @@ ST_TEST(md_view_shrink_to_fit_narrows_to_content) {
   }
 }
 
+ST_TEST(md_shrink_to_fit_does_not_narrow_wrapped_text) {
+  // 回归：**折行内容不得被缩窄**。
+  //
+  // 缺陷（2026-11-18，小白气泡实测）：`intrinsic_content_width()` 取“所有行的
+  // 最大文字宽”，而长文本已被折成多行——那个最大值只是“最宽那行碎片”，
+  // 远小于内容自然宽。拿它重排 ⇒ 气泡变窄 ⇒ 行数暴涨，
+  // 而外层按**上一轮高度**定尺寸 ⇒ 末尾几行被裁掉（截图里第 3 点消失）。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+  st::ui::Constraints constraints;
+  constraints.max_width = 420.0f;
+  constraints.available_width = 420.0f;
+  constraints.max_height = st::ui::kUnbounded;
+  constraints.available_height = st::ui::kUnbounded;
+
+  const std::string long_text =
+      "这是一段足够长的说明文字，用来确认气泡不会因为把折行后的碎片宽度当成内容宽"
+      "而被压成一根细长条，进而把末尾几行裁掉。"
+      "\n\n第二段：再来一句同样长的话，确保行数超过收缩上限。";
+  st::ui::MarkdownView view{long_text};
+  view.set_shrink_to_fit(true);
+  view.measure(context, constraints);
+  const float wrapped_width = view.measured_size().width;
+
+  // 判据：折行文本**保持满宽**（不被缩）。
+  ST_CHECK(wrapped_width >= 420.0f - 1.0f);
+
+  // 对照：真正短的一行必须能缩（否则这条就变成“永不缩”）。
+  st::ui::MarkdownView short_view{std::string("你好")};
+  short_view.set_shrink_to_fit(true);
+  short_view.measure(context, constraints);
+  ST_CHECK(short_view.measured_size().width < 420.0f - 1.0f);
+}
+
 ST_TEST(md_view_layout_width_follows_real_control_geometry) {
   // 回归：**排版宽 == 控件宽**（用户报“选中背景错位、没随窗口大小适应”）。
   //
@@ -877,11 +911,17 @@ ST_TEST(md_view_selection_band_uses_ink_metrics) {
   const float base = std::stof(*view.get_property("base_font_size"));
   const float ink_height = base * 0.5f;              // 桩：above 0.3 + below 0.2
   const float box_height = port.line_height(base);   // 行盒高（旧实现会用这个）
-  std::cout << std::format("  [md] 期望墨迹高={:.2f} 实测带高={} 行盒高={:.2f}\n", ink_height, best,
-                           box_height)
+  // 高亮带 = 墨迹高 + 上下留白（`kSelectionPadY` = 1px，见 markdown_view.cpp）。
+  //
+  // 为何不再“严格等于墨迹高”：紧贴墨迹的色块看起来像“文字被关在框里”
+  //（直边字符尤其明显）。现在两侧各外扩一点，这条断言跟着改口径。
+  constexpr float kSelectionPadY = 1.0f;
+  const float expected_band = ink_height + kSelectionPadY * 2.0f;
+  std::cout << std::format("  [md] 期望带高={:.2f}（墨迹 {:.2f} + 留白） 实测带高={} 行盒高={:.2f}\n",
+                           expected_band, ink_height, best, box_height)
             << std::flush;
-  // ① 带高 ≈ 墨迹高（容差 3px 吸收绘制取整/圆角混合）。
-  ST_CHECK_NEAR(static_cast<float>(best), ink_height, 3.0f);
+  // ① 带高 ≈ 墨迹高 + 留白（容差 3px 吸收绘制取整/圆角混合）。
+  ST_CHECK_NEAR(static_cast<float>(best), expected_band, 3.0f);
   // ② 前提成立：这个桩上行盒确实远高于墨迹（否则本条区分不出两者）。
   ST_CHECK(box_height > ink_height * 1.2f);
   // ③ 这才是“回退到行盒”会红的判据。

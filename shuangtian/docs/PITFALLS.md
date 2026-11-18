@@ -770,6 +770,19 @@
 | **同一个 payload 在启动路径上被哈希了两次**〔算法〕 | `read_payload_from_self` 校验 payload 一次，`materialize_server` 又对 payload 与既有侧车各算一次——**同一份内存被算了两遍**，白白多付一份全量哈希成本 | `apps/gebai_desktop/main.cpp` |
 | **“写文件慢”可能是哈希慢，不是 IO 慢**〔归因〕 | 用户报“写个文件这么慢”；实测物化：读 166 ms / 写 810 ms / **哈希 13.9 s**。凭直觉去优化写盘（或换 SSD）会白花力气。**先分段计时再动手** | `tools/materialize_cost_probe.cpp`（本次新加的量尺） |
 
+## 场景 31：改「自适应内容」的组件（气泡/视图跟着内容变宽变高）
+
+> **总判据：容器必须把**自己的 `max_width`** 算进「给子元素的可用宽」与「自己占的矩形」。
+> 漏了这一步，声明的 `max_width` 只在 `arrange` 后生效，而**传给子元素的宽仍是父级的整幅值**——
+> 子元素按错的宽排版，父级按对的宽摆位，两边口径分裂。**
+
+| 坑 | 一句话 | 出处 |
+|---|---|---|
+| **自己的 `max_width` 没传给子元素（真正的根因）**〔布局〕 | 气泡 `Row → Card(max_width=520) → 视图`：`Element::measure` 的可用宽只取了 `constraints.max_width`（Row 主轴是 `kUnbounded`），于是无界一路传到下游。实测探针：`Row max_w=1150` → `Card max_w=1e9 avail_w=1150` → `内层 max_w=1e9 avail_w=1e9`。下游按 1106 排（行少、矮），`arrange` 只给真实 488（行多、高）⇒ **宽度不随内容走**（161 字符的推理块只有 80px 宽）+ 长正文末行被裁。**修法**：在 `available_width` 上再 `clamp(min_width, max_width)` | `src/ui/element.cpp` 的 `Element::measure`；实测 2026-11-18 |
+| **自己的 `max_width` 也没夹住自己的矩形**〔布局〕 | 只修 `measure` 不够：`arrange` 拿到的 `rect` 直接当 `bounds_`，父级（Row 主轴无界）给多宽就摆多宽 ⇒ 容器自己声明了上限也不生效，里面的 `grow` 子项照样填满整幅。两处必须成对：一边算约束、一边落实自己占的框 | `src/ui/element.cpp` 的 `Element::arrange` |
+| **用「内容自适应」的东西做探针 ⇒ 逆向验证全绿**〔取证〕 | 拿 `MarkdownView(shrink_to_fit)` 或 `Text` 当探针时，它们会把宽自己缩到内容宽，**掩盖「拿到的可用宽是无界」这件事**——修复逐条回退都绿。唯一有效的探针是 **`grow=true` 的子元素**：它必须填满可用宽，且要到 `arrange` 后才有宽（所以判据读 `bounds().width`，不是 `measured_size()`） | `tests/ui_measure_width_constraint_test.cpp`；逆向验证后修正 |
+| **别为绕根因加补丁：会连带引入新缺陷**〔取证〕 | 未找到真正根因前，我在 `MarkdownView` 里加了「用上轮框宽」「arrange 自我修正高度」「清脏时机」三层补丁。根因修好后逐条验证，**全部不再需要**，而且它们自己引入过两个新缺陷：宽度正反馈塌缩（456→228→128→80）、兄弟重叠（推理块卡片盖住正文第一行）。**改多了就得逐条删回去重验** | 同上（git diff 可见这轮增删） |
+
 ## 怎么用这份速查
 
 **开工前**：扫一眼你**当前场景**那一节（30 秒）。

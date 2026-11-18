@@ -62,6 +62,13 @@ auto iso8601_utc(std::int64_t unix_millis) -> std::string {
 
 auto iso8601_now() -> std::string { return iso8601_utc(unix_ms()); }
 
+auto hhmm_at_offset(std::int64_t unix_millis, std::int64_t offset_seconds) -> std::string {
+  // 用 `floor_div` 而不是 `/`：后者向零截断，负的毫秒/秒会折到错误的一天。
+  const std::int64_t seconds = floor_div(unix_millis, 1000) + offset_seconds;
+  const std::int64_t second_of_day = seconds - floor_div(seconds, 86400) * 86400;
+  return std::format("{:02}:{:02}", second_of_day / 3600, (second_of_day / 60) % 60);
+}
+
 auto format_now(std::string_view format) -> std::string {
   // 本地时间的字段分解（状态栏/日志前缀用途，时区跟随系统）：平台差异下沉在
   // platform_time.cpp（MSVC/MinGW 无 localtime_r；CONVENTIONS §10 第 1 条——差异只进平台层）。

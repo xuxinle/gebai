@@ -112,6 +112,57 @@ ST_TEST(input_copy_action_and_ctrl_c) {
   ST_CHECK(!field.invoke_action("copy", {}));
 }
 
+ST_TEST(input_ctrl_v_pastes_from_clipboard) {
+  // 粘贴：框架之前只有 `Ctrl+C`/`Ctrl+X`/`Ctrl+A`，**没有 `Ctrl+V`**——
+  // 而 `CodeEditor` 与 `Terminal` 都有。用户报“输入框粘贴不了”就是这条。
+  FakeClipboardHost root;
+  st::ui::Input field;
+  field.set_host(&root);
+  field.set_text("ab");
+  field.set_cursor_index(2);
+  ST_CHECK(root.host_set_clipboard_text("CD"));
+
+  auto event = ctrl_key_event("v");
+  ST_CHECK(field.on_event(idle_context(), event));
+  ST_CHECK_EQ(field.value(), std::string("abCD"));
+
+  // 有选区时粘贴应当**替换**选区（通行行为，走 `replace_selection_with`）。
+  field.set_selection(0, 2);
+  ST_REQUIRE(field.has_selection());
+  ST_CHECK(root.host_set_clipboard_text("XY"));
+  auto replace_event = ctrl_key_event("v");
+  ST_CHECK(field.on_event(idle_context(), replace_event));
+  ST_CHECK_EQ(field.value(), std::string("XYCD"));
+
+  // 单行框：换行一律降成空格（直接插 `\n` 会得到一个看不见但存在的换行）。
+  ST_CHECK(root.host_set_clipboard_text("一\r\n二"));
+  field.set_selection(0, field.value().size());
+  auto multiline_event = ctrl_key_event("v");
+  ST_CHECK(field.on_event(idle_context(), multiline_event));
+  ST_CHECK_EQ(field.value(), std::string("一  二"));
+}
+
+ST_TEST(textarea_ctrl_v_pastes_and_keeps_newlines) {
+  // 多行框反过来：**保留换行**，并把 `\r\n`/裸 `\r` 归成 `\n`
+  //（`layout_lines` 只认 `\n`，留着 `\r` 会变成不可见的多余字符）。
+  FakeClipboardHost root;
+  st::ui::TextArea area;
+  area.set_host(&root);
+  ST_CHECK(root.host_set_clipboard_text("第一行\r\n第二行\r第三行"));
+
+  auto event = ctrl_key_event("v");
+  ST_CHECK(area.on_event(idle_context(), event));
+  ST_CHECK_EQ(area.value(), std::string("第一行\n第二行\n第三行"));
+
+  // 只读：粘贴被拦（不能改内容）。
+  area.set_read_only(true);
+  const std::string before = area.value();
+  ST_CHECK(root.host_set_clipboard_text("不该进来"));
+  auto blocked = ctrl_key_event("v");
+  ST_CHECK(area.on_event(idle_context(), blocked));
+  ST_CHECK_EQ(area.value(), before);
+}
+
 ST_TEST(textarea_copy_action_and_ctrl_c_readonly_too) {
   FakeClipboardHost root;
   st::ui::TextArea area;
