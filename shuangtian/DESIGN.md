@@ -1908,9 +1908,57 @@ void refresh_theme(const Theme& theme) {      // 非虚：唯一调度入口
 1. **组件自己的 `apply_theme`**——写变体色/默认尺寸（Button 的主色、Card 的描边…）
 2. **`surface`**——显式要求的底，盖组件默认
 3. **`appearance` 规则回放**——CSS 级声明，再盖一层
-4. **文本覆盖最后**——任何路径写进去的颜色都不该盖过用户直接设的
+   （`elevation` / `variant` / `radius_mode` 这类**档位**也走这条）
+4. **显式 `fill` / `border_color`**——比档位更直接，**必须最后落**
+5. **文本覆盖最后**——任何路径写进去的颜色都不该盖过用户直接设的
 
 于是优先级变成**结构保证**：**显式声明 > 组件默认**。
+
+### 4.2.20.2 为何 `fill` 必须排在 `appearance` **之后**（2026-11-19）
+
+**缺陷**：`BoxProps.fill` 与 `elevation` 同时给时，`fill` 读回被替掉。
+实测：`fill = 纯白(255,255,255,255)` + `elevation = Flat` 读回 **`254,254,255`**
+（主题 `Base` = `#FEFEFF`）；去掉 `elevation` 则读回 `255,255,255`。
+
+**根因**：`elevation` / `variant` 是**档位**，走 `apply_appearance`，而它会用
+`tokens.elevation_surface(level)` 重置 `background`（`Flat` → `Base`）。
+若 `apply_declared_paint` 排在它之前，声明的纯白就被档位色盖掉。
+
+**为何难查**：两者 alpha 都是 255，只断言 `background.a` 完全看不出问题；
+而且中间还隔着玻璃参数（`backdrop_*`）与主题刷新，现象表现为
+“玻璃气泡灰灰的、不通透”——与背板滤镜的缺陷**同症状、不同因**。
+
+**修法**：交换顺序，`apply_declared_paint` 排到 `appearance` 回放之后。
+语义上也更正确：`fill` 是比档位更**直接**的要求（与 `surface` 口径一致：
+“两者都给时它优先”）。
+
+**回归**：`tests/ui_glass_card_invariants_test.cpp` 的
+`glass_card_fill_survives_theme_refresh`（逆向验证：把顺序改回去即变红）。
+
+### 4.2.21 玻璃与背板渐变的主题令牌（2026-11-19）
+
+半透明/玻璃元素的观感建立在“背后有层次”上，而那层**颜色必须与主题同时成立**：
+
+| 令牌 | 位置 | 亮色 | 暗色 |
+|---|---|---|---|
+| `backdrop_gradient` | `Theme` | 暖米→冷蓝（亮度 214~252） | 暖黑→冷蓝（12~26） |
+| `glass_fill` | `Metrics` | 纯白 α=255 | 白但 **α≈18%** |
+| `glass_tint` | `Metrics` | 0.22 | **0.42** |
+
+两个声明式开关（`Style::use_theme_backdrop` / `Style::theme_glass`）让元素在**下发主题那一步**
+取当前主题的值——`build()` 在换肤时不会重跑，在那里写颜色拿不到新主题。
+
+**为何 `glass_fill`/`glass_tint` 必须分档（实测）**：暗色沿用亮色档时，
+气泡内亮度 **73.7** vs 背景 **23.0**（亮 50）——看上去是一块“发辉的灰纸”。
+换档后降到 **40.0 vs 23.0**（亮 17），而亮色档不受影响（保持 +3.3）。
+
+**优先级**：`theme_glass` 只填**缺省值**，显式 `fill` 仍然盖过它
+（用 `RenderExtras::fill_override_from_declaration` 区分“谁写的”——
+不分就会出现“显式 fill 被主题盖掉”或“换肤后底色不跟”二选一）。
+
+**玻璃配置的字符串形式**：`glass="blur:8,tint:0.22,refraction:20"`（XML / 控制通道 /
+`BoxProps::glass` 三处共用 `apply_glass_shorthand` 一个解析器）。为何不逐字段：
+漏写一个就静默半开（只给 blur 忘了 tint → “模糊但实心”），而一条声明天然原子。
 
 `apply_theme` 仍自己做一遍统一层（单测/不上树的元素直接调它时行为不变）；
 两处都是幂等赋值，重复跑无副作用。`UiRoot::layout` 的 `apply_theme_tree` 调

@@ -216,6 +216,20 @@ class Host {
   virtual void request_quit() = 0;
   virtual void request_repaint() = 0;
   virtual void set_theme_mode(ui::ThemeMode mode) = 0;
+  /// **按名称切到一套命名主题**（控制通道 `theme` 的 `name` 分支）。
+  ///
+  /// 为何与 `set_theme_mode` 分开：`set_theme_mode` 只切**亮/暗模式**
+  /// （影响 `ThemeMode` 派生的那批 token），而命名主题是**整套调色板**。
+  /// 混成一个参数会让“`mode=ink` 到底算亮还是算暗”变成隐含约定。
+  ///
+  /// 为何需要它（实测缺口）：验证“每套主题的渐变/玻璃观感”时，
+  /// 控制通道原先只能切 light/dark，命名主题（`cny`/`ink`/`matrix`…）
+  /// 根本没法从自动化里看到——而那类差异恰恰只能逐主题看。
+  /// 默认实现报 Unsupported（应用可以不支持自定义主题）。
+  [[nodiscard]] virtual auto set_theme_name(std::string_view name) -> Status {
+    (void)name;
+    return unexpected(ErrorCode::Unsupported, "该应用不支持按名称切换主题");
+  }
   /// 在当前主题上施加稀疏覆盖（控制通道 `theme` 的 `set` 分支）。
   ///
   /// 为什么放在 `Host` 而不是让 Server 直接改 `root().theme()`：

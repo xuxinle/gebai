@@ -230,6 +230,33 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   // 而焦点决定键盘输入的去向（读不到就只剩截图猜）。
   properties["focused"] = element.focused();
   properties["pressed"] = element.pressed();
+  // —— 液态玻璃（只读快照）——
+  //
+  // 为何必须导出：玻璃是“只能从像素看出来”的观感量，而像素断言需要先知道
+  // “参数到底写成多少了”。`glass` 字符串是**输入**形式（可解析但无法反推
+  // 用户原本想写什么），所以这里回读**四个解析后的值**——调用方拿它做
+  // “设了 blur=8 到底真的生效了吗”的断言，而不是靠反复截图猜。
+  //
+  // 另：这几个量不在 `property_names()` 里（它们属于 `Style` 而不是组件属性面），
+  // 不补这一轮就是“可写、不可读”的静默失明。
+  {
+    const Style& style = element.style();
+    properties["glass_blur"] = std::format("{:.2f}", static_cast<double>(style.backdrop_blur));
+    properties["glass_tint"] = std::format("{:.3f}", static_cast<double>(style.backdrop_tint));
+    properties["glass_refraction"] =
+        std::format("{:.2f}", static_cast<double>(style.backdrop_refraction));
+    properties["glass_dispersion"] =
+        std::format("{:.3f}", static_cast<double>(style.backdrop_dispersion));
+    // 高光以 0~1 回读（与 `glass` 字符串的 `highlight:` 同量纲，不用去猜 255）。
+    properties["glass_highlight"] =
+        std::format("{:.3f}", static_cast<double>(style.top_highlight.a) / 255.0);
+    // 渐变底是否由主题提供（验证“随主题”时最直接的一个断言点）。
+    properties["theme_backdrop"] = style.use_theme_backdrop;
+    // 玻璃底色与 `tint` 是否随主题换档（暗色档是“淡白 + tint 0.42”）。
+    properties["theme_glass"] = style.theme_glass;
+    // 底色 alpha 单列一项：暗色档的“淡白”就靠它（色相都是白，只有透明度在变）。
+    properties["glass_fill_alpha"] = style.background.a;
+  }
   snapshot["props"] = std::move(properties);
   return snapshot;
 }
@@ -247,6 +274,101 @@ auto rect_to_json(math::Rect rect) -> st::Json {
 ///
 /// `enabled` / `visible` / `focused` 三个是框架级属性（不经 `set_property`，
 /// 因为它们需要 `UiRoot` 参与焦点管理），先单独处理。
+/// 解析 **`glass` 属性**（紧凑字符串形式的液态玻璃配置）。
+///
+/// 为何要这个形式：四个玻璃参数各自一个名字时，XML/控制通道要写四条，
+/// 且漏一个就静默半开（比如给了 `blur` 忘了 `tint`，得到一块“模糊但实心”）。
+/// 一条字符串把“开关 + 参数”一次性说清，也天然适用于 XML（属性值就是字符串）。
+///
+/// 语法（逗号分隔，空白忽略，**不区分大小写**）：
+/// ```
+/// glass="on"                      开玻璃，参数用主题/默认档
+/// glass="off"                     关（显式关时不报错，便于模板统一写）
+/// glass="blur:8"                  只给模糊，其余保持原值
+/// glass="blur:8,tint:0.22,refraction:20,dispersion:0.35"
+/// glass="2"                       纯数字 = `blur` 的缩写
+/// ```
+/// 未给的下标字段**不会被重置**（与“只写你关心的参数”一致），
+/// 但 `on`/`off` 不带参数时按“开/关”处理。
+///
+/// 返回 false 仅当**一个键也不认识**（把拼写错误当成功会让调用方调半天没效果）；
+/// 认出一部分就整体成功，未认出的键忽略。
+auto apply_glass_shorthand(Element& element, std::string_view text) -> bool {
+  Style& style = element.style();
+  const auto lower = [](std::string_view s) {
+    std::string out(s);
+    for (char& ch : out) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return out;
+  };
+  const std::string whole = lower(text);
+  if (whole == "off" || whole == "0" || whole == "none" || whole.empty()) {
+    style.backdrop_blur = 0.0f;
+    style.backdrop_tint = 0.0f;
+    style.backdrop_refraction = 0.0f;
+    style.backdrop_dispersion = 0.0f;
+    return true;
+  }
+  // 纯数字 = `blur` 缩写（写在 `glass="8"` 这种最简形式里）。
+  if (whole.find(':') == std::string::npos && whole.find(',') == std::string::npos) {
+    if (const float value = std::strtof(whole.c_str(), nullptr); value > 0.0f) {
+      style.backdrop_blur = value;
+      // 只给模糊时给一个可读的缺省着色（否则玻璃几乎完全透明，文字背后全穿）。
+      if (style.backdrop_tint <= 0.0f) style.backdrop_tint = 0.22f;
+      return true;
+    }
+    // `glass="on"` 之类：开关本身合法，参数用当前值（全 0 时给一套缺省档）。
+    if (whole == "on") {
+      if (style.backdrop_blur <= 0.0f) style.backdrop_blur = 6.0f;
+      if (style.backdrop_tint <= 0.0f) style.backdrop_tint = 0.22f;
+      return true;
+    }
+    return false;
+  }
+  // `k:v` 列表。
+  bool recognized = false;
+  std::size_t start = 0;
+  while (start <= whole.size()) {
+    const std::size_t comma = whole.find(',', start);
+    std::string_view item(whole.data() + start,
+                          (comma == std::string::npos ? whole.size() : comma) - start);
+    while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.remove_prefix(1);
+    while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) item.remove_suffix(1);
+    if (!item.empty()) {
+      const std::size_t colon = item.find(':');
+      if (colon != std::string_view::npos) {
+        const std::string key(item.substr(0, colon));
+        const float value = std::strtof(std::string(item.substr(colon + 1)).c_str(), nullptr);
+        if (key == "blur") {
+          style.backdrop_blur = value;
+          recognized = true;
+        } else if (key == "tint") {
+          style.backdrop_tint = value;
+          recognized = true;
+        } else if (key == "refraction" || key == "refract") {
+          style.backdrop_refraction = value;
+          recognized = true;
+        } else if (key == "dispersion") {
+          style.backdrop_dispersion = value;
+          recognized = true;
+        } else if (key == "highlight") {
+          // 高光给 0~1 比例（`0.35` = 90/255），与其它参数同量纲。
+          //
+          // 颜色固定为白：玻璃高光就是“边被白光打亮”，让调用方再给一个 RGB
+          // 只会多一个可写错的维度（要彩色高光那是自定义投影，不该走玻璃配置）。
+          // 而 `a` 单独调——它是**强度**。
+          style.top_highlight = math::Color{
+              255, 255, 255,
+              static_cast<std::uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f)};
+          recognized = true;
+        }
+      }
+    }
+    if (comma == std::string::npos) break;
+    start = comma + 1;
+  }
+  return recognized;
+}
+
 auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
                       std::vector<RejectedProperty>* rejected) -> Json {
   // 被拒项登记（带拒因分类，BACKLOG 4022 方向①）：
@@ -429,6 +551,17 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
       // 这是 `Element` 级状态（不是 `Style`），因为命中判定在 `UiRoot` 分配事件的路径上。
       element.set_intercepts_input(st::json_as_bool(value, true));
       return true;   // 不改布局，不走下面的 mark_layout_dirty
+    } else if (name == "glass") {
+      // **液态玻璃的紧凑字符串配置**（XML 与运行时同一入口）：
+      //   glass="blur:8,tint:0.22,refraction:20,dispersion:0.35"
+      //   glass="on" / "off" / "8"
+      // 一条声明同时管“开不开”与“各参数”，避免四条属性漏写一条就静默半开。
+      //
+      // 注意别在这里 `return`：那会绕过 `changed` 登记，于是 `set glass=…`
+      // 虽然真的改了样式，但回包里的 `changed` 是空——调用方会认为没生效。
+      const std::string text = value.is_string() ? st::json_as_string(value)
+                                               : st::json_dump(value);
+      if (!apply_glass_shorthand(element, text)) return false;   // 一个键也不认识
     } else if (is_appearance_name(name)) {
       // 样式系统（`Appearance`）：五个字段都是**档位语义**，不是具体数值——
       // 落位要过 `Tokens` 解析（抬升→表面+阴影+高光、尺寸→高+字+图标三联动、

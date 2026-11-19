@@ -77,6 +77,38 @@ inline constexpr float kComposerReserve = 160.0f;
 /// 后一半只需交给父级约束，不需要额外的魔数。
 inline constexpr float kMaxBubbleWidth = st::ui::kUnbounded;
 
+// ── 气泡的液态玻璃配置 ──
+//
+// **一条字符串说完**（语法与 XML 的 `glass="…"`、控制通道的 `set glass=…`
+// 完全相同——三处共用一个解析器，不会分叉）。
+//
+// 五个参数各管一件事，调参时必须分开看（混着调会在“亮 ↔ 透”之间来回摆动）：
+//
+// | 参数 | 管的那个量 | 调高的代价 |
+// |---|---|---|
+// | `blur` | 背板层次保留（“透不透”） | 背景细节被抹平 → 一块均匀色 |
+// | `tint` | 亮度 / 白膜厚度 | 盖住背板 → “亮了但不透” |
+// | `refraction` | 边缘透镜畸变（“液态感”） | 边缘被扯得厉害 |
+// | `dispersion` | 边缘色散（彩虹纹） | 彩边明显 → 廉价 |
+// | `highlight` | 内边缘高光（“硬度”），0~1 | 边缘过曝 |
+//
+// **`tint` 是“亮与透”的直接权衡，不可能两全**：它乘在实白 alpha 上——
+// 高了亮但盖住背板（像不透明卡片），低了透但暗部透出来。所以“亮”不靠它，
+// 而靠 `highlight`（只贴边提亮）与 `refraction`（只弯边缘）。
+//
+// 各档取值的实测依据（扫描台：多组并排 + 单变量扫描，见霜天子Agent 提示词 §5.5）：
+// · `blur`：4 细条锐利但像“半透明”而非玻璃；8 柔和有层次；14 起糊成色块 → 取 6
+// · `tint`：0.15 很透但正文对比不足；0.34 偏白 → 取 0.22
+// · `refraction`：**已关**（取 0）——它对 14px 小圆角没有正面价值，只会在边缘把
+//   背后背景采样进来，形成一条与卡片本体色相不一致的“杂色带”。
+//   实测（控制变量，逐个开关）：关掉它后卡片顶缘 R−B 从 **−8~−14** 回到 **−5**
+//   （与背景的 −5 一致），杂色消失；而关掉 `highlight` 时杂色**仍在**。
+//   设成 20 时能看出“液态感”，但那是在大面积样张上；真实卡片上只会脏边。
+inline constexpr std::string_view kGlassSpec =
+    "blur:6,tint:0.22,refraction:0,dispersion:0,highlight:0.35";
+/// 气泡圆角：折射的带宽≈圆角半径，直角会把液态效果藏掉。
+inline constexpr float kGlassRadius = 14.0f;
+
 // 默认模型：应用内置的兜底值（不是密钥，也不是部署配置）。
 //
 // 真正的部署参数有两条路，**都不依赖运行时环境变量**：
@@ -805,6 +837,15 @@ struct AgentPage : st::ui::dsl::Component {
           [](st::ui::ScrollView& s) {
             s.set_id("msg-scroll");
             s.set_show_scrollbar(true);
+            // **页面底渐变交给主题令牌**（`Style::use_theme_backdrop`）。
+            //
+            // 为何不能省（实测）：背后是纯色时，气泡模糊/折射的结果与纯色几乎一致，
+            // 看上去就是一块“淡了一点的灰”——用户会认为玻璃没生效。
+            //
+            // 为何不在此写色泽：层次颜色必须与亮/暗主题**同时**成立，写死一组
+            // 暖→冷色，换到暗色主题就是一层灰蒙；而且 `build` 在换肤时不会重跑，
+            // 写了也拿不到新主题。声明这个标志后，颜色由 `refresh_theme` 同步。
+            s.style().use_theme_backdrop = true;
             // **跟随底部**：流式输出/新消息到达时自动跟到底。
             //
             // 为何不自己 `scroll_to(1e9)`（`set_follow_end` 就是为此而存在）：
@@ -961,14 +1002,40 @@ struct AgentPage : st::ui::dsl::Component {
                   .justify = is_user ? st::ui::Justify::End : st::ui::Justify::Start,
                   .key = "row-" + m.role + "-" + uid},
               [&] {
+                // **`elevation = Flat` 是必需项，不是修饰**：
+                // `Card` 的投影默认是 `shadow_level_ = 2`（md），而它画在**玻璃底下**——
+                // 背板模糊会把投影平均进来，整块气泡被压暗（实测：气泡内 200.7
+                // vs 背景 239.7，暗 39；关掉后气泡内 243.0、反推背板 239.6）。
+                // 玻璃本身就是“浮起来”的材质，再加投影既不符语义、又把通透感吃掉。
                 (void)card(c, {.gap = 6, .padding = 10, .max_width = kMaxBubbleWidth,
-                               // **气泡不限高**：内容多高它就多高（外层消息区滚动）。
-                               // 不限高的后果是“长回答在气泡内部出滚动条”——
-                               // 那既遮住末尾、又需要用户在一个小框里拖，
-                               // 与聊天气泡的阅读习惯相反。
                                .max_height = st::ui::kUnbounded,
-                               .surface = is_user ? st::ui::Element::Surface::Sunken
-                                                  : st::ui::Element::Surface::Base,
+                               .radius = kGlassRadius,
+                               // **不叠 `surface`**：它是主题实色底（`Base` = #FEFEFF、
+                               // `Sunken` = #E9EAF0 灰），会带自己的色相与亮度盖在背板上，
+                               // 玻璃变成“罩了一层雾的卡片”。
+                               //
+                               // 底色与 `tint` 都**交给主题档位**（`theme_glass`）：
+                               // 亮色用纯白 + tint 0.22；暗色必须换成淡白（α≈18%）+
+                               // tint 0.42，否则同一组参数会把暗色气泡抹成发辉的灰纸
+                               //（实测：沿用亮色档时气泡内 73.7 vs 背景 23.0，亮 50）。
+                               // **玻璃元素不画描边**：边框由 `top_highlight` 承担。
+                               //
+                               // 实测（用户标注截图，亮色 1988px 宽的对话项）：
+                               // 带 `border_color = 白 α140` 时，顶边会出现一条 **1px 高、
+                               // 亮度恒为 246.0** 的直线（从 x=40 一直拉到 x=1920，逐点完全相等），
+                               // 而上下两侧是 228~236——没有任何渐变，看起来就是“多了一道边框”。
+                               // 原因：环形描边在 DPI 1.25 下是全宽等亮的，它不会像高光那样衰减；
+                               // 而高光已经在做“边缘受光”，两者叠在一起就是两道平行亮线。
+                               //
+                               // 高光宽度不是“玻璃强度”而是几何（亮带的厚），
+                               // 不进 `glass` 字符串（那里管的是强度量）。
+                               .highlight_width = 1.5f,
+                               // **一行字符串配置玻璃**（与 XML 的 `glass="…"` 同一语法）：
+                               // 四个参数各自一个字段时要盯四处，漏一个就静默半开
+                               //（只给 blur 忘了 tint = “模糊但实心”）。
+                               .glass = kGlassSpec,
+                               .theme_glass = true,
+                               .elevation = st::ui::Elevation::Flat,
                                .key = "bubble-" + m.role + "-" + uid},
                            [&] {
                              (void)row(c, {.gap = 6, .key = "meta"}, [&] {
@@ -1038,11 +1105,20 @@ struct AgentPage : st::ui::dsl::Component {
                   .justify = st::ui::Justify::Start,
                   .key = "row-reasoning-" + uid},
               [&] {
-                (void)card(c, {.gap = 4, .padding = 9, .max_width = kMaxBubbleWidth,
-                               .max_height = st::ui::kUnbounded,
-                               .surface = st::ui::Element::Surface::Sunken,
-                               .key = "reasoning-block-" + uid},
-                           [&] {
+                // **推理块不用 `card()` 而要 `custom_container<Card>`**：
+                // 需要关掉 `Card` 的默认投影（`shadow_level_ = 2`，md），而
+                // `BoxProps` 没有对应字段（`elevation = Flat` 会同时把底重置成主题取色，
+                // 覆盖掉下面要的 `Sunken`）。
+                //
+                // 为何必须关（用户原话“为啥只有上边框有”，附截图实测）：
+                // 卡片上缘 y=662 有一行**横贯全宽**（x=100..2300）的硬线，
+                // 亮度 197（背景 235、卡内深处 242）。那是 md 投影落在卡片
+                // 上缘的那一圈暗晕——投影是**对称外扩**的，但卡片下方是内容、
+                // 左右是空白，只有上缘紧贴一段浅色背景，所以只有它被读成“一条边”。
+                // 二维渐变带（`inset`）不是这里的原因：本卡片的 shadow 是外投影。
+                (void)custom_container<st::ui::Card>(
+                    c,
+                    [&] {
                              (void)row(c, {.gap = 5, .align_items = st::ui::Align::Center,
                                            .key = "reasoning-meta-" + uid}, [&] {
                                (void)icon(c, "sparkles", 11,
@@ -1065,7 +1141,27 @@ struct AgentPage : st::ui::dsl::Component {
                                  },
                                  {.max_height = st::ui::kUnbounded,
                                   .key = "reasoning-" + uid});
-                           });
+                    },
+                    [](st::ui::Card& card) {
+                      // 关掉默认 md 投影：它落在卡片上缘会形成一道暗晕。
+                      card.set_shadow_level(0);
+                    },
+                    {.gap = 4,
+                     .padding = 9,
+                     .max_width = kMaxBubbleWidth,
+                     .max_height = st::ui::kUnbounded,
+                     .radius = kGlassRadius,
+                     .surface = st::ui::Element::Surface::Sunken,
+                     // **不画描边**（用户原话：“不想要这条怪怪的边”）。
+                     //
+                     // 实测：关掉投影后上缘仍剩 y=156 处的一道 **222**（上下 239/235）。
+                     // 那是 `Card::apply_theme` 给的 1px 描边（黑 5.5%）——
+                     // **必须走声明式字段**，在 `custom_container` 的 configure 回调里
+                     // 写 `card.style().border_width = 0` 会被之后跑的主题重算盖回去
+                     //（实测改了三次数值完全不变，就是这个原因）。
+                     .border_width = 1.0f,
+                     .border_color = st::math::Color{0, 0, 0, 1},
+                     .key = "reasoning-block-" + uid});
               });
   }
 
@@ -1871,7 +1967,14 @@ struct AgentPage : st::ui::dsl::Component {
 // ———————————————————————————————————————————————————————————————
 int run_app(int argc, char** argv) {
   st::app::CommonOptions common;
-  const std::vector<st::app::AppOption> app_options = {};
+  // **`--demo`：注入一组构造好的假消息**（不调模型）。
+  //
+  // 为何需要它：验证气泡/推理块的**形态**（边框、圆角、半透明）时，
+  // 每次等模型真实流式返回要十几秒，而且内容长短不可控——
+  // 观感类改动需要的是“固定内容 + 固定布局”的可重复画面。
+  // 只在开发/截图时用，不影响正常对话路径。
+  const std::vector<st::app::AppOption> app_options = {
+      st::app::flag("--demo", "注入构造好的演示消息（不调模型；截图/调观感用）")};
   st::app::AppOptionValues values;
   auto parsed = st::app::parse_options(argc, argv, app_options, common, values);
   if (!parsed) {
@@ -1954,10 +2057,54 @@ int run_app(int argc, char** argv) {
     return 1;
   }
 
+  // **`--demo`：注入一组构造好的假消息**（不调模型）。
+  //
+  // 为何需要它：验证气泡/推理块的**形态**（边框、圆角、半透明）时，
+  // 每次等模型真实流式返回要十几秒，而且内容长短不可控——
+  // 观感类改动需要的是“固定内容 + 固定布局”的可重复画面。
+  // 这个开关只在开发/截图时用，不影响正常对话路径。
+  if (values.has("--demo")) {
+    const std::string trace =
+        "用户要了解液态玻璃。\n"
+        "先想清楚它是什么：Apple 在 2025 年提出的设计语言，核心是折射而不是模糊。\n"
+        "需要区分三个层次：材质（玻璃）、行为（折射/高光）、动态（随背景变化）。\n"
+        "回答应该给一个最小可跑的实现，而不是只讲概念。";
+    const std::string body =
+        "## 液态玻璃的几个关键点\n\n"
+        "**材質**：背景内容透过，但被模糊、加饱和，不是简单叠一层灰。\n\n"
+        "**边缘折射**：玻璃边缘会把背景“扭曲”一下，像凸透镜。\n\n"
+        "**高光反射**：边缘有一圈高光，会随倾斜角度/光标位置移动。\n\n"
+        "```css\n.glass {\n  backdrop-filter: blur(20px) saturate(180%);\n"
+        "  box-shadow: inset 0 1px 0 rgba(255,255,255,.6);\n}\n```";
+    std::vector<Message> seeded;
+    {
+      Message user;
+      user.role = "user";
+      user.content = "简单介绍液态玻璃特效";
+      user.stamp = "14:22";
+      seeded.push_back(user);
+    }
+    {
+      Message assistant;
+      assistant.role = "assistant";
+      assistant.reasoning = trace;
+      assistant.reasoning_streaming = false;
+      assistant.content = body;
+      assistant.stamp = "14:22";
+      seeded.push_back(assistant);
+    }
+    page->messages.set(seeded);
+    page->status.set({});
+  }
+
   // 首次运行引导：没有可用配置就把配置面板直接弹出来（无顶栏入口，这一步不可绕过）。
   // 必须在 start() 之后：弹窗走声明式 overlay，需要 UiRoot 与脚本宿主就绪。
+  //
+  // **demo 模式不弹**：它的用途是截图看形态，弹窗的遮罩会把整屏压暗，
+  // 看到的颜色全不是真实主题（实测：遮罩下背景从 235 掉到 ~200，
+  // 会让人误以为玻璃/背景本身变暗了）。
   const Config cfg = page->config.value();
-  if (cfg.ready()) {
+  if (values.has("--demo") || cfg.ready()) {
     page->status.set({});
   } else {
     // 未配置时直接弹面板，不另写状态行（界面上不保留状态文字）。

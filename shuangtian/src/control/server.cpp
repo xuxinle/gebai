@@ -1827,6 +1827,20 @@ auto Server::Impl::handle_theme([[maybe_unused]] Client& client, [[maybe_unused]
                                 [[maybe_unused]] const Json& params,
                                 [[maybe_unused]] bool& deferred) -> Result<Json> {
   [[maybe_unused]] auto& root = host.root();
+  // **按主题名切换**（`name`）：内置两档之外的命名主题（`cny` / `ink` / `matrix`…）。
+  //
+  // 为何必须是单独一个参数而不是塞进 `mode`：`mode` 的语义是**亮暗模式**（影响
+  // `ThemeMode` 派生的那批 token），而命名主题是**整套调色板**——两件事，
+  // 混在一起会让“`mode=ink` 到底算亮还是算暗”变成一个隐含约定。
+  //
+  // 存在的理由（实测缺口）：没有它就无法验证“每套主题的渐变/玻璃观感”
+  // （控制通道只能切 light/dark），而这类观感差异恰恰只能逐主题看。
+  if (const std::string name = json_get_string(params, "name"); !name.empty()) {
+    if (auto status = host.set_theme_name(name); !status) {
+      return forward_error(status.error());
+    }
+    host.request_repaint();
+  }
   if (const std::string mode = json_get_string(params, "mode"); !mode.empty()) {
     if (mode == "light") {
       host.set_theme_mode(ui::ThemeMode::Light);
@@ -1933,12 +1947,12 @@ if (action == "quit" || action == "close") {
   result["action"] = action;
   return result;
 }
-if (action == "reload" || action == "repaint") {
-  host.request_repaint();
-  Json result = Json::object();
-  result["ok"] = true;
-  return result;
-}
+  if (action == "reload" || action == "repaint") {
+    host.request_repaint();
+    Json result = Json::object();
+    result["ok"] = true;
+    return result;
+  }
 if (action == "set_scale" || action == "scale") {
   const double requested = json_get_double(params, "scale", 0.0);
   if (requested <= 0.0) return unexpected(ErrorCode::Invalid, "set_scale 需要正的 scale 参数");

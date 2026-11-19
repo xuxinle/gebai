@@ -53,7 +53,32 @@ summary: 协议 st-control/1（TCP + uint32 长度前缀 JSON 帧）；握手 he
 | `wait` | 条件等待（`element`/`gone`/`text`/`stable`/`frames`） | 比 sleep 可靠：等的是状态，不是时间 |
 | `metrics` | 运行时指标（后端/无头/DPI/帧耗时/节点数） | 确认"真的在无头跑""DPI 真的生效" |
 | `events` | 订阅 `ui.changed` / `frame` / `input` / `log` / `theme` | `ui.changed.data.changed` = 变更元素 id 清单（去重、单帧上限 64） |
-| `theme` / `app` / `shutdown` | 切主题 / 退出与重绘/DPI / 优雅关闭 | `app` 的 `log` 要 `limit` 参数 |
+| `theme` / `app` / `shutdown` | 切主题 / 退出与重绘/DPI / 优雅关闭 | 切主题用 **`theme`**（`mode: light/dark/toggle`），**不是** `app`；`app` 的 `log` 要 `limit` 参数 |
+
+### 观测半透明/玻璃：`get` 的只读玻璃字段
+
+玻璃与渐变是“只能从像素看出来”的观感量，而像素断言需要先知道**参数写成多少了**。
+所以 `get` 的快照里带了这几项（都是只读、不在属性面里）：
+
+| 字段 | 含义 |
+|---|---|
+| `glass_blur` / `glass_tint` / `glass_refraction` / `glass_dispersion` | 解析后的四个值（`glass` 字符串的输入结果） |
+| `glass_highlight` | 内边缘高光强度，**0~1**（与 `glass="highlight:0.35"` 同量纲） |
+| `glass_fill_alpha` | 玻璃底色的 alpha（亮/暗主题档位不同：亮色 255、暗色 46） |
+| `theme_glass` | 该元素的底色与 `tint` 是否**随主题换档** |
+| `theme_backdrop` | 该元素的背板渐变是否**由主题提供** |
+
+典型用法（验“换肤后玻璃真的跟着变”）：
+
+```
+theme  mode=dark                    # 切暗色
+get    #bubble                       # 读回 glass_fill_alpha / glass_tint
+capture                             # 再截图量“气泡内 vs 背景”的亮度差
+```
+
+**为何需要“量亮度差”而不只看参数**：同一组参数在亮/暗主题下的观感差很远。
+实测暗色沿用亮色档时，气泡内 73.7 vs 背景 23.0（**亮 50**，看着像一块发辉的灰纸）。
+参数面上一切正常——只有像素能发现。
 
 选择器语法速记：
 

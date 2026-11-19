@@ -1054,6 +1054,42 @@ class Element {
     return extras_ != nullptr ? extras_->surface : Surface::None;
   }
 
+  /// 设**显式填充色**（`BoxProps::fill` 的入口）。
+  ///
+  /// 与 `set_surface` 的分工：`surface` 是“从主题取哪一档底”，
+  /// 本函是“就要这个色”（半透明玻璃、遮罩、提示条那种主题里没有的色）。
+  /// 两者都给时**本函优先**（在 `apply_declared_overrides` 里回放更晚）。
+  /// 透明度照常参与合成：`a == 0` 表示不干预（与 `BoxProps::fill` 同口径）。
+  void set_fill_override(math::Color color) noexcept {
+    if (color.a == 0U) return;
+    extras().fill_override = color;
+  }
+  /// 同上，但标记来源为**调用方显式声明**（而不是主题缺省档）。
+  ///
+  /// 为何需要这个区分：`theme_glass` 每帧会用主题底色写 `fill_override`，
+  /// 若它与显式 `fill` 共用“已存在”这个判据，第二帧就分不清谁写的——
+  /// 要么显式 `fill` 被主题盖掉，要么主题档永远不再更新（换肤后不跟）。
+  void set_declared_fill_override(math::Color color) noexcept {
+    if (color.a == 0U) return;
+    extras().fill_override = color;
+    extras().fill_override_from_declaration = true;
+  }
+  [[nodiscard]] auto fill_override() const noexcept -> std::optional<math::Color> {
+    return extras_ != nullptr ? extras_->fill_override : std::nullopt;
+  }
+
+  /// 设**显式描边色**（`BoxProps::border_color` 的入口）。
+  ///
+  /// 为何需要存档：组件（`Card`）会在 `apply_theme` 里按主题 `border` 令牌重算描边，
+  /// 不存档就会被下一帧盖掉——玻璃的白色高光边会变成一道淡灰。
+  void set_border_color_override(math::Color color) noexcept {
+    if (color.a == 0U) return;
+    extras().border_color_override = color;
+  }
+  [[nodiscard]] auto border_color_override() const noexcept -> std::optional<math::Color> {
+    return extras_ != nullptr ? extras_->border_color_override : std::nullopt;
+  }
+
  protected:
   /// **框架级统一层**：先虚派发组件自己的主题样式，再回放所有**显式声明**。
   ///
@@ -1061,12 +1097,26 @@ class Element {
   /// 1. 组件自己的 `apply_theme` —— 写变体色/默认尺寸（Button 的主色、Card 的描边…）
   /// 2. `surface` —— 显式要求的底，盖组件默认
   /// 3. `appearance` 规则回放 —— CSS 级声明，再盖一层
-  /// 4. 文本覆盖最后 —— 任何路径写进去的颜色都不该盖过用户直接设的，
+  ///    （`elevation` / `variant` 这类**档位**也走这条，会重置 `background`/`shadow`）
+  /// 4. **显式 `fill` / `border_color`** —— 比档位更直接，必须最后落
+  /// 5. 文本覆盖最后 —— 任何路径写进去的颜色都不该盖过用户直接设的，
   ///    包括 `appearance` 里带 `text` 的情形
+  ///
+  /// 第 4 步为何不能在第 3 步之前：`elevation = Flat` 也会经 `apply_appearance`
+  /// 把 `background` 重置成 `elevation_surface()`（= 主题 `Base` #FEFEFF = 254,254,255）。
+  /// 若 `fill` 先落，声明的纯白就被替掉，而 **alpha 恰好也是 255**——
+  /// 只查 alpha 的断言完全看不出问题（实测：`fill=白` + `elevation=Flat` 读回 254,254,255）。
   ///
   /// 为何做成**非虚的单一入口**：见 `refresh_theme` 的注释（72 组件里 65 个
   /// 不转调基类，统一层在它们上就是死代码）。
   void apply_declared_overrides(const Theme& theme) {
+    // **页面底渐变最先回放**：它是“我比默认更靠后”的底，后面的
+    // `surface` / `fill` / `background` 声明一旦出现就应当盖过它
+    //（那些是“这块就是某色”，比“随主题的页面底”更直接）。
+    apply_theme_backdrop(theme);
+    // 玻璃缺省档（底色 + tint）紧跟在后面：它是“主题给的底”，
+    // 而下面的 `fill`/`surface` 是“调用方直接要求的”，后者优先。
+    apply_theme_glass(theme);
     apply_surface(theme);
     apply_text_overrides();
     // 外观规则回放（声明过 `apply_appearance` 的元素在此跟随主题：
@@ -1074,7 +1124,78 @@ class Element {
     if (extras_ != nullptr && extras_->appearance.has_value()) {
       const Tokens tokens(theme);
       (void)ui::apply_appearance(*this, tokens, *extras_->appearance);
-      apply_text_overrides();   // 文本显式覆盖最后回放（盖过 appearance 的 text）
+    }
+    // **显式填充/描边必须排在 `appearance` 之后**（它盖过档位解析的底）。
+    //
+    // 为何：`elevation` / `variant` 这类档位走的也是 `apply_appearance`，
+    // 而它会用 `elevation_surface()` 把 `background` 重置成主题实色
+    //（`Elevation::Flat` → `Base` = #FEFEFF = 254,254,255）。
+    // 若 `fill` 先落，声明的纯白就被这层档位色替掉——而 alpha 恰好也是 255，
+    // 于是“背景是不是我的色”这类断言只查 alpha 会完全看不出问题。
+    // 实测：`fill=白` + `elevation=Flat` 读回 `254,254,255`；
+    // 去掉 `elevation` 则 `255,255,255`。语义上 `fill` 是更直接的要求，
+    // 与 `surface` 的口径一致（“两者都给时它优先”），所以它必须最后落。
+    apply_declared_paint(theme);
+    apply_text_overrides();   // 文本显式覆盖最后回放（盖过 appearance 的 text）
+  }
+
+  /// 把“随主题的页面底渐变”落到 `style_`（`Style::use_theme_backdrop` 为真时）。
+  ///
+  /// 为何单独一个回放入口：渐变颜色属于主题，而 `build()` 拿不到“新主题”
+  /// （它只在结构变化时跑，换肤时不会重跑）。只有在下发主题这一步同步，
+  /// 亮/暗切换才会跟着变。
+  void apply_theme_backdrop(const Theme& theme) {
+    if (!style_.use_theme_backdrop) return;
+    if (const auto& gradient = theme.backdrop_gradient()) {
+      style_.set_gradient_background(*gradient, theme.colors().bg);
+    } else {
+      // 主题没定渐变：退回纯色底（而不是留旧渐变，那会在换肤后错色）。
+      style_.set_solid_background(theme.colors().bg);
+    }
+  }
+
+  /// 把“随主题的玻璃缺省档”落到 `style_`（`Style::theme_glass` 为真时）。
+  ///
+  /// 只覆盖**底色与 tint**：`blur`/`refraction` 由调用方决定（它们与主题无关，
+  /// 是“玻璃有多厚/多弯”而不是“亮不亮”——后者才需要随亮暗换档）。
+  ///
+  /// 为何要单独一个回放入口：玻璃底色必须在下发主题这一步同步，`build()` 拿不到
+  /// 新主题（换肤时它不重跑）。
+  void apply_theme_glass(const Theme& theme) {
+    if (!style_.theme_glass) return;
+    // **只在调用方没显式要求底色时**才用主题档。
+    //
+    // 为何要这个判断：`theme_glass` 是“缺省值”，而 `fill` 是“这块就是某色”。
+    // 无条件盖底会把显式的 `fill` 吃掉——那正是“声明了却不生效”的老毛病。
+    //
+    // 为何不能直接查 `fill_override.has_value()`：本函数自己就会写入它，
+    // 第二帧就变成“已经有 override 了”→ 永远不再更新，换肤后底色停在上一个主题。
+    // 所以用 `fill_override_from_declaration_` 区分“谁写的”。
+    if (extras_ == nullptr || !extras_->fill_override_from_declaration) {
+      set_fill_override(theme.metrics().glass_fill);
+    }
+    style_.backdrop_tint = theme.metrics().glass_tint;
+  }
+
+  /// 把**显式底/描边**落到 `style_`（由 `apply_declared_overrides` 调，在组件
+  /// 自己的 `apply_theme` **之后**）。
+  ///
+  /// 为何必须是“声明回放”而不是“设一次”（实测缺陷）：组件的 `apply_theme`
+  /// 每次主题下发都会重算颜色——`Card` 把 `background` 重置为 `colors().surface`、
+  /// 把 `border_color` 重置为 `border` 令牌。只在 `apply_box` 里写一次的话，
+  /// 第二帧就被盖回去了（玻璃卡片又从半透明变回实心白）。
+  void apply_declared_paint(const Theme& theme) {
+    (void)theme;
+    if (extras_ == nullptr) return;
+    // 填充色优先于表面档位：`fill` 是更直接的要求（与 `BoxProps` 的文档口径一致：
+    // “与 `surface` 并行，两者都给时它优先”）。
+    if (extras_->fill_override.has_value()) {
+      // 走 `set_solid_background`：它会清掉组件可能铺的渐变，
+      // 否则渐变残影会盖住显式要求的纯色（与 `apply_surface` 同一条义务）。
+      style_.set_solid_background(*extras_->fill_override);
+    }
+    if (extras_->border_color_override.has_value()) {
+      style_.border_color = *extras_->border_color_override;
     }
   }
 
@@ -1607,6 +1728,24 @@ class Element {
     std::optional<FontWeight> text_weight_override{};
     /// 语义表面档位（`Element::Surface`；`None` = 不画底色，与构造默认一致）。
     Surface surface{Surface::None};
+    /// **显式填充色**（DSL `BoxProps::fill` 的存档）。
+    ///
+    /// 为何必须存一份（2026-11-19，实测缺陷）：`BoxProps::fill` 原来只在 `apply_box` 里
+    /// 写一次 `style_.set_solid_background`，而组件的 `apply_theme`（如 `Card`
+    /// 把 background 重置为 `colors().surface`）**每帧重算時会把它盖掉**。
+    /// 于是“设了 fill”变成首帧对、之后又回到主题色——玻璃卡片的半透明白
+    /// 变成实心白，`backdrop_tint` 怎么调都不生效（因为底不透明）。
+    /// 存进 `RenderExtras` 后，由 `apply_declared_overrides` 与 `surface` 同层回放。
+    std::optional<math::Color> fill_override{};
+    /// 该 `fill_override` 是否来自**调用方显式声明**（`BoxProps::fill`）。
+    ///
+    /// `theme_glass` 每帧会用主题底色写同一个字段，两者必须能区分：
+    /// 分不清就会出现“显式 `fill` 被主题盖掉”或“换肤后底色不跟”二选一。
+    bool fill_override_from_declaration{false};
+    /// **显式描边色**（DSL `BoxProps::border_color` 的存档）——与 `fill` 同一原因。
+    /// 组件（`Card`）会在 `apply_theme` 里按 `border` 令牌重算描边，
+    /// 不存档一样会被盖掉。
+    std::optional<math::Color> border_color_override{};
     /// 鼠标指针形态（`set_cursor` 声明的“这类控件整体用哪种”）。
     MouseCursor cursor{MouseCursor::Arrow};
     /// 外观规则（`apply_appearance` 的意图存档；`apply_theme` 每帧回放——

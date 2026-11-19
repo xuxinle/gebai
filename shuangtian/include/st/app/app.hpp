@@ -544,7 +544,13 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 按名字切主题（内置主题库：light/dark/nebula/qinhan/…）。
   /// 与 `set_theme_mode` 同一管线（`compose_theme_with` 重合成），
   /// `--theme-file` 与运行期 `theme.set` 的覆盖不丢。未知名字返回失败、不切换。
-  [[nodiscard]] auto set_theme_name(std::string_view name) -> Status;
+  ///
+  /// ⚠ **必须写 `override`**：基类 `Host` 里有同名虚函数（控制通道 `theme`
+  /// 的 `name` 分支调它）。不写 `override` 时编译器不会报错——
+  /// 它只是一个「恰好同名的新成员」，基类那份默认实现（报 Unsupported）
+  /// 仍然被虚派发调用，于是**切主题静默失效**。
+  /// 实测：`theme name=cny` 返回成功但 `name` 仍是 `dark`。
+  [[nodiscard]] auto set_theme_name(std::string_view name) -> Status override;
   /// 控制通道 `theme.set`：在当前主题上施加稀疏覆盖，成功即重绘。
   [[nodiscard]] auto apply_theme_overrides(const st::Json& overrides) -> Status override;
   /// 控制通道 `theme.tokens`：当前生效主题的完整快照。

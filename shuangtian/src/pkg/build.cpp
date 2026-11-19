@@ -1133,7 +1133,7 @@ struct LanguageFlags {
   }
   const PchContext* pch_ptr = pch.has_value() ? &*pch : nullptr;
 
-  const ObjectCache object_cache = resolve_object_cache();
+
 
   // 每个单元的**最终编译标志**（第三方放宽 / 框架单元用框架标志集 / C 与 C++ 分派）。
   // 先统一算好：缓存键与真正的编译命令必须来自同一份标志，否则"键一致但命令不同"必然出问题。
@@ -1190,6 +1190,7 @@ struct LanguageFlags {
     return st::hash::fnv1a64_hex(material);
   };
 
+  const ObjectCache object_cache = resolve_object_cache();
   std::size_t cache_hits = 0;
   std::atomic<std::size_t> cache_stores{0};
   std::vector<const CompileUnit*> pending;
@@ -2997,6 +2998,19 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
         !status) {
       return forward_error(status.error());
     }
+  } else {
+    // **仓库内自建（本清单就是框架）**：库源与第三方源都是框架源，要标成框架单元。
+    //
+    // 为何必须（`--define` 暴露的性能缺陷）：不标的话这些单元走 `unit_flags_for` 的
+    // else 分支，吃**目标自己的** flags——于是 `st build xiaobai --define APP_X=…`
+    // 会把宏写进框架单元的编译指纹，每换一个宏值就全量重编框架源
+    // （实测：每轮 2m30s，而其中只有应用自己的 1 个源真正用到该宏）。
+    //
+    // **第三方源也必须纳入**（实测漏过一轮）：Micropython 等 C 源在 `third_party_paths`
+    // 里而**不在 `library_sources`**，只标库源时它们仍随宏重编（实测 135 个单元里
+    // 大部分是 `third_party_micropython_py_*.c`）。
+    framework_sources.insert(library_sources.begin(), library_sources.end());
+    framework_sources.insert(third_party_paths.begin(), third_party_paths.end());
   }
 
   std::vector<std::string> all_sources = library_sources;
@@ -3011,17 +3025,26 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // **C 标志必须取 `framework->c_flags`**（框架清单的）：取 `manifest.c_flags` 在框架自建时
   // 恰好相等（同一个清单），只有独立工程引用时才暴露——见 `make_framework_flags` 的注释。
   std::optional<FrameworkFlags> framework_flags;
-  if (framework.has_value()) {
+  if (framework.has_value() || !framework_sources.empty()) {
     // 框架单元用**框架自己的**标志集：**不传工程侧的 `flags`**。
     //
-    // 为何要与工程标志分开（2026-11-18，`--define` 机制暴露）：
-    // `make_framework_flags` 会把传入的工程 flags 并进去，而工程 flags 现在含
-    // `--define` 的命令行宏——那会让**框架对象缓存被某个工程的宏污染**：
-    // 用 `--define XIAOBAI_MODEL=…` 构建过一次后，框架单元的缓存键就变了，
-    // 下次不带该宏的构建又得全量重编框架源（实测 366 单元全重编、耗时 2m20s）。
+    // 为何要与工程标志分开（`--define` 机制暴露）：`make_framework_flags` 会把传入的
+    // 工程 flags 并进去，而工程 flags 含 `--define` 的命令行宏——那会让**框架对象缓存
+    // 被某个目标的宏污染**：用 `--define APP_X=…` 构建过一次后，框架单元的缓存键就变，
+    // 下次换个宏值又得全量重编框架源（实测 366 单元全重编、每轮 2m30s）。
     // 框架源不该知道应用私有宏，所以这里传空。
-    framework_flags = make_framework_flags(manifest, framework->include_dirs, framework->c_flags,
-                                           {}, *toolchain);
+    //
+    // **`framework_sources` 非空也要走这条**（关键，否则修复只对独立工程生效）：
+    // 仓库内的目标（如 `apps/xiaobai`）引用框架是隐式的——它的清单里没有 `framework`
+    // 字段，框架源由 `framework_sources` 标记成 `framework_unit`，于是 `framework` 为空。
+    // 旧条件只判 `framework.has_value()`，这些目标的框架单元就退化成用**应用 flags**
+    // （含 `--define`）⇒ 每换一次宏值全量重编。
+    //
+    // 清单取谁：独立工程取框架自己的（`framework->` 那套字段）；仓库内自建时
+    // `manifest` 本身**就是**框架清单，直接用。
+    framework_flags = make_framework_flags(
+        manifest, framework.has_value() ? framework->include_dirs : manifest.include_dirs,
+        framework.has_value() ? framework->c_flags : manifest.c_flags, {}, *toolchain);
   }
   std::size_t rebuilt = 0;
   // check 模式：收集本次实际查过（哈希变化/首次）的单元源路径，用于状态写回。
@@ -3834,9 +3857,13 @@ namespace {
   std::vector<CompileUnit> units =
       make_units(effective, all, object_dir, third_party_paths, test_includes, framework_sources);
   std::optional<FrameworkFlags> framework_flags;
-  if (framework.has_value()) {
-    framework_flags = make_framework_flags(manifest, framework->include_dirs, framework->c_flags,
-                                           *flags, *toolchain);
+  // 与 `build()` 同一条口径（见那里的长注释）：框架单元**不吃目标自己的 flags**。
+  // 除了 `--define` 污染缓存键，这里旧写法还把 `*flags` 传给了第一个形参位置之后的
+  // 第四个参数（`profile_flags_list` 的位置）——那份里含档位标志，框架单元会重复带上。
+  if (framework.has_value() || !framework_sources.empty()) {
+    framework_flags = make_framework_flags(
+        manifest, framework.has_value() ? framework->include_dirs : manifest.include_dirs,
+        framework.has_value() ? framework->c_flags : manifest.c_flags, {}, *toolchain);
   }
   std::size_t rebuilt = 0;
   auto compiled = compile_units(effective, options, units, *flags, *toolchain,
@@ -3901,7 +3928,7 @@ namespace {
 
 auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
                bool list_only, std::string_view junit_path, bool include_slow,
-               std::string_view shard_log_dir) -> Result<int> {
+               std::string_view shard_log_dir, bool skip_build) -> Result<int> {
   // 与 `build()` 同一个理由：入口处清缓存（`st test` 可能在同一进程里被反复调用）。
   clear_content_hash_cache();  // ## `--list` 直接复用已有二进制，不走构建
   //
@@ -3918,12 +3945,21 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   if (!toolchain) return forward_error(toolchain.error());
 
   std::string output{};
-  if (list_only) {
+  // **`list_only` 与 `skip_build` 共用“直接用现有二进制”这条快路径**：
+  // 两者都不需要二进制是最新的（前者只枚举用例名，后者是调用方明示“我刚建过”）。
+  if (list_only || skip_build) {
     const std::string root = options.root.empty() ? manifest.directory : options.root;
     const std::string candidate = fs::join(
         fs::join(fs::join(root, "build"), profile_directory(options.profile, *toolchain)),
         fs::join("bin", "st_tests" + toolchain->executable_suffix));
-    if (fs::is_regular_file(candidate)) output = candidate;
+    if (fs::is_regular_file(candidate)) {
+      output = candidate;
+    } else if (skip_build) {
+      // 显式要求跳过构建、而产物不存在：**不能静默退回构建**——
+      // 调用方以为走了快路径，实际在那里等了十几秒，还会以为“快路径没用”。
+      return unexpected(ErrorCode::NotFound,
+                        std::format("测试二进制不存在（--no-build 需要先构建一次）: {}", candidate));
+    }
   }
 
   if (output.empty()) {

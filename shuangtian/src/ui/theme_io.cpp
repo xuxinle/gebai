@@ -325,6 +325,48 @@ auto apply_theme_overrides(Theme& theme, const Json& json) -> Status {
     theme.set_font_family(json_as_string(*family, theme.font_family()));
   }
 
+  // **页面底渐变**：可写两种形式。
+  //
+  //   "backdrop_gradient": ["#RRGGBB", "#RRGGBB", "#RRGGBB"]   // 三个色标，对角线
+  //   "backdrop_gradient": null                                    // 显式关掉（纯色底）
+  //
+  // 为何需要它（2026-11-19）：八套 JSON 主题原先**根本没有渐变**——它们的
+  // `theme_from_json` 以 `by_mode(fallback=Dark)` 为底，拿到的只是“暗色那套”
+  // 的渐变，而这些主题自己的 `bg` 差得很远（赤红 #150d10 / 纯黑 #000000 /
+  // 墨绿 #171009）。共用一套暖黑→冷蓝的渐变，会让玻璃透出与主题无关的颜色。
+  // 所以让主题自己声明，写在 JSON 里就能与它的色调对齐。
+  if (const auto* gradient = json_find(json, "backdrop_gradient"); gradient != nullptr) {
+    if (gradient->is_null()) {
+      theme.set_backdrop_gradient(std::nullopt);
+    } else if (gradient->is_array()) {
+      std::vector<raster::GradientStop> stops;
+      // 均匀分布：N 个色标对应 0, 1/(N-1), …, 1。
+      // 为何不让 JSON 写偏移：三色标是最常见情形，写偏移会让每条都变长一句；
+      // 真要非均匀过渡，那是设计上的刻意选择，届时再加 `[[offset, color]]` 形式。
+      const auto count = static_cast<std::size_t>(gradient->size());
+      if (count < 2U) {
+        return unexpected(ErrorCode::Invalid, "backdrop_gradient 至少需要两个颜色");
+      }
+      for (std::size_t index = 0; index < count; ++index) {
+        const Json& item = (*gradient)[index];
+        if (!item.is_string()) {
+          return unexpected(ErrorCode::Invalid, "backdrop_gradient 的每一项必须是颜色字符串");
+        }
+        math::Color parsed_color{};
+        if (!parse_color(json_as_string(item, ""), parsed_color)) {
+          return unexpected(ErrorCode::Invalid,
+                            std::format("backdrop_gradient[{}] 不是合法颜色", index));
+        }
+        const float offset = static_cast<float>(index) / static_cast<float>(count - 1U);
+        stops.push_back(raster::GradientStop{offset, parsed_color});
+      }
+      theme.set_backdrop_gradient(raster::Gradient::linear(
+          math::Point{0.0f, 0.0f}, math::Point{1.0f, 1.0f}, std::move(stops)));
+    } else {
+      return unexpected(ErrorCode::Invalid, "backdrop_gradient 必须是颜色数组或 null");
+    }
+  }
+
   if (!unknown.empty()) {
     std::string joined;
     for (std::size_t i = 0; i < unknown.size(); ++i) {
@@ -334,15 +376,21 @@ auto apply_theme_overrides(Theme& theme, const Json& json) -> Status {
     return unexpected(ErrorCode::Invalid, std::format("未知主题 token：{}", joined));
   }
 
-  // 顶层也只接受认识的键（`name`/`base`/`colors`/`metrics`/`font_family`）——
+  // 顶层也只接受认识的键（`name`/`base`/`colors`/`metrics`/`backdrop_gradient`/`font_family`）——
   // 顶层拼错比 token 拼错更常见（如写成 `colour`）。
+  //
+  // ⚠ **新增顶层字段必须同步这里**：上面那个 `if (json_find(...,"backdrop_gradient"))`
+  // 分支加上了不算完——本循环是**后置校验**，白名单没收录就整份主题解析失败。
+  // 实测：加了渐变字段后 `theme name=cny` 报“未知内置主题”，
+  // 而 `builtin_theme_names()` 又能列出 cny——那种“名字在列表里却取不到”
+  // 的表现就是这个后置校验在拒（报错文案被上层包装成了“未知主题”）。
   for (auto it = json.begin(); it != json.end(); ++it) {
     const std::string& key = it.key();
     if (key != "name" && key != "base" && key != "colors" && key != "metrics" &&
-        key != "font_family") {
+        key != "backdrop_gradient" && key != "font_family") {
       return unexpected(ErrorCode::Invalid,
                         std::format("未知主题字段：{}（可用：name / base / colors / metrics / "
-                                    "font_family）",
+                                    "backdrop_gradient / font_family）",
                                     key));
     }
   }

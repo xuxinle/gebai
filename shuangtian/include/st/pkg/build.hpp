@@ -228,10 +228,21 @@ auto clear_content_hash_cache() -> void;
 /// “到底哪条用例红了”恰好落在那段之外。实测踩过：失败详情只在 stdout、
 /// `.st/logs` 只剩三行摘要，只能重跑定位。落盘后每片一份
 /// `test-shard-<i>-of-<n>.log`，且**失败分片的完整输出会追加进 st 日志**。
+/// `skip_build` = **直接用已构建的测试二进制，不做增量判定、不重建**。
+///
+/// 为何需要（实测 2026-11-19）：改一条测试后 `st test <名>` 壁钟 **10.5s**，
+/// 而直跑同一个二进制只需 **0.4s**——差 10s 里**没有一点编译**，全部是
+/// `build_test_binary` 的增量判定：`needs_rebuild` 对每个单元的每个依赖头调
+/// `deps_entry_matches`，而后者在 mtime+size 未变时**会读内容算哈希**——
+/// 362 个测试单元 × 数百个依赖头就是那几秒（同 `--list` 那条注释记录过的现象）。
+/// 再加上 `st_tests.exe.debug` 实测 **202 MB**，一旦真需要重链又是几秒。
+///
+/// 语义边界很窄：**只算“我知道二进制是最新的”**（刚跑过 `st test` 且只改了测试
+/// 断言逻辑、想反复看红绿）。改过源文件就必须回到正常路径，否则跑的是旧二进制。
 [[nodiscard]] auto run_tests(const Manifest& manifest, const BuildOptions& options,
                              std::string_view filter, bool list_only = false,
                              std::string_view junit_path = {}, bool include_slow = false,
-                             std::string_view shard_log_dir = {})
+                             std::string_view shard_log_dir = {}, bool skip_build = false)
     -> Result<int>;
 
 /// 链接诊断文本是否表示「产物被运行中的实例占用」（跨三套工具链的文案判定；

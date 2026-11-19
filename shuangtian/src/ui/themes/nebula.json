@@ -36,6 +36,11 @@
     "code_bg": "#050510",
     "code_border": "rgba(140, 230, 210, 0.10)"
   },
+  "backdrop_gradient": [
+    "#12122E",
+    "#0E0A24",
+    "#080418"
+  ],
   "metrics": {
     "radius_sm": 8.0,
     "radius_md": 14.0,

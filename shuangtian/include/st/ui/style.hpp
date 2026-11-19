@@ -136,6 +136,24 @@ struct Style {
   /// 渐变的不透明度（`1.0` = 按渐变自身的颜色合成）。
   float gradient_opacity{1.0f};
 
+  /// **用主题的页面底渐变**（而不是自己给一组色标）。
+  ///
+  /// 声明这个标志后，每次 `refresh_theme` 会把当前主题的
+  /// `backdrop_gradient()` 写进 `background_gradient`——亮/暗主题各有一套
+  /// 同构档位，换肤自动跟随，应用不需要知道具体颜色，也不用自己监听主题变更
+  ///（自己写在 `build` 里会拿不到新主题：`build` 只在结构变化时跑）。
+  ///
+  /// 主题没定渐变时退回 `Theme::colors().bg` 纯色（不报错）。
+  bool use_theme_backdrop{false};
+
+  /// **玻璃参数跟随主题缺省档**（`Metrics::glass_fill` / `glass_tint`）。
+  ///
+  /// 声明它后，`refresh_theme` 会把当前主题的玻璃底色与 `backdrop_tint` 写进来。
+  /// 为何需要：亮/暗主题的玻璃**不能共用同一组亮度参数**——实测暗色下
+  /// 沿用亮色的纯白+tint 0.22，气泡内亮度 73.7 vs 背景 23.0（亮 50），
+  /// 看上去是一块“发辉的灰纸”。所以底色与 tint 都要随主题换档。
+  bool theme_glass{false};
+
   /// **纯色底的唯一写入口**：写 `background` 的同一步清掉渐变。
   ///
   /// 为何必须是唯一入口（2026-11-10，相期「全部忽略」蓝底）：

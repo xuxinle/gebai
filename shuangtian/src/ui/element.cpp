@@ -1681,24 +1681,65 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   if (style.top_highlight.a != 0U && style.highlight_width > 0.0f && box.width > 0.0f) {
     const math::Color edge = style.top_highlight;
     const math::Color fading = edge.with_alpha(0);
-    // 只占顶边**内沿**那一条（高度 = highlight_width）：径向渐变的垂直影响
-    // 天然衰减得很快，但把它限制在一条带里才能保证“不下泼到内容区”。
-    const math::Rect band{box.x, box.y, box.width, style.highlight_width};
-    // 径向半径：取宽度的 55%。太小 → 只有左上一小段亮（像块污渍）；
-    // 太大 → 整条顶边均匀发亮，又退化回“亮胶带”。宽高都参与，使窄卡也不会局部过亮。
-    const float reach = std::max(box.width, box.height * 3.0f) * 0.55f;
-    const raster::Gradient gradient = raster::Gradient::radial(
-        math::Point{band.x, band.y}, reach,
-        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, edge},
-                                          raster::GradientStop{0.45f, edge.with_alpha(
-                                                                            static_cast<std::uint8_t>(
-                                                                                edge.a / 3))},
+    // **水平内缩 = 圆角半径**（而不是画满全宽）。
+    //
+    // 为何必须内缩（实测 2026-11-19）：高光带原本是个**矩形**
+    // `{box.x, box.y, box.width, highlight_width}`，靠圆角遮罩去裁两端。
+    // 但遮罩在 `y = highlight_width`（1.5px）处的圆弧水平内缩量只有
+    // `R - sqrt(R²-(R-dy)²) ≈ 7.7px`——于是亮线在距端约 9px 处**断崖式**开始，
+    // 而且沿弧线一路亮到顶端。用户看到的就是“一条直线冲出圆角”。
+    // 内缩一个半径后，高光带的矩形完全落在圆角之内，两端由渐变自然淡出。
+    const float inset = std::min(radius, box.width * 0.5f);
+    // ⚠ **不能在这里 `return`**：本函数后面还有描边与背景的绘制，
+    // 提前 `return` 会把它们一块儿跳过（正是 `PITFALLS` 场景 8 记过的
+    // “`push_clip` 后的提前 `return` 会静默囚住后续所有绘制”同型缺陷）。
+    // 窄到放不下两侧圆角（胶囊/小徽标）时**只是不画高光**：
+    // 画了也看不出“边缘受光”，只会得到一块发亮的斑。
+    if (box.width > inset * 2.0f) {
+      // **垂直再内缩 1px**：高光从 `box.y + 1` 开始，不要压在最外缘。
+      //
+      // 为何（实测 2026-11-19，用户标注“不连续的杂色”）：卡片最外缘那一行是
+      // **部分覆盖**的（圆角抗锯齿 + 半透明玻璃），高光叠上去时，
+      // 每一列的实际混合比例取决于该列的覆盖率——于是 1px 带内亮度逐像素抖动
+      // （实测截图里 200/216/231/218/219/224… 周期约 12px，幅度 15~44）。
+      // 压缩后这种高频细节还会产生振铃，看上去就是“断续的杂色”。
+      // 下移 1px 后整条带落在**完全不透明**的内侧，混合比例一致，抖动消失
+      // （实测极差 0~1）。
+      const math::Rect band{box.x + inset, box.y + 1.0f,
+                            box.width - inset * 2.0f, style.highlight_width};
+    // **从顶边中段向两侧衰减**（线性），而不是以左上角为圆心的径向。
+    //
+    // ## 为何改掉径向（实测 2026-11-19）
+    //
+    // 原实现：`radial(圆心=左上角, reach = max(宽, 高×3) × 0.55)`。
+    // 对一张 168px 宽的气泡，reach = 92px——**整条顶边都落在渐变前段**，
+    // 于是横向 10%~90% 处亮度完全恒定（实测 248/249/248/248），
+    // 只在最末几像素断崖式掉到背景值。人眼看到的就是“一条亮胶带”
+    // （用户原话：这个上边框是怎么回事）。
+    //
+    // 线性双向衰减的理由：“边缘受光”的物理形状是**中间亮、向两端衰减到 0**——
+    // 那恰好是一个以中点为峰的对称渐变，与宽度无关地成立。
+    // 用对称五标的写法让长卡也自然淡出，不再靠 reach 猜一个魔数。
+    //
+    // ⚠ **渐变几何是 0~1 归一化坐标**（相对 `fill_rect` 的目标矩形），不是绝对像素。
+    // 写绝对像素会被当比例相乘/clamp，整条带于是拿到同一个颜色——
+    // 那正是“恒定亮线”的直接成因（实测：传 `band.x`…`band.x+band.width` 时
+    // 横向极差仅 **0.3**，完全等亮）。
+    const math::Color quarter = edge.with_alpha(
+        static_cast<std::uint8_t>(static_cast<float>(edge.a) * 0.55f));
+    const raster::Gradient gradient = raster::Gradient::linear(
+        math::Point{0.0f, 0.0f}, math::Point{1.0f, 0.0f},
+        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, fading},
+                                          raster::GradientStop{0.28f, quarter},
+                                          raster::GradientStop{0.5f, edge},
+                                          raster::GradientStop{0.72f, quarter},
                                           raster::GradientStop{1.0f, fading}});
     // 裁剪到圆角内：半径大于 0 时顶边那段会被圆角削掉，不裁就会在角上多出一小块。
-    if (radius > 0.0f) canvas.push_clip_rounded_rect(box, radius);
-    canvas.fill_rect(band, raster::Paint::with_gradient(gradient), 0.0f,
-                     raster::DrawOptions{.opacity = style.opacity});
-    if (radius > 0.0f) canvas.pop_clip();
+      if (radius > 0.0f) canvas.push_clip_rounded_rect(box, radius);
+      canvas.fill_rect(band, raster::Paint::with_gradient(gradient), 0.0f,
+                       raster::DrawOptions{.opacity = style.opacity});
+      if (radius > 0.0f) canvas.pop_clip();
+    }
   }
   if (style.border_width > 0.0f && border.a != 0U) {
     // **环形填充**而不是描边：卡片边框是界面里出现次数最多的描边，而 `stroke_path`

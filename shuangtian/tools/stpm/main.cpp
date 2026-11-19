@@ -94,7 +94,7 @@ constexpr const char* kStpmVersion = "0.1.0";
 [[nodiscard]] auto is_boolean_option(std::string_view name) -> bool {
   static constexpr std::string_view kBooleanOptions[] = {
       "san", "list", "slow", "verbose", "v", "force", "all", "help", "rules",
-      "no-pch", "no-strip", "offline", "locked", "quiet", "release",
+      "no-pch", "no-strip", "offline", "locked", "quiet", "release", "no-build",
   };
   return std::ranges::find(kBooleanOptions, name) != std::end(kBooleanOptions);
 }
@@ -746,6 +746,9 @@ auto command_test(const Arguments& arguments) -> int {
   options.test_jobs = test_jobs > 0.0 ? static_cast<std::size_t>(test_jobs) : 1;
   // `--list`：只列用例不跑（交测试框架入口）；`--format junit`：经 ST_JUNIT_XML 写逐用例报告
   const bool list_only = arguments.has("list");
+  // `--no-build`：直接用已构建的测试二进制（跳过增量判定与重建）。
+  // 实测：改一条测试后带它 **0.4s**、不带 **10.5s**（见 `run_tests` 头注释）。
+  const bool skip_build = arguments.has("no-build");
   std::string junit_path;
   if (arguments.get("format", "") == "junit") {
     junit_path = arguments.get("junit-out", "");
@@ -760,7 +763,8 @@ auto command_test(const Arguments& arguments) -> int {
                                  /*include_slow=*/arguments.has("slow"),
                                  // 分片日志与主日志**同一目录**（`.st/logs`）：
                                  // 事后只需 `ls .st/logs` 一个地方，不必再猜临时目录。
-                                 st::fs::join(manifest->directory, std::string(st::cli_log::kDirectory)));
+                                 st::fs::join(manifest->directory, std::string(st::cli_log::kDirectory)),
+                                 /*skip_build=*/skip_build);
   if (!code) {
     const st::Error& error = code.error();
     if (st::pkg::is_link_failure(error)) {

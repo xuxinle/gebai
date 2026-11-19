@@ -1562,8 +1562,41 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.radius_max > 0.0f) style.radius_max = props.radius_max;
   if (props.border_width > 0.0f) style.border_width = props.border_width;
   if (props.border_color.a != 0U) style.border_color = props.border_color;
-  // 直接填充色：走 `set_solid_background`（它同时清渐变，避免“先铺渐变后写纯色”的残影）。
-  if (props.fill.a != 0U) style.set_solid_background(props.fill);
+  // 液态玻璃：三个量一起落，否则会出现“设了折射但没模糊”的半成品
+  //（折射自带模糊半径，但 `backdrop_blur` 仍决定降级到只支持模糊的后端时能不能看）。
+  // 这三项不受 `apply_theme` 重算（组件不会重写它们），所以直接写即可。
+  //
+  // **字符串形式优先**：同时给 `glass="…"` 与逐字段时取字符串那份，
+  // 否则“两个入口写同一件事”的优先级就成了靠顺序的隐含约定。
+  if (!props.glass.empty()) {
+    (void)ui::apply_glass_shorthand(element, props.glass);
+  } else {
+    if (props.backdrop_blur > 0.0f) style.backdrop_blur = props.backdrop_blur;
+    if (props.backdrop_tint != 1.0f) style.backdrop_tint = props.backdrop_tint;
+    if (props.backdrop_refraction > 0.0f) style.backdrop_refraction = props.backdrop_refraction;
+    if (props.backdrop_dispersion > 0.0f) style.backdrop_dispersion = props.backdrop_dispersion;
+  }
+  // “底色 + tint 跟随主题”：声明后由 `refresh_theme` 按当前主题写。
+  // 放在最后落，是为了让它只当**缺省值**——上面的显式 `glass`/`fill` 优先。
+  if (props.theme_glass) style.theme_glass = true;
+  // 内边缘高光：它不参与 `apply_theme` 重算（组件不碰这两项），直接写即可。
+  // 玻璃的“亮”很大一部分来自这圈亮线（见 `BoxProps::top_highlight` 的注释）。
+  if (props.top_highlight.a != 0U) style.top_highlight = props.top_highlight;
+  if (props.highlight_width > 0.0f) style.highlight_width = props.highlight_width;
+  // **填充色与描边色存成“显式声明”**（不只是写一次 Style）。
+  //
+  // 为何（实测缺陷）：组件的 `apply_theme` 每帧会重算颜色——`Card` 把
+  // `background` 重置为 `colors().surface`、`border_color` 重置为 `border` 令牌。
+  // 只写一次的话，第二帧就被盖回去了：玻璃卡片的半透明白变回实心白、
+  // 白色高光边变成淡灰（现场：气泡看着“灰灰的、不通透”而玻璃参数怎么调都不变）。
+  // 存进 `RenderExtras` 后由 `apply_declared_overrides` 在组件之后回放。
+  if (props.fill.a != 0U) {
+    element.set_declared_fill_override(props.fill);
+    style.set_solid_background(props.fill);   // 首帧立即可见，不必等下一次主题刷新
+  }
+  if (props.border_color.a != 0U) {
+    element.set_border_color_override(props.border_color);
+  }
   // 叠放（绝对定位）：四个量一起落，否则会出现“写了 absolute 但没给偏移”的诡异总在左上角。
   //
   // 偏移是**可选**的（`-1` = 不锚定）：只给 `bottom` 就是“贴底 + 尺寸跟内容”，

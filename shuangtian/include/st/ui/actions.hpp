@@ -59,6 +59,21 @@ struct RejectedProperty {
 /// 控制通道的 `get` 与脚本的 `ui_get` 都返回它，保证"看到的完全一致"。
 [[nodiscard]] auto element_snapshot(Element& element) -> st::Json;
 
+/// 解析**液态玻璃的紧凑字符串配置**（`"blur:8,tint:0.22,refraction:20"`）。
+///
+/// 三个入口共用这一份实现，所以语义不会分叉：
+/// XML 的 `glass="…"` 属性、运行时/控制通道的 `set glass=…`、
+/// 声明式的 `BoxProps::glass`。
+///
+/// 语法：逗号分隔的 `key:value`，空白忽略、键名不分大小写：
+/// `blur` / `tint` / `refraction`（`refract` 同义）/ `dispersion` / `highlight`（0~1）。
+/// 特殊值：`"on"`（开，参数用缺省档）、`"off"`（全关）、`"0"`（全关）、
+/// 纯数字（= `blur`，自动补一个可读的 `tint`）。
+///
+/// 未给的字段**保持原值**（“只写你关心的参数”）；
+/// 返回 `false` 仅当一个键也不认识（拼写错误不该报成功）。
+[[nodiscard]] auto apply_glass_shorthand(Element& element, std::string_view text) -> bool;
+
 /// 应用一批属性，返回**实际生效**的属性名数组。
 ///
 /// 未识别的属性名被忽略（不报错）：调用方常批量下发，其中个别属性不被该组件支持是正常的。

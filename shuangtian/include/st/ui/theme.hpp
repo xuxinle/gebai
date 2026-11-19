@@ -294,6 +294,18 @@ struct Metrics {
   /// 只模糊不叠色 → 背后内容抢眼，弹层上的文字读不出来；
   /// 只叠色不模糊 → 就是实色底（模糊白做）。
   float overlay_blur_tint{0.72f};
+  /// **玻璃元素的底色**（`fill`）：亮色下是白、暗色下是“淡白”。
+  ///
+  /// 为何不能两边都用纯白（实测）：暗色主题里白了 50 个亮度阶——气泡内 **73.7**
+  /// vs 背景 **23.0**，看上去是一块发辉的灰纸，而不是玻璃。
+  /// 暗色档给白但 **alpha 低**（与 `backdrop_tint` 一起控总量）：
+  /// 玻璃在暗底上的“亮”应该来自**高光边**，而不是涂一层白膜。
+  math::Color glass_fill{255, 255, 255, 255};
+  /// 玻璃叠色不透明度（`Style::backdrop_tint`）的主题缺省档。
+  ///
+  /// 与 `glass_fill` 共同决定“亮不亮”：两者相乘才是最终的白膜厚度。
+  /// 暗色档显著更低——否则亮底用的同一组参数会把暗色气泡抹成一块灰。
+  float glass_tint{0.22f};
   /// **辉光强度**（`Palette::shadow_glow` 的倍率；0 = 关）。
   ///
   /// 歌白的 `--shadow-glow` 是多层 `box-shadow` 里最外层那道大半径彩光。
@@ -383,12 +395,27 @@ class Theme {
   /// 基础间距的倍数（4px 栅格）。
   [[nodiscard]] auto space(float steps) const noexcept -> float { return 4.0f * steps; }
 
+  /// **页面底渐变**（随主题走；`nullopt` = 纯色底）。
+  ///
+  /// 为何是主题令牌而不是应用写死：玻璃/半透明层的通透感建立在
+  /// “背后有层次”上，而层次的颜色必须与亮/暗主题同时成立。在应用里
+  /// 硬编码一组暖→冷色，换到暗色主题就是一层灰蒙。放进令牌表后，
+  /// 换肤时它跟着 `refresh_theme` 一起重算，应用不用改一行。
+  [[nodiscard]] auto backdrop_gradient() const noexcept
+      -> const std::optional<raster::Gradient>& {
+    return backdrop_gradient_;
+  }
+  void set_backdrop_gradient(std::optional<raster::Gradient> gradient) {
+    backdrop_gradient_ = std::move(gradient);
+  }
+
  private:
   ThemeMode mode_{ThemeMode::Light};
   Palette colors_{};
   SyntaxPalette syntax_{};
   TerminalPalette terminal_{};
   Metrics metrics_{};
+  std::optional<raster::Gradient> backdrop_gradient_{};
   std::string font_family_{"Noto Sans CJK SC"};
   std::string name_{"light"};
 };

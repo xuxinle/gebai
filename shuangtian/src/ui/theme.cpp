@@ -175,6 +175,26 @@ auto Theme::light() -> Theme {
   // 亚克力的“玻璃”是**带着自己的底色**浮在上面的，模糊只贡献质感，不该决定亮度。
   theme.metrics_.overlay_blur_radius = 14.0f;
   theme.metrics_.overlay_blur_tint = 0.88f;
+  // —— 页面底渐变（亮色）——
+  //
+  // 为何需要它：半透明/玻璃元素在**纯色底上永不显透**——模糊的结果与纯色
+  // 几乎一致，看上去只是一块“淡一点的灰”。层次必须来自**背景本身的渐变**。
+  //
+  // ## 跨度要**大**（暖→冷，明确看得出颜色变化）
+  //
+  // 曾经为了避开边角色相差异，把它压成“同族冷调只变亮度”（跨度只有 13）——
+  // 结果**渐变直接看不出来了**。大范围暖→冷本身就是想要的视觉效果，不该为了
+  // 防边角问题而牺牲（用户：“之前是随主题的大范围渐变”）。
+  //
+  // 边角的杂色来自 **`refraction`**（折射按圆角 SDF 位移采样，把远处不同色相的
+  // 背景拉进边缘），不是渐变本身——已在 `kGlassSpec` 里把折射关掉，
+  // 所以这里可以放心用大跨度（实测关折射后顶缘 R−B 与背景一致）。
+  theme.backdrop_gradient_ = raster::Gradient::linear(
+      math::Point{0.0f, 0.0f}, math::Point{1.0f, 1.0f},
+      {{0.0f, hex(0xFCF1E2FFU)}, {0.5f, hex(0xEAECF6FFU)}, {1.0f, hex(0xD4E4FFFFU)}});
+  // 玻璃：亮色下白膜可以实一点（背板本来就亮，白膜只负责“把颜色归一”）。
+  theme.metrics_.glass_fill = hex(0xFFFFFFFFU);
+  theme.metrics_.glass_tint = 0.22f;
   return theme;
 }
 
@@ -320,6 +340,27 @@ auto Theme::dark() -> Theme {
   // 但**不能低到让弹层比背板暗**——那是同一类缺陷，只是更容易在暗色里发生。
   theme.metrics_.overlay_blur_radius = 14.0f;
   theme.metrics_.overlay_blur_tint = 0.82f;
+  // —— 页面底渐变（暗色）——
+  //
+  // —— 页面底渐变（暗色）——
+  //
+  // 与亮色**同构的大范围暖→冷**：亮色是暖米→冷蓝，暗色是暖黑→冷蓝。
+  //
+  // 跨度按**实测**定（不是拍脑袋）：暗底上同样的绝对亮度差比亮底更难辨，
+  // 所以两端亮度取 34 → 10（差 24），再加色相 −4 → −22。
+  // 第一版只差 3 个亮度阶（实测量出来 [22,23,25,25]），完全看不出是渐变。
+  // 若这里留空，玻璃在暗色下就回到“透出一块死黑”的老路。
+  // 边角杂色已由关掉 `refraction` 解决，不再需要靠压渐变来绕。
+  theme.backdrop_gradient_ = raster::Gradient::linear(
+      math::Point{0.0f, 0.0f}, math::Point{1.0f, 1.0f},
+      {{0.0f, hex(0x221A14FFU)}, {0.5f, hex(0x181A24FFU)}, {1.0f, hex(0x0A1626FFU)}});
+  // 玻璃：暗色下**必须换成淡白**，否则同一组参数会把它抹成发辉的灰纸。
+  //
+  // 实测（暗色背景亮度 23.0）：用亮色的纯白 + `tint 0.22` 时气泡内 **73.7**，
+  // 比背景亮 50——看上去是“一块灰纸”而不是玻璃。
+  // 暗色档把“亮”交给**高光边**（`top_highlight`），白膜只留一点点做文字兜底。
+  theme.metrics_.glass_fill = hex(0xFFFFFF2EU);   // 白但 α≈18%
+  theme.metrics_.glass_tint = 0.42f;              // 再乘一道，总量约 8%
   return theme;
 }
 

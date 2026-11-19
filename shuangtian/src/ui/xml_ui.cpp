@@ -84,6 +84,10 @@ const std::unordered_set<std::string>& box_prop_names() {
       // 实测代价：图谱覆盖层被 flex 排到 0 尺寸而遭剔除，现象是
       // “这个容器从树里消失”，排查绕了一大圈。
       "absolute", "left",     "top",       "right",      "bottom",
+      // **液态玻璃的紧凑字符串配置**（`glass="blur:8,tint:0.22"`）。
+      // 这里列的是“地名”，具体解析在 `apply_properties` 的 `glass` 分支：
+      // 如果漏登记它，XML 里写 `glass` 会被当“未生效的属性”报出来并**静默不生效**。
+      "glass",
       // 动画（2026-11-10）：三个都不进属性面，而是在 `apply_one` 里单独处理——
       // 起播是**动作**（重置起点/标脏/请求续帧），做成属性会在声明式里每帧重播。
       "animate",  "animate_delay", "transition",

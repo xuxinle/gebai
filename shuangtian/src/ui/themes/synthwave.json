@@ -35,6 +35,11 @@
     "primary_active": "#FF6EC7",
     "shadow": "#000000B3"
   },
+  "backdrop_gradient": [
+    "#241040",
+    "#1C0A32",
+    "#140524"
+  ],
   "metrics": {
     "radius_sm": 6.0,
     "radius_md": 10.0,
