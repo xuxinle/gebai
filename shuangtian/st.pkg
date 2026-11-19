@@ -3,9 +3,34 @@
   "version": "0.1.0",
   "kind": "static_library",
   "cxx_standard": 23,
-  "include_dirs": ["include", "third_party", "third_party/sqlite",
-                   "third_party/micropython", "third_party/webview2"],
-  "modules": ["core", "math", "codec", "geom", "raster", "text", "md", "html", "xml", "ui", "shell", "control", "app", "pkg", "ext", "edit", "lsp", "perf", "search"],
+  "include_dirs": [
+    "include",
+    "third_party",
+    "third_party/sqlite",
+    "third_party/micropython",
+    "third_party/webview2"
+  ],
+  "modules": [
+    "core",
+    "math",
+    "codec",
+    "geom",
+    "raster",
+    "text",
+    "md",
+    "html",
+    "xml",
+    "ui",
+    "shell",
+    "control",
+    "app",
+    "pkg",
+    "ext",
+    "edit",
+    "lsp",
+    "perf",
+    "search"
+  ],
   "sources": [
     "src/core/*.cpp",
     "src/math/*.cpp",
@@ -33,14 +58,34 @@
     "third_party/micropython/shared/runtime/gchelper_generic.c",
     "src/python/bpy_bridge.c"
   ],
-  "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json", "third_party/three/three.cjs",
-            "third_party/webview2/WebView2Loader.dll",
-            "src/python/prelude.py", "src/python/bpy_data.py", "src/python/bpy_ops.py",
-            "src/python/bpy_ops_ns.py", "src/python/extract.py", "src/python/bpy_module.py"],
-  "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c",
-                          "third_party/micropython/py/*.c"],
-  "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
-  "tests": ["tests/*_test.cpp", "apps/gbcode/git_graph.cpp", "apps/gbcode/git_refs.cpp"],
+  "embed": [
+    "src/ui/script_api.js",
+    "src/ui/declarative.js",
+    "src/ui/themes/*.json",
+    "third_party/three/three.cjs",
+    "third_party/webview2/WebView2Loader.dll",
+    "src/python/prelude.py",
+    "src/python/bpy_data.py",
+    "src/python/bpy_ops.py",
+    "src/python/bpy_ops_ns.py",
+    "src/python/extract.py",
+    "src/python/bpy_module.py"
+  ],
+  "third_party_sources": [
+    "third_party/quickjs/*.c",
+    "third_party/sqlite/*.c",
+    "third_party/micropython/py/*.c"
+  ],
+  "c_flags": [
+    "-std=gnu11",
+    "-include",
+    "st_sqlite3_config.h"
+  ],
+  "tests": [
+    "tests/*_test.cpp",
+    "apps/gbcode/git_graph.cpp",
+    "apps/gbcode/git_refs.cpp"
+  ],
   "//tests_git_graph": "`git_graph.cpp`/`git_refs.cpp` 作为用例源直传（与 tests/* 同一处理）：\n它们是对应用侧纯数据层的实现（拓扑图、分支分类），测试直接链接它们。\n放进 `tests` 段才能被当作“用例直传”而不是归档（归档成员未被引用就不加载，链接会未定义）。\n⚠ 不能把 `git_service.cpp` 放这里：它已被 gbcode 目标编译，再直传一次就是 duplicate symbol。\n所以“测试要用的纯函数”必须住在**独立编译单元**里（`git_refs.cpp` 就是这么来的）。",
   "flags": [
     "-fno-strict-aliasing",
@@ -58,40 +103,113 @@
     "-Wdouble-promotion",
     "-Wimplicit-fallthrough"
   ],
-  "defines": ["ST_VERSION=\"0.1.0\"", "ST_ENABLE_LINT=1"],
+  "defines": [
+    "ST_VERSION=\"0.1.0\"",
+    "ST_ENABLE_LINT=1"
+  ],
   "lint": {
     "//": "规则豁免：规则 id → 路径 glob。成片/基于位置的边界走这里（单点破例走行内 // lint-allow）。两通道都需在 CONVENTIONS.md §8 登记，且各自计数、不静默。",
     "exempt": {
-      "L14": ["**/entry.cpp", "tools/*_probe.cpp", "tools/**", "tests/**", "**/slow_content.cpp", "apps/st_desktop/main.cpp"],
-      "L3": ["src/net/platform_tls_openssl.cpp", "tests/shard_parity_test.cpp"],
+      "L14": [
+        "**/entry.cpp",
+        "tools/*_probe.cpp",
+        "tools/**",
+        "tests/**",
+        "**/slow_content.cpp",
+        "apps/st_desktop/main.cpp"
+      ],
+      "L3": [
+        "src/net/platform_tls_openssl.cpp",
+        "tests/shard_parity_test.cpp"
+      ],
       "//probe": "量测探针（tools/*_probe.cpp）是**一次性量尺**、不是交付物：用 std::printf 输出数字、直接 include 系统头拿 ABI。它们不进任何 target 产物、不被应用包含，按 CONVENTIONS §8 做成片豁免。",
       "//probe_window": "窗口层探针（2026-11-01，量 OS 窗口而非画布）：① L8 —— 窗口过程只能靠进程级状态回填当前被测方案；② L12 —— 误报：探针自有的像素取值器名叫 `Shot::at(x,y)`，接收者不是容器；③ L17 —— 直接 Win32 的 `HRESULT`/`DWORD`/`long` ABI，转定宽只是为 printf。同属「一次性量尺」口径。",
-      "L8": ["tools/window_shadow_*_probe.cpp", "tools/present_layered_cost_probe.cpp"],
-      "L12": ["tools/window_shadow_*_probe.cpp"],
-      "L17": ["tools/window_shadow_*_probe.cpp", "tools/present_layered_cost_probe.cpp"],
-      "L7": ["tools/*_probe.cpp"],
-      "L6": ["tools/*_probe.cpp", "tools/blit_cost_compare.cpp"],
+      "L8": [
+        "tools/window_shadow_*_probe.cpp",
+        "tools/present_layered_cost_probe.cpp"
+      ],
+      "L12": [
+        "tools/window_shadow_*_probe.cpp"
+      ],
+      "L17": [
+        "tools/window_shadow_*_probe.cpp",
+        "tools/present_layered_cost_probe.cpp"
+      ],
+      "L7": [
+        "tools/**",
+        "tests/**"
+      ],
+      "L6": [
+        "tools/*_probe.cpp",
+        "tools/blit_cost_compare.cpp"
+      ],
       "//L18": "存量输出已各有落盘通道，L18 只拦新增裸打印：stpm（CLI 交互输出镜像落盘 cli_log）、tests（测试输出进分片日志）、apps（应用入口错误经宿主 stderr 捕获）——迁移到 ST_LOG 是增量过程，存量先登记豁免。",
-      "L18": ["tools/**", "tests/**", "apps/**"],
+      "L18": [
+        "tools/**",
+        "tests/**",
+        "apps/**"
+      ],
       "//tools_tests": "tools/**（独立工具/探针：C 转换、printf、系统头是参考实现的正常写法）与 tests/**（测试要测平台边界/写怪异字符串）是**登记性豁免**——lint 是 src（框架库）的严格门禁，这两区按工具/测试代码放宽。",
-      "L2": ["tools/**", "tests/**"],
-      "L7": ["tools/**", "tests/**"],
-      "L15": ["tests/**"]
+      "L2": [
+        "tools/**",
+        "tests/**"
+      ],
+      "L15": [
+        "tests/**"
+      ]
     }
   },
   "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",
-  "system_libs": ["pthread", "dl", "m", "ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi", "bcrypt"],
+  "system_libs": [
+    "pthread",
+    "dl",
+    "m",
+    "ws2_32",
+    "user32",
+    "gdi32",
+    "dwmapi",
+    "shell32",
+    "dbghelp",
+    "nanosrv",
+    "psapi",
+    "secur32",
+    "winpthread",
+    "ole32",
+    "uuid",
+    "shlwapi",
+    "bcrypt"
+  ],
   "toolchains": {
     "mingw": {
       "compiler": "x86_64-w64-mingw32-g++",
       "c_compiler": "x86_64-w64-mingw32-gcc",
       "platform": "windows",
       "//system_libs_note": "交叉接管用（resolve_system_libraries：声明即整体接管不追默认）。与 link-libs.txt 的 windows 节的**差异是有意的**：nanosrv 不在——它只在本机 MSYS2 MinGW 里需要（那里的 libdbghelp.a 只是转发壳）；mingw-w64 交叉包（Ubuntu 等）的 libdbghelp.a 自带真符号（实测 nm 可见 SymInitialize/SymFromAddr），再链 nanosrv 反而 cannot find -lnanosrv。",
-      "system_libs": ["ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"],
-      "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000006"],
+      "system_libs": [
+        "ws2_32",
+        "user32",
+        "gdi32",
+        "dwmapi",
+        "shell32",
+        "dbghelp",
+        "psapi",
+        "secur32",
+        "winpthread",
+        "ole32",
+        "uuid",
+        "shlwapi"
+      ],
+      "defines": [
+        "_WIN32_WINNT=0x0A00",
+        "WINVER=0x0A00",
+        "NTDDI_VERSION=0x0A000006"
+      ],
       "//defines_note": "NTDDI_VERSION 必须给到 RS5(0x0A000006)：ConPTY 的 HPCON/CreatePseudoConsole 在 mingw-w64 的 wincon.h 里由 #if (NTDDI_VERSION >= 0x0A000006) 门控。旧值 0x0A000000 会让 platform_pty.cpp 编不过（HPCON has not been declared）——本机 Windows MinGW 因更高默认 SDK 值而看不出来，Linux 交叉首次实编时现形。",
       "executable_suffix": ".exe",
-      "extra_flags": ["-static-libgcc", "-static-libstdc++"]
+      "extra_flags": [
+        "-static-libgcc",
+        "-static-libstdc++"
+      ]
     },
     "clang": {
       "//": "Clang 作为第二编译器（与 g++ 同一条口径：GCC 风格标志 + libstdc++ 运行库）。",
@@ -102,1363 +220,2575 @@
       "target_triple": "x86_64-w64-windows-gnu",
       "platform": "windows",
       "//system_libs_note": "同上：与 link-libs.txt 的 windows 节同步。",
-      "system_libs": ["ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread", "ole32", "uuid", "shlwapi"],
-      "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000006"],
+      "system_libs": [
+        "ws2_32",
+        "user32",
+        "gdi32",
+        "dwmapi",
+        "shell32",
+        "dbghelp",
+        "nanosrv",
+        "psapi",
+        "secur32",
+        "winpthread",
+        "ole32",
+        "uuid",
+        "shlwapi"
+      ],
+      "defines": [
+        "_WIN32_WINNT=0x0A00",
+        "WINVER=0x0A00",
+        "NTDDI_VERSION=0x0A000006"
+      ],
       "//defines_note": "NTDDI_VERSION 必须给到 RS5(0x0A000006)：ConPTY 的 HPCON/CreatePseudoConsole 在 mingw-w64 的 wincon.h 里由 #if (NTDDI_VERSION >= 0x0A000006) 门控。旧值 0x0A000000 会让 platform_pty.cpp 编不过（HPCON has not been declared）——本机 Windows MinGW 因更高默认 SDK 值而看不出来，Linux 交叉首次实编时现形。",
       "//suppressions": "对 clang 的告警收敛：前三条来自 **vendored 第三方头**（sqlite3.h 用 MSVC 扩展类型 __int64、quickjs.h 用旧式转换与 NAN）——那是上游代码，不是我们要改的东西。后两条（2026-11-02 加）：工程自身的既有代码里有少量只在 gcc 诊断下验证过的内部函数/lambda 捕获形态（`scene3d_script.cpp` 的反向序列化预留、`software_scene.cpp` 的采样循环），gcc 不告警而 clang 报 `-Werror`——逐处改会有背离语义的风险，收敛到工具链级。工程自己的代码其余告警仍与 gcc 同等严格。",
-      "suppressions": ["-Wno-language-extension-token", "-Wno-old-style-cast", "-Wno-double-promotion", "-Wno-unneeded-internal-declaration", "-Wno-unused-lambda-capture"],
+      "suppressions": [
+        "-Wno-language-extension-token",
+        "-Wno-old-style-cast",
+        "-Wno-double-promotion",
+        "-Wno-unneeded-internal-declaration",
+        "-Wno-unused-lambda-capture"
+      ],
       "executable_suffix": ".exe"
     }
   },
   "targets": {
-    "all": { "kind": "group",
-             "libraries": ["gallery", "gbcode", "louyue", "caiyun", "jianmu", "xiangqi", "cefu", "gedou", "xiaobai"],
-             "//libraries": "group 的 libraries 是**成员目标**（依次构建），不是链接的库——语义见 manifest.hpp 的 TargetSpec::libraries。" },
-    "st_core": { "kind": "library",
-                 "include_sources": ["src/core/*.cpp", "src/codec/*.cpp", "src/math/*.cpp",
-                                     "src/net/*.cpp", "src/xml/*.cpp", "src/test/*.cpp",
-                                     "src/edit/*.cpp", "src/lsp/*.cpp", "src/pkg/*.cpp",
-                                     "src/search/*.cpp"],
-                 "//include_sources": "**通用层**：这些模块的 .cpp 实测**不（传递地）触及 `st/ui/` 或 `st/raster/`**（逐个模块做头文件传递闭包算出来的），所以可以单独成库给非 GUI 程序用。改这些模块以外的代码不会触发本库重建。\n\n`lsp` 与 `pkg` 原本因经 `ext/json.hpp` 传递依赖被挡在外面——2026-10-26 把 json 归位到 `core/` 后它们不再触及 UI，于是入列（8 → 10 个模块）。",
-                 "inherit_project_embed": false,
-                 "//inherit_project_embed": "工程级 embed 是 UI 的 `script_api.js`/`declarative.js`——通用库不该带它们（实测 `ar t` 里能看到 `ui_declarative_js.cpp.o` 混进来）。",
-                 "system_libs": ["dl"] },
-    "st": { "kind": "executable",
-            "sources": ["tools/stpm/*.cpp", "src/ui/window_control.cpp"],
-            "include_sources": ["src/pkg/*.cpp",
-                                 "src/core/*.cpp",
-                                 "src/perf/*.cpp",
-                                 "src/ext/database.cpp", "src/ext/script.cpp"],
-            "include_third_party_sources": ["third_party/quickjs/*", "third_party/sqlite/*"],
-            "//include_third_party_sources": "白名单语义，与 include_sources 同哲学（漏写→链接报错可发现）。为何需要：第三方源原本只有工程级一层，micropython 进清单后自举（直铺 .o 链接，无归档按需拉取）把它的 127 个单元强制全链，而移植层符号 gc_collect 等在被库源白名单正确滤掉的 src/python/ 里→三条 undefined reference。stpm 经 ext/script.cpp（QuickJS）与 ext/database.cpp（SQLite）引用这两家；micropython 不进——构建工具不用 python。bootstrap.ps1/sh 读同一字段，两边过滤结果必须一致。",
-            "//include_sources": "**白名单**：本目标只编这些库级源，`src/**` 其余一概不进。\n\n为何用白名单：`exclude_sources` 是黑名单，漏一条就多编几个无关单元，而构建照常成功、**静默变胖**——只能靠人把每条间接依赖都推一遍。实测代价：原先逐项排了 13 条，仍因 `src/ui/window_control.cpp` 间接依赖 `math/geometry.hpp` 把 math 拉了回来。白名单相反：漏写会链接报错（可发现）。\n\n口径来源：编译器产出的 `tools_stpm_main.cpp.o.d` 实测只有 **23 个依赖头，全部来自 core/pkg/ext**。\n\n不在白名单里的（raster/text/md/xml/net/shell/math/codec/ext-video 与应用层）都不参与——改这些文件时**不再触发 st 自举**。\n\n⚠ `src/ext/video.cpp` 不能加：它需要 `raster::Canvas`（视频解码回帧）。",
-            "//sources": "`tools/stpm` 是入口；`src/ui/window_control.cpp` 是壳层边缘命中契约（`platform_win32.cpp` 用它）。",
-            "system_libs": ["dl"] },
-    "crash_probe": { "kind": "executable", "sources": ["tools/crash_probe.cpp"],
-                     "exclude_sources": ["src/pkg/*"] },
+    "all": {
+      "kind": "group",
+      "libraries": [
+        "gallery",
+        "gbcode",
+        "louyue",
+        "caiyun",
+        "jianmu",
+        "xiangqi",
+        "cefu",
+        "gedou",
+        "xiaobai"
+      ],
+      "//libraries": "group 的 libraries 是**成员目标**（依次构建），不是链接的库——语义见 manifest.hpp 的 TargetSpec::libraries。"
+    },
+    "st_core": {
+      "kind": "library",
+      "include_sources": [
+        "src/core/*.cpp",
+        "src/codec/*.cpp",
+        "src/math/*.cpp",
+        "src/net/*.cpp",
+        "src/xml/*.cpp",
+        "src/test/*.cpp",
+        "src/edit/*.cpp",
+        "src/lsp/*.cpp",
+        "src/pkg/*.cpp",
+        "src/search/*.cpp"
+      ],
+      "//include_sources": "**通用层**：这些模块的 .cpp 实测**不（传递地）触及 `st/ui/` 或 `st/raster/`**（逐个模块做头文件传递闭包算出来的），所以可以单独成库给非 GUI 程序用。改这些模块以外的代码不会触发本库重建。\n\n`lsp` 与 `pkg` 原本因经 `ext/json.hpp` 传递依赖被挡在外面——2026-10-26 把 json 归位到 `core/` 后它们不再触及 UI，于是入列（8 → 10 个模块）。",
+      "inherit_project_embed": false,
+      "//inherit_project_embed": "工程级 embed 是 UI 的 `script_api.js`/`declarative.js`——通用库不该带它们（实测 `ar t` 里能看到 `ui_declarative_js.cpp.o` 混进来）。",
+      "system_libs": [
+        "dl"
+      ]
+    },
+    "st": {
+      "kind": "executable",
+      "sources": [
+        "tools/stpm/*.cpp",
+        "src/ui/window_control.cpp"
+      ],
+      "include_sources": [
+        "src/pkg/*.cpp",
+        "src/core/*.cpp",
+        "src/perf/*.cpp",
+        "src/ext/database.cpp",
+        "src/ext/script.cpp"
+      ],
+      "include_third_party_sources": [
+        "third_party/quickjs/*",
+        "third_party/sqlite/*"
+      ],
+      "//include_third_party_sources": "白名单语义，与 include_sources 同哲学（漏写→链接报错可发现）。为何需要：第三方源原本只有工程级一层，micropython 进清单后自举（直铺 .o 链接，无归档按需拉取）把它的 127 个单元强制全链，而移植层符号 gc_collect 等在被库源白名单正确滤掉的 src/python/ 里→三条 undefined reference。stpm 经 ext/script.cpp（QuickJS）与 ext/database.cpp（SQLite）引用这两家；micropython 不进——构建工具不用 python。bootstrap.ps1/sh 读同一字段，两边过滤结果必须一致。",
+      "//include_sources": "**白名单**：本目标只编这些库级源，`src/**` 其余一概不进。\n\n为何用白名单：`exclude_sources` 是黑名单，漏一条就多编几个无关单元，而构建照常成功、**静默变胖**——只能靠人把每条间接依赖都推一遍。实测代价：原先逐项排了 13 条，仍因 `src/ui/window_control.cpp` 间接依赖 `math/geometry.hpp` 把 math 拉了回来。白名单相反：漏写会链接报错（可发现）。\n\n口径来源：编译器产出的 `tools_stpm_main.cpp.o.d` 实测只有 **23 个依赖头，全部来自 core/pkg/ext**。\n\n不在白名单里的（raster/text/md/xml/net/shell/math/codec/ext-video 与应用层）都不参与——改这些文件时**不再触发 st 自举**。\n\n⚠ `src/ext/video.cpp` 不能加：它需要 `raster::Canvas`（视频解码回帧）。",
+      "//sources": "`tools/stpm` 是入口；`src/ui/window_control.cpp` 是壳层边缘命中契约（`platform_win32.cpp` 用它）。",
+      "system_libs": [
+        "dl"
+      ]
+    },
+    "crash_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/crash_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
     "library_usage_check": {
       "//note": "验证 `docs/AS_LIBRARY.md` 的示例：只链 `st_core` 库（不带任何 UI/raster 单元）就能编出一个能跑的程序。它同时是「库是否真的自包含」的回归——若某个通用模块偷偷依赖了界面层，这里会链接失败。",
       "kind": "executable",
-      "sources": ["tools/library_usage_check.cpp"],
-      "libraries": ["st_core"],
-      "exclude_sources": ["src/**"] },
-    "gallery": { "kind": "executable", "sources": ["apps/gallery/*.cpp"],
-                 "exclude_sources": ["src/pkg/*"],
-                 "//system": "GUI 子系统（Subsystem=2）：双击 exe 不弹控制台窗口。\n桌面应用全部用 gui；工具链 st / 探测程序 / gedou_rl 保持 console（要在终端里跑并读输出）。",
-                 "system": "gui",
-                 "//icon": "exe **文件**图标（RT_GROUP_ICON）——资源管理器/任务栏/快捷方式看到的是它。\n源图由 tools/make_icons.py 画（可重生成），再由 tools/make_ico.py 转成多尺寸（16/24/32/48/64/128/256）。",
-                 "icon": "apps/gallery/assets/gallery.ico",
-                 "//embed": "用通配符而不是逐项：代码里有 `embed<\"...about.txt\">` 等引用，\n逐项列举必漏（实测漏过 about.txt 直接编译失败）。`.ico` 不进 embed——\n它只给 PE 资源用，嵌进去只是白胖（它比自己那些源图大 30 倍）。",
-                 "embed": ["apps/gallery/assets/*"] },
-    "gbcode": { "kind": "executable", "sources": ["apps/gbcode/*.cpp"],
-"exclude_sources": ["src/pkg/*", "src/ext/script.cpp", "src/ext/database.cpp", "third_party/quickjs/*", "third_party/sqlite/*"],
-"//defines": "ST_NO_SCRIPT：按需链接拆链开关——gbcode 不用进程内脚本，定义它后 app/server 的脚本调用点不编译，QuickJS 整链（实测 786KB）不进产物。控制协议调 script 会得到明确的“未编入”回复。需要脚本的应用（caiyun/xiangqi/jianmu）不定义此宏。",
-"defines": ["ST_NO_SCRIPT=1"],
-                  "//system": "GUI 子系统：双击 exe 不弹控制台窗口（PE Subsystem=2）。\n工具链 st 与探测程序保持 console——它们要在终端里跑并读输出。",
-                  "system": "gui",
-                  "//icon": "exe **文件**图标。资源管理器/任务栏/快捷方式看到的是它；\n运行期 SetWindowIcon 换的是窗口图标，两者不是一回事。\n由 tools/make_ico.py 从 gbcode-icon.png 生成（多尺寸）。",
-                  "icon": "apps/gbcode/assets/gbcode.ico",
-                  "//embed": "逐项列出而不用 `assets/*`：`.ico` 是给编译器进 PE 资源的，\n不是 battery::embed 的嵌入项（二进制且体积大，嵌进去只是白胖）。",
-                  "embed": ["apps/gbcode/assets/gbcode-icon.png",
-                              "apps/gbcode/assets/gbcode-logo.svg",
-                              "apps/gbcode/assets/icons.svg"] },
-    "louyue": { "kind": "executable", "sources": ["apps/louyue/*.cpp"],
-                  "exclude_sources": ["src/pkg/*"],
-                  "//system": "GUI 子系统：镂月是桌面编辑器，双击不弹控制台。",
-                  "system": "gui",
-                  "icon": "apps/louyue/assets/louyue.ico",
-                  "//embed": "用通配符（同 gallery）：代码里引用具体文件名，逐项列举易漏。",
-                  "embed": ["apps/louyue/assets/*"] },
-    "caiyun": { "kind": "executable", "sources": ["apps/caiyun/*.cpp"],
-                  "exclude_sources": ["src/pkg/*"],
-                  "//note": "裁云视频渲染：JSON 骨架 + 可选 JS 编排层（layout.js 每帧求值）",
-                  "//system": "GUI 子系统：裁云出片是带界面的桌面应用，双击不弹控制台。",
-                  "system": "gui",
-                  "icon": "apps/caiyun/assets/caiyun.ico",
-                  "//embed": "图标源图（窗口/任务栏图标用 `b::embed` 读，运行期 PNG 交给后端）+ 标题栏品牌 SVG。",
-                  "embed": ["apps/caiyun/assets/caiyun-icon.png",
-                              "apps/caiyun/assets/caiyun-logo.svg"] },
-    "jianmu": { "kind": "executable", "sources": ["apps/jianmu/*.cpp"],
-                  "exclude_sources": ["src/pkg/*"],
-                  "//note": "建木（三维建模与演示工作台）：监听 scenes/*.js 与 *.py 并热重载——.js 走 three.js 表达层、.py 走 bpy（Blender 建模 API），两者产出同一个 ThreeScene；支持旋转/缩放/平移/悬浮/点选。脚本是运行期读的（不 embed）——用户写的就是它已经会写的东西。",
-                  "//slow": "它是常驻应用（有主循环），不适合当单元测试跑；验证靠 tools/jianmu_e2e.py 与 tests/ui_three_view_test.cpp",
-                  "//system": "GUI 子系统（Subsystem=2）：建木是桌面工作窗口，双击不弹控制台。\n带参数从 cmd 跑（--headless / --scene 等 e2e 依赖它）时输出不会丢：入口的\n`startup_configure_console` 会把 stdout 接回父控制台（见 core/entry.cpp）。",
-                  "system": "gui",
-                  "//icon": "exe 文件图标（资源管理器/快捷方式/任务栏看到的 RT_GROUP_ICON）。\n源图 apps/jianmu/assets/jianmu-icon.png 由 tools/make_icons.py 画、tools/make_ico.py 打包。",
-                  "icon": "apps/jianmu/assets/jianmu.ico",
-                  "//embed": "图标两件：PNG 给系统 API 做窗口/任务栏图标，SVG 给自绘标题栏做品牌标记。\n**场景脚本不 embed**：它们是用户在磁盘上改的工作对象（改一行就要重载，内嵌等于每次改都重编）。",
-                  "embed": ["apps/jianmu/assets/jianmu-icon.png",
-                              "apps/jianmu/assets/jianmu-logo.svg"] },
-    "xiangqi": { "kind": "executable", "sources": ["apps/xiangqi/*.cpp"],
-                  "exclude_sources": ["src/pkg/*"],
-                  "//note": "agent 控制的桌面常驻面板：webSocket 客户端连控制器；界面 ui/main.xml、逻辑 ui/app.js。两份都**编译期嵌入**（单文件分发靠它）——`b::embed` 在非生产档仍优先读磁盘并监看文件，所以开发期改 XML/JS 依旧即改即生效",
-                  "//system": "gui = 桌面子系统（Subsystem=2）：双击不弹控制台窗口。相期是常驻面板，不能用 console。",
-                  "system": "gui",
-                  "//icon": "exe 文件图标（资源管理器/任务栏/快捷方式看到的 RT_GROUP_ICON）；代码里的窗口图标改不了磁盘上的 exe 图标",
-                  "icon": "apps/xiangqi/assets/xiangqi.ico",
-                  "//embed": "标题栏品牌 SVG（窗口/任务栏图标由 `make_xiangqi_icon_png` 现画）\n+ 界面与逻辑：单文件分发要求它们也在 exe 里（否则漏拷 `ui/` 就白屏）；\n热重载不受影响（非生产档 b::embed 先读磁盘）。",
-                  "embed": ["apps/xiangqi/assets/xiangqi-logo.svg",
-                           "apps/xiangqi/ui/main.xml",
-                           "apps/xiangqi/ui/app.js"] },
-    "cefu": { "kind": "executable", "sources": ["apps/cefu/src/*.cpp"],
-               "exclude_sources": ["src/pkg/*"],
-               "//note": "册府（结构化知识库）：C++ 边车常驻进程。界面 ui/main.xml、逻辑 ui/app.js 均**编译期嵌入**（单文件分发靠它）——`b::embed` 非生产档仍先读磁盘并监看文件，开发期改 XML/JS 依旧即改即生效；与 xiangqi 同样纳入主仓统一构建管理",
-               "//system": "gui = 桌面子系统：册府是常驻窗口应用，双击不弹控制台。",
-               "system": "gui",
-               "icon": "apps/cefu/assets/cefu.ico",
-               "//icon": "exe 文件图标（资源管理器/快捷方式看到的）。运行期窗口/托盘图标**直接嵌入同一份源图** `cefu-icon.png`——\n`cefu.ico` 的 256 档就是它（由 tools/make_icons.py 画、tools/make_ico.py 打包），所以三处显示同一个记号。",
-               "//embed": "标题栏品牌 SVG + 窗口/托盘位图（三者同一记号：SVG 给自绘标题栏，PNG 给系统 API 做窗口/托盘）。\n+ 界面与逻辑：单文件分发要求它们也在 exe 里。",
-               "embed": ["apps/cefu/assets/cefu-logo.svg",
-                        "apps/cefu/assets/cefu-icon.png",
-                        "apps/cefu/ui/main.xml",
-                        "apps/cefu/ui/app.js"] },
-    "gedou": { "kind": "executable", "sources": ["apps/gedou/*.cpp"],
-                 "exclude_sources": ["src/pkg/*"],
-                 "//note": "格斗（类拳皇 2D 对战）：自绘舞台 + 60Hz 逻辑帧 + 骨架姿态。分层见 main.cpp 头注（姿态/数据/逻辑/对手/视图）",
-                 "//system": "GUI 子系统：格斗是游戏，双击不弹控制台。\n（带 --policy / --dummy 等命令行参数时仍能从 cmd 跑——入口的\n`startup_configure_console` 会接管父控制台，输出不会丢。）",
-                 "system": "gui",
-                 "icon": "apps/gedou/assets/gedou.ico",
-                 "//embed": "图标两件（**必顶**）：PNG（窗口/任务栏图标，`b::embed` 交给后端）+ SVG（标题栏品牌）。\n体积小、已入库。缺了说明清单写错，应当报错。",
-                 "embed": ["apps/gedou/assets/gedou-icon.png",
-                             "apps/gedou/assets/gedou-logo.svg"],
-                 "//optional_embed": "角色立绘（SDXL 生成、抠图后的透明 PNG）：由本地生图产线产出，因体积不入库，\n克隆下来的机器上必然没有。\n**逐文件列出**而不是写 actions/*.png——可选嵌入缺失时要按字面路径补\n零字节占位，而 `b::embed<...>` 的查找键就是这些字面路径（通配符缺失时无法预知具体文件名）。\n缺文件时：构建照常通过，运行时解码失败自动退回矢量画风（见 `GameView::load_portraits`）。\n补素材：按 `apps/gedou/ART_PIPELINE.md` 跑生图管线，产物落回本目录即自动生效。",
-                 "optional_embed": ["apps/gedou/assets/actions/donut-apple_drop.png",
-                     "apps/gedou/assets/actions/donut-apple_guard.png",
-                     "apps/gedou/assets/actions/donut-apple_life.png",
-                     "apps/gedou/assets/actions/donut-defeat.png",
-                     "apps/gedou/assets/actions/donut-donut_toss.png",
-                     "apps/gedou/assets/actions/donut-guard.png",
-                     "apps/gedou/assets/actions/donut-heavy.png",
-                     "apps/gedou/assets/actions/donut-hurt.png",
-                     "apps/gedou/assets/actions/donut-idle.png",
-                     "apps/gedou/assets/actions/donut-kick.png",
-                     "apps/gedou/assets/actions/donut-knockdown.png",
-                     "apps/gedou/assets/actions/donut-light.png",
-                     "apps/gedou/assets/actions/donut-puff_spray.png",
-                     "apps/gedou/assets/actions/donut-special.png",
-                     "apps/gedou/assets/actions/donut-victory.png",
-                     "apps/gedou/assets/actions/donut-waist_grab.png",
-                     "apps/gedou/assets/actions/donut-walk.png",
-                     "apps/gedou/assets/actions/husheng-apple_drop.png",
-                     "apps/gedou/assets/actions/husheng-apple_guard.png",
-                     "apps/gedou/assets/actions/husheng-apple_life.png",
-                     "apps/gedou/assets/actions/husheng-defeat.png",
-                     "apps/gedou/assets/actions/husheng-donut_toss.png",
-                     "apps/gedou/assets/actions/husheng-guard.png",
-                     "apps/gedou/assets/actions/husheng-heavy.png",
-                     "apps/gedou/assets/actions/husheng-hurt.png",
-                     "apps/gedou/assets/actions/husheng-idle.png",
-                     "apps/gedou/assets/actions/husheng-kick.png",
-                     "apps/gedou/assets/actions/husheng-knockdown.png",
-                     "apps/gedou/assets/actions/husheng-light.png",
-                     "apps/gedou/assets/actions/husheng-puff_spray.png",
-                     "apps/gedou/assets/actions/husheng-special.png",
-                     "apps/gedou/assets/actions/husheng-victory.png",
-                     "apps/gedou/assets/actions/husheng-waist_grab.png",
-                     "apps/gedou/assets/actions/husheng-walk.png"] },
-    "gebai_desktop": { "kind": "executable", "sources": ["apps/gebai_desktop/*.cpp"],
-                  "//note": "歌白桌面端：霜天原生宿主（自绘窗口 + 整窗 WebView2）+ 内嵌的 gebai 服务端侧车。\n它取代原先的 Rust tao/wry 启动器（packages/desktop/launcher）：同样的能力——物化侧车、解析监听端口、导航页面、关窗回收——只是宿主换成框架自己的（跨平台同一套代码、无 Rust 工具链依赖）。",
-                  "//system": "GUI 子系统：桌面端双击不弹控制台。带 --headless 从终端跑时，入口的 `startup_configure_console` 会把 stdout 接回父控制台（e2e 靠它读日志）。",
-                  "system": "gui",
-                  "//icon": "exe 文件图标：与 gebai.exe / Web UI favicon 同一记号（源图 packages/web/public/favicon.svg，由 packages/desktop/scripts/gen-icon.ts 渲染成 packages/desktop/icons/icon.ico 后拷入库）。",
-                  "icon": "apps/gebai_desktop/assets/gebai.ico",
-                  "//embed": "只有窗口/任务栏图标。**侧车不 embed**：`packages/desktop/dist/gebai.exe` 是 270MB 的构建产物，用 b::embed 会生成 ~1.1GB C++ 源码、每次全量重编（实测不可接受）。发布形态由打包脚本把侧车二进制**追加到宿主 exe 末尾**（trailer：魔数+长度+哈希，见 main.cpp 的 read_payload_from_self 与 packages/desktop/scripts/pack-desktop.ts），单文件分发不受影响；开发期用 --server-exe 指一件现成二进制。",
-                  "embed": ["apps/gebai_desktop/assets/gebai-icon32.rgba"] },
-    "xiaobai": { "kind": "executable", "sources": ["apps/xiaobai/*.cpp"],
-                  "exclude_sources": ["src/pkg/*"],
-                  "//system": "GUI 子系统：小白是桌面 AI 对话窗口，双击不弹控制台（--headless 时入口接回 stdout）。",
-                  "system": "gui",
-                  "//defines": "构建期预置的连接参数（条件编译，见 main.cpp 的 XIAOBAI_HAS_PRESET_*）。三者各自独立，给哪个预置哪个：XIAOBAI_BASE_URL（兼容端点到 /v1）、XIAOBAI_MODEL（模型名，预置后设置面板不展示该字段）、XIAOBAI_API_KEY（Bearer 令牌）。**默认不在这里预置**——部署参数不提交进仓库，改用 `st build xiaobai --define 'XIAOBAI_MODEL=\\\"…\\\"'`（可重复，只作用于本次构建，同名覆盖本清单）。本应用**不写任何配置文件**：配置只存在于内存里，关窗即忘；没预置的值由用户在设置面板里现填（面板会自动回显已预置/已填的值）。",
-                  "//icon": "exe 文件图标（资源管理器/任务栏/快捷方式看到的 RT_GROUP_ICON）。源图由 tools/make_icons.py 画（火箭），再由 tools/make_ico.py 转多尺寸——两件必须同源，否则窗口图标与桌面图标会是两个标。",
-                  "icon": "apps/xiaobai/assets/xiaobai.ico",
-                  "embed": ["apps/xiaobai/assets/xiaobai-icon.png",
-             "apps/xiaobai/assets/xiaobai-logo.svg"] },
-    "st_desktop": { "kind": "executable", "sources": ["apps/st_desktop/*.cpp"],
-                  "exclude_sources": ["src/pkg/*"],
-                  "//note": "霜天桌面：替代原生桌面的全屏置底启动器（壁纸 + 真实应用图标网格 + 液态玻璃任务栏），同时也是液态玻璃特性的验收载体。**不内嵌子窗口**：点图标只是 spawn 起真实 exe，应用窗口自然浮在桌面之上。窗口形态（铺满显示器/置底/隐藏系统任务栏）由 shell 层的 fill_monitor / stay_at_bottom / set_system_taskbar_visible 提供，`--windowed` 可切回普通窗口。应用清单读 exe 同目录的 desktop.json。玻璃 = Style::backdrop_blur + backdrop_refraction + backdrop_dispersion（GPU 生效，软件/无头降级实色底）。",
-                  "//system": "GUI 子系统（桌面环境，双击不弹控制台）；--headless 时入口 startup_configure_console 接回 stdout，无头冒烟靠它读日志。",
-                  "//icon": "exe 文件图标（标题栏/任务栏/资源管理器）。由 tools/st_desktop_icon_gen.py 按 splash.cpp 的品牌几何绘制，与内嵌的 st_desktop-icon.png **同一份像素**的不同尺寸档——否则窗口图标与桌面图标会是两个标。",
-                  "icon": "apps/st_desktop/assets/st_desktop.ico",
-                  "//embed": "**全套应用图标**：各应用自己那份 `<app>-icon.png`（就是它们的窗口/任务栏图标），覆盖 `group all` 的八个应用 + 桌面自己——桌面图标必须与任务栏一致，不自己另画一套。桌面那份由 `tools/st_desktop_icon_gen.py` 按 `src/app/splash.cpp` 的品牌几何（三条主干 + ±52° 分叉 + 中心点）绘制，与启动卡上的标同源。另加壁纸位图 `bg-slate.png`（复用裁云素材库的石面细纹：亮度 36.5%，玻璃才有可透的亮度差）。合计约 1MB。",
-                  "embed": ["apps/gallery/assets/gallery-icon.png",
-                              "apps/gbcode/assets/gbcode-icon.png",
-                              "apps/jianmu/assets/jianmu-icon.png",
-                              "apps/caiyun/assets/caiyun-icon.png",
-                              "apps/louyue/assets/louyue-icon.png",
-                              "apps/xiangqi/assets/xiangqi-icon.png",
-                              "apps/cefu/assets/cefu-icon.png",
-                              "apps/gedou/assets/gedou-icon.png",
-                              "apps/xiaobai/assets/xiaobai-icon.png",
-                              "apps/st_desktop/assets/st_desktop-icon.png",
-                              "apps/caiyun/assets/media/bg-slate.png"],
-                  "system": "gui" },
-    "gedou_rl": { "kind": "executable",
-                  "sources": ["tools/gedou_rl.cpp",
-                              "apps/gedou/rl_env.cpp",
-                              "apps/gedou/policy.cpp",
-                              "apps/gedou/fight.cpp",
-                              "apps/gedou/fighter.cpp",
-                              "apps/gedou/pose.cpp",
-                              "apps/gedou/ai.cpp"],
-                  "extra_include_dirs": [".", "apps/gedou"],
-                  "exclude_sources": ["src/pkg/*"],
-                  "//system": "console：**故意保持**——它是命令行工具（采集/评测/导出 schema），\n输出要能直接管道给 Python 与 shell。",
-                  "//note": "强化学习采集/评测：复用 Match 做进程内批量对局（不在 Python 重实现战斗逻辑），经验落二进制供 torch 训练；--eval 报胜率" },
+      "sources": [
+        "tools/library_usage_check.cpp"
+      ],
+      "libraries": [
+        "st_core"
+      ],
+      "exclude_sources": [
+        "src/**"
+      ]
+    },
+    "gallery": {
+      "kind": "executable",
+      "sources": [
+        "apps/gallery/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//system": "GUI 子系统（Subsystem=2）：双击 exe 不弹控制台窗口。\n桌面应用全部用 gui；工具链 st / 探测程序 / gedou_rl 保持 console（要在终端里跑并读输出）。",
+      "system": "gui",
+      "//icon": "exe **文件**图标（RT_GROUP_ICON）——资源管理器/任务栏/快捷方式看到的是它。\n源图由 tools/make_icons.py 画（可重生成），再由 tools/make_ico.py 转成多尺寸（16/24/32/48/64/128/256）。",
+      "icon": "apps/gallery/assets/gallery.ico",
+      "//embed": "用通配符而不是逐项：代码里有 `embed<\"...about.txt\">` 等引用，\n逐项列举必漏（实测漏过 about.txt 直接编译失败）。`.ico` 不进 embed——\n它只给 PE 资源用，嵌进去只是白胖（它比自己那些源图大 30 倍）。",
+      "embed": [
+        "apps/gallery/assets/*"
+      ]
+    },
+    "gbcode": {
+      "kind": "executable",
+      "sources": [
+        "apps/gbcode/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*",
+        "src/ext/script.cpp",
+        "src/ext/database.cpp",
+        "third_party/quickjs/*",
+        "third_party/sqlite/*"
+      ],
+      "//defines": "ST_NO_SCRIPT：按需链接拆链开关——gbcode 不用进程内脚本，定义它后 app/server 的脚本调用点不编译，QuickJS 整链（实测 786KB）不进产物。控制协议调 script 会得到明确的“未编入”回复。需要脚本的应用（caiyun/xiangqi/jianmu）不定义此宏。",
+      "defines": [
+        "ST_NO_SCRIPT=1"
+      ],
+      "//system": "GUI 子系统：双击 exe 不弹控制台窗口（PE Subsystem=2）。\n工具链 st 与探测程序保持 console——它们要在终端里跑并读输出。",
+      "system": "gui",
+      "//icon": "exe **文件**图标。资源管理器/任务栏/快捷方式看到的是它；\n运行期 SetWindowIcon 换的是窗口图标，两者不是一回事。\n由 tools/make_ico.py 从 gbcode-icon.png 生成（多尺寸）。",
+      "icon": "apps/gbcode/assets/gbcode.ico",
+      "//embed": "逐项列出而不用 `assets/*`：`.ico` 是给编译器进 PE 资源的，\n不是 battery::embed 的嵌入项（二进制且体积大，嵌进去只是白胖）。",
+      "embed": [
+        "apps/gbcode/assets/gbcode-icon.png",
+        "apps/gbcode/assets/gbcode-logo.svg",
+        "apps/gbcode/assets/icons.svg"
+      ]
+    },
+    "louyue": {
+      "kind": "executable",
+      "sources": [
+        "apps/louyue/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//system": "GUI 子系统：镂月是桌面编辑器，双击不弹控制台。",
+      "system": "gui",
+      "icon": "apps/louyue/assets/louyue.ico",
+      "//embed": "用通配符（同 gallery）：代码里引用具体文件名，逐项列举易漏。",
+      "embed": [
+        "apps/louyue/assets/*"
+      ]
+    },
+    "caiyun": {
+      "kind": "executable",
+      "sources": [
+        "apps/caiyun/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "裁云视频渲染：JSON 骨架 + 可选 JS 编排层（layout.js 每帧求值）",
+      "//system": "GUI 子系统：裁云出片是带界面的桌面应用，双击不弹控制台。",
+      "system": "gui",
+      "icon": "apps/caiyun/assets/caiyun.ico",
+      "//embed": "图标源图（窗口/任务栏图标用 `b::embed` 读，运行期 PNG 交给后端）+ 标题栏品牌 SVG。",
+      "embed": [
+        "apps/caiyun/assets/caiyun-icon.png",
+        "apps/caiyun/assets/caiyun-logo.svg"
+      ]
+    },
+    "jianmu": {
+      "kind": "executable",
+      "sources": [
+        "apps/jianmu/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "建木（三维建模与演示工作台）：监听 scenes/*.js 与 *.py 并热重载——.js 走 three.js 表达层、.py 走 bpy（Blender 建模 API），两者产出同一个 ThreeScene；支持旋转/缩放/平移/悬浮/点选。脚本是运行期读的（不 embed）——用户写的就是它已经会写的东西。",
+      "//slow": "它是常驻应用（有主循环），不适合当单元测试跑；验证靠 tools/jianmu_e2e.py 与 tests/ui_three_view_test.cpp",
+      "//system": "GUI 子系统（Subsystem=2）：建木是桌面工作窗口，双击不弹控制台。\n带参数从 cmd 跑（--headless / --scene 等 e2e 依赖它）时输出不会丢：入口的\n`startup_configure_console` 会把 stdout 接回父控制台（见 core/entry.cpp）。",
+      "system": "gui",
+      "//icon": "exe 文件图标（资源管理器/快捷方式/任务栏看到的 RT_GROUP_ICON）。\n源图 apps/jianmu/assets/jianmu-icon.png 由 tools/make_icons.py 画、tools/make_ico.py 打包。",
+      "icon": "apps/jianmu/assets/jianmu.ico",
+      "//embed": "图标两件：PNG 给系统 API 做窗口/任务栏图标，SVG 给自绘标题栏做品牌标记。\n**场景脚本不 embed**：它们是用户在磁盘上改的工作对象（改一行就要重载，内嵌等于每次改都重编）。",
+      "embed": [
+        "apps/jianmu/assets/jianmu-icon.png",
+        "apps/jianmu/assets/jianmu-logo.svg"
+      ]
+    },
+    "xiangqi": {
+      "kind": "executable",
+      "sources": [
+        "apps/xiangqi/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "agent 控制的桌面常驻面板：webSocket 客户端连控制器；界面 ui/main.xml、逻辑 ui/app.js。两份都**编译期嵌入**（单文件分发靠它）——`b::embed` 在非生产档仍优先读磁盘并监看文件，所以开发期改 XML/JS 依旧即改即生效",
+      "//system": "gui = 桌面子系统（Subsystem=2）：双击不弹控制台窗口。相期是常驻面板，不能用 console。",
+      "system": "gui",
+      "//icon": "exe 文件图标（资源管理器/任务栏/快捷方式看到的 RT_GROUP_ICON）；代码里的窗口图标改不了磁盘上的 exe 图标",
+      "icon": "apps/xiangqi/assets/xiangqi.ico",
+      "//embed": "标题栏品牌 SVG（窗口/任务栏图标由 `make_xiangqi_icon_png` 现画）\n+ 界面与逻辑：单文件分发要求它们也在 exe 里（否则漏拷 `ui/` 就白屏）；\n热重载不受影响（非生产档 b::embed 先读磁盘）。",
+      "embed": [
+        "apps/xiangqi/assets/xiangqi-logo.svg",
+        "apps/xiangqi/ui/main.xml",
+        "apps/xiangqi/ui/app.js"
+      ]
+    },
+    "cefu": {
+      "kind": "executable",
+      "sources": [
+        "apps/cefu/src/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "册府（结构化知识库）：C++ 边车常驻进程。界面 ui/main.xml、逻辑 ui/app.js 均**编译期嵌入**（单文件分发靠它）——`b::embed` 非生产档仍先读磁盘并监看文件，开发期改 XML/JS 依旧即改即生效；与 xiangqi 同样纳入主仓统一构建管理",
+      "//system": "gui = 桌面子系统：册府是常驻窗口应用，双击不弹控制台。",
+      "system": "gui",
+      "icon": "apps/cefu/assets/cefu.ico",
+      "//icon": "exe 文件图标（资源管理器/快捷方式看到的）。运行期窗口/托盘图标**直接嵌入同一份源图** `cefu-icon.png`——\n`cefu.ico` 的 256 档就是它（由 tools/make_icons.py 画、tools/make_ico.py 打包），所以三处显示同一个记号。",
+      "//embed": "标题栏品牌 SVG + 窗口/托盘位图（三者同一记号：SVG 给自绘标题栏，PNG 给系统 API 做窗口/托盘）。\n+ 界面与逻辑：单文件分发要求它们也在 exe 里。",
+      "embed": [
+        "apps/cefu/assets/cefu-logo.svg",
+        "apps/cefu/assets/cefu-icon.png",
+        "apps/cefu/ui/main.xml",
+        "apps/cefu/ui/app.js"
+      ]
+    },
+    "gedou": {
+      "kind": "executable",
+      "sources": [
+        "apps/gedou/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "格斗（类拳皇 2D 对战）：自绘舞台 + 60Hz 逻辑帧 + 骨架姿态。分层见 main.cpp 头注（姿态/数据/逻辑/对手/视图）",
+      "//system": "GUI 子系统：格斗是游戏，双击不弹控制台。\n（带 --policy / --dummy 等命令行参数时仍能从 cmd 跑——入口的\n`startup_configure_console` 会接管父控制台，输出不会丢。）",
+      "system": "gui",
+      "icon": "apps/gedou/assets/gedou.ico",
+      "//embed": "图标两件（**必顶**）：PNG（窗口/任务栏图标，`b::embed` 交给后端）+ SVG（标题栏品牌）。\n体积小、已入库。缺了说明清单写错，应当报错。",
+      "embed": [
+        "apps/gedou/assets/gedou-icon.png",
+        "apps/gedou/assets/gedou-logo.svg"
+      ],
+      "//optional_embed": "角色立绘（SDXL 生成、抠图后的透明 PNG）：由本地生图产线产出，因体积不入库，\n克隆下来的机器上必然没有。\n**逐文件列出**而不是写 actions/*.png——可选嵌入缺失时要按字面路径补\n零字节占位，而 `b::embed<...>` 的查找键就是这些字面路径（通配符缺失时无法预知具体文件名）。\n缺文件时：构建照常通过，运行时解码失败自动退回矢量画风（见 `GameView::load_portraits`）。\n补素材：按 `apps/gedou/ART_PIPELINE.md` 跑生图管线，产物落回本目录即自动生效。",
+      "optional_embed": [
+        "apps/gedou/assets/actions/donut-apple_drop.png",
+        "apps/gedou/assets/actions/donut-apple_guard.png",
+        "apps/gedou/assets/actions/donut-apple_life.png",
+        "apps/gedou/assets/actions/donut-defeat.png",
+        "apps/gedou/assets/actions/donut-donut_toss.png",
+        "apps/gedou/assets/actions/donut-guard.png",
+        "apps/gedou/assets/actions/donut-heavy.png",
+        "apps/gedou/assets/actions/donut-hurt.png",
+        "apps/gedou/assets/actions/donut-idle.png",
+        "apps/gedou/assets/actions/donut-kick.png",
+        "apps/gedou/assets/actions/donut-knockdown.png",
+        "apps/gedou/assets/actions/donut-light.png",
+        "apps/gedou/assets/actions/donut-puff_spray.png",
+        "apps/gedou/assets/actions/donut-special.png",
+        "apps/gedou/assets/actions/donut-victory.png",
+        "apps/gedou/assets/actions/donut-waist_grab.png",
+        "apps/gedou/assets/actions/donut-walk.png",
+        "apps/gedou/assets/actions/husheng-apple_drop.png",
+        "apps/gedou/assets/actions/husheng-apple_guard.png",
+        "apps/gedou/assets/actions/husheng-apple_life.png",
+        "apps/gedou/assets/actions/husheng-defeat.png",
+        "apps/gedou/assets/actions/husheng-donut_toss.png",
+        "apps/gedou/assets/actions/husheng-guard.png",
+        "apps/gedou/assets/actions/husheng-heavy.png",
+        "apps/gedou/assets/actions/husheng-hurt.png",
+        "apps/gedou/assets/actions/husheng-idle.png",
+        "apps/gedou/assets/actions/husheng-kick.png",
+        "apps/gedou/assets/actions/husheng-knockdown.png",
+        "apps/gedou/assets/actions/husheng-light.png",
+        "apps/gedou/assets/actions/husheng-puff_spray.png",
+        "apps/gedou/assets/actions/husheng-special.png",
+        "apps/gedou/assets/actions/husheng-victory.png",
+        "apps/gedou/assets/actions/husheng-waist_grab.png",
+        "apps/gedou/assets/actions/husheng-walk.png"
+      ]
+    },
+    "gebai_desktop": {
+      "kind": "executable",
+      "sources": [
+        "apps/gebai_desktop/*.cpp"
+      ],
+      "//note": "歌白桌面端：霜天原生宿主（自绘窗口 + 整窗 WebView2）+ 内嵌的 gebai 服务端侧车。\n它取代原先的 Rust tao/wry 启动器（packages/desktop/launcher）：同样的能力——物化侧车、解析监听端口、导航页面、关窗回收——只是宿主换成框架自己的（跨平台同一套代码、无 Rust 工具链依赖）。",
+      "//system": "GUI 子系统：桌面端双击不弹控制台。带 --headless 从终端跑时，入口的 `startup_configure_console` 会把 stdout 接回父控制台（e2e 靠它读日志）。",
+      "system": "gui",
+      "//icon": "exe 文件图标：与 gebai.exe / Web UI favicon 同一记号（源图 packages/web/public/favicon.svg，由 packages/desktop/scripts/gen-icon.ts 渲染成 packages/desktop/icons/icon.ico 后拷入库）。",
+      "icon": "apps/gebai_desktop/assets/gebai.ico",
+      "//embed": "只有窗口/任务栏图标。**侧车不 embed**：`packages/desktop/dist/gebai.exe` 是 270MB 的构建产物，用 b::embed 会生成 ~1.1GB C++ 源码、每次全量重编（实测不可接受）。发布形态由打包脚本把侧车二进制**追加到宿主 exe 末尾**（trailer：魔数+长度+哈希，见 main.cpp 的 read_payload_from_self 与 packages/desktop/scripts/pack-desktop.ts），单文件分发不受影响；开发期用 --server-exe 指一件现成二进制。",
+      "embed": [
+        "apps/gebai_desktop/assets/gebai-icon32.rgba"
+      ]
+    },
+    "xiaobai": {
+      "kind": "executable",
+      "sources": [
+        "apps/xiaobai/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//system": "GUI 子系统：小白是桌面 AI 对话窗口，双击不弹控制台（--headless 时入口接回 stdout）。",
+      "system": "gui",
+      "//defines": "构建期预置的连接参数（条件编译，见 main.cpp 的 XIAOBAI_HAS_PRESET_*）。三者各自独立，给哪个预置哪个：XIAOBAI_BASE_URL（兼容端点到 /v1）、XIAOBAI_MODEL（模型名，预置后设置面板不展示该字段）、XIAOBAI_API_KEY（Bearer 令牌）。**默认不在这里预置**——部署参数不提交进仓库，改用 `st build xiaobai --define 'XIAOBAI_MODEL=\\\"…\\\"'`（可重复，只作用于本次构建，同名覆盖本清单）。本应用**不写任何配置文件**：配置只存在于内存里，关窗即忘；没预置的值由用户在设置面板里现填（面板会自动回显已预置/已填的值）。",
+      "//icon": "exe 文件图标（资源管理器/任务栏/快捷方式看到的 RT_GROUP_ICON）。源图由 tools/make_icons.py 画（火箭），再由 tools/make_ico.py 转多尺寸——两件必须同源，否则窗口图标与桌面图标会是两个标。",
+      "icon": "apps/xiaobai/assets/xiaobai.ico",
+      "embed": [
+        "apps/xiaobai/assets/xiaobai-icon.png",
+        "apps/xiaobai/assets/xiaobai-logo.svg"
+      ]
+    },
+    "st_desktop": {
+      "kind": "executable",
+      "sources": [
+        "apps/st_desktop/*.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "霜天桌面：替代原生桌面的全屏置底启动器（壁纸 + 真实应用图标网格 + 液态玻璃任务栏），同时也是液态玻璃特性的验收载体。**不内嵌子窗口**：点图标只是 spawn 起真实 exe，应用窗口自然浮在桌面之上。窗口形态（铺满显示器/置底/隐藏系统任务栏）由 shell 层的 fill_monitor / stay_at_bottom / set_system_taskbar_visible 提供，`--windowed` 可切回普通窗口。应用清单读 exe 同目录的 desktop.json。玻璃 = Style::backdrop_blur + backdrop_refraction + backdrop_dispersion（GPU 生效，软件/无头降级实色底）。",
+      "//system": "GUI 子系统（桌面环境，双击不弹控制台）；--headless 时入口 startup_configure_console 接回 stdout，无头冒烟靠它读日志。",
+      "//icon": "exe 文件图标（标题栏/任务栏/资源管理器）。由 tools/st_desktop_icon_gen.py 按 splash.cpp 的品牌几何绘制，与内嵌的 st_desktop-icon.png **同一份像素**的不同尺寸档——否则窗口图标与桌面图标会是两个标。",
+      "icon": "apps/st_desktop/assets/st_desktop.ico",
+      "//embed": "**全套应用图标**：各应用自己那份 `<app>-icon.png`（就是它们的窗口/任务栏图标），覆盖 `group all` 的八个应用 + 桌面自己——桌面图标必须与任务栏一致，不自己另画一套。桌面那份由 `tools/st_desktop_icon_gen.py` 按 `src/app/splash.cpp` 的品牌几何（三条主干 + ±52° 分叉 + 中心点）绘制，与启动卡上的标同源。另加壁纸位图 `bg-slate.png`（复用裁云素材库的石面细纹：亮度 36.5%，玻璃才有可透的亮度差）。合计约 1MB。",
+      "embed": [
+        "apps/gallery/assets/gallery-icon.png",
+        "apps/gbcode/assets/gbcode-icon.png",
+        "apps/jianmu/assets/jianmu-icon.png",
+        "apps/caiyun/assets/caiyun-icon.png",
+        "apps/louyue/assets/louyue-icon.png",
+        "apps/xiangqi/assets/xiangqi-icon.png",
+        "apps/cefu/assets/cefu-icon.png",
+        "apps/gedou/assets/gedou-icon.png",
+        "apps/xiaobai/assets/xiaobai-icon.png",
+        "apps/st_desktop/assets/st_desktop-icon.png",
+        "apps/caiyun/assets/media/bg-slate.png"
+      ],
+      "system": "gui"
+    },
+    "gedou_rl": {
+      "kind": "executable",
+      "sources": [
+        "tools/gedou_rl.cpp",
+        "apps/gedou/rl_env.cpp",
+        "apps/gedou/policy.cpp",
+        "apps/gedou/fight.cpp",
+        "apps/gedou/fighter.cpp",
+        "apps/gedou/pose.cpp",
+        "apps/gedou/ai.cpp"
+      ],
+      "extra_include_dirs": [
+        ".",
+        "apps/gedou"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//system": "console：**故意保持**——它是命令行工具（采集/评测/导出 schema），\n输出要能直接管道给 Python 与 shell。",
+      "//note": "强化学习采集/评测：复用 Match 做进程内批量对局（不在 Python 重实现战斗逻辑），经验落二进制供 torch 训练；--eval 报胜率"
+    },
     "svg_sheet": {
       "//note": "把 SVG 图标光栅化成 PNG 拼版（深/浅两行）。\n图标写错了不会报错、只会画不出来，所以先把每个 SVG 单独渲染成图。",
-      "kind": "executable", "sources": ["tools/svg_sheet.cpp"],
-      "exclude_sources": ["src/pkg/*"] },
-    "gltf_skin_check": { "kind": "executable", "sources": ["tools/gltf_skin_check.cpp"],
-                          "exclude_sources": ["src/pkg/*"] },
-    "vertex_region": { "kind": "executable", "sources": ["tools/vertex_region.cpp"],
-                       "exclude_sources": ["src/pkg/*"] },
-    "uv_layout": { "kind": "executable", "sources": ["tools/uv_layout.cpp"],
-                   "exclude_sources": ["src/pkg/*"] },
-    "tex_dump": { "kind": "executable", "sources": ["tools/tex_dump.cpp"],
-                  "exclude_sources": ["src/pkg/*"] },
-    "rig_map_check": { "kind": "executable", "sources": ["tools/rig_map_check.cpp"],
-                        "exclude_sources": ["src/pkg/*"] },
-    "fighter_preview": { "kind": "executable", "sources": ["tools/fighter_preview.cpp"],
-                          "exclude_sources": ["src/pkg/*"] },
-    "caret_ink_probe": { "kind": "executable", "sources": ["tools/caret_ink_probe.cpp"],
-                         "exclude_sources": ["src/pkg/*"] },
-    "menu_clip_probe": { "kind": "executable", "sources": ["tools/menu_clip_probe.cpp"],
-                         "exclude_sources": ["src/pkg/*"],
-                         "//note": "MenuPanel 视口剔除的像素等价性验证（见源文件头部）" },
-    "pty_stop_probe": { "kind": "executable", "sources": ["tools/pty_stop_probe.cpp"],
-                        "exclude_sources": ["src/pkg/*"] },
-    "pty_form_probe": { "kind": "executable", "sources": ["tools/pty_form_probe.cpp"],
-                         "exclude_sources": ["src/pkg/*"] },
-    "font_stack_probe": { "kind": "executable", "sources": ["tools/font_stack_probe.cpp"],
-                          "exclude_sources": ["src/pkg/*"] },
-    "mp_thread_safety_probe": { "kind": "executable",
-                                "sources": ["tools/mp_thread_safety_probe.cpp"],
-                                "exclude_sources": ["src/pkg/*"],
-                                "//note": "MicroPython 解释器是进程级单例：并发解释会互踩堆。本探针把「单线程串行 / 两线程并发 / available() 判据」三件事分开量——它是 `three_view_dispatches_py_to_bpy_and_js_to_three` 单跑即崩的取证工具。" },
-    "mp_reinit_probe": { "kind": "executable",
-                         "sources": ["tools/mp_reinit_probe.cpp"],
-                         "exclude_sources": ["src/pkg/*"],
-                         "//note": "最小复现：主线程 run 一次 → 另一线程 run 一次 → 主线程再用。曾用于排除「跨线程」假设（实测崩在第一次 run，与线程无关）。" },
-    "mp_runtime_smoke_probe": { "kind": "executable",
-                                "sources": ["tools/mp_runtime_smoke_probe.cpp"],
-                                "exclude_sources": ["src/pkg/*"],
-                                "//note": "最小闭合检查：init → run(简单赋值) → run(import bpy) → deinit，全部直接调 st_mp_*，绕开 Runtime 的所有纪律。用来区分「桥本身不通」与「跨线程纪律不对」——它把 nlr_push 的缺陷钉到 st_mp_init 第一行。" },
-    "bold_face_probe": { "kind": "executable", "sources": ["tools/bold_face_probe.cpp"],
-                         "exclude_sources": ["src/pkg/*"],
-                         "//note": "探本机是否有真粗体面：决定禁用合成加粗后 bold 会不会退化" },
-    "text_bold_sharpness_probe": { "kind": "executable",
-                                   "sources": ["tools/text_bold_sharpness_probe.cpp"],
-                                   "exclude_sources": ["src/pkg/*"],
-                                   "//note": "真粗体面 vs Regular 的墨量分层：把“糊/脏”变成可量的数" },
-    "lsp_parse_probe": { "kind": "executable",
-                          "sources": ["tools/lsp_parse_probe.cpp"],
-                          "exclude_sources": ["src/pkg/*"] },
-    "lsp_symbols_probe": { "kind": "executable",
-                            "sources": ["tools/lsp_symbols_probe.cpp", "apps/gbcode/lsp_bridge.cpp"],
-                            "extra_include_dirs": ["."],
-                            "exclude_sources": ["src/pkg/*"] },
-    "git_graph_probe": { "kind": "executable",
-                         "sources": ["tools/git_graph_probe.cpp", "apps/gbcode/git_graph.cpp"],
-                         "extra_include_dirs": ["."],
-                         "exclude_sources": ["src/pkg/*"] },
-    "port_isolation_probe": { "kind": "executable",
-                              "sources": ["tools/port_isolation_probe.cpp"],
-                              "exclude_sources": ["src/pkg/*"] },
-    "lock_contention_probe": { "kind": "executable",
-                               "sources": ["tools/lock_contention_probe.cpp"],
-                               "exclude_sources": ["src/pkg/*"] },
-    "font_thread_safety_probe": { "kind": "executable",
-                                   "sources": ["tools/font_thread_safety_probe.cpp"],
-                                   "exclude_sources": ["src/pkg/*"] },
-    "md_async_bench": { "kind": "executable", "sources": ["tools/md_async_bench.cpp"],
-                        "exclude_sources": ["src/pkg/*"] },
-    "ring_path_probe": { "kind": "executable", "sources": ["tools/ring_path_probe.cpp"],
-                         "exclude_sources": ["src/pkg/*"] },
-    "ring_raster_probe": { "kind": "executable", "sources": ["tools/ring_raster_probe.cpp"],
-                           "exclude_sources": ["src/pkg/*"] },
-    "border_alpha_probe": { "kind": "executable", "sources": ["tools/border_alpha_probe.cpp"],
-                            "exclude_sources": ["src/pkg/*"] },
-    "draw_shadow_profile_probe": { "kind": "executable",
-                                   "sources": ["tools/draw_shadow_profile_probe.cpp"],
-                                   "exclude_sources": ["src/pkg/*"] },
+      "kind": "executable",
+      "sources": [
+        "tools/svg_sheet.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "gltf_skin_check": {
+      "kind": "executable",
+      "sources": [
+        "tools/gltf_skin_check.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "vertex_region": {
+      "kind": "executable",
+      "sources": [
+        "tools/vertex_region.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "uv_layout": {
+      "kind": "executable",
+      "sources": [
+        "tools/uv_layout.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "tex_dump": {
+      "kind": "executable",
+      "sources": [
+        "tools/tex_dump.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "rig_map_check": {
+      "kind": "executable",
+      "sources": [
+        "tools/rig_map_check.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "fighter_preview": {
+      "kind": "executable",
+      "sources": [
+        "tools/fighter_preview.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "caret_ink_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/caret_ink_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "menu_clip_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/menu_clip_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "MenuPanel 视口剔除的像素等价性验证（见源文件头部）"
+    },
+    "pty_stop_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/pty_stop_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "pty_form_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/pty_form_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "font_stack_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/font_stack_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "mp_thread_safety_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/mp_thread_safety_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "MicroPython 解释器是进程级单例：并发解释会互踩堆。本探针把「单线程串行 / 两线程并发 / available() 判据」三件事分开量——它是 `three_view_dispatches_py_to_bpy_and_js_to_three` 单跑即崩的取证工具。"
+    },
+    "mp_reinit_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/mp_reinit_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "最小复现：主线程 run 一次 → 另一线程 run 一次 → 主线程再用。曾用于排除「跨线程」假设（实测崩在第一次 run，与线程无关）。"
+    },
+    "mp_runtime_smoke_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/mp_runtime_smoke_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "最小闭合检查：init → run(简单赋值) → run(import bpy) → deinit，全部直接调 st_mp_*，绕开 Runtime 的所有纪律。用来区分「桥本身不通」与「跨线程纪律不对」——它把 nlr_push 的缺陷钉到 st_mp_init 第一行。"
+    },
+    "bold_face_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/bold_face_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "探本机是否有真粗体面：决定禁用合成加粗后 bold 会不会退化"
+    },
+    "text_bold_sharpness_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/text_bold_sharpness_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "真粗体面 vs Regular 的墨量分层：把“糊/脏”变成可量的数"
+    },
+    "lsp_parse_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/lsp_parse_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "lsp_symbols_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/lsp_symbols_probe.cpp",
+        "apps/gbcode/lsp_bridge.cpp"
+      ],
+      "extra_include_dirs": [
+        "."
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "git_graph_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/git_graph_probe.cpp",
+        "apps/gbcode/git_graph.cpp"
+      ],
+      "extra_include_dirs": [
+        "."
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "port_isolation_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/port_isolation_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "lock_contention_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/lock_contention_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "font_thread_safety_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/font_thread_safety_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "md_async_bench": {
+      "kind": "executable",
+      "sources": [
+        "tools/md_async_bench.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "ring_path_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/ring_path_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "ring_raster_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/ring_raster_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "border_alpha_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/border_alpha_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "draw_shadow_profile_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/draw_shadow_profile_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
     "rounded_fill_probe": {
       "kind": "executable",
-      "sources": ["tools/rounded_fill_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/rounded_fill_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "sprite_equiv_probe": {
       "kind": "executable",
-      "sources": ["tools/sprite_equiv_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/sprite_equiv_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "shadow_covered_probe": {
       "kind": "executable",
-      "sources": ["tools/shadow_covered_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_covered_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "shadow_inside_ratio": {
       "kind": "executable",
-      "sources": ["tools/shadow_inside_ratio.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_inside_ratio.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "overdraw_probe": {
       "kind": "executable",
-      "sources": ["tools/overdraw_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/overdraw_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "round_rect_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/round_rect_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/round_rect_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "round_rect_fixed_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/round_rect_fixed_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/round_rect_fixed_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "mul255_equiv_probe": {
       "kind": "executable",
-      "sources": ["tools/mul255_equiv_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/mul255_equiv_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "frame_floor_probe": {
       "kind": "executable",
-      "sources": ["tools/frame_floor_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/frame_floor_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "round_rect_bucket_probe": {
       "kind": "executable",
-      "sources": ["tools/round_rect_bucket_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/round_rect_bucket_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "sprite_color_key_probe": {
       "kind": "executable",
-      "sources": ["tools/sprite_color_key_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/sprite_color_key_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "round_rect_route_probe": {
       "kind": "executable",
-      "sources": ["tools/round_rect_route_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/round_rect_route_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "round_rect_accuracy_probe": {
       "kind": "executable",
-      "sources": ["tools/round_rect_accuracy_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/round_rect_accuracy_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "round_rect_diff_locate_probe": {
       "kind": "executable",
-      "sources": ["tools/round_rect_diff_locate_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/round_rect_diff_locate_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "shadow_mask_distribution_probe": {
       "kind": "executable",
-      "sources": ["tools/shadow_mask_distribution_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_mask_distribution_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "shadow_run_length_probe": {
       "kind": "executable",
-      "sources": ["tools/shadow_run_length_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_run_length_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "shadow_cost_breakdown_probe": {
       "kind": "executable",
-      "sources": ["tools/shadow_cost_breakdown_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_cost_breakdown_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "shadow_blend_route_probe": {
       "kind": "executable",
-      "sources": ["tools/shadow_blend_route_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_blend_route_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "glyph_coverage_distribution_probe": {
       "kind": "executable",
-      "sources": ["tools/glyph_coverage_distribution_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/glyph_coverage_distribution_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "glyph_row_waste_probe": {
       "kind": "executable",
-      "sources": ["tools/glyph_row_waste_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/glyph_row_waste_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "text_cost_breakdown_probe": {
       "kind": "executable",
-      "sources": ["tools/text_cost_breakdown_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/text_cost_breakdown_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "alpha_table_equiv_probe": {
       "kind": "executable",
-      "sources": ["tools/alpha_table_equiv_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/alpha_table_equiv_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "text_row_overhead_probe": {
       "kind": "executable",
-      "sources": ["tools/text_row_overhead_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/text_row_overhead_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "text_run_cost_split_probe": {
       "kind": "executable",
-      "sources": ["tools/text_run_cost_split_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/text_run_cost_split_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "lcd_text_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/lcd_text_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/lcd_text_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "text_subtract_probe": {
       "kind": "executable",
-      "sources": ["tools/text_subtract_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/text_subtract_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "fill_path_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/fill_path_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/fill_path_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "fill_path_pixels_probe": {
       "kind": "executable",
-      "sources": ["tools/fill_path_pixels_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/fill_path_pixels_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "simd_row_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/simd_row_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/simd_row_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "geometry_hit_rate_probe": {
       "kind": "executable",
-      "sources": ["tools/geometry_hit_rate_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/geometry_hit_rate_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "layout_fixed_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/layout_fixed_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/layout_fixed_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "cold_memory_probe": {
       "kind": "executable",
-      "sources": ["tools/cold_memory_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/cold_memory_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "cold_memory_scale_probe": {
       "kind": "executable",
-      "sources": ["tools/cold_memory_scale_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/cold_memory_scale_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "paint_traverse_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/paint_traverse_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/paint_traverse_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "frame_epilogue_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/frame_epilogue_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/frame_epilogue_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "partial_frame_limit_probe": {
       "kind": "executable",
-      "sources": ["tools/partial_frame_limit_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/partial_frame_limit_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "partial_frame_overhead_probe": {
       "kind": "executable",
-      "sources": ["tools/partial_frame_overhead_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/partial_frame_overhead_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "cull_effectiveness_probe": {
       "kind": "executable",
-      "sources": ["tools/cull_effectiveness_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/cull_effectiveness_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "gpu_probe": {
       "kind": "executable",
-      "sources": ["tools/gpu_probe.cpp"],
+      "sources": [
+        "tools/gpu_probe.cpp"
+      ],
       "//": "软件画布 vs GPU 画布的导出实测（1080p / 无头 / 裁云负载）"
     },
     "gpu_vs_cpu_export_probe": {
       "kind": "executable",
-      "sources": ["tools/gpu_vs_cpu_export_probe.cpp"],
+      "sources": [
+        "tools/gpu_vs_cpu_export_probe.cpp"
+      ],
       "//": "构建增量判定加内容哈希的成本（对比 stat / fnv / sha256）"
     },
     "deps_hash_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/deps_hash_cost_probe.cpp"],
+      "sources": [
+        "tools/deps_hash_cost_probe.cpp"
+      ],
       "//": "deferred context 可行性（并行录制 vs 串行回放）"
     },
     "deferred_ctx_probe": {
       "kind": "executable",
-      "sources": ["tools/deferred_ctx_probe.cpp"],
+      "sources": [
+        "tools/deferred_ctx_probe.cpp"
+      ],
       "//": "GPU 导出的时间去向（回读 / 转换 / 拷贝各占多少）"
     },
     "probe_three_eval": {
       "kind": "executable",
-      "sources": ["tools/probe_three_eval.cpp"],
+      "sources": [
+        "tools/probe_three_eval.cpp"
+      ],
       "//": "离线求值一份 three.js 脚本，打印真实错误。为何要它：走 GUI 验一轮要 1~2 分钟（起窗口→切视图→截图），而这个纯属求值语义、与画面无关"
     },
     "gpu_export_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/gpu_export_cost_probe.cpp"],
+      "sources": [
+        "tools/gpu_export_cost_probe.cpp"
+      ],
       "//": "frame_stats 降采样是否真的看到帧间差异（验证 still_ratio 恒 100% 的根因）",
-      "include_dirs": ["apps/caiyun"]
+      "include_dirs": [
+        "apps/caiyun"
+      ]
     },
     "frame_stats_diff_probe": {
       "kind": "executable",
-      "sources": ["tools/frame_stats_diff_probe.cpp", "apps/caiyun/frame_stats.cpp"],
+      "sources": [
+        "tools/frame_stats_diff_probe.cpp",
+        "apps/caiyun/frame_stats.cpp"
+      ],
       "//": "vignette 四条渐变带的代价（横向 vs 竖向 vs 纯色）"
     },
     "vignette_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/vignette_cost_probe.cpp"],
+      "sources": [
+        "tools/vignette_cost_probe.cpp"
+      ],
       "//": "grain（4200 个 1px 小圆）的代价与替代实现对照"
     },
     "grain_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/grain_cost_probe.cpp"],
+      "sources": [
+        "tools/grain_cost_probe.cpp"
+      ],
       "//": "layout 图元要多大 alpha/尺寸才能让 32x18 网格逐帧差达标"
     },
     "layout_alpha_probe": {
       "kind": "executable",
-      "sources": ["tools/layout_alpha_probe.cpp"],
-      "include_dirs": ["apps/caiyun"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/layout_alpha_probe.cpp"
+      ],
+      "include_dirs": [
+        "apps/caiyun"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
     },
     "motion_qa": {
       "kind": "executable",
-      "sources": ["tools/motion_qa.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/motion_qa.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "动效验收（通用）：画面沿用率 + 变化强度 + 元素身份；支持 --ref 同口径对照"
     },
     "caiyun_js_probe": {
       "kind": "executable",
-      "sources": ["tools/caiyun_js_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
-      "link": ["st_ext"],
+      "sources": [
+        "tools/caiyun_js_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "link": [
+        "st_ext"
+      ],
       "//note": "JS 编排能否替代 JSON 描述：C++ 函数可调 / 一遍 eval 产出图层表 / 配额 / 报错定位"
     },
     "scene3d_texture_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_texture_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_texture_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "三维纹理与 UV 是否真的贴上且位置正确（v 轴翻转、双线性采样）"
     },
     "scene3d_color_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_color_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_color_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "颜色管线接入后的视觉对照：同一场景新旧两条输出链各落一张 PNG + 亮度/过曝统计"
     },
     "constraint_rot_probe": {
       "kind": "executable",
-      "sources": ["tools/constraint_rot_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/constraint_rot_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "约束 connect 旋转的互逆性验证（+Y 指向方向向量）"
     },
     "constraint_e2e_probe": {
       "kind": "executable",
-      "sources": ["tools/constraint_e2e_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/constraint_e2e_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "约束解算端到端：attach 链/connect 数值直读 + serialize 对照"
     },
     "constraint_lamp_probe": {
       "kind": "executable",
-      "sources": ["tools/constraint_lamp_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/constraint_lamp_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "约束渲染验证：台灯 attach/connect 装配 + 台面升高联动 + 错误报路"
     },
     "constraint_connect_probe": {
       "kind": "executable",
-      "sources": ["tools/constraint_connect_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/constraint_connect_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "connect 数值直读（调试用）"
     },
     "mesh_boolean_probe": {
       "kind": "executable",
-      "sources": ["tools/mesh_boolean_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/mesh_boolean_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "布尔内核隔离验证：体积/确定性/快速路/水密校验/链式"
     },
     "mesh_boolean_render_probe": {
       "kind": "executable",
-      "sources": ["tools/mesh_boolean_render_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/mesh_boolean_render_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "布尔渲染冒烟：带孔法兰 + 挖槽块（肉眼验证）"
     },
     "sketch_shapes_probe": {
       "kind": "executable",
-      "sources": ["tools/sketch_shapes_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/sketch_shapes_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "Extrude/Revolve 渲染验证：凹轮廓支架/车削花瓶/星形"
     },
     "pattern_probe": {
       "kind": "executable",
-      "sources": ["tools/pattern_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/pattern_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "Ring/Row 阵列渲染验证"
     },
     "rotation_static_probe": {
       "kind": "executable",
-      "sources": ["tools/rotation_static_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/rotation_static_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "静态 rotation 是否影响渲染（判断 model 矩阵是否生效）"
     },
     "new_primitives_probe": {
       "kind": "executable",
-      "sources": ["tools/new_primitives_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/new_primitives_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "新图元渲染验证：型钢四型 / 螺旋楼梯 / 星形十字柱 / 紧固件"
     },
     "showcase_tower_probe": {
       "kind": "executable",
-      "sources": ["tools/showcase_tower_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/showcase_tower_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "精美场景：黄昏螺旋观景塔（Part/Use + 布尔 + 楼梯 + 型钢 + 阵列 + 车削）"
     },
     "expressiveness_fan_probe": {
       "kind": "executable",
-      "sources": ["tools/expressiveness_fan_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/expressiveness_fan_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "表达能力 showcase：轴流风扇（布尔散热孔/车削导流罩/挤出叶片阵列）"
     },
     "mesh_boolean_xml_probe": {
       "kind": "executable",
-      "sources": ["tools/mesh_boolean_xml_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/mesh_boolean_xml_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "XML <Subtract> 标签冒烟：打孔板 + attach 联合"
     },
     "scene3d_script_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_script_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_script_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
     "scene_xml_render_probe": {
       "kind": "executable",
-      "sources": ["tools/scene_xml_render_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene_xml_render_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "XML 多层场景渲染：层级/父动子动/可见性子树继承/确定性（scene_xml 的像素级验收）"
     },
     "scene_xml_showcase_probe": {
       "kind": "executable",
-      "sources": ["tools/scene_xml_showcase_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene_xml_showcase_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "XML 表达力展示：蒸汽朋克差分机（11 种图元/5 层/金属+玻璃+发光/动画四帧）"
     },
     "scene_xml_showcase_v3": {
       "kind": "executable",
-      "sources": ["tools/scene_xml_showcase_v3.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene_xml_showcase_v3.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "差分机 v3：装配大纲驱动 + Part/Use 部件化 + mirror 复用 + 全约束装配 + snap"
     },
     "st_api": {
       "kind": "executable",
-      "sources": ["tools/st_api.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/st_api.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "输出机读能力清单（场景脚本字段契约）。独立于 st：st 的源白名单刻意不含 raster"
     },
     "llm_usability_probe": {
       "kind": "executable",
-      "sources": ["tools/llm_usability_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/llm_usability_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "大模型可用性实测：拼错字段/缺字段/类型错时的报错质量"
     },
     "real_asset_probe": {
       "kind": "executable",
-      "sources": ["tools/real_asset_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/real_asset_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "真实素材渲染：读生态素材（Khronos 样例）并渲成 PNG，人眼验收"
     },
     "jpeg_probe": {
       "kind": "executable",
-      "sources": ["tools/jpeg_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/jpeg_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "JPEG 解码验证：解真实 JPEG，按已知图案趋势验证内容正确"
     },
     "procedural_probe": {
       "kind": "executable",
-      "sources": ["tools/procedural_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/procedural_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "过程化可行性：脚本算公式->宿主造几何->渲染，并实测 Json 通道开销"
     },
     "ecosystem_probe": {
       "kind": "executable",
-      "sources": ["tools/ecosystem_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/ecosystem_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "生态素材兼容性总账：读真实形态 glTF，报告哪些信息被保留、哪些被丢弃"
     },
     "texture_probe": {
       "kind": "executable",
-      "sources": ["tools/texture_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/texture_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "贴图四格对照：基准/平铺/曲面/染色，验证采样与 UV 变换"
     },
     "pick_probe": {
       "kind": "executable",
-      "sources": ["tools/pick_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/pick_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "拾取探针：屏幕上打 21 条射线，把命中点重投影回去叠在渲染图上核验"
     },
     "skin_probe": {
       "kind": "executable",
-      "sources": ["tools/skin_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/skin_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "蒙皮对照：同一骨骼同一姿态，上排 LBS 形变 vs 下排刚性父子"
     },
     "animation_probe": {
       "kind": "executable",
-      "sources": ["tools/animation_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/animation_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "关键帧动画：分镜图（8 帧）+ 导出带动画的 .glb 并读回验证采样值"
     },
     "splash_probe": {
       "kind": "executable",
-      "sources": ["tools/splash_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/splash_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "启动卡离屏渲染：出 10 张 PNG + 三条断言（磨砂档卡外全透明 / 无磨砂档卡外不透明 / 帧间有动效）。为何不用截图：卡只活 320ms，而一次屏抓要 250ms，且 DWM acrylic 内容用 GetDC 抓不到"
     },
     "brand_probe": {
       "kind": "executable",
-      "sources": ["tools/brand_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/brand_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "启动卡品牌标记候选：6 个方案 × 1x/1.5x/2x 三档对照图（图标是纯观感物，必须小尺寸也认得出）"
     },
     "ui_animation_probe": {
       "kind": "executable",
-      "sources": ["tools/ui_animation_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/ui_animation_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "组件动画（CSS 式）的分镜图 + 像素量断言：淡入墨量单调、滑入墨迹真的在左移、抖动位移变号、无限循环不提前停、缩放墨量变化。为何必须出图：属性面读回对而绘制层没读它，是这条线真实存在的失败形态"
     },
     "splash_anim_probe": {
       "kind": "executable",
-      "sources": ["tools/splash_anim_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/splash_anim_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "启动卡动画的离屏验证：8 帧时间序列 + 三条断言（相邻帧有变化 / 不溢到卡外）。为何不用截图：磨砂档走分层窗口，GetDC 抓到的是纯黑（实测全部采样帧中心 (0,0,0)），看着像“动画没动”"
     },
     "backdrop_level_probe": {
       "kind": "executable",
-      "sources": ["tools/backdrop_level_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/backdrop_level_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "启动期窗口背景透明度档位对比：Acrylic 整窗磨砂 vs 纯分层（只有卡）。用来判定“只看到悬浮的卡”该走哪条路——Acrylic 是整窗材质，无法只作用到卡区"
     },
     "composite_pivot_probe": {
       "kind": "executable",
-      "sources": ["tools/composite_pivot_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/composite_pivot_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "组合模型空间体系对照：同一机械臂只改枢轴/父子可见性，四格出图证明各自生效"
     },
     "primitives_gallery_probe": {
       "kind": "executable",
-      "sources": ["tools/primitives_gallery_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/primitives_gallery_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "图元总览：22 个图元各渲一格拼成 PNG，并逐个导出 .glb（能被 Blender/引擎打开）"
     },
     "scene3d_blender_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_blender_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_blender_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "2026-10-24 新增能力探针：材质基色/自发光/点光/聚光/AgX/正交，逐项证明真的生效"
     },
     "scene3d_capability_matrix": {
       "kind": "executable",
-      "sources": ["tools/scene3d_capability_matrix.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_capability_matrix.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "三维能力矩阵：逐项核对软件腿/GPU腿是否都真的支持（阴影/透明/金属高光）"
     },
     "three_check": {
       "kind": "executable",
-      "sources": ["tools/three_check.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/three_check.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "三维渲染自检：把一份场景（three.js 源码或 JSON）渲染一遍，输出 PASS/FAIL + 逐物体可见性 + 可执行的修正建议。退出码可当 CI 门禁（0=ok，1=有 error，2=解析失败）。这是“写→渲染→验证”闭环的最后一环：模型读文本就够了，不必看图"
     },
     "three_anim_probe": {
       "kind": "executable",
-      "sources": ["tools/three_anim_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/three_anim_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "把场景里 `userData.spin` / `userData.oscillate` 的抽取结果打出来。存在的理由：动画失效是**完全静默**的（场景照常渲染、物体数正确，就是不动），静态截图区分不出“本来就没动”与“动画坏了”——这个探针让它可断言"
     },
     "three_composite_probe": {
       "kind": "executable",
-      "sources": ["tools/three_composite_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/three_composite_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "复现 `ThreeView` 的合成路径：同一个 Scene3D，只把**目标画布 device_scale 与目标矩形口径**两个变量拎出来对照。用于定位“three_check 能画、视口里只剩背景色”那个问题"
     },
     "three_camera_probe": {
       "kind": "executable",
-      "sources": ["tools/three_camera_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/three_camera_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "验证相机 `lookAt` 的抽取：对比“lookAt 后 add / add 后 lookAt / 不调 lookAt”三种写法抽出的 target。存在的理由：抽取错的症状是“视角完全不对”（看到背面而不是正面），而它会与轨道相机重叠、很难归因"
     },
     "lathe_axis_probe": {
       "kind": "executable",
-      "sources": ["tools/lathe_axis_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/lathe_axis_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "实测 LatheGeometry 的轴向与 rotation.x 的效果（打印三个旋转下的世界包围盒跨度）。存在的理由：右手系绕 X 转 ±90° 到底 Y→Z 还是 Y→-Z，推导容易错；而错一次的代价是“表壳盖住表盘”这类很难归因的现象"
     },
     "lookat_diag_probe": {
       "kind": "executable",
-      "sources": ["tools/lookat_diag_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/lookat_diag_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "定位 `camera.lookAt()` 在 QuickJS 里的数值缺陷：分别验证 Matrix4.lookAt / setFromRotationMatrix / applyQuaternion 三者。手法是把诊断值拼进一个哨兵 Mesh 的**名字**里，C++ 侧从 `ThreeObject::name` 读回——不改任何生产接口"
     },
     "scene_spec_dual_probe": {
       "kind": "executable",
-      "sources": ["tools/scene_spec_dual_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene_spec_dual_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "验证 `parse_scene_spec_text` 同时接受 JSON 声明式与 three.js 源码。它是**裁云联动的唯一接口**（`model_script`、三维预览、自检三条路都走它），所以这条判据就是联动本身能不能成立的依据"
     },
     "scene_overlay_probe": {
       "kind": "executable",
-      "sources": ["tools/scene_overlay_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene_overlay_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "验证 three 场景的三扇叠加窗（extra_transform / camera_override / material_override）。存在的理由：任一扇没生效时**画面根本不变也不报错**，只能靠对比渲染结果发现"
     },
     "geometry_coverage_probe": {
       "kind": "executable",
-      "sources": ["tools/geometry_coverage_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/geometry_coverage_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "逐个确认 three 几何在抽取后**真的有面**（顶点数/三角形数）。存在的理由：“物体存在但画不出来”完全不会报错，而多零件模型里少一层叶片很难从截图看出来"
     },
     "python_embed_probe": {
       "kind": "executable",
-      "sources": ["tools/python_embed_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/python_embed_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "内嵌 MicroPython 的端到端判据：语言基础 + mathutils + bpy.data/ops + bmesh。它是整条 bpy 链路的地基。`.c` 源必须显式列出：不会被自动源集合纳入"
     },
     "st_py": {
       "kind": "executable",
-      "sources": ["tools/st_py.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/st_py.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "通用调试入口：跑一个 .py 文件并打印 result 或错误。排查具体脚本时的 python 替代品（判据型探针不适合这个用途）"
     },
     "bpy_script_bisect": {
       "kind": "executable",
-      "sources": ["tools/bpy_script_bisect.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_script_bisect.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "按顶层块二分执行大脚本，定位 MicroPython 报 NameError 的具体位置（MINIMUM 档不说名字，只能二分）"
     },
     "bpy_normal_probe": {
       "kind": "executable",
-      "sources": ["tools/bpy_normal_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_normal_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "诊断：立方体面法线朝内还是朝外（朝内则 N·L<0，光照贡献为 0，全黑）"
     },
     "bpy_lighting_probe": {
       "kind": "executable",
-      "sources": ["tools/bpy_lighting_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_lighting_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "诊断：把抽出来的灯光/材质/分组数值打出来。全黑时分不清是光反了、强度 0、还是基色没设"
     },
     "bpy_flat_ablate": {
       "kind": "executable",
-      "sources": ["tools/bpy_flat_ablate.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_flat_ablate.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "受控平面消融：把 bpy 路径与真 Blender 的 12 级差逐项归因（energy/1000 / ambient 保底 / rim / ACES）"
     },
     "bpy_brdf_compare": {
       "kind": "executable",
-      "sources": ["tools/bpy_brdf_compare.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_brdf_compare.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "BRDF 层对照：把非 BRDF 的四项偏差（world/ambient/energy 标度/色调映射）对齐真 Blender 后，逐像素量残留（只可能来自 BRDF 与光栅化）"
     },
     "bpy_energy_scale": {
       "kind": "executable",
-      "sources": ["tools/bpy_energy_scale.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_energy_scale.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "工件级标度验证：同一份 .py 扫 ENERGY_SCALE，看哪个标度让本框架与真 Blender 落在同一曝光（判据：主体均值与全白占比）"
     },
     "bpy_scale_impact": {
       "kind": "executable",
-      "sources": ["tools/bpy_scale_impact.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_scale_impact.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "标度改动的影响面预演：不改代码，用覆盖参数模拟「去掉 energy/1000」后每个存量 bpy 场景的曝光变化，据此判断哪条改法不会把现有出片打爆"
     },
     "bpy_compat_diag": {
       "kind": "executable",
-      "sources": ["tools/bpy_compat_diag.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_compat_diag.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "诊断：同一份 bpy 文本在默认口径与声明 compat 时 SceneSpec 的关键字段（tone/ambient/ibl/diffuse/compat），用于排查测试与探针口径不一致"
     },
     "bpy_compat_gap": {
       "kind": "executable",
-      "sources": ["tools/bpy_compat_gap.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_compat_gap.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "量默认口径与对标口径的实际像素差：AgX 修好后默认口径变暗，那条 >20 断言的阈值需要按实测重定"
     },
     "agx_two_legs": {
       "kind": "executable",
-      "sources": ["tools/agx_two_legs.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/agx_two_legs.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "两腿 AgX 一致性：同一份受控平面在软件腿与 GPU 腿上取中心像素。受控平面只有一个数，两腿之差只可能来自色调映射链"
     },
     "sweep_shadow_extent": {
       "kind": "executable",
-      "sources": ["tools/sweep_shadow_extent.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/sweep_shadow_extent.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "扫描 shadow_map.extent，用暗部质心与 Cycles 的距离选最优"
     },
     "light_dir_semantics": {
       "kind": "executable",
-      "sources": ["tools/light_dir_semantics.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/light_dir_semantics.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "判定 Light::direction 的语义（指向光源 vs 照射方向）：头文件与 software_scene 注释相反，用几何判据实测定夺"
     },
     "bpy_render": {
       "kind": "executable",
-      "sources": ["tools/bpy_render.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_render.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "用同一份 bpy 脚本在霜天里出图（与真 Blender 对比）。两边跑同一脚本，避免手写两份场景时的换算误差"
     },
     "agx_verify": {
       "kind": "executable",
-      "sources": ["tools/agx_verify.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/agx_verify.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "AgX 逐点对账：9 个样本（中性灰 5 档 + 红绿蓝 + 黄铜）与真 Blender 比，覆盖曲线与色相；判据最大差 ≤2"
     },
     "bpy_export_asset": {
       "kind": "executable",
-      "sources": ["tools/bpy_export_asset.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_export_asset.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "把 bpy 脚本产出的物体几何导出成 JSON 资产（供 three.js 脚本组装）——「bpy 做资产、js 组装」的资产端"
     },
     "tone_map_probe": {
       "kind": "executable",
-      "sources": ["tools/tone_map_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/tone_map_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "AgX / ACES 在标准亮度上的输出：用来判断 bpy 对标时的背景偏差是色调映射实现问题还是本来观感（真 Blender 用 3D LUT 的 AgX，本框架是解析拟合）"
     },
     "align_render": {
       "kind": "executable",
-      "sources": ["tools/align_render.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/align_render.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "像素级对标的霜天侧驱动：同一份 three.js 场景 → 本框架渲染，并显式覆盖 tone_map/背景，好与浏览器同一组参数严格对齐（align_bench_probe 的加强版：可切算子与背景）"
     },
     "align_bench_probe": {
       "kind": "executable",
-      "sources": ["tools/align_bench_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/align_bench_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "对齐基准出图：给任何场景（.js/.py）出一张 1100x800 的 PNG，好与真 three.js / 真 Blender 的图并排看。中性的出图工具，不绑定特定判据"
     },
     "bpy_sphere_geometry_probe": {
       "kind": "executable",
-      "sources": ["tools/bpy_sphere_geometry_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_sphere_geometry_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "bpy uv_sphere 的几何判据：三轴半径是否等于请求值。文档曾声称“顶点 x 超出半径两倍、球被压扁”，而示例场景据此刻意改用立方体——探针把“缺陷还在不在、多大”变成数字，防文档漂移导致的错误绕过"
     },
     "scene3d_capability_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_capability_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_capability_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "三条表达层的能力对照：每个能力用自己的脚本真跑一遍，看是否被识别且真的产出可画场景。清单是数据（加一条加一行）——防“grep 到了但另一条路径没接”那类缺口"
     },
     "render_gap_probe": {
       "kind": "executable",
-      "sources": ["tools/render_gap_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/render_gap_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "渲染差距的量化基线：两条腿一致性（同一脚本不能两副长相）+ 暗部存在性。给任何 .js/.py 场景出可复算的数字，不靠肉眼"
     },
     "mixed_scene_probe": {
       "kind": "executable",
-      "sources": ["tools/mixed_scene_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/mixed_scene_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "bpy × three.js 混合工作流的判据：bpy 供几何（THREE.__assets）、three 决定最终场景。反证那条（单独跑组装脚本必失败）是“资产真的参与了”的关键——没有它，“资产读进来但物体没画”也能绿"
     },
     "ggx_alpha_probe": {
       "kind": "executable",
-      "sources": ["tools/ggx_alpha_probe.cpp", "src/raster/software_scene.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/ggx_alpha_probe.cpp",
+        "src/raster/software_scene.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "GGX alpha 映射判据（防回归）：alpha 必须是 roughness²。修前用 roughness 直接当 alpha，瓣宽近一倍，主体均值 98.7 vs 78.0"
     },
     "ggx_lobe_width_probe": {
       "kind": "executable",
-      "sources": ["tools/ggx_lobe_width_probe.cpp", "src/raster/software_scene.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/ggx_lobe_width_probe.cpp",
+        "src/raster/software_scene.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "量 GGX 高光瓣的宽度。若太窄（如只有 10 度），金属大片面只有 0.006 的环境反射 → 整体偏暗，而真渲染器有较宽的高光带"
     },
     "tune_lighting_grid": {
       "kind": "executable",
-      "sources": ["tools/tune_lighting_grid.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/tune_lighting_grid.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "网格扫 ambient/diffuse/env，用加权分位差做目标函数。均值只会说“偏亮”，而分位差能区分“整体偏移”与“对比不足”"
     },
     "normal_sweep_probe": {
       "kind": "executable",
-      "sources": ["tools/normal_sweep_probe.cpp", "src/raster/software_scene.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/normal_sweep_probe.cpp",
+        "src/raster/software_scene.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "法线扫描：找出哪个法线角度得到 132 级（本框架亮带），以及去环境/去 rim 的贡献。定位“同一部位差 53.5 级”的来源"
     },
     "histogram_diff": {
       "kind": "executable",
-      "sources": ["tools/histogram_diff.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/histogram_diff.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "主体亮度直方图逐档对比：定位“哪一段偏亮”。均值差只说明整体偏亮，标准差说明分布宽度（层次感）"
     },
     "shading_decompose_probe": {
       "kind": "executable",
-      "sources": ["tools/shading_decompose_probe.cpp", "src/raster/software_scene.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/shading_decompose_probe.cpp",
+        "src/raster/software_scene.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "逐项拆解主体亮度来源：AO 已排除（只降 5.4），剩下的候选是 ambient(0.35) 与 rim(0.25) 这两个非物理项"
     },
     "ao_benefit_probe": {
       "kind": "executable",
-      "sources": ["tools/ao_benefit_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/ao_benefit_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "量 AO 的理论收益：用亮度梯度当深度代理，看“交界处变暗”能拉近多少。先量再做——CPU 上的逐像素 AO 代价不低"
     },
     "world_env_probe": {
       "kind": "executable",
-      "sources": ["tools/world_env_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/world_env_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "世界背景→环境反射判据：env_sky 必须跟场景背景而不是硬编码亮天空。修前亮天空让金属主体均值 139.6、暗部恒 0%"
     },
     "subject_brightness_probe": {
       "kind": "executable",
-      "sources": ["tools/subject_brightness_probe.cpp", "src/raster/software_scene.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/subject_brightness_probe.cpp",
+        "src/raster/software_scene.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "诊断主体为何比真渲染器亮近一倍（139.6 vs 78.1）：逐候选量化——金属漫反射权重、环境叠加方式、缺 AO、光照方向范围"
     },
     "subject_stats": {
       "kind": "executable",
-      "sources": ["tools/subject_stats.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/subject_stats.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "只统计主体（排除背景）的三路对照。全图统计被 80% 的背景主导，掩羜了光照模型的真实差异"
     },
     "metal_specular_probe": {
       "kind": "executable",
-      "sources": ["tools/metal_specular_probe.cpp", "src/raster/software_scene.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/metal_specular_probe.cpp",
+        "src/raster/software_scene.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "金属高光判据（防回归）：默认 specular 下金属必须有方向性高光、F0 要起作用、粗糙度要收敛。修前默认材质的金属完全没有高光"
     },
     "ggx_highlight_probe": {
       "kind": "executable",
-      "sources": ["tools/ggx_highlight_probe.cpp", "src/raster/software_scene.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/ggx_highlight_probe.cpp",
+        "src/raster/software_scene.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "量主光 GGX 高光的峰值：法线扫 0~90 度看最高值。若默认材质峰值为 0，说明平行光高光完全没算（specular 默认 0 是唯一开关）"
     },
     "brightness_source_probe": {
       "kind": "executable",
-      "sources": ["tools/brightness_source_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/brightness_source_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "确认画面亮度由哪一项主导：逐项归零看均值掉多少。标定 diffuse 时发现它扫 5 倍只改 2.7/255，说明主导项在别处"
     },
     "diffuse_calibrate": {
       "kind": "executable",
-      "sources": ["tools/diffuse_calibrate.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/diffuse_calibrate.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "标定 bpy energy → Lighting.diffuse 的换算系数。两者单位无物理对应（W/m² vs 相对权重），只能拿真 Blender 参照图实测标定"
     },
     "lighting_lower_bound_probe": {
       "kind": "executable",
-      "sources": ["tools/lighting_lower_bound_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/lighting_lower_bound_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "查“暗部永远 0%”的根因：逐档扫 ambient/diffuse/env，看哪个是亮度下界的来源"
     },
     "env_strength_calibrate": {
       "kind": "executable",
-      "sources": ["tools/env_strength_calibrate.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/env_strength_calibrate.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "扫 env_strength 找直方图最接近 three.js 参照的值。两个旋钮都能让画面变亮，只有分布形状指标能分辨“真的更接近”与“只是更亮”"
     },
     "render_compare": {
       "kind": "executable",
-      "sources": ["tools/render_compare.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/render_compare.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "三路渲染量化对照：分区统计（暗/中/亮）+ 直方图重叠度。全图平均会掩盖“亮部太暗”这类问题，所以必须分区"
     },
     "agx_saturation_probe": {
       "kind": "executable",
-      "sources": ["tools/agx_saturation_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/agx_saturation_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "诊断 AgX 对材质本色的去饱和是否过度：把每步数值与饱和度打出来，区分“实现问题”与“色彩空间错”与“本来就该去饱和”"
     },
     "tone_map_align_probe": {
       "kind": "executable",
-      "sources": ["tools/tone_map_align_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/tone_map_align_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "色调映射对齐判据：单调性/端点/中灰定位/AgX 高光保色相/来源默认。只钉“能对齐的那一层”（色彩管线），光照积分差异另行记录"
     },
     "tone_map_measure": {
       "kind": "executable",
-      "sources": ["tools/tone_map_measure.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/tone_map_measure.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "量出三条色调映射曲线（three=None / Blender=AgX / 本框架=ACES）在同一线性输入下的输出差。它是量尺不是门禁——先有数据才谈阈值"
     },
     "material_groups_probe": {
       "kind": "executable",
-      "sources": ["tools/material_groups_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/material_groups_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "多材质槽：一个网格按面分两材质，验两组颜色都出现且面积相当。三个错法（只画最后一组/整网格重画/槽位越界）都不报错，只能用像素判据"
     },
     "concave_triangulate_probe": {
       "kind": "executable",
-      "sources": ["tools/concave_triangulate_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/concave_triangulate_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "凹多边形三角化：用已知面积的 L 形/星形证明扇形算法会填平凹角（静默错），再验耳切修好。面积是可断言的量，比“看着像”可靠"
     },
     "bpy_watch_probe": {
       "kind": "executable",
-      "sources": ["tools/bpy_watch_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_watch_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "bpy 真实资产（机械腕表轮系）：验「用它真能造出复杂东西」——渐开线齿轮、多轮啮合布局、轮辐窗口。机制通不等于造得出东西，这个探针是那条分界线"
     },
     "bpy_script_probe": {
       "kind": "executable",
-      "sources": ["tools/bpy_script_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_script_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "bpy_script 端到端：纯 Python 文本自动识别 → SceneSpec → 渲染 → 像素判据（含 camera/material 覆盖与优先级）。必须像素收口：漏 end_frame 时 draw_calls 会涨而画布全空"
     },
     "bpy_scene_probe": {
       "kind": "executable",
-      "sources": ["tools/bpy_scene_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp",
-                  "src/raster/bpy_runtime.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_scene_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp",
+        "src/raster/bpy_runtime.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "bpy 脚本 → ThreeScene 端到端：建几何、抽场景、验顶点数与包围盒"
     },
     "python_features_probe": {
       "kind": "executable",
-      "sources": ["tools/python_features_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/python_features_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "逐条探测 MINIMUM 档支持哪些 Python 特性（__slots__/property/staticmethod/推导式/继承…）。存在的理由：失败信息只有 NameError: name not defined（没说是哪个名字），只能一条条试"
     },
     "bpy_load_probe": {
       "kind": "executable",
-      "sources": ["tools/bpy_load_probe.cpp", "src/python/mp_bridge.c",
-                  "src/python/bpy_bridge.c", "src/python/bpy_embed.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/bpy_load_probe.cpp",
+        "src/python/mp_bridge.c",
+        "src/python/bpy_bridge.c",
+        "src/python/bpy_embed.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "诊断 bpy 兼容层为何装载成功但 import 失败：直接跑 Python 看 sys.modules 里有什么、能不能写。存在的理由：“装载无报错但 import 失败”完全靠猜是猜不出来的"
     },
     "cylinder_theta_probe": {
       "kind": "executable",
-      "sources": ["tools/cylinder_theta_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/cylinder_theta_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "实测 CylinderGeometry 的 thetaStart/Length 转到 X 轴后覆盖哪个方位（读世界包围盒的 y 范围）。存在的理由：剖切视图全靠它，画错半圈就是“敞开的变成盖住的”，而画面不会报错、只是什么都看不见"
     },
-    "scene3d_shadow_probe": {      "kind": "executable",
-      "sources": ["tools/scene3d_shadow_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+    "scene3d_shadow_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/scene3d_shadow_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "平面投影阴影：强度四档各落一张 PNG + 地面/球体/阴影区亮度对比"
     },
-    "scene3d_lights_probe": {      "kind": "executable",
-      "sources": ["tools/scene3d_lights_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+    "scene3d_lights_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/scene3d_lights_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "多光源对照：主光/补光/轮廓光/暖色补光各落一张 PNG + 亮面与暗面亮度"
     },
-    "scene3d_shade_equiv_probe": {      "kind": "executable",
-      "sources": ["tools/scene3d_shade_equiv_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+    "scene3d_shade_equiv_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/scene3d_shade_equiv_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "渐进采用底线：默认材质（specular/emission/metallic = 0）必须与旧 shade_terms 逐位等价"
     },
     "scene3d_material_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_material_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_material_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "Principled 材质对照：五种参数（塑料/金属/自发光）各落一张 PNG + 均值/峰值/高光占比"
     },
     "scene3d_cull_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_cull_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_cull_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "背面剔除的**方向**（单面平面 + 两个相机位置；封闭体分辨不出方向对错）"
     },
     "scene3d_composite_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_composite_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_composite_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "三维零拷贝合成 vs 回读：有显卡就用显卡的成败点（回读会把显卡的收益全吃掉）"
     },
     "scene3d_two_legs_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_two_legs_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_two_legs_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "三维两条腿（GPU/软件）对照：光栅成本与回读成本分开量，决定“有显卡就用显卡”值不值"
     },
     "scene3d_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/scene3d_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"],
+      "sources": [
+        "tools/scene3d_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
       "//note": "软件三维腿的单帧成本基线：裁云把三维当画面主体用之前先量清楚（尺寸×面数×单价）"
     },
     "shadow_unit_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/shadow_unit_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_unit_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "shadow_amortized_probe": {
       "kind": "executable",
-      "sources": ["tools/shadow_amortized_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/shadow_amortized_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "layout_duplicate_work_probe": {
       "kind": "executable",
-      "sources": ["tools/layout_duplicate_work_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/layout_duplicate_work_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "frame_allocation_probe": {
       "kind": "executable",
-      "sources": ["tools/frame_allocation_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/frame_allocation_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "frame_variance_probe": {
       "kind": "executable",
-      "sources": ["tools/frame_variance_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/frame_variance_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "covered_region_verify_probe": {
       "kind": "executable",
-      "sources": ["tools/covered_region_verify_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/covered_region_verify_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "file_io_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/file_io_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/file_io_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "search_bench": {
       "kind": "executable",
-      "sources": ["tools/search_bench.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/search_bench.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "list_dir_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/list_dir_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/list_dir_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "dir_size_cost_probe": {
       "kind": "executable",
-      "sources": ["tools/dir_size_cost_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/dir_size_cost_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "gpu_mask_cache_probe": {
       "kind": "executable",
-      "sources": ["tools/gpu_mask_cache_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/gpu_mask_cache_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "text_cache_limit_probe": {
       "kind": "executable",
-      "sources": ["tools/text_cache_limit_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/text_cache_limit_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "simd_short_row_probe": {
       "kind": "executable",
-      "sources": ["tools/simd_short_row_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/simd_short_row_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "clear_fill_merge_probe": {
       "kind": "executable",
-      "sources": ["tools/clear_fill_merge_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/clear_fill_merge_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
     "memory_bandwidth_probe": {
       "kind": "executable",
-      "sources": ["tools/memory_bandwidth_probe.cpp"],
-      "exclude_sources": ["src/pkg/*"]
+      "sources": [
+        "tools/memory_bandwidth_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
     },
-    "ink_spread_probe": { "kind": "executable", "sources": ["tools/ink_spread_probe.cpp"],
-                          "exclude_sources": ["src/pkg/*"] },
-    "weight_spread_probe": { "kind": "executable", "sources": ["tools/weight_spread_probe.cpp"],
-                             "exclude_sources": ["src/pkg/*"] },
-    "gpu_structural_probe": { "kind": "executable", "sources": ["tools/gpu_structural_probe.cpp"],
-                              "exclude_sources": ["src/pkg/*"] },
-    "button_center_probe": { "kind": "executable", "sources": ["tools/button_center_probe.cpp"],
-                             "exclude_sources": ["src/pkg/*"] },
-    "gradient_fill_probe": { "kind": "executable", "sources": ["tools/gradient_fill_probe.cpp"],
-                             "exclude_sources": ["src/pkg/*"] },
-    "icon_sheet_probe": { "kind": "executable", "sources": ["tools/icon_sheet_probe.cpp"],
-                          "exclude_sources": ["src/pkg/*"] },
-    "icon_metric_probe": { "kind": "executable", "sources": ["tools/icon_metric_probe.cpp"],
-                           "exclude_sources": ["src/pkg/*"] },
-    "icon_ascii_probe": { "kind": "executable", "sources": ["tools/icon_ascii_probe.cpp"],
-                          "exclude_sources": ["src/pkg/*"] },
-    "make_sample_png": { "kind": "executable", "sources": ["tools/make_sample_png.cpp"],
-                         "exclude_sources": ["src/pkg/*"] },
-    "title_bar_buttons_probe": { "kind": "executable",
-                                 "sources": ["tools/title_bar_buttons_probe.cpp"],
-                                 "exclude_sources": ["src/pkg/*"] },
-    "line_box_probe": { "kind": "executable", "sources": ["tools/line_box_probe.cpp"],
-                        "exclude_sources": ["src/pkg/*"] },
-    "ink_sampling_probe": { "kind": "executable",
-                            "sources": ["tools/ink_sampling_probe.cpp"],
-                            "exclude_sources": ["src/pkg/*"] },
-    "gebai_logo_probe": { "kind": "executable", "sources": ["tools/gebai_logo_probe.cpp"],
-                          "exclude_sources": ["src/pkg/*"] }
+    "ink_spread_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/ink_spread_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "weight_spread_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/weight_spread_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "gpu_structural_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/gpu_structural_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "button_center_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/button_center_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "gradient_fill_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/gradient_fill_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "icon_sheet_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/icon_sheet_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "icon_metric_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/icon_metric_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "icon_ascii_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/icon_ascii_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "make_sample_png": {
+      "kind": "executable",
+      "sources": [
+        "tools/make_sample_png.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "title_bar_buttons_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/title_bar_buttons_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "line_box_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/line_box_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "ink_sampling_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/ink_sampling_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "gebai_logo_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/gebai_logo_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    }
   },
   "dependencies": {
     "modules": [],
     "source": [],
-    "system": ["pthread", "dl", "m"]
+    "system": [
+      "pthread",
+      "dl",
+      "m"
+    ]
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

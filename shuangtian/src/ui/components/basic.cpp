@@ -1285,6 +1285,10 @@ void Card::apply_theme(const Theme& theme) {
   // 亚克力的「玻璃边缘」：抬升的卡片顶部一道极弱亮线。
   // 只给**真抬升**的卡片（有阴影的那些）——平铺的内容块加边缘光会变成"到处在发光"。
   // 浅色档本令牌是透明的（见 `Theme::light()` 的说明），所以这里无需分模式判断。
+  //
+  // 显式高光（`glass` 字符串的 `highlight:` / `BoxProps::top_highlight`）
+  // 由 `Element::apply_declared_paint` 在本函数**之后**回放 —— 所以这里只管默认值，
+  // 不需要（也不应该）在这里判断“有没有声明”。
   style_.top_highlight = (elevated_ || shadow_level_ > 0) ? theme.colors().highlight
                                                          : math::Color{0, 0, 0, 0};
 }

@@ -1064,6 +1064,54 @@ class Element {
     if (color.a == 0U) return;
     extras().fill_override = color;
   }
+
+    /// 设**显式顶部高光色**（`BoxProps::top_highlight` / `glass` 字符串的 `highlight:`）。
+  ///
+  /// 为何需要存成声明（实测 2026-11-19，用户报“边缘立体感不够”）：
+  /// `Card::apply_theme` 会根据 `elevated_ / shadow_level_` **无条件重写**
+  /// `style_.top_highlight`。而玻璃卡片为了关投影会写 `.elevation = Flat`
+  /// （⇒ `shadow_level_ == 0`）——于是它把高光强制设为**透明**，
+  /// 调用方的 `highlight:0.35` 静默失效（回读恒为 0.000）。
+  /// 存声明后由 `apply_declared_paint` 在组件之后回放，优先级与 `fill` 一致。
+  ///
+  /// ⚠ **r/g/b 全 0（黑）时用白色占位**：调用方常常只关心**强度**（`highlight:0.85`），
+  /// 颜色交给主题合成。若把“全 0 + 非零 alpha”存进存档，任何在主题合成之前
+  /// 回放的路径（实测：启动首帧就是）都会画出一道**黑边**。
+  /// 白色占位只是“未合成前的安全值”——一旦 `apply_theme_glass` 跑过就会换成主题色。
+  void set_top_highlight_override(math::Color color) noexcept {
+    if (color.a == 0U) return;
+    if (color.r == 0U && color.g == 0U && color.b == 0U) {
+      color = math::Color{255, 255, 255, color.a};
+    }
+    extras().top_highlight_override = color;
+    // 记下**原始强度**：主题合成每次要从它重新乘倍率，
+    // 若拿合成后的值再乘，就会逐帧衰减到 0。
+    extras().top_highlight_base_alpha = color.a;
+  }
+  [[nodiscard]] auto top_highlight_override() const noexcept -> std::optional<math::Color> {
+    return extras_ != nullptr ? extras_->top_highlight_override : std::nullopt;
+  }
+
+  /// 设**显式描边宽度**（`0` = 不要描边）。
+  ///
+  /// 为何不能“不写就是不要”：`Card::apply_theme` 每帧会把 `border_width`
+  /// 重置为主题值（1px），而**描边画在 `top_highlight` 之后**——
+  /// 玻璃卡片的亮边就会被一道灰线盖掉（实测：`highlight:0.75` 完全看不见）。
+  void set_border_width_override(float width) noexcept {
+    extras().border_width_override = width;
+  }
+
+  /// 标记**调用方显式给了高光颜色**。声明后 `apply_theme_glass` 不再用主题色覆盖。
+  void mark_top_highlight_color_declared() noexcept {
+    extras().top_highlight_color_declared = true;
+  }
+
+  /// 标记**调用方显式声明了 `backdrop_tint`**（`glass` 字符串的 `tint:`）。
+  /// 声明后 `apply_theme_glass` 不再每帧把 `tint` 写回主题值。
+  void mark_glass_tint_declared() noexcept { extras().glass_tint_declared = true; }
+
+  /// 设**显式阴影**（含内阴影）——组件 `apply_theme` 之后回放，不会被抬升档位清掉。
+  void set_shadow_override(Shadow shadow) noexcept { extras().shadow_override = shadow; }
   /// 同上，但标记来源为**调用方显式声明**（而不是主题缺省档）。
   ///
   /// 为何需要这个区分：`theme_glass` 每帧会用主题底色写 `fill_override`，
@@ -1174,7 +1222,51 @@ class Element {
     if (extras_ == nullptr || !extras_->fill_override_from_declaration) {
       set_fill_override(theme.metrics().glass_fill);
     }
-    style_.backdrop_tint = theme.metrics().glass_tint;
+    // `tint` 同理：**显式声明优先**。
+    //
+    // 为何需要这个判断（实测 2026-11-19）：本函数每帧跑，无条件写 `tint`
+    // 会把运行时 `set glass=…tint:0.9` 立即盖回主题值（0.22）——
+    // 现象是“`set glass` 回读成功、画面完全不变”（实测 tint 从 0.22 改到 0.9，
+    // 内部亮度恒为 242）。
+    if (extras_ == nullptr || !extras_->glass_tint_declared) {
+      style_.backdrop_tint = theme.metrics().glass_tint;
+    }
+    // **高光颜色随主题**（实测 2026-11-19，用户：“高光亮度和颜色要随主题背景”）。
+    //
+    // 只在调用方**没有显式给颜色**时取主题值（`highlight_color:#RRGGBB` 优先）。
+    // 强度保持调用方给的比例（`highlight:0.85` 的 `a`），只换**色相**、并按主题
+    // 的 `glass_highlight_strength` 再乘一道亮度——暗底上的白线对比远高于亮底，
+    // 不降就会“白得发假”。
+    //
+    // ⚠ **强度必须从存档读，不能从 `style_.top_highlight.a` 读**（实测 2026-11-19，
+    // 用户：“高光颜色要先切暗色再切亮色才显示，启动时是黑边”）：
+    //
+    // 首帧的顺序是 `dsl 声明 → set_top_highlight_override(存档) → refresh_theme`，
+    // 而 `dsl` **只写存档、不写 `style_`**（那正是为了不被组件盖掉）。
+    // 于是本函数首次执行时 `style_.top_highlight.a` 还是 0，条件为假 → 跳过合成；
+    // 紧接着 `apply_declared_paint` 回放存档，拿到的 `top_highlight` 的 r/g/b
+    // 仍是构造时的全 0（黑）——画出来就是**一道黑边**。
+    // 切一次主题会重跑本函数，那时 `style_` 里已有上一次的值，非零→合成成功，
+    // 所以“切暗色再切亮色才正常”。根因就在“读的是回放前的值”。
+    if (extras_ != nullptr && extras_->top_highlight_override.has_value() &&
+        !extras_->top_highlight_color_declared) {
+      const math::Color tint = theme.metrics().glass_highlight;
+      const float strength = theme.metrics().glass_highlight_strength;
+      // **用原始强度重新合成**（不是拿存档里上一次的合成结果再乘）：
+      // 存档经本函数改写后 `a` 已经乘过 `strength`，若下一帧再乘一次
+      // 会逐帧衰减到 0（每隔一帧就变淡一阶，看不出来但会慢慢消失）。
+      if (!extras_->top_highlight_base_alpha.has_value()) {
+        extras_->top_highlight_base_alpha = extras_->top_highlight_override->a;
+      }
+      const std::uint8_t base_alpha = *extras_->top_highlight_base_alpha;
+      if (base_alpha != 0U) {
+        const auto scaled = static_cast<std::uint8_t>(std::clamp(
+            static_cast<float>(base_alpha) * strength, 0.0f, 255.0f));
+        style_.top_highlight = math::Color{tint.r, tint.g, tint.b, scaled};
+        // 同时更新存档：否则下一帧 `apply_declared_paint` 会把旧值回放回来。
+        extras_->top_highlight_override = style_.top_highlight;
+      }
+    }
   }
 
   /// 把**显式底/描边**落到 `style_`（由 `apply_declared_overrides` 调，在组件
@@ -1196,6 +1288,24 @@ class Element {
     }
     if (extras_->border_color_override.has_value()) {
       style_.border_color = *extras_->border_color_override;
+    }
+    // **显式“无描边”**（`BoxProps::border_width == 0` 且调用方确实写了这个字段）：
+    // 组件 `Card::apply_theme` 每帧会把 `border_width` 重置为主题值（1px），
+    // 而**描边画在高光之后**——于是它会盖掉高光（实测：`highlight:0.75` 完全看不见，
+    // 边缘只剩一道灰线）。玻璃卡片要的正是“由高光勾边”，描边必须能被关掉。
+    if (extras_->top_highlight_override.has_value()) {
+      style_.top_highlight = *extras_->top_highlight_override;
+    }
+    // 显式阴影（含**内阴影**）最后落：`Card::apply_theme` 会在抬升档位为 0 时
+    // 把 `shadow` 清为 `Shadow{}`——玻璃卡片必然是 `elevation = Flat`，
+    // 于是声明的内阴影被抹掉。
+    if (extras_ != nullptr && extras_->shadow_override.has_value()) {
+      style_.shadow = *extras_->shadow_override;
+    }
+    // 显式顶部高光最后落：`Card::apply_theme` 会按抬升档位重写它，
+    // 而那正好会把玻璃卡片的 `highlight:` 抹成透明（见 set_top_highlight_override）。
+    if (extras_ != nullptr && extras_->border_width_override.has_value()) {
+      style_.border_width = *extras_->border_width_override;
     }
   }
 
@@ -1737,6 +1847,26 @@ class Element {
     /// 变成实心白，`backdrop_tint` 怎么调都不生效（因为底不透明）。
     /// 存进 `RenderExtras` 后，由 `apply_declared_overrides` 与 `surface` 同层回放。
     std::optional<math::Color> fill_override{};
+    /// **显式顶部高光**（`glass` 字符串的 `highlight:` 存档）——见 `set_top_highlight_override`。
+    std::optional<math::Color> top_highlight_override{};
+    /// **显式描边宽度**（含 `0` = 不要描边）；`nullopt` = 没声明、用组件默认。
+    /// 为何需要它：`Card::apply_theme` 每帧把 `border_width` 重置为主题值，
+    /// 而描边画在高光**之后**——玻璃卡片就会被一道灰线盖掉高光。
+    std::optional<float> border_width_override{};
+    /// **显式 `backdrop_tint` 声明**（`glass` 字符串的 `tint:`）。
+    /// 为何需要：`apply_theme_glass` 每帧把 `tint` 写回主题值，
+    /// 会把运行时的 `set glass=…tint:…` 立即盖掉（实测：改 0.22→0.9 画面不变）。
+    bool glass_tint_declared{false};
+    /// **显式给了高光颜色**（`glass` 字符串的 `highlight_color:`）。
+    /// 声明后 `apply_theme_glass` 不再拿主题色覆盖——那才是“这块玻璃就要这个光”。
+    bool top_highlight_color_declared{false};
+    /// **高光的原始强度**（首次设值时记下，不被主题合成改写）。
+    /// 为何需要：`apply_theme_glass` 会把 `*_override->a` 乘主题倍率后存回去，
+    /// 若每次都拿存档值乘一次，就会**逐帧衰减**（存档是上次的输出）。
+    std::optional<std::uint8_t> top_highlight_base_alpha{};
+    /// **显式阴影**（含内阴影）。`Card::apply_theme` 在档位为 0 时会清空 `shadow`，
+    /// 玻璃卡片的 `elevation = Flat` 正好命中——声明的内阴影会静默消失。
+    std::optional<Shadow> shadow_override{};
     /// 该 `fill_override` 是否来自**调用方显式声明**（`BoxProps::fill`）。
     ///
     /// `theme_glass` 每帧会用主题底色写同一个字段，两者必须能区分：

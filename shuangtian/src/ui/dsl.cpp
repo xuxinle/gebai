@@ -1561,6 +1561,8 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.max_height != kAuto) style.max_height = props.max_height;
   if (props.radius_max > 0.0f) style.radius_max = props.radius_max;
   if (props.border_width > 0.0f) style.border_width = props.border_width;
+  // **显式“无描边”**：`Card::apply_theme` 每帧重置成主题值，而描边画在高光之后。
+  if (props.border_none) element.set_border_width_override(0.0f);
   if (props.border_color.a != 0U) style.border_color = props.border_color;
   // 液态玻璃：三个量一起落，否则会出现“设了折射但没模糊”的半成品
   //（折射自带模糊半径，但 `backdrop_blur` 仍决定降级到只支持模糊的后端时能不能看）。
@@ -1579,10 +1581,27 @@ void apply_box(Element& element, const BoxProps& props) {
   // “底色 + tint 跟随主题”：声明后由 `refresh_theme` 按当前主题写。
   // 放在最后落，是为了让它只当**缺省值**——上面的显式 `glass`/`fill` 优先。
   if (props.theme_glass) style.theme_glass = true;
-  // 内边缘高光：它不参与 `apply_theme` 重算（组件不碰这两项），直接写即可。
+  // 内边缘高光：**必须走存档入口**。
   // 玻璃的“亮”很大一部分来自这圈亮线（见 `BoxProps::top_highlight` 的注释）。
-  if (props.top_highlight.a != 0U) style.top_highlight = props.top_highlight;
+  // 原注释写着“组件不碰这两项”——那是**错的**：`Card::apply_theme` 会根据
+  // `elevated_ / shadow_level_` 重写 `top_highlight`，而玻璃卡片必然是
+  // `elevation = Flat`（要关投影）⇒ 被强制设为透明。实测代价：
+  // `highlight:0.35` 静默失效、边缘毫无立体感，而 `set glass` 报成功。
+  if (props.top_highlight.a != 0U) element.set_top_highlight_override(props.top_highlight);
   if (props.highlight_width > 0.0f) style.highlight_width = props.highlight_width;
+  if (props.top_highlight.a != 0U) style.highlight_edges = props.highlight_edges;
+  // 内边缘暗边：与顶部高光一明一暗，才构成“体积”。
+  // 走 `Style::shadow` 的 inset 模式（绘制层已经支持四边带 + 圆角裁剪）。
+  if (props.inset_shadow.a != 0U) {
+    Shadow shadow{};
+    shadow.color = props.inset_shadow;
+    shadow.blur = props.inset_shadow_blur > 0.0f ? props.inset_shadow_blur : 4.0f;
+    shadow.inset = true;
+    // 光源在左上 ⇒ 暗边压在下缘（offset_y 为负表示“光从上来”），
+    // 这与 `top_highlight` 的受光方向一致（两者方向矛盾会读成脏边）。
+    shadow.offset_y = -shadow.blur * 0.5f;
+    element.set_shadow_override(shadow);
+  }
   // **填充色与描边色存成“显式声明”**（不只是写一次 Style）。
   //
   // 为何（实测缺陷）：组件的 `apply_theme` 每帧会重算颜色——`Card` 把

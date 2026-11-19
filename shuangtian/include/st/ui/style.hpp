@@ -20,6 +20,22 @@ enum class Justify : std::uint8_t { Start, Center, End, SpaceBetween, SpaceAroun
 enum class FontWeight : std::uint8_t { Regular, Medium, SemiBold, Bold };
 enum class TextAlign : std::uint8_t { Start, Center, End };
 
+/// 边缘高光画在哪几条边（`Style::highlight_edges`）。
+///
+/// 为何是枚举而不是四个 bool：边与边之间存在**互斥的读法**——
+/// 一整圈读作“盒子”、只有上下读作“薄片”、只有顶边读作“上边框”。
+/// 枚举把这三种形态各自命名，调用方不必自己拼组合。
+/// 用位掩码行不行？当前只需要这三个形态，多出来的组合没有真实用途，
+/// 而位掩码会让“默认值到底是什么”变得需要推。
+enum class HighlightEdges : std::uint8_t {
+  /// 一整圈（四边 + 圆角）——默认值。
+  All,
+  /// 只上下两条（侧边完全无光）。
+  TopBottom,
+  /// 只有顶边一条（早期行为）。
+  Top,
+};
+
 /// 自动尺寸哨兵。
 inline constexpr float kAuto = -1.0f;
 inline constexpr float kUnbounded = 1.0e9f;
@@ -232,14 +248,21 @@ void set_gradient_background(raster::Gradient fill, math::Color fallback) noexce
   math::Color border_color{0, 0, 0, 0};
   float border_width{0.0f};
   Shadow shadow{};
-  /// **顶部内高光**（亚克力的「玻璃边缘」）：不为透明时，在圆角内沿顶边画一条
-  /// `highlight_width` 高的横向亮线（两端淡出）。
+  /// **边缘高光**：不为透明时沿边缘画 `highlight_width` 厚的亮带。
   ///
-  /// 为什么是「顶部」而不是四周描边：真实玻璃的边缘受光只在**上缘**，四周一圈会把
-  /// 色块封成"双层轮廓"反而显脏（与 `Card::apply_theme` 里"有阴影的卡片再配一道
-  /// 同样明显的描边会变脏"同因）。
+  /// 画哪几条边由 `highlight_edges` 决定（默认一整圈）。
+  /// 真实玻璃的受光是**一圈**；但只画上下两条也是常见形态——侧边没有光时，
+  /// 卡片读作“薄片”而不是“盒子”。
   /// 消费点是 `Element::paint_box`——组件只需填本字段，不必各自绘制。
   math::Color top_highlight{0, 0, 0, 0};
+  /// 高光画在哪些边上（`glass` 字符串的 `edges:`）。
+  ///
+  /// 为何要这个字段（实测 2026-11-19，用户逐轮提的三种诉求各自成立）：
+  /// · 「只在顶边一条」→ 读作**上边框**（用户：这个上边框是怎么回事）；
+  /// · 「一整圈」→ 太厚像白描边（用户：厚了）；
+  /// · 「只要上下两条」→ 上下受光、两侧交给折射（用户：只高亮上下 2 边）。
+  /// 这三种都在同一个字段上表达不了，所以拆成“厚度 × 哪些边”两个维度。
+  HighlightEdges highlight_edges{HighlightEdges::All};
   float highlight_width{1.0f};
   float opacity{1.0f};
   /// 是否把子元素裁到自己的矩形内。

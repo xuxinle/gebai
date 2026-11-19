@@ -1789,6 +1789,20 @@ class GpuCanvas final : public Surface {
     paste.uv[1] = half_v;
     paste.uv[2] = static_cast<float>(area.width) / static_cast<float>(ext.width) - 2.0f * half_u;
     paste.uv[3] = static_cast<float>(area.height) / static_cast<float>(ext.height) - 2.0f * half_v;
+    // **贴回必须套圆角裁剪**（`mode[2] = 2` 走 SDF 圆角覆盖率）。
+    //
+    // 实测 2026-11-19（用户标图：“这不是还有吗”，指向气泡顶边一条暗线）：
+    // 折射着色器的输出 **alpha 恒为 1**（不透明）。不套圆角裁剪时，`Bitmap`
+    // 模式会把整块 `area` 矩形不透明地贴回去——**圆角外那四个角也贴**，
+    // 于是紧贴顶边（`+0px`）出现一行暗线（实测 223~234，而上下都是 238）。
+    // 它与高光无关（那时 `highlight` 已经是 0），是贴回几何与元素圆角不匹配。
+    paste.mode[2] = 2.0f;
+    paste.clip[0] = static_cast<float>(area.x);
+    paste.clip[1] = static_cast<float>(area.y);
+    paste.clip[2] = static_cast<float>(area.width);
+    paste.clip[3] = static_cast<float>(area.height);
+    paste.clip_radii[0] = paste.clip_radii[1] = paste.clip_radii[2] = paste.clip_radii[3] =
+        corner * scale_;
     submit_to(rtv_, paste, targets.srv_b, true, /*opaque=*/false, physical_width_, physical_height_,
               &area);
     note_deferred_draw();
@@ -2563,6 +2577,12 @@ class GpuCanvas final : public Surface {
         base_params(DrawMode::GradientRoundRect, physical, radii, opacity);
     switch (gradient.kind()) {
       case Gradient::Kind::Linear: {
+        // 渐变轴是**绝对逻辑坐标**（`paint_box` 已经把 0~1 归一化映射成
+        // `box.x + p.x * box.width`，见 `map_point`），所以这里只需换成物理。
+        //
+        // 両条渲染腿必须同口径：软件腿在 `Canvas::fill_row` 里用同一套
+        // 逻辑坐标求 t，所以本函数只能做坐标单位转换，不能做归一化映射
+        //（那样会把已经绝对的坐标再乘一次尺寸，端点全部错位）。
         const math::Point from = gradient.start();
         const math::Point to = gradient.end();
         params.axis[0] = from.x * scale_;
