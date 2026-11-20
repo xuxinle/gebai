@@ -2,8 +2,10 @@
 #include "st/ui/stylesheet.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
+#include <tuple>
 #include "st/core/log.hpp"
 #include "st/core/fs.hpp"
 #include "st/perf/clock.hpp"
@@ -407,7 +409,6 @@ struct StyleField {
 const StyleField kStyleFields[] = {
     // —— 布局 ——
     {"width", "width", +[](const Style& s) { return fmt_f2(s.width); }},
-    {"height", "height", +[](const Style& s) { return fmt_f2(s.height); }},
     {"min_width", "min_width", +[](const Style& s) { return fmt_f2(s.min_width); }},
     {"max_width", "max_width", +[](const Style& s) { return fmt_f2(s.max_width); }},
     {"min_height", "min_height", +[](const Style& s) { return fmt_f2(s.min_height); }},
@@ -642,11 +643,18 @@ auto Element::property_names() const -> std::vector<std::string_view> {
   // 同一套校验与错误回报），`get` 走字段直读。两边名字必须一处一致，
   // 否则就是“认了但落不上”。
   //
-  // 注：`color`/`font_size`/`weight` 三个历史名字保留（读侧名），
-  // 与字段名 `font_size`/`font_weight` 共用同一状态。
+  // ## 哪些字段**不能**上这张表
+  //
+  // 凡是**组件自己也声明了只读**的同名字，一律不放在基类可写表里——
+  // 契约测试要求“同一名字不能既声明可写又声明只读”。实测冲突的：
+  //   · `height`：`HtmlView`/`Skeleton`/`StatusBar` 自报实际高度（由内容决定）。
+  //
+  // `color` / `font_size` **必须留在这里**：`ColorPicker` 刻意不重复声明 `color`、
+  // 而是依赖基类表（它自己的 `get/set_property` 覆写了取值）——删了它
+  // `color_picker_properties_expose_and_accept_color` 立刻变红。
   return {"color_override", "tone_override", "color", "font_size", "weight", "font_weight",
-          // —— 布局 ——
-          "width", "height", "min_width", "max_width", "min_height", "max_height",
+          // —— 布局 ——（`height` 除外，见上）
+          "width", "min_width", "max_width", "min_height", "max_height",
           "gap", "grow", "shrink", "wrap", "absolute", "left", "top", "right", "bottom",
           "direction", "align_items", "align_self", "justify",
           // —— 绘制 ——
@@ -1541,8 +1549,31 @@ namespace {
 /// **为什么左右边要纵向淡出**：左右边的两端正好落在圆角上，而圆角同时被上下边
 /// 覆盖。若左右边满强度顶到角上，会在四个角形成“角比上下边还亮/还暗”的硬块；
 /// 淡出到 0 让圆角的中段由上下边接管，交界连续。
+/// 把 `HighlightEdges` 枚举展开成四条边的权重（`top, bottom, left, right`）。
+///
+/// 枚举是**公开接口**（`Style::highlight_edges`、`BoxProps::highlight_edges`
+/// 直接写它），所以绘制层必须能把它展开成四个权重。
+///
+/// 与 `stylesheet.cpp` 的 `apply_edges_preset` **同一套取值**：那边是写进
+/// `Style` 的时机，这边是“只设了枚举、没设四字段”时的回退——两处口径必须一致，
+/// 否则同一个枚举名在两条路径下画出来不一样。
+[[nodiscard]] auto edges_preset_weights(HighlightEdges edges)
+    -> std::tuple<float, float, float, float> {
+  switch (edges) {
+    case HighlightEdges::Top:
+      return {1.0f, 0.0f, 0.0f, 0.0f};
+    case HighlightEdges::TopBottom:
+      return {1.0f, 0.55f, 0.0f, 0.0f};    // 侧边完全无光 → 读作“薄片”
+    case HighlightEdges::TopBottomShaded:
+      return {1.0f, 0.55f, -1.0f, -1.0f};  // 侧边压暗：亮暗互为对照，体积感
+    case HighlightEdges::All:
+    default:
+      return {1.0f, 1.0f, 1.0f, 1.0f};
+  }
+}
+
 void paint_highlight_edges(const Style& style, raster::Surface& canvas, const math::Rect& box,
-                           float radius, float /*origin_x*/, float /*origin_y*/) {
+                           float radius, const std::array<float, 4>& weights) {
   const math::Color bright = style.top_highlight;
   const float ring = style.highlight_width;
   const math::Path light_ring = math::make_rounded_border_ring(box, radius, ring);
@@ -1563,10 +1594,10 @@ void paint_highlight_edges(const Style& style, raster::Surface& canvas, const ma
     return weight > 0.0f ? bright_alpha(weight) : dark_alpha(weight);
   };
 
-  const math::Color top_c = edge_color(style.highlight_top);
-  const math::Color bottom_c = edge_color(style.highlight_bottom);
-  const math::Color left_c = edge_color(style.highlight_left);
-  const math::Color right_c = edge_color(style.highlight_right);
+  const math::Color top_c = edge_color(weights[0]);
+  const math::Color bottom_c = edge_color(weights[1]);
+  const math::Color left_c = edge_color(weights[2]);
+  const math::Color right_c = edge_color(weights[3]);
 
   const raster::DrawOptions opts{.opacity = style.opacity};
 
@@ -2004,9 +2035,24 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   // 每条边用**矩形裁剪**从同一个环里取出来，圆角处天然连续。
   if (style.top_highlight.a != 0U && style.highlight_width > 0.0f && box.width > 0.0f &&
       box.height > 0.0f) {
-    if (style.highlight_top != 0.0f || style.highlight_bottom != 0.0f ||
-        style.highlight_left != 0.0f || style.highlight_right != 0.0f) {
-      paint_highlight_edges(style, canvas, box, radius, box.x, box.y);
+    // 四条边权重优先；四个都是 0（未声明）时回退到 `highlight_edges` 枚举。
+    //
+    // 为何必须保留这个回退：枚举是**公开接口**——`style.highlight_edges = X`
+    // 直接写、`BoxProps::highlight_edges` 不走 `apply_edges_preset`、以及旧代码
+    // 都依赖它。只读四个字段会让那些写法**静默失效**（实测：四条
+    // `highlight_topbottom_*` 用例全红，侧边本该无光却画上了边）。
+    //
+    // 两个入口共用同一份展开规则（`edges_preset_weights`），避免两处漂移。
+    float top_w = style.highlight_top;
+    float bottom_w = style.highlight_bottom;
+    float left_w = style.highlight_left;
+    float right_w = style.highlight_right;
+    if (top_w == 0.0f && bottom_w == 0.0f && left_w == 0.0f && right_w == 0.0f) {
+      std::tie(top_w, bottom_w, left_w, right_w) = edges_preset_weights(style.highlight_edges);
+    }
+    if (top_w != 0.0f || bottom_w != 0.0f || left_w != 0.0f || right_w != 0.0f) {
+      paint_highlight_edges(style, canvas, box, radius,
+                            std::array<float, 4>{top_w, bottom_w, left_w, right_w});
     }
   }
   if (style.border_width > 0.0f && border.a != 0U) {

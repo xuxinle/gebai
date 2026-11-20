@@ -290,10 +290,23 @@ void set_gradient_background(raster::Gradient fill, math::Color fallback) noexce
   ///
   /// 强度 1.0 ≈ `top_highlight` 的原始 alpha；负数绝对值 1.0 ≈ alpha 的 45%（暗线）。
   /// 两者不取同一标尺：暗线叠在亮带的输出之上，同样的 alpha 比在底色上更明显。
-  float highlight_top{1.0f};
-  float highlight_bottom{1.0f};
-  float highlight_left{1.0f};
-  float highlight_right{1.0f};
+  ///
+  /// ## 默认 0 = “未声明”，不是“不画”
+  ///
+  /// 四项默认全是 **0**，绘图层把它读作“调用方没逐边指定”，于是回退到
+  /// `highlight_edges` 枚举展开。这样两条入口共存：
+  /// · 只设枚举（旧代码 / `style.highlight_edges = X`）→ 按枚举画；
+  /// · 设了任一边（新写法 / `edge_top 1.0`）→ 以四项为准。
+  ///
+  /// 若默认写成 1.0（早先的取值），回退条件永不成立，枚举就**静默失效**——
+  /// 实测：四条 `highlight_topbottom_*` 用例全红，本应无光的侧边被画上了边。
+  ///
+  /// 代价：真想“四条边都不画”不能靠全 0（那会回退到枚举），得把
+  /// `top_highlight` 置透明或 `highlight_width = 0`——两者都是更直接的写法。
+  float highlight_top{0.0f};
+  float highlight_bottom{0.0f};
+  float highlight_left{0.0f};
+  float highlight_right{0.0f};
   float highlight_width{1.0f};
   float opacity{1.0f};
   /// 是否把子元素裁到自己的矩形内。
