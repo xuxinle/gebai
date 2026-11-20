@@ -88,6 +88,11 @@ const std::unordered_set<std::string>& box_prop_names() {
       // 这里列的是“地名”，具体解析在 `apply_properties` 的 `glass` 分支：
       // 如果漏登记它，XML 里写 `glass` 会被当“未生效的属性”报出来并**静默不生效**。
       "glass",
+      // **CSS 式统一入口**（`style="radius 14, blur 8, ring 1"`）。
+      // 与 DSL 的 `BoxProps::style`、控制通道的 `set style=…` **同一个解析器**
+      //（`ui::apply_stylesheet`，键表在 `ui::sheet_key_names()`）。
+      // 漏登记它就会重演 `glass` 当初的毛病：XML 里写了被报“未生效”且静默不落。
+      "style",
       // 动画（2026-11-10）：三个都不进属性面，而是在 `apply_one` 里单独处理——
       // 起播是**动作**（重置起点/标脏/请求续帧），做成属性会在声明式里每帧重播。
       "animate",  "animate_delay", "transition",

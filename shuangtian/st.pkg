@@ -355,7 +355,8 @@
     "gbcode": {
       "kind": "executable",
       "sources": [
-        "apps/gbcode/*.cpp"
+        "apps/gbcode/*.cpp",
+        "src/ext/script_stub.cpp"
       ],
       "exclude_sources": [
         "src/pkg/*",

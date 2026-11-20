@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "st/ui/selector.hpp"
+#include "st/ui/stylesheet.hpp"   // CSS 式统一入口（set style=...）
 #include "st/ui/svg.hpp"   // parse_color（色值解析：与 DSL 的 hex_color 同一份）
 
 #include "st/core/json.hpp"
@@ -294,133 +295,42 @@ auto rect_to_json(math::Rect rect) -> st::Json {
 /// 返回 false 仅当**一个键也不认识**（把拼写错误当成功会让调用方调半天没效果）；
 /// 认出一部分就整体成功，未认出的键忽略。
 auto apply_glass_shorthand(Element& element, std::string_view text) -> bool {
-  Style& style = element.style();
-  const auto lower = [](std::string_view s) {
-    std::string out(s);
-    for (char& ch : out) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return out;
-  };
-  const std::string whole = lower(text);
-  if (whole == "off" || whole == "0" || whole == "none" || whole.empty()) {
-    style.backdrop_blur = 0.0f;
-    style.backdrop_tint = 0.0f;
-    style.backdrop_refraction = 0.0f;
-    style.backdrop_dispersion = 0.0f;
-    return true;
+  // **委托给统一解析层**（`apply_stylesheet`）。
+  //
+  // 为何不再自己解析（改造前这里是一份 129 行的独立实现）：它和 `StyleSheet`
+  // 的玻璃键表是**同一件事的两份代码**，一个键改了另一份不跟就是
+  // "dsl 里生效、xml 里不生效"。现在两边共用同一份键表与落位逻辑。
+  //
+  // 兼容的历史写法（纯语义糖，在解析前统一规整）：
+  //   glass="on" / "off" / "none" / "0" / 纯数字（= blur）
+  std::string whole(text);
+  for (char& ch : whole) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
   }
-  // 纯数字 = `blur` 缩写（写在 `glass="8"` 这种最简形式里）。
-  if (whole.find(':') == std::string::npos && whole.find(',') == std::string::npos) {
-    if (const float value = std::strtof(whole.c_str(), nullptr); value > 0.0f) {
-      style.backdrop_blur = value;
-      // 只给模糊时给一个可读的缺省着色（否则玻璃几乎完全透明，文字背后全穿）。
-      if (style.backdrop_tint <= 0.0f) style.backdrop_tint = 0.22f;
-      return true;
-    }
-    // `glass="on"` 之类：开关本身合法，参数用当前值（全 0 时给一套缺省档）。
-    if (whole == "on") {
-      if (style.backdrop_blur <= 0.0f) style.backdrop_blur = 6.0f;
-      if (style.backdrop_tint <= 0.0f) style.backdrop_tint = 0.22f;
-      return true;
-    }
-    return false;
+  const auto has = [&whole](char ch) { return whole.find(ch) != std::string::npos; };
+  SheetReport report;
+  if (whole.empty() || whole == "off" || whole == "none" || whole == "0") {
+    (void)ui::apply_stylesheet(element, "blur 0, tint 0, refraction 0, dispersion 0", &report);
+    return report.ok();
   }
-  // `k:v` 列表。
-  bool recognized = false;
-  std::size_t start = 0;
-  while (start <= whole.size()) {
-    const std::size_t comma = whole.find(',', start);
-    std::string_view item(whole.data() + start,
-                          (comma == std::string::npos ? whole.size() : comma) - start);
-    while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.remove_prefix(1);
-    while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) item.remove_suffix(1);
-    if (!item.empty()) {
-      const std::size_t colon = item.find(':');
-      if (colon != std::string_view::npos) {
-        const std::string key(item.substr(0, colon));
-        const float value = std::strtof(std::string(item.substr(colon + 1)).c_str(), nullptr);
-        if (key == "blur") {
-          style.backdrop_blur = value;
-          recognized = true;
-        } else if (key == "tint") {
-          style.backdrop_tint = value;
-          // **标记显式声明**：否则 `apply_theme_glass` 每帧写回主题值，
-          // 运行时改 tint 永远不生效（实测 0.22→0.9 画面不变）。
-          element.mark_glass_tint_declared();
-          recognized = true;
-        } else if (key == "refraction" || key == "refract") {
-          style.backdrop_refraction = value;
-          recognized = true;
-        } else if (key == "dispersion") {
-          style.backdrop_dispersion = value;
-          recognized = true;
-        } else if (key == "highlight") {
-          // 高光**强度**（0~1 比例，`0.35` = 90/255）。
-          //
-          // ⚠ 颜色**不在这里定**：它随主题（`Metrics::glass_highlight`），
-          // 由 `apply_theme_glass` 在每帧主题下发时合成。
-          // 原先这里写死 `255,255,255`，后果是“亮色勉强可见、暗色白得发假、
-          // 彩底完全不搭”（用户：“高光亮度和颜色要随主题背景”）。
-          // 要指定颜色用单独的 `highlight_color:#RRGGBB` 键（它会打上
-          // “显式声明”标记，使主题不再覆盖）。
-          //
-          // 占位色取当前值：主题合成会换掉 r/g/b，只保留这里算出的 `a`。
-          style.top_highlight =
-              math::Color{style.top_highlight.r, style.top_highlight.g, style.top_highlight.b,
-                          static_cast<std::uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f)};
-          element.set_top_highlight_override(style.top_highlight);
-          recognized = true;
-        } else if (key == "ring") {
-          // 环带厚度（逻辑像素）——高光是**沿轮廓的一圈**，不是顶边一条线。
-          //
-          // 为何要放进字符串：调厚度是观感调整里最高频的一件事（“厚了/薄了”），
-          // 而它之前只能改代码 + 重编（~20s 一轮）。进字符串后控制通道能直接扫。
-          style.highlight_width = std::max(value, 0.0f);
-          recognized = true;
-        } else if (key == "edges") {
-          // 高光画哪几条边：`edges:tb`（上下） / `edges:all`（一圈） / `edges:top`。
-          //
-          // 为何也放进字符串：这三个形态是同一件事的三个取值（用户逐轮试的），
-          // 而改 `Style` 字段需要重编（~20s 一轮）。字符串里可扫。
-          const std::string shape(item.substr(colon + 1));
-          if (shape.find("tb") != std::string::npos ||
-              shape.find("topbottom") != std::string::npos) {
-            style.highlight_edges = HighlightEdges::TopBottom;
-          } else if (shape.find("all") != std::string::npos) {
-            style.highlight_edges = HighlightEdges::All;
-          } else if (shape.find("top") != std::string::npos) {
-            style.highlight_edges = HighlightEdges::Top;
-          }
-          recognized = true;
-        } else if (key == "highlight_color") {
-          // 高光颜色可选（默认白）。
-          //
-          // 为何需要：浅色主题下卡底已经接近 255，**纯白高光最多只能提 13 个阶**，
-          // 而背景是暖米→冷蓝的渐变——用一枚冷调高光反而能靠**色相**而不是亮度
-          // 读出“边缘受光”（实测纯白 hl=0.9 在画面上只亮 1 个阶）。
-          // 语法：`highlight_color:#E8F4FF`（带 # 或纯十六进制）。
-          const std::string raw(item.substr(colon + 1));
-          std::string hex_text = raw;
-          if (!hex_text.empty() && hex_text.front() == '#') hex_text.erase(0, 1);
-          if (hex_text.size() >= 6) {
-            const auto channel = [&hex_text](std::size_t at) {
-              return static_cast<std::uint8_t>(
-                  std::strtoul(hex_text.substr(at, 2).c_str(), nullptr, 16));
-            };
-            style.top_highlight =
-                math::Color{channel(0), channel(2), channel(4), style.top_highlight.a};
-            element.set_top_highlight_override(style.top_highlight);
-            // **标记显式给色**：否则 `apply_theme_glass` 每帧拿主题色盖回去，
-            // `highlight_color:#RRGGBB` 就静默失效（同 tint 那条的形态）。
-            element.mark_top_highlight_color_declared();
-            recognized = true;
-          }
-        }
-      }
-    }
-    if (comma == std::string::npos) break;
-    start = comma + 1;
+  if (whole == "on") {
+    // 开关语义：只在没值时给一套缺省档（已有值不覆盖）。
+    if (element.style().backdrop_blur > 0.0f) return true;
+    (void)ui::apply_stylesheet(element, "blur 6, tint 0.22", &report);
+    return report.ok();
   }
-  return recognized;
+  if (!has(':') && !has(',') && !has(' ') && !has(';')) {
+    // 纯数字 = blur 缩写。
+    if (std::strtof(whole.c_str(), nullptr) <= 0.0f) return false;
+    (void)ui::apply_stylesheet(element, "blur " + whole, &report);
+    // 只给模糊时给一个可读的缺省着色（否则玻璃几乎全透，文字背后全穿）。
+    if (element.style().backdrop_tint <= 0.0f) {
+      (void)ui::apply_stylesheet(element, "tint 0.22", &report);
+    }
+    return report.ok();
+  }
+  (void)ui::apply_stylesheet(element, whole, &report);
+  return report.ok();
 }
 
 auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
@@ -605,6 +515,20 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
       // 这是 `Element` 级状态（不是 `Style`），因为命中判定在 `UiRoot` 分配事件的路径上。
       element.set_intercepts_input(st::json_as_bool(value, true));
       return true;   // 不改布局，不走下面的 mark_layout_dirty
+    } else if (name == "style") {
+      // **CSS 式统一入口**（与 `BoxProps::style` / XML `style` 属性同一个解析器）。
+      //
+      // 为何不只给 `glass`：`glass` 只管玻璃，而实际调参经常要同时改
+      // 填充/圆角/描边/玻璃/文字——分五次 `set` 既慢又容易出现
+      // “改了一半”的中间态。`style` 一条声明搞定，且**键名与 DSL 一致**。
+      //
+      // 未知键**报错**（不静默）：`set` 的语义是“调用方明确要求改成这个”，
+      // 拼错就应当失败——静默忽略会让“写了却没生效”变成谜。
+      const std::string text = value.is_string() ? st::json_as_string(value)
+                                               : st::json_dump(value);
+      SheetReport report;
+      (void)ui::apply_stylesheet(element, text, &report);
+      if (!report.ok()) return false;
     } else if (name == "glass") {
       // **液态玻璃的紧凑字符串配置**（XML 与运行时同一入口）：
       //   glass="blur:8,tint:0.22,refraction:20,dispersion:0.35"

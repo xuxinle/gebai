@@ -147,11 +147,29 @@ inline constexpr float kMaxBubbleWidth = st::ui::kUnbounded;
 // 只剩一道硬边。实测：气泡 left=14px 时左边从边缘到内部 5px 完全恒定（硬边）；
 // 而上边有 259px 空间，才有那条可见的折射带。**这就是“只有上边有”的根因**。
 //
-// 不带 tint：它由 `theme_glass` 按主题给（亮色 0.32 / 暗色 0.42）。
-// 写死会给 tint 打上“显式声明”标记，`theme_glass` 不再换档。
-inline constexpr std::string_view kGlassSpec =
-    "blur:16,refraction:6,dispersion:0.3,highlight:0.85,ring:1,edges:all";
-/// 气泡圆角：折射的带宽≈圆角半径，直角会把液态效果藏掉。
+inline constexpr std::string_view kBubbleStyle =
+    // —— 外观 ——
+    "radius 14, "            // 折射的带宽≈圆角半径，直角会把液态效果藏掉
+    "border 0, "            // 描边画在高光**之后**，不关掉就会把亮边盖成灰线
+    "shadow 0, "            // `Card` 默认 md 投影画在玻璃底下，被背板模糊平均成一圈暗晕
+    // —— 玻璃 ——
+    "theme_glass 1, "       // 底色与 tint 跟随主题（亮 0.32 / 暗 0.42）
+    "blur 16, refraction 6, dispersion 0.3, "
+    "highlight 0.85, ring 1, edges all";
+//
+// 各值为什么是这些数（实测依据见下方长注释，这里只留结论）：
+//
+// · `blur 16`：本页看不出差别（气泡背后是纯渐变，8/16/24/36 卡内梯度全 0.42），
+//   但真实叠加场景（卡片压在别的元素上）才起作用，先把厚度留够。
+// · `refraction 6`：受**四边都能成像**约束——外扩量 `pad = blur/2 + strength
+//   + corner + 8`，超过 `msg-list` 的 `padding_x`（=44）就会有一侧被画布裁掉、
+//   折射静默失效（实测左侧 5px 完全恒定 = 硬边）。
+// · `highlight 0.85 / ring 1 / edges all`：四边都受光、细如发丝。
+//   亮度与颜色由主题给（亮色 #E8F0FF、暗色 #BFD8FF×0.55）。
+//
+// 不写 `tint`：它由 `theme_glass` 按主题给。写死会给 tint 打上“显式声明”标记，
+// 主题不再换档，暗色下就会用亮色的膜厚（实测气泡内 73.7 vs 背景 23.0）。
+/// 气泡圆角（供布局与内边距参照；样式里的 `radius` 已包含它）。
 inline constexpr float kGlassRadius = 14.0f;
 
 // 默认模型：应用内置的兜底值（不是密钥，也不是部署配置）。
@@ -1062,50 +1080,24 @@ struct AgentPage : st::ui::dsl::Component {
                 // 背板模糊会把投影平均进来，整块气泡被压暗（实测：气泡内 200.7
                 // vs 背景 239.7，暗 39；关掉后气泡内 243.0、反推背板 239.6）。
                 // 玻璃本身就是“浮起来”的材质，再加投影既不符语义、又把通透感吃掉。
+                // **一个 `style=` 声明管全部外观**（CSS 式子集，
+                // 与 XML / 控制通道同一个解析器、同一份键表）。
+                //
+                // 为何不再逐字段写（这一轮的教训）：改造前这里堆了十几个字段
+                //（radius / highlight_width / glass / theme_glass / elevation / border_none…），
+                // 而**优先级藏在调用链里**——`elevation=Flat` 会把 `top_highlight` 抹成透明、
+                // `Card::apply_theme` 会把 `border_width` 重置、`apply_theme_glass` 会把
+                // `tint` 写回主题值。三次都表现为“写了不生效”。
+                //
+                // 现在每个效果只有**一个键、一个落点**，优先级在 `apply_stylesheet`
+                // 一处定义（声明 → 存档 → 组件之后回放）。
                 (void)card(c, {.gap = 6, .padding = 10, .max_width = kMaxBubbleWidth,
                                .max_height = st::ui::kUnbounded,
-                               .radius = kGlassRadius,
-                               // **不叠 `surface`**：它是主题实色底（`Base` = #FEFEFF、
-                               // `Sunken` = #E9EAF0 灰），会带自己的色相与亮度盖在背板上，
-                               // 玻璃变成“罩了一层雾的卡片”。
-                               //
-                               // 底色与 `tint` 都**交给主题档位**（`theme_glass`）：
-                               // 亮色用纯白 + tint 0.22；暗色必须换成淡白（α≈18%）+
-                               // tint 0.42，否则同一组参数会把暗色气泡抹成发辉的灰纸
-                               //（实测：沿用亮色档时气泡内 73.7 vs 背景 23.0，亮 50）。
-                               // **玻璃元素不画描边**：边框由 `top_highlight` 承担。
-                               //
-                               // 为何必须显式声明（实测 2026-11-19）：`Card::apply_theme`
-                               // 每帧把 `border_width` 重置成主题值（1px），而**描边画在
-                               // 高光之后**——于是 `highlight:0.75` 完全看不见，
-                               // 边缘只剩一道灰线（放大 6 倍才看清）。
-                               // 写着 `.border_width = 0` 无效（那是默认值），要用 `border_none`。
-                               .border_none = true,
-                               //
-                               // 实测（用户标注截图，亮色 1988px 宽的对话项）：
-                               // 带 `border_color = 白 α140` 时，顶边会出现一条 **1px 高、
-                               // 亮度恒为 246.0** 的直线（从 x=40 一直拉到 x=1920，逐点完全相等），
-                               // 而上下两侧是 228~236——没有任何渐变，看起来就是“多了一道边框”。
-                               // 原因：环形描边在 DPI 1.25 下是全宽等亮的，它不会像高光那样衰减；
-                               // 而高光已经在做“边缘受光”，两者叠在一起就是两道平行亮线。
-                               //
-                               // **环光厚 1.5**（用户：“厚了，薄点”）。
-                               //
-                               // 实测三档（上边逐行亮度，内部基准 241）：
-                               //   ring 3.0 → 2~3 行（253,253,246）  太厚，读作“白描边”
-                               //   ring 2.0 → 1~2 行（253,244）
-                               //   ring 1.5 → 1 行（246）            ← 取这档：细如发丝
-                               //   ring 1.0 → 0 行（242）           过薄，四边几乎看不出
-                               //
-                               // 厚度走 `kGlassSpec` 的 `ring:` 键，**不在这里重复写**——
-                               // 两处都设一遍容易漂移（改了一处忘了另一处），而 `glass`
-                               // 字符串本来就是“一条声明管全部参数”的入口。
-                               // **一行字符串配置玻璃**（与 XML 的 `glass="…"` 同一语法）：
-                               // 四个参数各自一个字段时要盯四处，漏一个就静默半开
-                               //（只给 blur 忘了 tint = “模糊但实心”）。
-                               .glass = kGlassSpec,
-                               .theme_glass = true,
-                               .elevation = st::ui::Elevation::Flat,
+                               // 投影必须关：`Card` 默认 md 投影画在玻璃**底下**，
+                               // 背板模糊会把投影平均进来（实测气泡内暗 39）。
+                               // 用 `shadow 0` 一次性表达“不要投影”，
+                               // 比 `elevation = Flat` 更直白（后者绕过档位才能关）。
+                               .style = kBubbleStyle,
                                .key = "bubble-" + m.role + "-" + uid},
                            [&] {
                              (void)row(c, {.gap = 6, .key = "meta"}, [&] {

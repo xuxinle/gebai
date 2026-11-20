@@ -17,6 +17,7 @@
 #include "st/core/log.hpp"
 #include "st/core/print.hpp"
 #include "st/ui/actions.hpp"
+#include "st/ui/stylesheet.hpp"
 // 声明式包装函数（`row` / `button` / `tabs` …）要**强类型**地用具体组件，
 // 所以这里一次性拿全部组件头——**这是本文件自己的需要，不是框架的默认**。
 // 应用不需要跟着全量：它们可以只 include 自己要的那几个头并调
@@ -1681,6 +1682,19 @@ void apply_box(Element& element, const BoxProps& props) {
     transition.duration = props.transition_duration;
     transition.easing = anim::Easing::ease_out();
     element.set_transition(transition);
+  }
+  // **CSS 式统一入口最后应用**：它比扁平字段“更晚”，因此同名的键以它为准。
+  //
+  // 这一句就是“一个落点”的落实——不再为每个新效果在 `BoxProps` 上加字段，
+  // 也不需要在下面几十个 `if (props.xxx)` 里再抄一遍。
+  if (!props.style.empty()) {
+    SheetReport report;
+    (void)ui::apply_stylesheet(element, props.style, &report);
+    // 拼错的键**必须报出来**：静默忽略正是“写了却不生效”的温床。
+    // 走 `ST_LOG_WARN` 而不抛异常：声明式构建不能因为一个样式键写错就整页不渲染。
+    for (const std::string& bad : report.unknown) {
+      ST_LOG_WARN("样式键拼错（元素 {}）：{}（可用键见 sheet_key_names）", element.id(), bad);
+    }
   }
 }
 
