@@ -106,7 +106,49 @@ auto parse_edges(std::string_view text) -> std::optional<HighlightEdges> {
     return HighlightEdges::TopBottom;
   }
   if (v == "top" || v == "t" || v == "1") return HighlightEdges::Top;
+  // `tbs` / `topbottom-shaded`：上下亮、左右暗（见 `HighlightEdges::TopBottomShaded`）。
+  if (v == "tbs" || v == "topbottom_shaded" || v == "tb_shaded" || v == "shaded") {
+    return HighlightEdges::TopBottomShaded;
+  }
   return std::nullopt;
+}
+
+/// 把 `edges` 的预设展开成四条边各自的权重。
+///
+/// 枚举保留为**预设别名**（旧写法 `edges tbs` 等行为不变），真正驱动绘制的是
+/// `Style::highlight_top/bottom/left/right` 四个带符号强度——这样“上强下弱、
+/// 左右微弱”这类真实光照才能字节表达出来。
+///
+/// 取值口径（与 `paint_highlight_edges` 的 alpha 映射一致）：
+/// `1.0` = 满强度亮边；`-1.0` = 满强度暗边；`0` = 不画。
+void apply_edges_preset(Style& style, HighlightEdges edges) {
+  switch (edges) {
+    case HighlightEdges::Top:
+      style.highlight_top = 1.0f;
+      style.highlight_bottom = 0.0f;
+      style.highlight_left = 0.0f;
+      style.highlight_right = 0.0f;
+      break;
+    case HighlightEdges::TopBottom:
+      style.highlight_top = 1.0f;
+      style.highlight_bottom = 0.55f;   // 下缘明显比上缘暗，才读得出“光从上来”
+      style.highlight_left = 0.0f;
+      style.highlight_right = 0.0f;
+      break;
+    case HighlightEdges::TopBottomShaded:
+      style.highlight_top = 1.0f;
+      style.highlight_bottom = 0.55f;
+      style.highlight_left = -1.0f;     // 侧边压暗：亮与暗互为对照，体积感才出来
+      style.highlight_right = -1.0f;
+      break;
+    case HighlightEdges::All:
+    default:
+      style.highlight_top = 1.0f;
+      style.highlight_bottom = 1.0f;
+      style.highlight_left = 1.0f;
+      style.highlight_right = 1.0f;
+      break;
+  }
 }
 
 auto parse_weight(std::string_view text) -> std::optional<FontWeight> {
@@ -386,7 +428,19 @@ auto apply_declaration(Element& element, Style& style, const Declaration& decl, 
     } else if (key == "ring" || key == "highlight_width") {
       if (auto v = num()) { style.highlight_width = std::max(*v, 0.0f); return true; }
     } else if (key == "edges" || key == "highlight_edges") {
-      if (auto v = parse_edges(raw)) { style.highlight_edges = *v; return true; }
+      if (auto v = parse_edges(raw)) {
+        style.highlight_edges = *v;
+        apply_edges_preset(style, *v);
+        return true;
+      }
+    } else if (key == "edge_top" || key == "highlight_top") {
+      if (auto v = num()) { style.highlight_top = *v; return true; }
+    } else if (key == "edge_bottom" || key == "highlight_bottom") {
+      if (auto v = num()) { style.highlight_bottom = *v; return true; }
+    } else if (key == "edge_left" || key == "highlight_left") {
+      if (auto v = num()) { style.highlight_left = *v; return true; }
+    } else if (key == "edge_right" || key == "highlight_right") {
+      if (auto v = num()) { style.highlight_right = *v; return true; }
     }
     return false;
   }
@@ -468,8 +522,12 @@ auto sheet_key_names() -> const std::vector<SheetKey>& {
       {"highlight_color", G::Glass, "#RRGGBB"},
       {"ring", G::Glass, "<像素>"},
       {"highlight_width", G::Glass, "同 ring"},
-      {"edges", G::Glass, "all|tb|top"},
-      {"highlight_edges", G::Glass, "同 edges"},
+      {"edges", G::Glass, "all|tb|top|tbs"},
+      {"highlight_edges", G::Glass, "同 edges（预设别名）"},
+      {"edge_top", G::Glass, "上边强度，可负（正=亮边/负=暗边/0=不画）"},
+      {"edge_bottom", G::Glass, "下边强度，同上"},
+      {"edge_left", G::Glass, "左边强度，同上"},
+      {"edge_right", G::Glass, "右边强度，同上"},
       // —— Text ——
       {"color", G::Text, "#RRGGBB[AA]"},
       {"size", G::Text, "<像素>"},

@@ -34,6 +34,12 @@ enum class HighlightEdges : std::uint8_t {
   TopBottom,
   /// 只有顶边一条（早期行为）。
   Top,
+  /// 上下两条**亮**边（含圆角），左右两条**暗**线——“光照从上下来”的玻璃。
+  ///
+  /// 与 `TopBottom` 的区别：后者侧边**完全无光**（裁掉），读作薄片；
+  /// 本项把侧边画成同一色相的**压暗环带**，读作一个有厚度的实心块——
+  /// 亮与暗在同一张卡上互为对照，体积感就出来了。
+  TopBottomShaded,
 };
 
 /// 自动尺寸哨兵。
@@ -263,6 +269,31 @@ void set_gradient_background(raster::Gradient fill, math::Color fallback) noexce
   /// · 「只要上下两条」→ 上下受光、两侧交给折射（用户：只高亮上下 2 边）。
   /// 这三种都在同一个字段上表达不了，所以拆成“厚度 × 哪些边”两个维度。
   HighlightEdges highlight_edges{HighlightEdges::All};
+  /// 四条边各自的亮度权重（**可正可负**，0 = 不画）。
+  ///
+  /// 顺序是 `top` / `bottom` / `left` / `right`，对应卡片的上/下/左/右四条边。
+  ///
+  /// ## 为何不用一个枚举或“上下/左右”两组
+  ///
+  /// 枚举只能表达 4 种**固定组合**；而“上下/左右”两组仍表达不了
+  /// “上强下弱、左无右微”。真实玻璃受光很少均匀，四条边各自一个量才是**完整**的：
+  /// 常见组合（如上强下弱、左右微弱）都能字节写出，不必再动框架。
+  /// 枚举降级为这四个值的**预设别名**（见 `parse_edges`），旧写法行为不变。
+  ///
+  /// ## 符号语义（决定颜色方向）
+  ///
+  /// · `> 0`：**亮边**——用 `top_highlight` 的色相（通常是白）。
+  /// · `< 0`：**暗边**——用**黑色**。
+  ///
+  /// 为何暗边必须是黑而不是“降低 alpha 的亮色”：实测半透明白叠在灰底上
+  /// 永远是**变亮**（侧边曾量到 +21/+42），无论 alpha 多低。见 `paint_box`。
+  ///
+  /// 强度 1.0 ≈ `top_highlight` 的原始 alpha；负数绝对值 1.0 ≈ alpha 的 45%（暗线）。
+  /// 两者不取同一标尺：暗线叠在亮带的输出之上，同样的 alpha 比在底色上更明显。
+  float highlight_top{1.0f};
+  float highlight_bottom{1.0f};
+  float highlight_left{1.0f};
+  float highlight_right{1.0f};
   float highlight_width{1.0f};
   float opacity{1.0f};
   /// 是否把子元素裁到自己的矩形内。

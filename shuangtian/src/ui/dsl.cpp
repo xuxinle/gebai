@@ -1591,6 +1591,48 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.top_highlight.a != 0U) element.set_top_highlight_override(props.top_highlight);
   if (props.highlight_width > 0.0f) style.highlight_width = props.highlight_width;
   if (props.top_highlight.a != 0U) style.highlight_edges = props.highlight_edges;
+  // 四条边各自的强度（`BoxProps::edge_*`）。语义：非 0 就盖掉 `edges` 预设。
+  //
+  // 为何用 0 作“未设置”：沿路都是“不写就不覆盖”的 DSL 惯例，而 0 本身
+  // 就是“不画这条边”的有效值，两者会撞——所以四条边全 0 时走预设，
+  // 要让某条边**单独归零**就用样式串（`edge_left 0`）。
+  const bool custom_edges = props.edge_top != 0.0f || props.edge_bottom != 0.0f ||
+                            props.edge_left != 0.0f || props.edge_right != 0.0f;
+  if (custom_edges) {
+    if (props.edge_top != 0.0f) style.highlight_top = props.edge_top;
+    if (props.edge_bottom != 0.0f) style.highlight_bottom = props.edge_bottom;
+    if (props.edge_left != 0.0f) style.highlight_left = props.edge_left;
+    if (props.edge_right != 0.0f) style.highlight_right = props.edge_right;
+  } else {
+    // `edges` 预设 → 四条边权重（与样式串 `edges` 同一套映射）。
+    switch (props.highlight_edges) {
+      case HighlightEdges::Top:
+        style.highlight_top = 1.0f;
+        style.highlight_bottom = 0.0f;
+        style.highlight_left = 0.0f;
+        style.highlight_right = 0.0f;
+        break;
+      case HighlightEdges::TopBottom:
+        style.highlight_top = 1.0f;
+        style.highlight_bottom = 0.55f;
+        style.highlight_left = 0.0f;
+        style.highlight_right = 0.0f;
+        break;
+      case HighlightEdges::TopBottomShaded:
+        style.highlight_top = 1.0f;
+        style.highlight_bottom = 0.55f;
+        style.highlight_left = -1.0f;
+        style.highlight_right = -1.0f;
+        break;
+      case HighlightEdges::All:
+      default:
+        style.highlight_top = 1.0f;
+        style.highlight_bottom = 1.0f;
+        style.highlight_left = 1.0f;
+        style.highlight_right = 1.0f;
+        break;
+    }
+  }
   // 内边缘暗边：与顶部高光一明一暗，才构成“体积”。
   // 走 `Style::shadow` 的 inset 模式（绘制层已经支持四边带 + 圆角裁剪）。
   if (props.inset_shadow.a != 0U) {

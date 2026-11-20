@@ -114,7 +114,8 @@ ACES 两条曲线的差（同一线性输入）：
 
 ## 四、做法：three.js 同构
 
-新增 `include/st/raster/three_parity.hpp` + `src/raster/three_parity.cpp`，逐式对照
+新增 `include/st/raster/pbr.hpp` + `src/raster/pbr.cpp`（最初叫 `three_parity`，
+后因“名字带 `three` 会让人误以为只有 three 路径走它”而改名），逐式对照
 `third_party/three/three.cjs` 的 ShaderChunk：
 
 ```

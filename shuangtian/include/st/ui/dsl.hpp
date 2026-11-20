@@ -664,8 +664,16 @@ struct BoxProps {
   math::Color top_highlight{0, 0, 0, 0};
   /// 高光画在哪几条边（默认 `All` = 一整圈）。
   ///
-  /// 只在 `top_highlight` 非透明时有意义。三种形态的语义见 `HighlightEdges`。
+  /// 只在 `top_highlight` 非透明时有意义。四种形态的语义见 `HighlightEdges`。
   HighlightEdges highlight_edges{HighlightEdges::All};
+  /// 四条边各自的强度（`> 0` 亮边 / `< 0` 暗边 / `0` = 不写入，走 `highlight_edges` 预设）。
+  ///
+  /// 与样式串的 `edge_top` / `edge_bottom` / `edge_left` / `edge_right` 同义。
+  /// 四个全为 0（默认）时完全等价于旧行为。
+  float edge_top{0.0f};
+  float edge_bottom{0.0f};
+  float edge_left{0.0f};
+  float edge_right{0.0f};
   /// 高光宽度（逻辑像素；`<= 0` 时用主题默认）。
   float highlight_width{0.0f};
   /// **内边缘暗边（内阴影）**：给玻璃/凹槽块做出“体积”。

@@ -2438,7 +2438,7 @@ Shape+holes/InstancedMesh/AnimationMixer）20/20 可用；端到端（three.js �
 正常打光是 **45.6**。所以不能用绝对亮度阈值判“没打光”——那条诊断代码保留但阈值写得很低，
 注释里记了这个实测值，防止后来者照着直觉改成“看起来合理”的数。
 
-**回归**：4 个测试文件共 36 用例 / 327 断言（抽取 11 + 语义翻译 8 + 接入 6 + 报告 11），
+**回归**：当时新建 4 个测试文件、共 36 条用例 / 327 条断言（抽取 11 + 语义翻译 8 + 接入 6 + 报告 11），
 其中像素级判据覆盖“覆盖率/冷暖分布/换相机变化/逐物体可见性/空画面/相机内部/纯色块/完全重叠”。
 **接口**：`include/st/raster/three_runtime.hpp`、`include/st/raster/scene_report.hpp`。
 **文档**：`docs/three3d.md`。**工具**：`tools/three_check.cpp`（`st build three_check`）。
@@ -5781,7 +5781,7 @@ mingw 头里没有，按 SDK 数值写死；三个调用任一失败都**不致�
 | 最大化/还原 | 影子层 `SW_HIDE` + `SetWindowRgn(nullptr)` | 用户明确要求；且最大化时阴影落在屏幕外、圆角会露桌面色 |
 | 几何缓存 | `chrome_signature_`（宽/高/半径/margin）相同就**不重建** | 拖动时每帧都会调 `update_window_chrome`，但只有尺寸真变才重新生成位图 |
 
-**性能（`tools/window_chrome_cost_probe.cpp`，可复算）**：
+**性能（当时用 `tools/window_chrome_cost_probe.cpp` 量，可复算；该探针与 `window_chrome.*` 已随窗口边框重写一并移除）**：
 
 | 规模 | 旧（全图逐像素 + 27 MiB assign） | **现（只写环、缓冲复用）** |
 |---|---|---|
@@ -5808,7 +5808,7 @@ mingw 头里没有，按 SDK 数值写死；三个调用任一失败都**不致�
 
 | 层 | 判据 | 实测 |
 |---|---|---|
-| `tests/shell_window_chrome_test.cpp`（7 用例） | 窗口内部不画、窗外单调衰减、最大化整张空、圆角随 DPI 缩放并夹取、阴影可关、SDF 符号 | 全绿（含**逆向验证**：3 处回退全变红） |
+| `tests/shell_window_chrome_test.cpp`（7 用例，已随 `window_chrome.*` 移除） | 窗口内部不画、窗外单调衰减、最大化整张空、圆角随 DPI 缩放并夹取、阴影可关、SDF 符号 | 全绿（含**逆向验证**：3 处回退全变红） |
 | `tools/window_chrome_measure.py`（真窗口） | 四边 16px 与画布一致；角上有像素被让出；窗外阴影剖面单调；最大化后 `GetWindowRgn` 无区域且影子层隐藏 | 四边 **0 处**不一致；圆角让出 **59** 像素；阴影 **190→244** 单调；最大化 `GetWindowRgn=0` |
 | `tools/window_unfocused_frame_check.py` | **失焦态**下窗缘仍是应用像素（用户报的就是失焦） | 四边 16px 各 **0 处**不一致 |
 

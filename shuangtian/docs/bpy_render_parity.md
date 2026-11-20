@@ -469,7 +469,7 @@ Blender 的 AgX 是 **OCIO LUT**（`AgX_Base_sRGB.cube`，2.9 MB，`config.ocio`
 
 ### 第 5 步：基线固化（不做这步，下次改引擎不知道变好还是劈了）
 
-新建 `tests/raster_bpy_blender_parity_test.cpp`，判据全部来自本次实测：
+新建 `tests/raster_bpy_cycles_parity_test.cpp`，判据全部来自本次实测：
 
 | 判据 | 基线 | 阈值 |
 |---|---|---|

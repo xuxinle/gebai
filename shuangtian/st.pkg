@@ -355,19 +355,12 @@
     "gbcode": {
       "kind": "executable",
       "sources": [
-        "apps/gbcode/*.cpp",
-        "src/ext/script_stub.cpp"
+        "apps/gbcode/*.cpp"
       ],
       "exclude_sources": [
         "src/pkg/*",
-        "src/ext/script.cpp",
         "src/ext/database.cpp",
-        "third_party/quickjs/*",
         "third_party/sqlite/*"
-      ],
-      "//defines": "ST_NO_SCRIPT：按需链接拆链开关——gbcode 不用进程内脚本，定义它后 app/server 的脚本调用点不编译，QuickJS 整链（实测 786KB）不进产物。控制协议调 script 会得到明确的“未编入”回复。需要脚本的应用（caiyun/xiangqi/jianmu）不定义此宏。",
-      "defines": [
-        "ST_NO_SCRIPT=1"
       ],
       "//system": "GUI 子系统：双击 exe 不弹控制台窗口（PE Subsystem=2）。\n工具链 st 与探测程序保持 console——它们要在终端里跑并读输出。",
       "system": "gui",
@@ -2781,6 +2774,36 @@
       "exclude_sources": [
         "src/pkg/*"
       ]
+    },
+    "highlight_corner_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/highlight_corner_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "边缘高光四形态的像素探针：出全图 + 左上角 8x 放大。用途是「圆角处是否连续渐变」这类纯形态缺陷——属性面读回全对，只有像素能看出来"
+    },
+    "line_center_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/line_center_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "centered_line_top 逐 role 对照：把「算出的 y」与「实际画出的墨迹中心」并排量出来。用于回答「按 Monospace 算、按 Proportional 画」到底错开多少像素"
+    },
+    "dark_edge_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/dark_edge_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "暗色主题下「左右仍有高光」的成分拆解：完整/关折射/关高光/都关/edges=all 五组对照，并落 PNG 供 10x 放大核对"
     }
   },
   "dependencies": {

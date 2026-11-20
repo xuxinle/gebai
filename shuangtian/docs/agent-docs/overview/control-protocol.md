@@ -55,18 +55,36 @@ summary: 协议 st-control/1（TCP + uint32 长度前缀 JSON 帧）；握手 he
 | `events` | 订阅 `ui.changed` / `frame` / `input` / `log` / `theme` | `ui.changed.data.changed` = 变更元素 id 清单（去重、单帧上限 64） |
 | `theme` / `app` / `shutdown` | 切主题 / 退出与重绘/DPI / 优雅关闭 | 切主题用 **`theme`**（`mode: light/dark/toggle`），**不是** `app`；`app` 的 `log` 要 `limit` 参数 |
 
-### 观测半透明/玻璃：`get` 的只读玻璃字段
+### 调半透明/玻璃：`Style` 的**全部字段**都可读写
 
 玻璃与渐变是“只能从像素看出来”的观感量，而像素断言需要先知道**参数写成多少了**。
-所以 `get` 的快照里带了这几项（都是只读、不在属性面里）：
+因此 `Style` 的每个字段都进了属性面：
 
-| 字段 | 含义 |
+```
+set  #bubble  highlight_left=-0.45          # 单字段（= Style 字段名）
+get  #bubble  highlight_top                  # 读**实际生效值**（已被主题回放/声明的结果）
+set  #bubble  style="blur 16, ring 1.2"     # 批量（走统一解析层，与样式串同一套校验）
+```
+
+**名字有两套，别混**（这是最容易踩的一脚）：
+
+| 属性名（`get`/`set` 用的） | 样式串键名（`style="..."` 里写的） |
 |---|---|
-| `glass_blur` / `glass_tint` / `glass_refraction` / `glass_dispersion` | 解析后的四个值（`glass` 字符串的输入结果） |
-| `glass_highlight` | 内边缘高光强度，**0~1**（与 `glass="highlight:0.35"` 同量纲） |
-| `glass_fill_alpha` | 玻璃底色的 alpha（亮/暗主题档位不同：亮色 255、暗色 46） |
-| `theme_glass` | 该元素的底色与 `tint` 是否**随主题换档** |
-| `theme_backdrop` | 该元素的背板渐变是否**由主题提供** |
+| `backdrop_blur` | `blur` |
+| `backdrop_tint` | `tint` |
+| `backdrop_refraction` / `backdrop_dispersion` | `refraction` / `dispersion` |
+| `highlight_top` / `_bottom` / `_left` / `_right` | `edge_top` / `edge_bottom` / `edge_left` / `edge_right` |
+| `highlight_width` | `ring` |
+| `top_highlight` | `highlight_color` |
+
+单字段的 `set` 内部会拼成样式串交给统一解析层，所以**两套名字都能写**
+（`set highlight_left=0.35` 与 `set style="edge_left 0.35"` 等价）。
+
+四条边的强度是**带符号**的：`> 0` 亮边、`< 0` 压暗（黑色）、`0` 不画。
+存取层**不夹取**（写 2 就存 2），封顶只发生在绘制时的 alpha 映射。
+
+> 为何强调“读实际生效值”：`Style` 里的很多项会被主题回放与
+> `apply_declared_paint` 改写。只看写入值会得出“设了但对”的错误结论。
 
 典型用法（验“换肤后玻璃真的跟着变”）：
 

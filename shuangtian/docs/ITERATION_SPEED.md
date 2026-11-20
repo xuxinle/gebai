@@ -278,7 +278,7 @@ PS 5.1 的 `Out-File -Encoding` 是 `ValidateSet(unknown,string,unicode,…,utf8
 | # | 缺陷 | 症状 |
 |---|---|---|
 | 1 | 手写 glob 的 `**` 语义错 | 监视列表 650 → 397（**漏 110 个**）——两指针+回溯把「跨不跨目录」状态藏在回溯变量里，回溯到更早的星就丢 |
-| 2 | `fs::walk` 路径基准误解 | 列表**恒为空**——`walk(root/src)` 返回 `src/a.cpp`（已相对根），我又拼一次 `dir` → `src/src/a.cpp` |
+| 2 | `fs::walk` 路径基准误解 | 列表**恒为空**——`walk(root)` 返回的已是相对根的路径，我又拼一次 `dir`，结果变成 `src/src/...`（重复一层） |
 | 3 | stat 用相对路径 | 列表恒为空——`modified_ns(entry.path)` 读不到（cwd ≠ root）⇒ 静默跳过 |
 
 修复后：**1.45 s → 0.34 s（4.3 倍）**，其中扫描 ~0.2 s、构建 ~0.13 s。

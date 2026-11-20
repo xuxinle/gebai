@@ -29,7 +29,7 @@ auto w = std::make_unique<st::ui::TextArea>();
 
 ## 动作面（控制通道 `invoke`）
 
-`clear` · `submit` · `activate` · `select_all` · `clear_selection` · `copy`
+`clear` · `submit` · `activate` · `paste` · `select_all` · `clear_selection` · `copy`
 
 > `invoke` 是**绕过鼠标**的可靠触发路径：它直接调组件的动作入口，与真实点击走同一段业务代码但不过命中测试。要验证点击路径本身再用 `click`。
 

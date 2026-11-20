@@ -643,6 +643,15 @@ env 回退路径。判据：**改任一条腿，必须让 `scene3d_two_legs_test
 5. **回去把绕路代码改成用新能力**：否则绕路代码会变成“新能力的反例”。
 6. 跑 `action=test` 全绿 + `action=lint`。
 7. 如果是**设计层面**的补齐（新增 Style 字段、新协议能力），同步 `DESIGN.md`。
+8. **新的观感/样式参数必须同时开放到属性面**（`property_names()` + `get_property`）。
+
+   为何这是“补完”的一部分而不是加强项：没开口时，调一档颜色/宽度/粗细就只能
+   改代码 → 重编 → 重启 → 截图，一轮 20~30 s，而用户往往还要接着调十几轮。
+   已有 `Style` 字段就自动可用（`src/ui/element.cpp` 的 `kStyleFields` 表，
+   带 `sheet_key` 列映射到统一解析层的键名），**新加字段时只接进那张表就两条都通了**。
+
+   实测代价（2026-11-20）：先靠重编调了 6 轮玻璃边缘参数，之后才把字段开放到属性面；
+   后半程全部靠控制通道实时试，一次也没重编。
 
 - **当场修其余情形**：修复 ≤ 一行~几十行、**能配一条回归测试**、不改公共接口。
   本会话就当场修过三处（`ScrollView` 内部件被裁 → 悬垂；`MenuBar` 一次点击触发两次；
@@ -687,6 +696,8 @@ env 回退路径。判据：**改任一条腿，必须让 `scene3d_two_legs_test
 | **某组件有哪些属性/动作** | `shuangtian_doc(path="components/<族>/<组件>.md")`（从源码生成，就是当下的真相） |
 | **写界面该守什么契约** | `shuangtian_doc(path="overview/ui-writing.md")` |
 | 真的在无头模式跑 | `metrics.headless=true`、`metrics.backend=headless` |
+| **画面到底哪条腿画的** | **`metrics.renderer`**（`software` / `gpu`）。用户报“桌面不对”而自己的截图正常时，**先查这一项、别再调参数**：无头走软件光栅器、真实窗口走 GPU，两侧能力可能不同。实测：GPU 的 `fill_path` 曾丢弃渐变（整圈亮边），而配置与主题全程无辜。复现要 `start(window=true)` + **桌面截图**——`capture` 截的是应用内部画布，上屏卡住时它仍可能是黑屏/旧帧 |
+| 调一档参数要不要重编 | 不用。`Style` 的**全部字段**都进了属性面：`set <字段名>=<值>`（或 `set style="blur 16, ring 1.2"` 批量）。⚠ 属性名与样式串键名是**两套**（`backdrop_blur` vs `blur`、`highlight_top` vs `edge_top`、`highlight_width` vs `ring`），单字段 `set` 两套都认；`get` 读的是**实际生效值**。详见 `shuangtian_doc(path="overview/control-protocol.md")` |
 | DPI 生效 | `metrics.device_scale`、`metrics.physical_width/height`（= 逻辑 × scale） |
 | 帧率/卡顿 | `metrics.frame_p50_ms` / `frame_p95_ms` / `frames` |
 | 组件是否存在 | `find` 的 `count`；或 `wait for=element` |

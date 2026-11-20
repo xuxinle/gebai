@@ -45,6 +45,7 @@
 #endif
 
 #include "app_icon_element.hpp"
+#include "../app_icon.hpp"     // 图标四链路的一行接入（窗口/标题栏/托盘同源）
 #include "battery/embed.hpp"   // b::embed<...>()：各应用图标与壁纸是编译期嵌入的
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"
@@ -799,6 +800,13 @@ void apply_shell_options(st::app::AppOptions& options) {
   // 启动卡在整屏窗口上会闪一下全屏底色（`splash_card_window` 先把窗口缩成卡片再
   // 放大），桌面壳不需要它：图标网格本身就是启动画面。
   options.splash = false;
+  // **窗口图标**（任务栏 / Alt-Tab / 窗口列表）。
+  //
+  // 桌面壳窗口铺满整屏且置底，平时看不到这些地方——但它仍是一个**普通窗口**，
+  // 在 Alt-Tab 切窗、任务管理器、以及“任务栏隐藏”被意外恢复时都会露出图标。
+  // 不设就是系统默认的空白图标（与 `st_desktop.ico` 里那个不是同一个东西）。
+  st::app::icon::attach_png(options.window_icon_png,
+                            b::embed<"apps/st_desktop/assets/st_desktop-icon.png">());
 }
 
 }  // namespace

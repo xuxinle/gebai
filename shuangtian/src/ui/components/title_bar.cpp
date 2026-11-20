@@ -58,6 +58,24 @@ constexpr float k_icon_size = 14.0f;
 ///（`ps_main` 的 mode==3 现在会裁掉外扩那一圈，见那里的说明）——
 /// 那个修好后，16px 下软件与 GPU 的图标已经一致（实测 x18..47 y15..44、30×30）。
 constexpr float k_title_icon_size = 16.0f;
+/// 标题栏图标的**纵向微调**（逻辑像素，正值 = 下移）。
+///
+/// ## 为什么需要这个常数
+///
+/// 图标盒用 `(栏高 - 16) / 2` 让**盒子**居中，但盒内的图形并非满幅：
+/// SVG 的 24-viewBox 四周有留白，而各标记的留白**上下不等**（家族模板的
+/// 圆角方底是 `y 0.5..21.5`，即上方留 0.5、下方留 2.5）。
+/// 于是**盒中心 ≠ 墨迹中心**，图标看着比同一行的文字偏高。
+///
+/// 实测（2026-11-20，小白标题栏，scale=1.25，物理像素）：
+///   图标墨迹中心 19.5 / 品牌名 21.0 / model 按钮文字 21.0
+/// 文字两者已对齐，只有图标偏上 **1.5 物理像素 = 1.2 逻辑像素**。
+/// 取 1.2 补偿后三者同基。
+///
+/// 为何不用 `Icon::ink_size` 自动算：它对**内置图标**（描边字形）与
+/// **SVG 标记**两套来源给的是不同性质的量，拿它反推盒偏移会引入第二套口径；
+/// 而标题栏图标只占 16px、偏移是稳定的小量，一个实测常数更直白。
+constexpr float k_title_icon_nudge_y = 1.2f;
 /// 标题栏内边距（左右）。
 constexpr float k_padding_x = 12.0f;
 /// `after_title` 槽的最小占位。
@@ -586,15 +604,26 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
   const math::Rect caption = caption_rect();
   float text_left = caption.x;
   if (!icon_.empty()) {
-    const math::Rect icon_box{bounds_.x + k_padding_x,
-                              bounds_.y + (bounds_.height - k_title_icon_size) * 0.5f,
-                              k_title_icon_size, k_title_icon_size};
-    // 图标垂直居中在标题栏里：`(栏高 - 图标尺寸) / 2`。
+    // 图标盒 `(栏高 - 16) / 2` 让**盒子**居中；但盒内的图形并非满幅，
+    // 所以还需要一个纵向微调（`k_title_icon_nudge_y`）让**墨迹**落到位。
     //
     // 注：曾出现“logo 看着偏下”，根因**不在这里**——几何一直是居中的，
     // 而是 `Canvas::draw_canvas_at` 把物理坐标当逻辑坐标用，多乘了一次 `device_scale`，
     // 把贴图向右下推了（见该函数注释与 `tests/raster_canvas_at_scale_test.cpp`）。
-    // 保留本条注释是因为“视觉偏了”最先会怀疑这里的算式。
+    //
+    // ## 2026-11-20：图标与文字不在一条线
+    //
+    // 实测（小白，scale=1.25，物理像素）：
+    //   图标墨迹中心 19.5 / 品牌名 21.0 / model 按钮文字 21.0
+    // 品牌名与按钮**本已对齐**（它们各自的行盒/墨迹公式恰好得到同一结果），
+    // 只有图标偏上 1.5px。故本次**只调图标**，不动文字那两处。
+    //
+    // 原因：SVG 的 24-viewBox 四周留白**上下不等**（家族模板圆角方底是
+    // `y 0.5..21.5`）——盒中心 ≠ 墨迹中心。
+    const math::Rect icon_box{bounds_.x + k_padding_x,
+                              bounds_.y + (bounds_.height - k_title_icon_size) * 0.5f +
+                                  k_title_icon_nudge_y,
+                              k_title_icon_size, k_title_icon_size};
     Icon::draw(canvas, icon_, icon_box, style_.color, 0.0f);
   }
   // —— 品牌名（在图标右侧、`leading` 槽左侧）——
@@ -610,6 +639,12 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
       if (!clipped.empty()) {
         const float line = port.line_height(style_.font_size);
         // 品牌名用 **muted** 色（弱于窗口标题）：它是应用身份，不需要跟标题争视觉。
+        //
+        // 纵向用 `(栏高 − 行盒) / 2`：实测（2026-11-20）它与同一行的
+        // model 按钮文字**已经对齐**（均 21.0 物理像素）；
+        // 改成 `centered_line_top` 反而会让它上移 2px（该函数按**参考样本**
+        // 的墨迹居中，而样本与内容文本的墨迹中心不同）。
+        // 因此这里保持原算式，只把图标对齐到它。
         port.draw(canvas, clipped,
                   math::Point{brand_left, bounds_.y + (bounds_.height - line) * 0.5f},
                   style_.font_size, colors.text_muted);
@@ -621,6 +656,7 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
     const TextPort& port = text_port_of(context);
     const std::string clipped = port.ellipsize(title_, style_.font_size, text_width);
     if (!clipped.empty()) {
+      // 与品牌名同一套纵向口径（见品牌名处注释：原算式已与按钮对齐，不改）。
       const float line = port.line_height(style_.font_size);
       port.draw(canvas, clipped,
                 math::Point{text_left, bounds_.y + (bounds_.height - line) * 0.5f},

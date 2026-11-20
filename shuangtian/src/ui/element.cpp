@@ -1,4 +1,5 @@
 #include "st/ui/element.hpp"
+#include "st/ui/stylesheet.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -382,6 +383,83 @@ void Element::collect_visual(VisualNode& node) const {
   }
 }
 
+namespace {
+
+/// `Style` 字段的**读回元数据表**：名字 → “怎么读成一个字符串”。
+///
+/// ## 为何是一张表而不是一长串 `if`
+///
+/// 这批字段的读写必须**同名同源**：`set` 走统一解析层（`apply_stylesheet`，
+/// 它有一份权威键表），`get` 走本表。两处一旦漂移，就会出现
+/// “能设、读不回来”或“读到的不是那个字段”——都是静默的。
+/// 把它们排成一张表，名字与字段在同一行，加字段时不容易只改一边。
+///
+/// 未收录的可读字段由各组件自己的 `property_names()` 负责（如 `radius` 在
+/// `Card` 上有它自己的语义），本表只补充 `Style` 这一层。
+struct StyleField {
+  std::string_view name;       ///< 控制通道上的属性名（= `Style` 字段名）
+  std::string_view sheet_key;  ///< 统一解析层（样式串）里这个字段的键名
+  std::string (*read)(const Style& style);
+};
+
+[[nodiscard]] auto fmt_f2(float v) { return std::format("{:.2f}", static_cast<double>(v)); }
+
+const StyleField kStyleFields[] = {
+    // —— 布局 ——
+    {"width", "width", +[](const Style& s) { return fmt_f2(s.width); }},
+    {"height", "height", +[](const Style& s) { return fmt_f2(s.height); }},
+    {"min_width", "min_width", +[](const Style& s) { return fmt_f2(s.min_width); }},
+    {"max_width", "max_width", +[](const Style& s) { return fmt_f2(s.max_width); }},
+    {"min_height", "min_height", +[](const Style& s) { return fmt_f2(s.min_height); }},
+    {"max_height", "max_height", +[](const Style& s) { return fmt_f2(s.max_height); }},
+    {"gap", "gap", +[](const Style& s) { return fmt_f2(s.gap); }},
+    {"grow", "grow", +[](const Style& s) { return std::string(s.grow ? "true" : "false"); }},
+    {"shrink", "shrink", +[](const Style& s) { return std::string(s.shrink ? "true" : "false"); }},
+    {"wrap", "wrap", +[](const Style& s) { return std::string(s.wrap ? "true" : "false"); }},
+    {"absolute", "absolute", +[](const Style& s) { return std::string(s.absolute ? "true" : "false"); }},
+    {"left", "left", +[](const Style& s) { return fmt_f2(s.left); }},
+    {"top", "top", +[](const Style& s) { return fmt_f2(s.top); }},
+    {"right", "right", +[](const Style& s) { return fmt_f2(s.right); }},
+    {"bottom", "bottom", +[](const Style& s) { return fmt_f2(s.bottom); }},
+    // —— 绘制 ——
+    {"background", "background", +[](const Style& s) { return s.background.to_css(); }},
+    {"gradient_opacity", "gradient_opacity", +[](const Style& s) { return fmt_f2(s.gradient_opacity); }},
+    {"radius", "radius", +[](const Style& s) { return fmt_f2(s.radius); }},
+    {"radius_max", "radius_max", +[](const Style& s) { return fmt_f2(s.radius_max); }},
+    {"opacity", "opacity", +[](const Style& s) { return fmt_f2(s.opacity); }},
+    {"clip_children", "clip", +[](const Style& s) { return std::string(s.clip_children ? "true" : "false"); }},
+    // —— 玻璃 ——
+    {"use_theme_backdrop", "theme_backdrop", +[](const Style& s) { return std::string(s.use_theme_backdrop ? "true" : "false"); }},
+    {"theme_glass", "theme_glass", +[](const Style& s) { return std::string(s.theme_glass ? "true" : "false"); }},
+    {"backdrop_blur", "blur", +[](const Style& s) { return fmt_f2(s.backdrop_blur); }},
+    {"backdrop_tint", "tint", +[](const Style& s) { return fmt_f2(s.backdrop_tint); }},
+    {"backdrop_refraction", "refraction", +[](const Style& s) { return fmt_f2(s.backdrop_refraction); }},
+    {"backdrop_dispersion", "dispersion", +[](const Style& s) { return fmt_f2(s.backdrop_dispersion); }},
+    {"top_highlight", "highlight_color", +[](const Style& s) { return s.top_highlight.to_css(); }},
+    {"highlight_top", "edge_top", +[](const Style& s) { return fmt_f2(s.highlight_top); }},
+    {"highlight_bottom", "edge_bottom", +[](const Style& s) { return fmt_f2(s.highlight_bottom); }},
+    {"highlight_left", "edge_left", +[](const Style& s) { return fmt_f2(s.highlight_left); }},
+    {"highlight_right", "edge_right", +[](const Style& s) { return fmt_f2(s.highlight_right); }},
+    {"highlight_width", "ring", +[](const Style& s) { return fmt_f2(s.highlight_width); }},
+    // —— 玻璃短名别名（与样式串的写法一致，报账更好认）——
+    {"glass_edge_top", "edge_top", +[](const Style& s) { return fmt_f2(s.highlight_top); }},
+    {"glass_edge_bottom", "edge_bottom", +[](const Style& s) { return fmt_f2(s.highlight_bottom); }},
+    {"glass_edge_left", "edge_left", +[](const Style& s) { return fmt_f2(s.highlight_left); }},
+    {"glass_edge_right", "edge_right", +[](const Style& s) { return fmt_f2(s.highlight_right); }},
+    {"glass_ring", "ring", +[](const Style& s) { return fmt_f2(s.highlight_width); }},
+    {"glass_highlight", "highlight", +[](const Style& s) { return fmt_f2(static_cast<float>(s.top_highlight.a) / 255.0f); }},
+    {"glass_highlight_color", "highlight_color", +[](const Style& s) { return s.top_highlight.to_css(); }},
+};
+
+[[nodiscard]] auto style_field(std::string_view name) -> const StyleField* {
+  for (const auto& field : kStyleFields) {
+    if (field.name == name) return &field;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 auto Element::get_property(std::string_view name) const -> std::optional<std::string> {
   // `hovered` 暴露给控制通道：悬浮是**只能看像素、看不出状态**的交互态，
   // 不给读取口就只能靠截图猜（自动化验证会很脆）。
@@ -413,6 +491,14 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   // 兼容期：仍接受 `size`，但走告警路径（见 set_property）。
   if (name == "font_size") return std::format("{:.2f}", static_cast<double>(style_.font_size));
   if (name == "weight") return std::string(ui::to_string(style_.font_weight));
+  // —— 全部 `Style` 字段的读回口（与 `property_names()` 声明的那批同名）——
+  //
+  // 读**实际生效值**（`style_`），不是当初写进去的字符串：这些值会被主题回放与
+  // `apply_declared_paint` 改写，调用方要断言的是“最终效果”。
+  //
+  // 为何集中在这里而不是各组件自己报：`Style` 是基类的，绘制也在基类
+  //（`paint_box` / `paint_background`），组件层并不知道它的最终值。
+  if (const auto* field = style_field(name); field != nullptr) return field->read(style_);
   // —— 动画诊断口 ——
   //
   // `animation` 返回**空串** = 未设动画（而不是 `"none"`：后者在 CSS 里是隔写，
@@ -504,8 +590,37 @@ auto Element::set_property(std::string_view name, std::string_view value) -> boo
     }
     return true;
   }
+  // —— 全部 `Style` 字段：一律走**统一解析层** ——
+  //
+  // 为何不在这里逐个手写：`Style` 的键本来就有唯一权威解析器
+  //（`apply_stylesheet`，DSL/XML/样式串/控制通道共用同一份键表），
+  // 在这里再写一遍就是把“一个字段两个落点”重新引回来——框架自己的头注释
+  //（`stylesheet.hpp`）记着这条踩过五次的教训。
+  //
+  // 于是：能通过样式串配的东西，都能通过 `set <名字>=<值>` 配，校验/夹取/报错
+  // 与样式串完全同一套。名字不对不会静默失败（解析器会回错误）。
+  if (const auto* field = style_field(name); field != nullptr) {
+    SheetReport report;
+    // ⚠ 写的是 **`sheet_key`**（统一解析层的键名），不是字段名——
+    // 两者并不总相同：`Style::backdrop_blur` 在样式串里叫 `blur`、
+    // `highlight_top` 叫 `edge_top`、`highlight_width` 叫 `ring`。
+    // 直接拿字段名去拼样式串会得到“未知键”（实测：11 个键里 9 个静默不生效）。
+    const std::string sheet = std::format("{} {}", field->sheet_key, value);
+    const std::size_t applied = apply_stylesheet(*this, sheet, &report);
+    if (applied > 0 && report.ok()) {
+      // 高光色/强度需要同步存档，否则下一帧 `apply_declared_paint` 会把旧值回放回来。
+      if (name == "top_highlight" || name == "glass_highlight_color" ||
+          name == "glass_highlight") {
+        set_top_highlight_override(style_.top_highlight);
+        if (name != "glass_highlight") mark_top_highlight_color_declared();
+      }
+      return true;
+    }
+    return false;
+  }
   return false;
 }
+
 
 auto Element::property_names() const -> std::vector<std::string_view> {
   // 基类元素的**可写**表。
@@ -514,7 +629,36 @@ auto Element::property_names() const -> std::vector<std::string_view> {
   // 在基类元素上确实可写（值合法就落位），但它们**不下发给组件**——
   // 因为通用护欄“表里声明的名字，`set` 必须生效（填 `"测试值"`）”会对它们必败。
   // 两者分工：这张表 = “这个元素有什么”；`with_universal` = “能无条件并给所有组件的”。
-  return {"color_override", "tone_override", "color", "font_size", "weight", "font_weight"};
+  //
+  // ## 为何要声明**全部** `Style` 字段
+  //
+  // `Style` 的每个字段都能通过 `set style="blur 16, ring 1.2, edge_top 1.0"`
+  // 一路落到绘制层（统一解析层 `apply_stylesheet` 就是四套入口的唯一落点），
+  // 但**读不回来**——调用方只能凭写入值猜“到底生效了没有”，而其中多数值会被
+  // 主题回放、`apply_declared_paint` 改写。实测代价：调一个边缘参数只能反复截图猜，
+  // 每档还要重编一轮。
+  //
+  // 这里声明的是**字段名**（与 `Style` 一致），`set` 走 `apply_stylesheet`（同一个键表、
+  // 同一套校验与错误回报），`get` 走字段直读。两边名字必须一处一致，
+  // 否则就是“认了但落不上”。
+  //
+  // 注：`color`/`font_size`/`weight` 三个历史名字保留（读侧名），
+  // 与字段名 `font_size`/`font_weight` 共用同一状态。
+  return {"color_override", "tone_override", "color", "font_size", "weight", "font_weight",
+          // —— 布局 ——
+          "width", "height", "min_width", "max_width", "min_height", "max_height",
+          "gap", "grow", "shrink", "wrap", "absolute", "left", "top", "right", "bottom",
+          "direction", "align_items", "align_self", "justify",
+          // —— 绘制 ——
+          "background", "gradient_opacity", "radius", "radius_max", "opacity", "clip_children",
+          // —— 玻璃 ——
+          "use_theme_backdrop", "theme_glass", "backdrop_blur", "backdrop_tint",
+          "backdrop_refraction", "backdrop_dispersion",
+          "top_highlight", "highlight_edges", "highlight_top", "highlight_bottom",
+          "highlight_left", "highlight_right", "highlight_width",
+          // —— 玻璃的短名别名（与样式串同口径，便于报账可读）——
+          "glass_edge_top", "glass_edge_bottom", "glass_edge_left", "glass_edge_right",
+          "glass_ring", "glass_highlight", "glass_highlight_color"};
 }
 
 auto Element::readonly_property_names() const -> std::vector<std::string_view> {
@@ -1374,6 +1518,149 @@ void Element::arrange(const RenderContext& context, math::Rect rect) {
 /// 为什么放在基类而不是每个组件里：悬浮反馈是**跨组件一致性**问题——
 /// 按钮、列表项、表格行、标签页各写一套，观感一定会散（间距、时长、色阶都不同）。
 /// 组件只需声明"要哪些效果"（`HoverEffect`），参数由主题令牌统一给。
+namespace {
+
+/// 四条边按各自权重绘制高光 / 阴影环带（`Element::paint_box` 的渲染细节）。
+///
+/// ## 结构
+///
+/// 一个环路径 `make_rounded_border_ring(box, radius, ring)`，四条边各用**矩形裁剪**
+/// 从同一个环里取出来画一次。裁剪而非“每条边单独造路径”的理由：
+/// 环只有 76 条边、四条边共用；且圆角处路径天然连续，不会在接缝处出现缺口。
+///
+/// ## 每条边的颜色与衰减
+///
+/// | 权重 | 颜色 | 纵向衰减 |
+/// |---|---|---|
+/// | `> 0` | `top_highlight`（通常白） | 上下边：向卡内淡出；左右边：向两端淡出 |
+/// | `< 0` | 黑 | 同上，alpha 按 `|权重| × 45%` |
+///
+/// **为什么暗边必须是黑**：半透明白叠在灰底上永远是“变亮”（实测侧边 +21/+42），
+/// 无论 alpha 多低。“阴影”的语义是比周围暗，只能靠暗色叠加。这条只能量像素看出来。
+///
+/// **为什么左右边要纵向淡出**：左右边的两端正好落在圆角上，而圆角同时被上下边
+/// 覆盖。若左右边满强度顶到角上，会在四个角形成“角比上下边还亮/还暗”的硬块；
+/// 淡出到 0 让圆角的中段由上下边接管，交界连续。
+void paint_highlight_edges(const Style& style, raster::Surface& canvas, const math::Rect& box,
+                           float radius, float /*origin_x*/, float /*origin_y*/) {
+  const math::Color bright = style.top_highlight;
+  const float ring = style.highlight_width;
+  const math::Path light_ring = math::make_rounded_border_ring(box, radius, ring);
+
+  /// 亮边的 alpha：权重 1.0 → 原 alpha。
+  const auto bright_alpha = [&](float weight) {
+    const float a = std::clamp(std::abs(weight), 0.0f, 1.0f);
+    return bright.with_alpha(static_cast<std::uint8_t>(
+        std::lround(static_cast<float>(bright.a) * a)));
+  };
+  /// 暗边的 alpha：权重 1.0 → 原 alpha 的 45%（叠在亮带之上同样可见）。
+  const auto dark_alpha = [&](float weight) {
+    const float a = std::clamp(std::abs(weight), 0.0f, 1.0f);
+    return math::Color{0, 0, 0,
+        static_cast<std::uint8_t>(std::lround(static_cast<float>(bright.a) * 0.45f * a))};
+  };
+  const auto edge_color = [&](float weight) {
+    return weight > 0.0f ? bright_alpha(weight) : dark_alpha(weight);
+  };
+
+  const math::Color top_c = edge_color(style.highlight_top);
+  const math::Color bottom_c = edge_color(style.highlight_bottom);
+  const math::Color left_c = edge_color(style.highlight_left);
+  const math::Color right_c = edge_color(style.highlight_right);
+
+  const raster::DrawOptions opts{.opacity = style.opacity};
+
+  // —— 上下两条边 ——
+  //
+  // 画法：整个环铺一次**纵向渐变**，再用矩形裁剪只留上（下）那一条。
+  //
+  // 渐变必须用**同一个定义**给上下两带（各建一次），否则会出现“下带比上带亮”
+  // ——实测下带误用满亮实心色时，底部 126 vs 顶部 72，光照方向整个反掉。
+  //
+  // 上下带的渐变在 `cap_h` 处淡出到 0：那是圆角开始转向侧边的位置，
+  // 过了它就交给左右边接管，两者交接才连续。
+  const float cap_h = std::min(box.height * 0.5f, radius + ring);
+  // 上下两带**横向只让出一个亚像素级的量**（不是让出半径）。
+  //
+  // 实测教训：曾让出 `radius`（想“圆角以外不属于这条边”），结果**整个圆角被切掉**——
+  // 亮带从圆角外侧才开始，两端悬空在弧的对侧，读作“卡上方浮着一条白线”。
+  // 剖面证据：y=60 时 x=67 仍是背景色 21，到 x=72 突然跳到 98。
+  //
+  // 圆角**本来就应该**受光（上边转向侧边的过渡就在那里），所以只让出
+  // 半像素避开边界重复取样即可。
+  constexpr float kSideGuard = 0.5f;
+  const float side_inset = std::min(kSideGuard, box.width * 0.25f);
+  const bool want_top = top_c.a != 0U;
+  const bool want_bottom = bottom_c.a != 0U;
+  if (want_top) {
+    // 渐变只用 **2 个色标**（满亮 → 透明）。
+    //
+    // 为何不是 3 个（旧写法 `满亮@0, 满亮@0.45, 透明@1`）：环带就是渐变的画布，
+    // 窄环上三个色标挤在一两个物理像素内，`@0.45` 那个平台会把过渡吃掉，
+    // 实测剖面退化成 `125 → 105 → 44`（跳崖）。两个色标的线性过渡在任何宽度下都成立，
+    // 这才让 `ring` 可以向下调到 1.2 左右。
+    const raster::Gradient g = raster::Gradient::linear(
+        math::Point{box.x, box.y}, math::Point{box.x, box.y + std::max(cap_h, 1.0f)},
+        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, top_c},
+                                          raster::GradientStop{1.0f, top_c.with_alpha(0)}});
+    const float inset = side_inset;
+    canvas.push_clip_rect(
+        math::Rect{box.x + inset, box.y, std::max(0.0f, box.width - inset * 2.0f),
+                   std::max(cap_h, ring * 1.5f)});
+    canvas.fill_path(light_ring, raster::Paint::with_gradient(g), opts);
+    canvas.pop_clip();
+  }
+  if (want_bottom) {
+    const float band_h = std::max(cap_h, 1.0f);
+    const raster::Gradient g = raster::Gradient::linear(
+        math::Point{box.x, box.y + box.height - band_h},
+        math::Point{box.x, box.y + box.height},
+        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, bottom_c.with_alpha(0)},
+                                          raster::GradientStop{0.55f, bottom_c},
+                                          raster::GradientStop{1.0f, bottom_c}});
+    const float inset = side_inset;
+    canvas.push_clip_rect(
+        math::Rect{box.x + inset, box.y + box.height - std::max(cap_h, ring * 1.5f),
+                   std::max(0.0f, box.width - inset * 2.0f), std::max(cap_h, ring * 1.5f)});
+    canvas.fill_path(light_ring, raster::Paint::with_gradient(g), opts);
+    canvas.pop_clip();
+  }
+
+  // —— 左右两条边 ——
+  //
+  // 纵向渐变：两端（圆角处）淡出到 0，中段满强度。这样圆角中段由上下边接管，
+  // 两者交界连续——而不是在圆角上出现“亮→暗”的硬切。
+  //
+  // **在上下边之后画**（两条理由，取决于侧边是暗还是亮）：
+  // · 侧边压暗（`< 0`）时：暗线必须叠在亮带之上才看得见；反过来画会被亮带盖掉。
+  // · 侧边亮起（`> 0`）时：两端淡出到 0，所以不会在圆角处与上下边叠加成一块更亮的光斑。
+  const auto side_gradient = [&](const math::Color& c) {
+    const float t = box.height > 0.0f
+                        ? std::clamp(cap_h / box.height, 0.02f, 0.45f)
+                        : 0.1f;
+    return raster::Gradient::linear(
+        math::Point{box.x, box.y}, math::Point{box.x, box.y + box.height},
+        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, c.with_alpha(0)},
+                                          raster::GradientStop{t, c},
+                                          raster::GradientStop{1.0f - t, c},
+                                          raster::GradientStop{1.0f, c.with_alpha(0)}});
+  };
+  const float side_w = std::max(ring * 2.0f, 1.0f);
+  if (left_c.a != 0U) {
+    canvas.push_clip_rect(math::Rect{box.x, box.y, side_w, box.height});
+    canvas.fill_path(light_ring, raster::Paint::with_gradient(side_gradient(left_c)), opts);
+    canvas.pop_clip();
+  }
+  if (right_c.a != 0U) {
+    canvas.push_clip_rect(
+        math::Rect{box.x + box.width - side_w, box.y, side_w, box.height});
+    canvas.fill_path(light_ring, raster::Paint::with_gradient(side_gradient(right_c)), opts);
+    canvas.pop_clip();
+  }
+}
+
+}  // namespace
+
 void Element::paint_box(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   // 动画值在这里生效：`paint_style()` 无动画时就是 `style_` 本身（零开销），
@@ -1690,48 +1977,37 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   // 现在颜色与强度都由主题给（`Metrics::glass_highlight*`），而**调用方仍可覆盖**：
   // `glass="…,highlight_color:#RRGGBB"` 优先——那才是“这块玻璃就要这个光”。
   //
-  // ## 三形态（厚度 × 哪些边）
+  // ## 四形态（厚度 × 哪些边）
   //
   // · `Top`：只在顶边一条——早期实现，用户标图说“这个上边框是怎么回事”；
-  // · `All`：沿一整圈环带——**当下取值**，四边都受光；
-  // · `TopBottom`：只上下两条——试过，侧边无光时读作“薄片”。
+  // · `All`：沿一整圈环带，四边都受光；
+  // · `TopBottom`：只上下两条——侧边无光时读作“薄片”；
+  // · `TopBottomShaded`：上下两道亮带 + 左右两道暗线——**当下取值**，
+  //   亮与暗互为对照，“卡是有厚度的一块”才立得起来。
   //
   // 共同实现：用 `make_rounded_border_ring` 构环路径（不用 `stroke_path`——
   // 它把圆角矩形展开成 ~152 条边，而环形只有 76 条；本函数每张卡片每帧都走）。
   // 选边靠**矩形裁剪**：把整圈环填一次，再裁掉不要的边——比“每条边单独造路径”
   // 少一半路径数据，且圆角处天然连续。
+  // ## 四条边各自一个权重（厚度 × 每条边多亮/多暗）
+  //
+  // `Style::highlight_top/bottom/left/right` 各是一个**带符号的强度**：
+  // `> 0` 亮边（取 `top_highlight` 色相）、`< 0` 暗边（黑色）、`0` 不画。
+  //
+  // 为什么不再用 `HighlightEdges` 枚举做唯一入口：枚举只有 4 种固定组合
+  // （整圈 / 只上下 / 只顶 / 上亮下暗），表达不了“上强下弱、左右微弱”这类
+  // 真实光照——而那才是玻璃卡片最常见的样子。枚举现在只是**预设别名**
+  // （`edges tbs` 等仍可用，由 `apply_glass_shorthand` 展开成四个值）。
+  //
+  // 共同实现：用 `make_rounded_border_ring` 构环路径（不用 `stroke_path`——
+  // 它把圆角矩形展开成 ~152 条边，而环形只有 76 条；本函数每张卡片每帧都走）。
+  // 每条边用**矩形裁剪**从同一个环里取出来，圆角处天然连续。
   if (style.top_highlight.a != 0U && style.highlight_width > 0.0f && box.width > 0.0f &&
       box.height > 0.0f) {
-    const math::Color edge = style.top_highlight;
-    const float ring = style.highlight_width;
-    const math::Path light_ring = math::make_rounded_border_ring(box, radius, ring);
-    // 渐变方向：**从左上到右下**（光源约定与 `Shadow` 一致——“光从上来”）。
-    // 上缘满色、下缘降到 55%：上下都受光，但上亮下暗才读得出“光从上来”；
-    // 两侧若也被保留（`All`），同一渐变就让它们自然分出明暗。
-    const math::Color dim = edge.with_alpha(
-        static_cast<std::uint8_t>(static_cast<float>(edge.a) * (
-            style.highlight_edges == HighlightEdges::All ? 0.55f : 0.75f)));
-    const raster::Gradient gradient = raster::Gradient::linear(
-        math::Point{box.x, box.y}, math::Point{box.x + box.width, box.y + box.height},
-        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, edge},
-                                          raster::GradientStop{0.5f, edge},
-                                          raster::GradientStop{1.0f, dim}});
-    // 只画上下时：把左右两侧裁掉。
-    //
-    // 裁剪区取 `radius..width-radius`（**不取 0..width**）：直接按全宽裁会把
-    // 左右两条竖光的内侧一半留下，在卡的两端形成两个小竖点——“上下两条”
-    // 看上去就变成了“上下两条 + 两个角挂件”。
-    const bool clip_sides = style.highlight_edges == HighlightEdges::TopBottom;
-    const bool top_only = style.highlight_edges == HighlightEdges::Top;
-    if (clip_sides || top_only) {
-      const float inset = std::min(radius, box.width * 0.5f);
-      const float clip_h = top_only ? ring * 1.5f : box.height;
-      canvas.push_clip_rect(
-          math::Rect{box.x + inset, box.y, box.width - inset * 2.0f, clip_h});
+    if (style.highlight_top != 0.0f || style.highlight_bottom != 0.0f ||
+        style.highlight_left != 0.0f || style.highlight_right != 0.0f) {
+      paint_highlight_edges(style, canvas, box, radius, box.x, box.y);
     }
-    canvas.fill_path(light_ring, raster::Paint::with_gradient(std::move(gradient)),
-                     raster::DrawOptions{.opacity = style.opacity});
-    if (clip_sides || top_only) canvas.pop_clip();
   }
   if (style.border_width > 0.0f && border.a != 0U) {
     // **环形填充**而不是描边：卡片边框是界面里出现次数最多的描边，而 `stroke_path`

@@ -393,7 +393,7 @@
 | **时好时坏的构建失败先怀疑"规模临界"** | 同一命令有时成功有时失败 → 不是环境抖动，而是"取决于多少单元需重编"的临界；当成抖动会白等很多轮 | 同上 |
 | **「长得像 X 就当成 X」是启发式的经典错法** | 用"含 `.o` 或 `build/` 就当对象文件"挑参数，把 `-o` 的产物路径也挑走了 → 报 `could not open ...exe`（看着像产物不存在）。**该由调用方显式给出，不该猜** | 同上 |
 | **同一件事在多个入口各写一份＝口径必然分家** | `dbghelp`/`nanosrv` 在自举脚本、框架清单、默认库表三处各不相同，导致独立工程链接**长期失败**。看到"三个入口同一份清单"就该收敛到一处。**已收敛（2026-10-12）**：五处清单（bootstrap.ps1/sh、st.pkg 两处 toolchains、build.cpp 默认表）统一到仓库根 `link-libs.txt`（纯文本按平台分节），自举脚本与 `default_system_libs` 都读它，读不到时用同值内置兑底（独立工程场景）。加新系统库只改 link-libs.txt 一处 | `link-libs.txt` 头注释；`build.cpp:default_system_libs` |
-| **Windows 上 `core.autocrlf=true` 会让补丁对不上** | 工作区 CRLF、`git diff` 给 LF → 补丁报 `does not apply`；表现极具误导性（**手工验证 OK、脚本里失败**） | `tools/partial_patch_e2e.py` |
+| **Windows 上 `core.autocrlf=true` 会让补丁对不上** | 工作区 CRLF、`git diff` 给 LF → 补丁报 `does not apply`；表现极具误导性（**手工验证 OK、脚本里失败**） | 一次性脚本，已删（结论自足） |
 | **数据算对了、界面没接上** | B6 副行（`List::Entry` 缺字段→`dsl` 的值被静默丢弃）与 B7 行内区间各撞一次。**跨层功能必须有一层断言"它在下一层真的出现"** | `BACKLOG.md` 已完成段的方法论前言 |
 | **有权威来源的状态，别在本地再存一份** | 组件自维护 `hex_focused_` 而 `TextInput` 只投给 `UiRoot::focused_` → 「点了输入框敲字没反应」。改用框架焦点 + 未上树时退化 | 同上（B10） |
 | **无头/未就绪时"量尺"返回 0，别据此算布局** | `TextPort` 为空时 `measure()` 得 0，品牌区宽度退化成 0；改用**保守估宽**（不需要量尺） | 同上（B4） |
@@ -515,7 +515,7 @@
 | **“闪烁/光标”类契约会一份份漏掉**〔自绘组件〕 | “按 `time_seconds` 判显隐”只完成了一半——还必须 `request_wake_at(下一个翻转点)`，否则静止时帧循环已收敛，光标就**冻在它恰好可见的那一相位**（看上去就是“光标一直亮着但不闪”）。`Terminal` 与 `Input` 各修过一次，而 `CodeEditor` 漏了整整一年（用户 2026-11-09 报「编辑器光标不闪烁」）。**判据：任何以时间为自变量的绘制，都必须在这一帧登记下一个变化时刻**；反向不许拿 `request_animation()` 顶替（一秒翻两次的东西会把帧预算拉满） | `src/ui/components/code_editor.cpp` 的 `paint_content`；`tests/ui_code_editor_caret_blink_test.cpp`（成对钉“不冻结 + 不空转”） |
 | **像素哈希验不了“闪烁”**〔量具〕 | 每秒只翻两次的东西，等间隔连拍很容易**每次都落在同一相位**（实测 10 张全同、`distinct=1`），据此判“没在闪”就是被量具骗了。**行为契约要抬到属性面**（`caret_blink` 报 0/1/-1），像素只用来验“形态对不对” | `CodeEditor::get_property("caret_blink")`；实测 2026-11-09 |
 | **失焦时多一圈灰框：先去问 `WM_NCACTIVATE`**〔窗口〕 | 去装饰窗口（`WM_NCCALCSIZE` 返回 0）在**失焦**后内侧冒出 ~10px 灰白带，激活态没有。它画在窗口自己的 DC 里、`WM_NCPAINT` 一次都没被调、与所有 DWM 属性无关——**只有 `DefWindowProc(WM_NCACTIVATE)` 会按 `WS_THICKFRAME` 重画“未激活边框”到整窗客户区**。修法：`lParam = -1` 调默认实现（只更新激活状态、不重画框架）后返回 TRUE。直接 `return TRUE` 会让激活状态位不更新；`return FALSE` 会让系统认为框架状态没改完 | `src/shell/platform_win32.cpp` 的 `WM_NCACTIVATE`；`tools/window_frame_nc_probe.cpp`（8 变体逐条带宽度）；实测 2026-11-05（10px → 0px） |
-| **“分多次写”的位图生成，先在尺子上量**〔性能〕 | 环形阴影位图 4K 下全图逐像素算 + `assign` 27 MiB 要 **20.6 ms**（拖动时每帧一次，肉眼可见卡）；改成「SDF 可分离 + 整段跳过 + 缓冲复用」后 **2.5 ms**。三个优化里**任何一个漏掉就回到 10 ms 以上**——尤其“只写环”写反了（把中间那段当快路径）时，反而比全图还慢（11.9 ms） | `src/shell/window_chrome.cpp` 的 `build_ring_pixels`；`tools/window_chrome_cost_probe.cpp`；实测 2026-11-05 |
+| **“分多次写”的位图生成，先在尺子上量**〔性能〕 | 环形阴影位图 4K 下全图逐像素算 + `assign` 27 MiB 要 **20.6 ms**（拖动时每帧一次，肉眼可见卡）；改成「SDF 可分离 + 整段跳过 + 缓冲复用」后 **2.5 ms**。三个优化里**任何一个漏掉就回到 10 ms 以上**——尤其“只写环”写反了（把中间那段当快路径）时，反而比全图还慢（11.9 ms） | 当时的 `window_chrome.cpp` 的 `build_ring_pixels` 与配套探针（窗口边框后来重写，文件已不在）；实测 2026-11-05 |
 | **主/副两个窗口共用一个窗口类时，`WM_NCCREATE` 会抢 `this->window_`**〔窗口〕 | 影窗的 `WM_NCCREATE` 在 `CreateWindowExW` **返回之前**到达，那时 `shadow_window_` 还是 nullptr——靠“副窗句柄已赋值”判別主/副的写法一定错。后果是 `window_` 被覆成那个 1×1 的透明窗：整个界面变黑、上屏全落到影窗上。修法：建副窗前置一个 `creating_shadow_` 标志，窗口过程按它分流 | `src/shell/platform_win32.cpp` 的 `window_proc` / `create_shadow_window`；实测 2026-11-05 |
 | **`PrintWindow` 在 GPU 画布窗口上内容部分过期**〔量具〕 | 即使窗口**激活**，`PrintWindow(PW_RENDERFULLCONTENT)` 拿到的内容也不是当前画布：实测 4K 下 6000+ 个采样点不一致，形态是「整行渐变条颜色差 18」「某列整块是上帧内容」。原因在 swapchain（DISCARD）与窗口重绘表面不是同一份。**它靠得住的只有合成层面**（圆角遮罩、系统描边）；像素内容要用 `--renderer software` 起（那样 window DC 就是画布）或只测平坦背景的窗缘 | `tools/window_chrome_measure.py` / `tools/window_unfocused_frame_check.py`；实测 2026-11-05（激活态 6045 点差异、窗缘 0 点） |
 | **桌面截屏前必须验“窗口真的在最上面”**〔量具〕 | 窗口默认贴 (0,0) 且几乎铺满屏时，左侧/上方的“窗外”像素根本不在屏内（读到 000000）；而别的窗口压在上面时读到的是别人的颜色——本次曾把浏览器侧栏的灰像素读成“霜天的灰框”，差点据此改错。**判据：`WindowFromPoint(窗口中心) == 目标窗口`**；量窗外内容前还要先把窗口挪到屏幕中间 | `tools/window_chrome_measure.py`；`tools/window_channel_stability_check.py`（先证两路各自身稳定，再互比） |
@@ -789,6 +789,26 @@
 | **自己的 `max_width` 也没夹住自己的矩形**〔布局〕 | 只修 `measure` 不够：`arrange` 拿到的 `rect` 直接当 `bounds_`，父级（Row 主轴无界）给多宽就摆多宽 ⇒ 容器自己声明了上限也不生效，里面的 `grow` 子项照样填满整幅。两处必须成对：一边算约束、一边落实自己占的框 | `src/ui/element.cpp` 的 `Element::arrange` |
 | **用「内容自适应」的东西做探针 ⇒ 逆向验证全绿**〔取证〕 | 拿 `MarkdownView(shrink_to_fit)` 或 `Text` 当探针时，它们会把宽自己缩到内容宽，**掩盖「拿到的可用宽是无界」这件事**——修复逐条回退都绿。唯一有效的探针是 **`grow=true` 的子元素**：它必须填满可用宽，且要到 `arrange` 后才有宽（所以判据读 `bounds().width`，不是 `measured_size()`） | `tests/ui_measure_width_constraint_test.cpp`；逆向验证后修正 |
 | **别为绕根因加补丁：会连带引入新缺陷**〔取证〕 | 未找到真正根因前，我在 `MarkdownView` 里加了「用上轮框宽」「arrange 自我修正高度」「清脏时机」三层补丁。根因修好后逐条验证，**全部不再需要**，而且它们自己引入过两个新缺陷：宽度正反馈塌缩（456→228→128→80）、兄弟重叠（推理块卡片盖住正文第一行）。**改多了就得逐条删回去重验** | 同上（git diff 可见这轮增删） |
+
+## 场景 32：给应用配图标（标题栏 / 任务栏 / 资源管理器 / 托盘）
+
+同一个应用在**四条链路**上各用一份素材，而它们必须“看起来是同一个东西”。
+没有哪一处代码会“错”：都能编译、能启动、属性面自洽——错在**多份资产之间的对应关系**。
+
+```
+py -3 tools/icon_consistency_check.py            # 全量检查（有问题退出码 1）
+py -3 tools/icon_consistency_check.py xiangqi    # 只查一个
+```
+
+| 坑〔场景〕 | 现象 | 真因 / 判据 | 出处 |
+|---|---|---|---|
+| **只改 SVG 不改 PNG ⇒ 一个应用两个图标**〔图标〕 | 标题栏是 A 形，任务栏/资源管理器是 B 形 | `apps/<app>/assets/` 下 `<app>-logo.svg`（标题栏）与 `<app>-icon.png`（窗口）+ `<app>.ico`（PE 资源）**三份必须同一记号**。相期的红/白/蓝三色条曾被改成深灰人像（`c018aee9`）而**只改了 SVG**，于是标题栏人像、任务栏三色条 | `tools/icon_consistency_check.py`（配色同源校验） |
+| **`set_icon("svg:X")` 却没注册 `X` ⇒ 图标静默不画**〔图标〕 | 标题栏那个格子是空的，**控制通道读 `icon` 属性一切正常**（就是那个字符串） | `Icon::draw` 查不到就什么都不画、也不报错。判据：`svg:` 后面的 id **必须**出现在 `register_svg`/`add_single` 的参数字符串里；且注册必须在首帧前 | `apps/app_icon.hpp` |
+| **宽扁卡片上的对角线渐变 ⇒ 上下反相**〔绘制〕 | 想“上亮下暗”，实测 `top=181 / bottom=225`（下边更亮一倍） | 线性渐变按**画布绝对坐标**投影：卡片宽>高时梯度主要沿 x 走，上下两边的投影值几乎相等甚至反相。要“光从上来”就用**纯纵向**渐变 | `src/ui/element.cpp` 的 `paint_box` |
+| **用半透明白画“阴影” ⇒ 反而变亮**〔绘制〕 | 想要侧边暗线，实测侧边是 **+21/+42**（比卡内底色亮） | 任何 alpha 的白叠在灰底上都是“变亮”。阴影必须用**暗色**叠加。属性面看着 alpha 合理，只有量像素才知道方向反了 | 同上（`TopBottomShaded`） |
+| **渐变填充路径在 GPU 上退化成单色**〔绘制·两条腿〕 | 暗色主题气泡**四边都有浅色亮边**，配置明明是“上下两道”；同一份配置在**无头截图里完全正常** | `GpuCanvas::fill_path` 曾无条件取 `paint.color()`，而 `Paint::with_gradient` 把 `color_` 设成**第一个色标**。于是 `edge→透明` 的亮带取到满亮（整圈发亮）、`透明→暗→透明` 的侧边取到全透明（不画）。软件腿逐像素 `Paint::sample` 从不如此 ⇒ **只有真实窗口错、截图永远对**（这是它最难查的一点，见下条判据） | `src/raster/platform_d3d11.cpp` 的 `rasterize_path_gradient`；`tests/gpu_fill_path_gradient_test.cpp` |
+| **“截图对、桌面错” ⇒ 先查后端而不是先查配置**〔两条腿〕 | 用户报“桌面看着不对”，而自己截的图一切正常；越查越怀疑配置/主题/DPI | 无头走**软件光栅器**、真实窗口走**GPU(D3D11)**。判据：`metrics.renderer`（`software` / `gpu`）与 `metrics.headless`。**两者不同就先把同一条链路复现出来**（`run(action=start, window=true)` + 桌面截图），不要再在无头里调参数——那是在量另一条腿。GPU 侧能力缺口（渐变、模糊、遮罩）都可能只在一侧缺失 | 本轮实测：无头 20/27（正确） vs 桌面 98（错误），配置与主题全程无辜 |
+| **环带只有 1~2px 宽 ⇒ 固定点采样一左一右不对等**〔取证〕 | 完全对称的图，左边量到 242、右边只量到 181 | 亚像素环带在逐像素网格上常只占 1 格。**扫描整个环带厚度取极值**，再沿边取中位数；另：取“最亮”量不到暗线（会取到内侧底色），要取**偏离最大**的极值 | `tests/ui_highlight_edges_test.cpp` |
 
 ## 怎么用这份速查
 

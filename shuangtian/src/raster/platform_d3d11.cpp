@@ -1452,7 +1452,20 @@ class GpuCanvas final : public Surface {
     // 缺了这步，非整数 DPI 下路径类绘制（菜单面板/勾选/图标）整体缩成 1/scale——
     // hit_test 按逻辑坐标算，画出来缩小错位（实测 1.5x 下菜单面板缩 2/3，光标视觉错位）。
     const Path physical = scale_ == 1.0f ? path : path.scaled(scale_);
-    // 缓存键：直接用逻辑 path（与缩放后几何一一对应，不会误命中）。
+    // **渐变必须走渐变分支**（实测 2026-11-20）。
+    //
+    // 旧代码无条件走 `paint.color()`，而 `Paint::with_gradient` 把 `color_` 设成
+    // **第一个色标**（见 `paint.cpp` 的 `with_gradient`）——于是：
+    //   · `edge → 透明` 的亮带 ⇒ 取第一个色标 = 满亮 ⇒ **整圈发亮**；
+    //   · `透明 → 暗 → 透明` 的侧边 ⇒ 取第一个色标 = 全透明 ⇒ **完全不画**。
+    // 两条叠起来就是“四边高光、左右无阴影”——用户报的正是这个。
+    //
+    // 而软件光栅器走的是 `Canvas::fill_path`（逐像素采样 `Paint::sample`），
+    // 所以**只有真实窗口（GPU）出问题、无头截图正常**——这是它难查的原因。
+    if (const Gradient* gradient = paint.gradient(); gradient != nullptr) {
+      rasterize_path_gradient(path, physical, options.opacity, *gradient, PaintOp::FillPath);
+      return;
+    }
     rasterize_path(path, physical, options.opacity, paint.color(), PaintOp::FillPath);
   }
   void stroke_path(const Path& path, const Paint& paint, float width, const StrokeStyle& style,
@@ -2678,7 +2691,96 @@ class GpuCanvas final : public Surface {
     return hash;
   }
 
-  /// 描边/填充的公共部分：光栅化为遮罩 → 合成。
+  /// 渐变填充**路径**（圆角矩形以外的任意几何）。
+  ///
+  /// ## 为何需要单独一条路
+  ///
+  /// `draw_gradient` 只能画**圆角矩形**（靠 `DrawMode::GradientRoundRect` +
+  /// 矩形 SDF）。而高光环带、环形高亮等是**任意路径**——需要的是
+  /// 「渐变颜色 × 路径覆盖率」两项相乘。
+  ///
+  /// ## 实现：复用已有的两个通道
+  ///
+  /// 着色器里 `g_mode.z > 2.5` 是「路径遮罩裁剪」分支（第 688 行附近）：
+  /// 它把 `g_clip_texture`（t1）的 r 作为**标量**乘进 `factor3`，
+  /// 而这个乘法对**所有 mode 都生效**（包括渐变）。
+  /// 所以只需：① 用 `GradientRoundRect` 画整个包围盒；
+  /// ② 把路径遮罩绑到 t1、`clip_mode = 3`。两项自然相乘，不用改着色器。
+  ///
+  /// 这与软件腿的语义一致：软件腿逐像素 `Paint::sample` 后乘覆盖率。
+  void rasterize_path_gradient(const Path& cache_key_source, const Path& rasterize, float opacity,
+                               const Gradient& gradient, PaintOp op) {
+    if (rasterize.is_empty()) return;
+    math::Rect bounds = rasterize.flattened_bounds(0.25f);
+    if (bounds.is_empty()) return;
+    math::IntRect area = bounds.inflate(1.0f).round_out();
+    if (area.is_empty()) return;
+    area = area.intersect(current_clip().rect);
+    if (area.is_empty()) return;
+
+    ID3D11ShaderResourceView* ramp = ramp_texture(gradient);
+    if (ramp == nullptr) return;
+    ID3D11ShaderResourceView* mask = path_mask_texture(cache_key_source, area, &rasterize);
+    if (mask == nullptr) return;
+
+    const std::int64_t start = st::time::now_ns();
+
+    // ⚠ 裁剪帧必须**先压栈**，再调 `base_params`：
+    // 它在调用时就把 `current_clip()` 的 mode/shape/radii 写进 `params`。
+    // 顺序反了的话 `params.mode[2]` 拿到的是**上一个**裁剪帧（实测：路径遮罩
+    // 完全不生效，整个包围盒被填满——圆角矩形的圆角消失，变成直角矩形）。
+    //
+    // 区域用**物理坐标**：与 `push_mask_clip`（框架既有的同类通道）保持同一口径——
+    // 它把 `area`（物理 `IntRect`）直接写成 `frame.shape`。
+    const math::Rect physical_area{static_cast<float>(area.x), static_cast<float>(area.y),
+                                   static_cast<float>(area.width),
+                                   static_cast<float>(area.height)};
+    ClipFrame mask_frame;
+    mask_frame.rect = area;   // 物理像素：`submit` 用它设 scissor
+    mask_frame.shape = physical_area;
+    mask_frame.radii = {0.0f, 0.0f, 0.0f, 0.0f};
+    mask_frame.mask = mask;
+    mask_frame.mode = 3;
+    clip_stack_.push_back(mask_frame);
+
+    // 画的矩形 = 遮罩区域本身（面积已与裁剪域取过交）。
+    const math::Rect physical{static_cast<float>(area.x), static_cast<float>(area.y),
+                              static_cast<float>(area.width),
+                              static_cast<float>(area.height)};
+    ShaderParams params = base_params(DrawMode::GradientRoundRect, physical,
+                                      {0.0f, 0.0f, 0.0f, 0.0f}, opacity);
+    // 渐变几何：与 `draw_gradient` 同一口径（**绝对逻辑坐标 × scale**，不归一化）。
+    switch (gradient.kind()) {
+      case Gradient::Kind::Linear: {
+        params.axis[0] = gradient.start().x * scale_;
+        params.axis[1] = gradient.start().y * scale_;
+        params.axis[2] = gradient.end().x * scale_;
+        params.axis[3] = gradient.end().y * scale_;
+        params.axis_extra[0] = 0.0f;
+        break;
+      }
+      case Gradient::Kind::Radial: {
+        params.axis[0] = gradient.start().x * scale_;
+        params.axis[1] = gradient.start().y * scale_;
+        params.axis_extra[0] = 1.0f;
+        params.axis_extra[1] = gradient.radius() * scale_;
+        break;
+      }
+      default: {
+        params.axis[0] = gradient.start().x * scale_;
+        params.axis[1] = gradient.start().y * scale_;
+        params.axis_extra[0] = 2.0f;
+        break;
+      }
+    }
+    // 路径遮罩（mode=3 的裁剪帧）已在前文压栈：`submit` 会把它绑到 t1，
+    // 着色器在 `g_mode.z > 2.5` 分支把它作为标量乘进 `factor3`。
+    submit(params, ramp, false);
+    clip_stack_.pop_back();
+    log_op(op, start,
+           static_cast<std::uint64_t>(area.width) * static_cast<std::uint64_t>(area.height));
+  }
+
   void rasterize_path(const Path& cache_key_source, const Path& rasterize, float opacity,
                       math::Color color, PaintOp op) {
     if (rasterize.is_empty()) return;

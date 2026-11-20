@@ -523,7 +523,7 @@
 ### P2：x11/wayland 也要**自绘窗框阴影与圆角**（几何已平台无关，只差接入）
 
 2026-11-05 在 Win32 一侧把窗框改成了**纯自绘**（外围阴影 + 圆角，见 `DESIGN.md` §4.6.5）。
-几何与位图生成已经抽到平台无关的 `include/st/shell/window_chrome.hpp`（纯函数，7 条单测），
+几何与位图生成已经抽到平台无关的 `window_chrome.hpp`（纯函数，7 条单测；该模块 2026-11 窗口边框重写时已移除），
 **剩下的事只是两个平台各自的“怎么把这块带 alpha 的位图交给合成器”**：
 
 | 平台 | 阴影层 | 圆角裁剪 |
@@ -4692,7 +4692,7 @@ Assertion failed: it != m_data.m_value.object->end(),
 
 ### 已排除
 
-- **与当时的圆角环修复无关**：把 `src/raster/path.cpp` 回退后重编再跑，同样崩在同一断言；
+- **与当时的圆角环修复无关**：把当时的 `path.cpp`（现为 `src/math/path.cpp`）回退后重编再跑，同样崩在同一断言；
 - 崩点是**制品侧**（`third_party/nlohmann/json.hpp`）而不是被测代码：断言的含义是
   「用 `at()`/`operator[]` 撞了一个不存在的 object 键」。
 
