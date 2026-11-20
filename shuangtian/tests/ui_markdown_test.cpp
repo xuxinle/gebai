@@ -911,21 +911,27 @@ ST_TEST(md_view_selection_band_uses_ink_metrics) {
   const float base = std::stof(*view.get_property("base_font_size"));
   const float ink_height = base * 0.5f;              // 桩：above 0.3 + below 0.2
   const float box_height = port.line_height(base);   // 行盒高（旧实现会用这个）
-  // 高亮带 = 墨迹高 + 上下留白（`kSelectionPadY` = 1px，见 markdown_view.cpp）。
+  // 高亮带 = 墨迹高 + 上下留白。
+  //
+  // **留白直接引用实现里的公共常量**（`markdown_view.hpp`）：
+  // 旧写法在测试里再写一份 `constexpr float kSelectionPadY = 1.0f`，
+  // 于是实现把它从 1.0 改成 3.5 时这条测试就红——不是回归，
+  // 而是“同一件事在两处各写了一遍”。实现与测试走同一个入口。
   //
   // 为何不再“严格等于墨迹高”：紧贴墨迹的色块看起来像“文字被关在框里”
-  //（直边字符尤其明显）。现在两侧各外扩一点，这条断言跟着改口径。
-  constexpr float kSelectionPadY = 1.0f;
-  const float expected_band = ink_height + kSelectionPadY * 2.0f;
-  std::cout << std::format("  [md] 期望带高={:.2f}（墨迹 {:.2f} + 留白） 实测带高={} 行盒高={:.2f}\n",
-                           expected_band, ink_height, best, box_height)
+  //（直边字符尤其明显）。现在四周外扩一圈，这条断言跟着改口径。
+  const float expected_band = ink_height + st::ui::kSelectionPadY * 2.0f;
+  std::cout << std::format("  [md] 期望带高={:.2f}（墨迹 {:.2f} + 留白 {:.2f}） 实测带高={} 行盒高={:.2f}\n",
+                           expected_band, ink_height, st::ui::kSelectionPadY, best, box_height)
             << std::flush;
   // ① 带高 ≈ 墨迹高 + 留白（容差 3px 吸收绘制取整/圆角混合）。
   ST_CHECK_NEAR(static_cast<float>(best), expected_band, 3.0f);
   // ② 前提成立：这个桩上行盒确实远高于墨迹（否则本条区分不出两者）。
   ST_CHECK(box_height > ink_height * 1.2f);
   // ③ 这才是“回退到行盒”会红的判据。
-  ST_CHECK(static_cast<float>(best) < box_height * 0.9f);
+  // 用“明显小于行盒”（固定余量）而不是“小于行盒的 90%”：
+  // 留白加大后带高会接近行盒，按比例判会误伤自己的合理改动。
+  ST_CHECK(static_cast<float>(best) < box_height - 4.0f);
 }
 
 ST_TEST(md_view_link_hit_and_click_callback) {

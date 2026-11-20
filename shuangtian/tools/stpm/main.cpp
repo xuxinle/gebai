@@ -404,18 +404,23 @@ auto command_build(const Arguments& arguments) -> int {
   // 所以现在：
   //   · 第一行只说**编译段**，并直接把概念写在标签里（“对象复用”，不是“命中缓存”）；
   //   · 第二行只说**链接段**：真的重链了（给耗时）/ 跳过了（给**理由**）。
-  st::log::out("构建完成 [{}] · 编译段：单元 {}（重编 {} / 对象复用 {}）\n", options.profile,
-              stats->units_total, stats->units_rebuilt, stats->units_cached);
-  st::log::out("  编译 {} · 总 {}", st::time::format_duration_ns(stats->compile_ms * 1'000'000),
-              st::time::format_duration_ns(st::time::now_ns() - start));
-  if (stats->linked) {
-    st::log::out(" · 链接 {}\n", st::time::format_duration_ns(stats->link_ms * 1'000'000));
-  } else {
-    st::log::out(" · 链接已跳过 · {}\n",
-                stats->link_skip_reason.empty() ? std::string("产物已是最新")
-                                                : stats->link_skip_reason);
-  }
-  st::log::out("  并行 {} 路{}\n", stats->workers, stats->pch_used ? " · PCH" : "");
+  //
+  // **编译段与链接段必须在同一行**（日得改回单行的原因）：
+  // 智能体管道里常带过滤（`| Select-String "error:|构建完成"`），而链接段的
+  // “链接 {}” 落在**下一行**——被过滤掉，于是看起来“编译完了但不知道链没链”，
+  // 甚至误以为没构建。把链接结果并进第一行，**任何只需要一行的过滤都能拿到全貌**。
+  const std::string link_part =
+      stats->linked
+          ? std::format(" · 链接 {}",
+                        st::time::format_duration_ns(stats->link_ms * 1'000'000))
+          : std::format(" · 链接已跳过 · {}",
+                        stats->link_skip_reason.empty() ? std::string("产物已是最新")
+                                                        : stats->link_skip_reason);
+  st::log::out("构建完成 [{}] · 编译段：单元 {}（重编 {} / 对象复用 {}）{} · 编译 {} · 总 {}",
+               options.profile, stats->units_total, stats->units_rebuilt, stats->units_cached,
+               link_part, st::time::format_duration_ns(stats->compile_ms * 1'000'000),
+               st::time::format_duration_ns(st::time::now_ns() - start));
+  st::log::out(" · 并行 {} 路{}\n", stats->workers, stats->pch_used ? " · PCH" : "");
   // 并发决策必须可见："为什么是 14 路而不是 28"是运维/排查会问的第一个问题
   if (!stats->concurrency_reason.empty()) {
     st::log::out("  并发依据: {}（超大单元上限 {}）\n", stats->concurrency_reason,

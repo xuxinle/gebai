@@ -330,7 +330,13 @@ auto apply_glass_shorthand(Element& element, std::string_view text) -> bool {
     return report.ok();
   }
   (void)ui::apply_stylesheet(element, whole, &report);
-  return report.ok();
+  // **认出一部分就算成功**（与函数头的承诺一致）。
+  //
+  // 不能用 `report.ok()`：它的语义是"`unknown` 为空"= **全部认识**，
+  // 而玻璃串的契约是"拼错一个键不该让整条配置作废"（部分生效是常态）。
+  // 实测：`glass="blur:8,wrongkey:1"` 里 `blur` 已生效，
+  // 旧实现却返回 false，调用方会当成"整串写错了"去回退到缺省值。
+  return report.applied > 0;
 }
 
 auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,

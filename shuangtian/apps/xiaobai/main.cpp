@@ -31,6 +31,8 @@
 #include <vector>
 
 #include "../app_icon.hpp"
+#include "session_store.hpp"
+#include "tool_support.hpp"
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"
 #include "st/core/entry.hpp"
@@ -64,18 +66,47 @@ namespace http = st::net::http;
 // 尺寸、行高、圆角、高度全部由框架算：应用不再手算任何几何。
 inline constexpr std::size_t kComposerMaxLines = 6;
 
+// —— 字号阶栈 ——
+//
+// 界面里只有三个层级，且**逐级小一号**（用户要求“思考和工具的字体比正文小一号”）：
+//   · 正文（气泡里面的答复）13
+//   · 思考（过程，比正文轻）11
+//   · 工具（日志/回显，最不该抢视线）10
+//
+// 为何不写落到调用处：这三个数会**一起**决定整屏的视觉节奏（标题字号也是从
+// 正文基准算的，见 `MarkdownView::sync_heading_sizes`），散在四五个
+// `set_base_font_size(11.0f)` 里时，改一级就会漏改另一级。
+inline constexpr float kBodyFontSize = 13.0f;
+inline constexpr float kTraceFontSize = 11.0f;
+inline constexpr float kToolFontSize = 10.0f;
+
 /// 消息区尾部留白：胶囊是浮层（不占流），按最大高度预留才算得太少。
 /// 该值只是“预留得够用”，不影响胶囊本身（那个自适应）。
 inline constexpr float kComposerReserve = 160.0f;
 
-/// 气泡最大宽度：**不设固定上限**（取 `kUnbounded`），让它能长到消息区的可用宽
-/// （再往外就是窗口边距，由外层容器决定）。
+/// 气泡最大宽度：**不设应用层上限**，只受窗口（消息区可用宽）约束。
 ///
-/// 为何不限定一个固定像素（如 520）：那会把“一行就放得下的话”在 520 处硬折行，
-/// 即使窗口中还有大片空白——用户看到的是一只被挤窄的气泡，而不是“随内容宽”。
-/// 气泡的宽度语义是：**短内容随内容变窄，长内容铺满可用宽**；
-/// 后一半只需交给父级约束，不需要额外的魔数。
-inline constexpr float kMaxBubbleWidth = st::ui::kUnbounded;
+/// 语义就是要求的那样：**短内容随内容变窄，长内容铺满窗口可用宽**。
+/// 上限由父容器给的 `available_width` 决定，应用不该写死像素——
+/// 写死 860 那种值会让宽窗口里出现一条人为的窄带。
+///
+/// ## 那为什么之前长句不折行（已修）
+///
+/// 气泡曾包在 **`row`** 里（用 `justify` 做左/右对齐）。而 flex 行的布局是：
+/// ```cpp
+/// child_constraints.max_width = row ? kUnbounded : available_width;   // element.cpp
+/// ```
+/// 横向给子项的是 **`kUnbounded`**（行按内容自然宽排），于是 `MarkdownView`
+/// 拿不到宽度上限 → 长句一行铺到底、不折行 → 所有工具卡输出区高度都一样。
+///
+/// **修法不是加像素上限，而是去掉 `row` 包裹**：让卡片直接挂在 `column`
+/// （消息列表）里，用 `align_self` 做左/右对齐。`column` 给子项的是
+/// `available_width`，于是气泡自然只能长到窗口可用宽，短内容仍由
+/// `shrink_to_fit` 收缩。
+///
+/// ⚠ `max_width` 要用 `kAuto`（不限）而不是 `kUnbounded`：前者表示“没声明”，
+/// 后者是显式“极大值”，参与 `min/max` 夹取时会把父级的可用宽反复放大。
+inline constexpr float kMaxBubbleWidth = st::ui::kAuto;
 
 // ── 气泡的液态玻璃配置 ──
 //
@@ -154,7 +185,13 @@ inline constexpr std::string_view kBubbleStyle =
     "shadow 0, "            // `Card` 默认 md 投影画在玻璃底下，被背板模糊平均成一圈暗晕
     // —— 玻璃 ——
     "theme_glass 1, "       // 底色与 tint 跟随主题（亮 0.32 / 暗 0.42）
-    "blur 16, refraction 6, dispersion 0.3, "
+    // **`blur 8`（原 16）**：用户原话“模糊调小点，不要这么糊”——
+    // 截图里 16px 模糊把底下的代码压成了灰馅，完全看不出“背后是字”。
+    // 玻璃的意图是“透过、但略带模糊”，不是“磨砂不透明”。8 还看得出字形轮廓。
+    //
+    // 连带的好事：`pad = blur/2 + strength + corner + 8` 从 36 降到 28，
+    // 四边折射带更容易完整成像（贴近画布边缘时不易被裁掉）。
+    "blur 8, refraction 6, dispersion 0.3, "
     "highlight 0.85, ring 1.2, edge_top 1.0, edge_bottom 0.5, "
     "edge_left 0.35, edge_right 0.35";
     // 四条边独立配（`edges` 预设的等价写法，但强度可调）：
@@ -172,8 +209,8 @@ inline constexpr std::string_view kBubbleStyle =
 //
 // 各值为什么是这些数（实测依据见下方长注释，这里只留结论）：
 //
-// · `blur 16`：本页看不出差别（气泡背后是纯渐变，8/16/24/36 卡内梯度全 0.42），
-//   但真实叠加场景（卡片压在别的元素上）才起作用，先把厚度留够。
+// · `blur 8`：原值 16 在“卡片压在代码/正文上”时糊成了灰馅（用户反馈
+//   “不要这么糊”）。模糊的意图是“透过但略酸”，保留字形轮廓即可。
 // · `refraction 6`：受**四边都能成像**约束——外扩量 `pad = blur/2 + strength
 //   + corner + 8`，超过 `msg-list` 的 `padding_x`（=44）就会有一侧被画布裁掉、
 //   折射静默失效（实测左侧 5px 完全恒定 = 硬边）。
@@ -814,10 +851,28 @@ inline constexpr int kToolShellTimeoutMs = 60 * 1000;
   return st::fs::join(root, path);
 }
 
+/// 写操作结果末尾附一行越界提醒（在根目录内则不加任何东西）。
+///
+/// 判据本身在 `tool_support.hpp`（`xiaobai::tool::path_escapes_root`）——
+/// 抽出去是为了让测试能调**真实现**；之前的测试只能复制一份同语义代码，
+/// 实现改坏了它照样绿。
+[[nodiscard]] auto escaping_note(const std::string& root, const std::string& resolved)
+    -> std::string {
+  if (!xiaobai::tool::path_escapes_root(root, resolved)) return {};
+  return "\n⚠ 注意：该路径在工具工作目录（" + root + "）之外。";
+}
+
 /// `edit`：把文件里的 `old` 全数替换为 `new`。
 ///
 /// 为何要强制“必须命中”：常见的失败是模型猜了不存在的原文，
 /// 而默默写回一份未改动的文件会让它以为改成功了（这是最贵的失败模式）。
+///
+/// ## 命不中时要给“下一步怎么做”
+///
+/// 只回“未找到”会让模型**盲猜重试**（改前缀、去空格、换大小写……），
+/// 每猜一次就是一轮完整 API 调用。实测这类重试常要 3~5 轮。
+/// 所以失败时给出**最多 3 条线索**：首行相同/相近的行号与原文，
+/// 模型据此一次就能把 `old_string` 改对。
 [[nodiscard]] auto tool_edit_text(const std::string& path, const std::string& old_text,
                                   const std::string& new_text) -> ToolResult {
   auto loaded = st::fs::read_text(path);
@@ -829,8 +884,20 @@ inline constexpr int kToolShellTimeoutMs = 60 * 1000;
   std::size_t count = 0;
   std::size_t at = content.find(old_text);
   if (at == std::string::npos) {
-    return ToolResult{false,
-                      "未找到要替换的内容（文件未改动）。请先用 read 确认原文。路径：" + path};
+    // 线索：拿 old_string 的首行去比对（行首空白差异是最常见的不匹配原因）。
+    // 探测逻辑在 `tool_support.hpp`（`similar_lines`），与测试共用同一份。
+    std::string hint;
+    for (const auto& [line_no, line] : xiaobai::tool::similar_lines(content, old_text)) {
+      hint += "\n  第 " + std::to_string(line_no) + " 行：" + line;
+    }
+    std::string message = "未找到要替换的内容（文件未改动）。路径：" + path;
+    if (!hint.empty()) {
+      message += "\n文件里与 old_string 首行相近的行：" + hint +
+                 "\n提示：注意行首缩进与空白必须完全一致。";
+    } else {
+      message += "\n提示：请先用 read 确认原文（含缩进与空白）。";
+    }
+    return ToolResult{false, std::move(message)};
   }
   while (at != std::string::npos) {
     content.replace(at, old_text.size(), new_text);
@@ -840,7 +907,11 @@ inline constexpr int kToolShellTimeoutMs = 60 * 1000;
   if (auto status = st::fs::write_text(path, content); !status) {
     return ToolResult{false, "写入失败：" + status.error().message};
   }
-  return ToolResult{true, "已替换 " + std::to_string(count) + " 处。文件：" + path};
+  std::string message = "已替换 " + std::to_string(count) + " 处。文件：" + path;
+  // 多命中时提醒：模型往往只想改一处，全量替换会误伤同类代码。
+  if (count > 1) message += "（注意：old_string 在原文件中出现了 " + std::to_string(count) +
+                            " 次，已全部替换；若只想改一处请给出更长的上下文）";
+  return ToolResult{true, std::move(message)};
 }
 
 // ———————————————————————————————————————————————————————————————
@@ -1012,16 +1083,24 @@ struct AgentPage : st::ui::dsl::Component {
           [](st::ui::Panel&) {},   // 无样式逃生：胶囊的每一面都走 BoxProps 声明
           {.gap = 8, .padding_x = 8, .padding_y = 6,
            .direction = st::ui::FlexDirection::Row,
-           .radius = 999.0f,        // 胶囊：绘制层夹到短边一半（CSS 语义）
-           .surface = st::ui::Element::Surface::Base,
+           // 胶囊形态靠 `radius_max = 22`（矮时夹成胶囊、长高后退成圆角矩形）：
+           // 绘制层的 `border-radius` 夹取语义与玻璃的 `radius` 各自独立，
+           // 前者管轮廓、后者管折射带宽，两个都要给。
            .absolute = true,
            .left = 18.0f,
            .right = 18.0f,
            .bottom = 18.0f,
            .radius_max = 22.0f,     // 矮时胶囊，长高后圆角矩形
-           .border_width = 1.0f,
-           .border_color = st::math::Color{0, 0, 0, 36},
-           .elevation = st::ui::Elevation::Overlay,
+           // **与气泡同款玻璃材质**（用户要求“输入框也用正文的玻璃特效”）。
+           //
+           // 圆角与描边不再逐项写：`kBubbleStyle` 里已有 `radius 14 / border 0 /
+           // shadow 0`，而 `apply_stylesheet` 的优先级会让逐项声明被回放覆盖——
+           // 写了也不生效，只会让人误以为“改这里有用”。
+           //
+           // 位置不能随便：`BoxProps` 的设计符必须按**声明顺序**出现，
+           // `style` 在 `align_items`/`key` **之前**（写反了编译器报
+           // `designator order ... does not match`）。
+           .style = kBubbleStyle,
            .align_items = st::ui::Align::Center,
            .key = "composer"});
 
@@ -1085,16 +1164,21 @@ struct AgentPage : st::ui::dsl::Component {
     // 且推理很长时把答复挤到看不见的地方。它们是两个消息主体，
     // 宽度也该各算各的（推理往往比答复长得多）。
     if (!is_user && !m.reasoning.empty()) reasoning_bubble(c, m, index);
-    // **用 `justify` 对齐，不用 `spacer`**：
+    // **对齐用 `align_self`，不套 `row`**。
     //
-    // `spacer` 是一个 `grow` 的空元素，它会把行内的剩余宽**全部占掉**——
-    // 气泡于是永远只能长到“行宽的一半”左右（实测：窗口 1178、气泡封顶 520）。
-    // 而两侧留白应该由消息区自身的 `padding_x` 提供（那是窗口边距，要保留），
-    // 对齐则只是“靠左/靠右”的位置问题，两者不该用同一个机制。
-    (void)row(c, {.gap = 0, .max_height = st::ui::kUnbounded,
-                  .justify = is_user ? st::ui::Justify::End : st::ui::Justify::Start,
-                  .key = "row-" + m.role + "-" + uid},
-              [&] {
+    // ## 为何不能套 `row`（这一轮的核心教训）
+    //
+    // `row` 给子项的横向约束是 **`kUnbounded`**（行按内容自然宽排，
+    // 见 `element.cpp`：`child_constraints.max_width = row ? kUnbounded : available_width`）。
+    // 气泡包在 row 里 → 卡片里的 `MarkdownView` 拿不到宽度上限 →
+    // **长句一行铺到底、不折行** → 内容再长也只占一两行，
+    // 于是所有工具卡的输出区高度一模一样（实测 23 张全是 141.7px）。
+    //
+    // 直接把卡片挂在消息列表（`column`）上，它拿到的就是父级的
+    // `available_width`——**气泡自然只受窗口约束**，无需任何像素上限。
+    // 左/右对齐交给 `align_self`（它正是“单项覆盖父容器交叉轴对齐”的语义）。
+    {
+      {
                 // **`elevation = Flat` 是必需项，不是修饰**：
                 // `Card` 的投影默认是 `shadow_level_ = 2`（md），而它画在**玻璃底下**——
                 // 背板模糊会把投影平均进来，整块气泡被压暗（实测：气泡内 200.7
@@ -1118,6 +1202,10 @@ struct AgentPage : st::ui::dsl::Component {
                                // 用 `shadow 0` 一次性表达“不要投影”，
                                // 比 `elevation = Flat` 更直白（后者绕过档位才能关）。
                                .style = kBubbleStyle,
+                               // 左/右对齐：靠 `align_self`（父容器交叉轴对齐的单项覆盖），
+                               // 而不是外套一个 `row`——`row` 会把横向约束变成 `kUnbounded`，
+                               // 气泡就再也拿不到窗口可用宽（长句不折行）。
+                               .align_self = is_user ? st::ui::Align::End : st::ui::Align::Start,
                                .key = "bubble-" + m.role + "-" + uid},
                            [&] {
                              (void)row(c, {.gap = 6, .key = "meta"}, [&] {
@@ -1156,7 +1244,7 @@ struct AgentPage : st::ui::dsl::Component {
                                    c,
                                    [body](st::ui::MarkdownView& view) {
                                      view.set_shrink_to_fit(true);
-                                     view.set_base_font_size(13.0f);
+                                     view.set_base_font_size(kBodyFontSize);
                                      // `set_markdown` 自带相等早退，逐帧重设不贵。
                                      view.set_markdown(body);
                                    },
@@ -1169,7 +1257,8 @@ struct AgentPage : st::ui::dsl::Component {
                                     .key = "body-" + m.role + "-" + uid});
                              }
                            });
-              });
+      }
+    }
   }
 
   /// 推理过程的**独立气泡**（与答复气泡平级，靠在左）。
@@ -1183,10 +1272,10 @@ struct AgentPage : st::ui::dsl::Component {
     using namespace st::ui::dsl;
     const std::string uid = std::to_string(index);
     const std::string trace = m.reasoning;
-    (void)row(c, {.gap = 0, .max_height = st::ui::kUnbounded,
-                  .justify = st::ui::Justify::Start,
-                  .key = "row-reasoning-" + uid},
-              [&] {
+    // 同气泡：**不套 `row`**（否则拿不到可用宽，长句不折行）。
+    // 靠左对齐用 `align_self = Start`。
+    {
+      {
                 // **推理块不用 `card()` 而要 `custom_container<Card>`**：
                 // 需要关掉 `Card` 的默认投影（`shadow_level_ = 2`，md），而
                 // `BoxProps` 没有对应字段（`elevation = Flat` 会同时把底重置成主题取色，
@@ -1218,7 +1307,9 @@ struct AgentPage : st::ui::dsl::Component {
                                  c,
                                  [trace](st::ui::MarkdownView& view) {
                                    view.set_shrink_to_fit(true);
-                                   view.set_base_font_size(12.0f);
+                                   // 比正文小一号：正文 13 → 思考 11
+                                   //（“过程”比“答复”轻，读起来不该抢注意力）。
+                                   view.set_base_font_size(kTraceFontSize);
                                    view.set_markdown(trace);
                                  },
                                  {.max_height = st::ui::kUnbounded,
@@ -1232,19 +1323,20 @@ struct AgentPage : st::ui::dsl::Component {
                      .padding = 9,
                      .max_width = kMaxBubbleWidth,
                      .max_height = st::ui::kUnbounded,
-                     .radius = kGlassRadius,
-                     .surface = st::ui::Element::Surface::Sunken,
-                     // **不画描边**（用户原话：“不想要这条怪怪的边”）。
+                     // **与气泡同款玻璃材质**（用户要求“思考也用正文的玻璃特效”）。
                      //
-                     // 实测：关掉投影后上缘仍剩 y=156 处的一道 **222**（上下 239/235）。
-                     // 那是 `Card::apply_theme` 给的 1px 描边（黑 5.5%）——
-                     // **必须走声明式字段**，在 `custom_container` 的 configure 回调里
-                     // 写 `card.style().border_width = 0` 会被之后跑的主题重算盖回去
-                     //（实测改了三次数值完全不变，就是这个原因）。
-                     .border_width = 1.0f,
-                     .border_color = st::math::Color{0, 0, 0, 1},
+                     // 为何不再用 `Sunken` + 1px 描边：那是“凹陷的底板”语义
+                     //（背景信息、要弱于正文）。但一套界面里出现两种材质语言时，
+                     // 思考块看起来像另一类控件而不是“同一条对话的一部分”。
+                     // 现在靠**字号小一号 + 玻璃更淡的 tint** 表达“这是过程，不是答复”。
+                     //
+                     // `style=` 一次性管外观（优先级在 `apply_stylesheet` 一处定义），
+                     // 所以这里不再逐个写 `radius/border/shadow`——写了也会被回放覆盖。
+                     .style = kBubbleStyle,
+                     .align_self = st::ui::Align::Start,
                      .key = "reasoning-block-" + uid});
-              });
+      }
+    }
   }
 
   /// 工具名的**中文显示名**（界面上给人看的）。
@@ -1262,8 +1354,18 @@ struct AgentPage : st::ui::dsl::Component {
 
   /// 把工具入参摊成一行可读摘要（“执行命令 · `npm test`”的那种）。
   ///
-  /// 为何要摘要而不直接打整份 JSON：���数里常带整个文件内容（`write`/`edit`），
+  /// 为何要摘要而不直接打整份 JSON：参数里常带整个文件内容（`write`/`edit`），
   /// 原样展示会把卡片撑成一面墙。只需让人看出“对它做了什么”。
+  ///
+  /// ## 未知工具不能倒整份 JSON
+  ///
+  /// 旧实现对不认识的工具直接把整个 JSON 压成一行。而真实使用里工具名远不止
+  /// 内置的四个（歌白会话里几乎全是 `js` / `grep` / `agent_load`），
+  /// 于是参数区变成一片噪声：实测 `js` 的 280 字符 JSON 铺满整张卡片，
+  /// 尾部还被裁掉——用户看不出“它到底要干什么”。
+  ///
+  /// 现在分三步：按**已知工具**取最能说明动作的字段 → 按**常见字段名**猜
+  /// （`command`/`code`/`path`/`pattern` 在各家工具里高度一致）→ 才退回 JSON。
   [[nodiscard]] static auto tool_arguments_brief(std::string_view name, std::string_view arguments)
       -> std::string {
     // 多行内容在摘要里压成一行（否则首行之后的内容全被截掉，看不出参数是谁）。
@@ -1273,14 +1375,25 @@ struct AgentPage : st::ui::dsl::Component {
       for (const char ch : text) out.push_back(ch == '\n' || ch == '\r' ? ' ' : ch);
       return out;
     };
+    // 取首行且限长：参数常是多行脚本，首行通常就足以认出动作。
+    const auto head = [](std::string text, std::size_t cap) {
+      const auto nl = text.find('\n');
+      if (nl != std::string::npos) text.resize(nl);
+      if (text.size() > cap) {
+        text.resize(cap);
+        text += "…";
+      }
+      return text;
+    };
     // **失败也要给出原文**：参数解析不出来时，让用户看到模型到底传了什么
-    // （否则只能看到“参数无效”却不知道哪里错）。
+    //（否则只能看到“参数无效”却不知道哪里错）。
     const auto parsed = st::json_parse(arguments);
-    if (!parsed.has_value()) return one_line(arguments);
+    if (!parsed.has_value()) return head(one_line(arguments), 160);
     const Json& args = *parsed;
-    // 每个工具只抽“最能说明动作”的那一两个字段。
+
+    // —— 已知工具：抽最能说明动作的字段 ——
     std::string brief;
-    if (name == "sh") {
+    if (name == "sh" || name == "bash" || name == "run") {
       brief = tool_arg(args, "command");
     } else if (name == "read" || name == "write") {
       brief = tool_arg(args, "path");
@@ -1288,11 +1401,37 @@ struct AgentPage : st::ui::dsl::Component {
       const std::string path = tool_arg(args, "path");
       const std::string from = tool_arg(args, "old_string");
       brief = path;
-      if (!from.empty()) brief += "  「" + from + "」";
-    } else {
-      // 未知工具：把整个 JSON 压成一行（总比什么都没有强）。
-      brief = one_line(arguments);
+      if (!from.empty()) brief += "  「" + head(one_line(from), 60) + "」";
+    } else if (name == "js") {
+      // 编排脚本：首行通常是 `const r = await sh({...})`，比整份代码更能说明意图。
+      brief = head(one_line(tool_arg(args, "code")), 120);
+    } else if (name == "agent_load" || name == "agent") {
+      brief = tool_arg(args, "name");
+    } else if (name == "grep" || name == "search") {
+      brief = "「" + head(tool_arg(args, "pattern"), 60) + "」";
+      const std::string scope = tool_arg(args, "path");
+      if (!scope.empty()) brief += "  于 " + scope;
+    } else if (name == "glob") {
+      brief = tool_arg(args, "pattern");
+    } else if (name == "fetch_url") {
+      brief = tool_arg(args, "url");
     }
+
+    // —— 不认识：按**字段名优先级**猜一个 ——
+    //
+    // 这些名字在各家工具里高度一致（MCP / OpenAI function calling 的惯例），
+    // 比“倒整份 JSON”有用得多。
+    if (brief.empty()) {
+      for (const char* key : {"command", "cmd", "code", "script", "path", "file", "file_path",
+                              "name", "pattern", "query", "url", "prompt", "text"}) {
+        brief = tool_arg(args, key);
+        if (!brief.empty()) break;
+      }
+    }
+
+    // —— 最后一招：JSON 本身（压成一行后限长） ——
+    if (brief.empty()) brief = one_line(arguments);
+
     if (brief.size() > 160U) {
       brief.resize(160U);
       brief += "…";
@@ -1314,14 +1453,17 @@ struct AgentPage : st::ui::dsl::Component {
     }
     const std::string label = tool_label(m.tool_name);
     const std::string brief = tool_arguments_brief(m.tool_name, m.tool_arguments);
-    (void)row(c, {.gap = 0, .max_height = st::ui::kUnbounded,
-                  .justify = st::ui::Justify::Start,
-                  .key = "row-tool-" + uid}, [&] {
+    // 同气泡/思考块：**不套 `row`**，让卡片拿到父级的 `available_width`。
+    // 否则输出区拿不到宽度上限 → 长行不折行 → 所有工具卡高度一样。
+    {
+      {
       (void)card(c,
                  {.gap = 5, .padding = 9, .max_width = kMaxBubbleWidth,
                   // 与气泡同理：工具输出也全高展开（外层消息区滚）。
                   .max_height = st::ui::kUnbounded,
-                  .surface = st::ui::Element::Surface::Sunken,
+                  // **与气泡同款玻璃材质**（用户要求“工具也用正文的玻璃特效”）。
+                  .style = kBubbleStyle,
+                  .align_self = st::ui::Align::Start,
                   .key = "tool-" + m.tool_name + "-" + uid},
                  [&] {
                    (void)row(c, {.gap = 6, .align_items = st::ui::Align::Center,
@@ -1349,7 +1491,9 @@ struct AgentPage : st::ui::dsl::Component {
                          c,
                          [preview](st::ui::MarkdownView& view) {
                            view.set_shrink_to_fit(true);
-                           view.set_base_font_size(11.0f);
+                           // 比正文小一号：正文 13 → 工具 10
+                           //（工具输出是“日志/回显”性质，最不需要占视线）。
+                           view.set_base_font_size(kToolFontSize);
                            // 包成代码块：工具输出不该被当成 Markdown 渲染（缩进/`*` 会变形）。
                            view.set_markdown("```\n" + preview + "\n```");
                          },
@@ -1358,7 +1502,8 @@ struct AgentPage : st::ui::dsl::Component {
                           .key = "tool-output-" + uid});
                    }
                  });
-    });
+      }
+    }
   }
 
   /// 配置面板（overlay 内容）。
@@ -1664,7 +1809,26 @@ struct AgentPage : st::ui::dsl::Component {
       }
       std::string text = ran->stdout_text;
       if (text.empty()) text = "（无输出）";
-      text += "\n[exit " + std::to_string(ran->exit_code) + "]";
+
+      // 退出标识必须让模型能**区分三种情况**（旧写法只给 `[exit N]`）：
+      //   · 正常结束 → 命令自己的退出码；
+      //   · 超时被杀 → 运行时长≈上限（此时 N 是框架的杀进程码，不是命令的返回）；
+      //   · 被信号终止 → POSIX 下 128+N。
+      //
+      // 为何这很重要：模型看到 `[exit 1]` 会去查命令哪写错了；
+      // 而实际是超时/被杀时，正确动作是**拆小重跑**或调大超时。
+      // 它分不出来就会一直在错误的方向上修命令。
+      const bool timed_out =
+          options.timeout_ms > 0 && ran->elapsed_ms >= static_cast<std::int64_t>(options.timeout_ms);
+      text += "\n[exit " + std::to_string(ran->exit_code) + ", " +
+              std::to_string(ran->elapsed_ms) + "ms";
+      if (timed_out) {
+        text += " · 超时：已达 " + std::to_string(options.timeout_ms) +
+                "ms 上限，进程被终止——若命令本身需要更久，请拆成更小的步骤重跑";
+      } else if (ran->exit_code > 128 && ran->exit_code < 160) {
+        text += " · 被信号终止（signal " + std::to_string(ran->exit_code - 128) + "）";
+      }
+      text += "]";
       return ToolResult{ran->exit_code == 0, truncate_tool_output(std::move(text))};
     }
 
@@ -1675,6 +1839,23 @@ struct AgentPage : st::ui::dsl::Component {
         return ToolResult{false, "读取失败：" + loaded.error().message + "（路径：" + path + "）"};
       }
       std::string content = std::move(*loaded);
+      // **二进制文件必须拒绝**（而不是解成乱码喂给模型）。
+      //
+      // 为何重要：模型说“read 一下 logo.png”时，旧实现会把字节按文本解，
+      // 得到一大片 U+FFFD 与不可打印字符——既浪费上下文，又可能让模型据此
+      // 编造出“文件内容就是这样”的错误结论。直接告知“这是二进制”才是它需要的信息。
+      //
+      // 判据用**NUL 字节**：文本文件（UTF-8/GBK/UTF-16 都不含裸 NUL）里不会出现，
+      // 而几乎所有二进制格式都有。比“扩展名白名单”可靠（.dat/.bin 等无法枚举），
+      // 也比“可打印字符比例”便宜（只看前 8KB）。
+      {
+        // 判据在 `tool_support.hpp`（`looks_binary`）：前 8KB 里有无裸 NUL。
+        if (xiaobai::tool::looks_binary(content)) {
+          return ToolResult{false, "这是二进制文件，不能按文本读取（大小 " +
+                                    std::to_string(content.size()) +
+                                    " 字节）。如需查看请用 sh 配合专用工具。路径：" + path};
+        }
+      }
       // 行号 + 可选切片：与常见编辑器/工具的输出形状一致，模型能直接引用行号。
       std::size_t offset = 1;
       std::size_t limit = 0;
@@ -1719,12 +1900,16 @@ struct AgentPage : st::ui::dsl::Component {
       if (auto wrote = st::fs::write_text(path, content); !wrote) {
         return ToolResult{false, "写入失败：" + wrote.error().message};
       }
-      return ToolResult{true, "已写入 " + std::to_string(content.size()) + " 字节。" + path};
+      return ToolResult{true, "已写入 " + std::to_string(content.size()) + " 字节。" + path +
+                                  escaping_note(tool_root, path)};
     }
 
     if (call.name == "edit") {
       const std::string path = resolve_tool_path(tool_root, tool_arg(args, "path"));
-      return tool_edit_text(path, tool_arg(args, "old_string"), tool_arg(args, "new_string"));
+      ToolResult result = tool_edit_text(path, tool_arg(args, "old_string"),
+                                         tool_arg(args, "new_string"));
+      if (result.ok) result.text += escaping_note(tool_root, path);
+      return result;
     }
 
     return ToolResult{false, "未知工具：" + call.name};
@@ -1988,6 +2173,131 @@ struct AgentPage : st::ui::dsl::Component {
     messages.set(std::move(list));
   }
 
+  // ———————————————————————————————————————————————————————————————
+  // 会话持久化（连续保存）
+  //
+  // 一条对话存档，不是会话列表：小白是“一个模型一条对话”的应用。
+  // 存到 `~/.xiaobai/session.json`（`XIAOBAI_SESSION` 可覆盖）。
+  // ———————————————————————————————————————————————————————————————
+
+  /// 把当前界面状态拍成快照。
+  [[nodiscard]] auto session_snapshot() const -> xiaobai::session::Snapshot {
+    xiaobai::session::Snapshot snap;
+    const Config cfg = config.value();
+    snap.base_url = cfg.base_url;
+    snap.api_key = cfg.api_key;
+    snap.model = cfg.model;
+    for (const auto& m : messages.value()) {
+      xiaobai::session::StoredMessage out;
+      out.role = m.role;
+      out.content = m.content;
+      out.stamp = m.stamp;
+      out.reasoning = m.reasoning;
+      for (const auto& call : m.tool_calls) {
+        out.tool_calls.push_back({call.id, call.name, call.arguments});
+      }
+      out.tool_call_id = m.tool_call_id;
+      out.tool_name = m.tool_name;
+      out.tool_arguments = m.tool_arguments;
+      out.output = m.output;
+      out.tool_failed = m.tool_failed;
+      snap.messages.push_back(std::move(out));
+    }
+    return snap;
+  }
+
+  /// 主循环每帧调：**内容真的变了**才写盘。
+  ///
+  /// 为何用指纹而不是“每次变更就写”：流式生成时内容每帧都在长，
+  /// 无条件写会把磁盘打得很热；而比一次几十字节的指纹几乎零成本。
+  ///
+  /// 返回值：本帧是否真的写了（给日志/调试用）。
+  auto persist_if_changed() -> bool {
+    const xiaobai::session::Snapshot snap = session_snapshot();
+    const std::uint64_t now = xiaobai::session::fingerprint(snap);
+    if (now == session_fingerprint && session_saved_once) return false;
+    session_fingerprint = now;
+    session_saved_once = true;
+    return xiaobai::session::save(snap);
+  }
+
+  /// 启动时恢复（手到已有存档才有动作）。
+  ///
+  /// 返回是否真的恢复出东西：调用方据此决定要不要先弹配置窗。
+  auto restore_session() -> bool {
+    const auto snap = xiaobai::session::load();
+    if (!snap.has_value()) return false;
+    if (snap->messages.empty()) return false;
+
+    // 配置：存档里的值**优先于**构建预置（用户上次填的才算数）；
+    // 但构建期宏锁定的模型不该被旧存档改回去。
+    Config cfg = config.value();
+    if (!snap->base_url.empty()) cfg.base_url = snap->base_url;
+    if (!snap->api_key.empty()) cfg.api_key = snap->api_key;
+    if (!snap->model.empty() && !model_locked()) cfg.model = snap->model;
+    config.set(cfg);
+
+    std::vector<Message> restored;
+    for (const auto& m : snap->messages) {
+      Message out;
+      out.role = m.role;
+      out.content = m.content;
+      out.stamp = m.stamp;
+      out.reasoning = m.reasoning;
+      for (const auto& call : m.tool_calls) {
+        out.tool_calls.push_back(ToolCall{call.id, call.name, call.arguments});
+      }
+      out.tool_call_id = m.tool_call_id;
+      out.tool_name = m.tool_name;
+      out.tool_arguments = m.tool_arguments;
+      out.output = m.output;
+      out.tool_failed = m.tool_failed;
+      restored.push_back(std::move(out));
+    }
+    messages.set(std::move(restored));
+    // 恢复出来的会话先把指纹对齐，避免启动后无谓地立刻重写一遍。
+    session_fingerprint = xiaobai::session::fingerprint(session_snapshot());
+    session_saved_once = true;
+    return true;
+  }
+
+  /// **清空会话上下文**（标题栏那个图标按钮的落点）。
+  ///
+  /// 与“新建一个空对话”同义：上下文全部丢弃，只留一条欢迎语。
+  ///
+  /// ## 为何不只是清 `messages`
+  ///
+  /// 用户说“清空会话上下文”，“上下文”包括三类东西：
+  /// · 界面上的消息（`messages`）；
+  /// · **正在流式的答案与待执行的工具调用**（不中止它们，回复会接着“填”到清空后的对话里）；
+  /// · **磁盘上的存档**（不清就会下次启动又被恢复回来——用户会以为按钮没生效）。
+  ///
+  /// 所以三件事一起做，并**立即写盘**（不等主循环的指纹变更检测）：
+  /// 用户点完就想关窗，而关窗可能快过下一帧。
+  ///
+  /// 为何连配置也一起清：它是“会话上下文”的一部分（上次用的模型/端点）。
+  /// 但**保留在内存里**不动——清的是磁盘存档，当前连接照常能用；
+  /// 下一次启动会重新弹配置窗（那才是“清干净”的预期）。
+  void clear_session() {
+    // ① 中止正在跑的请求（否则它会把结果追回到空对话里）。
+    stop_stream();
+    // ② 清界面上的对话。
+    messages.set(std::vector<Message>{
+        Message{"assistant", "你好，我是小白。有什么需要帮助的吗？", ""}});
+    // ③ 清磁盘存档，并立刻落盘这份“新会话”。
+    //
+    // 不能只删文件：主循环下一帧发现“内容变了”又会把旧内容写回去吗？不会
+    //（内容已变），但**必须立即写**一份新的，否则用户马上关窗、文件还是旧的。
+    session_fingerprint = 0;
+    session_saved_once = false;
+    (void)persist_if_changed();
+  }
+
+  /// 上一次落盘的指纹（配合 `persist_if_changed`）。
+  std::uint64_t session_fingerprint{0};
+  /// 是否已经存过一次（首次无论指纹如何都存，保证文件存在）。
+  bool session_saved_once{false};
+
   // —— 后台线程主体 ——
   static void run_request(StreamJob* raw, const Config& cfg, const Json& tools,
                           const std::vector<Json>& context) {
@@ -2111,9 +2421,34 @@ int run_app(int argc, char** argv) {
     badge->set_size(st::ui::Button::Size::Small);
     badge->set_hint("点击配置模型连接");
     badge->on_click = [page] { page->open_settings(); };
-    auto* badge_raw = frame->title_bar()->add_leading(std::move(badge));
-    page->model_badge = badge_raw;
-  }
+      auto* badge_raw = frame->title_bar()->add_leading(std::move(badge));
+  page->model_badge = badge_raw;
+
+  // **清空会话**：图标按钮，放在 trailing 槽（标题之后、窗口控制钮之前）。
+  //
+  // 为何用 `add_trailing` 而不是 `add_leading`：leading 紧跟在品牌名后面，
+  // 而清空是“对当前会话的破坏性操作”，它应该待在**右侧操作区**、
+  // 与最小化/关闭同一侧，远离“当前模型”那个导航性位置。
+  //
+  // 为何用图标不用文字（用户明确要求）：标题栏高度只有 ~32px，
+  // “清空会话”四个字会把模型标签挤走；图标 + `hint`（悬停提示）足够表达。
+  //
+  // 为何要二次确认（`card_ask` 那种弹窗太重，这里用即时可撤销的策略）：
+  // 不弹确认——但**清完立即写盘**（见 `clear_session`），
+  // 所以“误点”的代价是丢一段对话而不是“文件还在、界面空了”的困惑。
+  // 若将来要确认，正确的位置是 `on_click` 里弹一个轻量风层，而不是在标题栏加文字。
+  // 空标签 + `set_icon`：图标就是全部内容（标题栏不放文字，用户明确要求）。
+  auto clear_button = std::make_unique<st::ui::Button>("", st::ui::Button::Variant::Ghost,
+                                                       st::ui::Button::Size::Small);
+  clear_button->set_id("btn-clear-session");
+  clear_button->set_key("btn-clear-session");
+  clear_button->set_icon("trash");
+  clear_button->set_hint("清空会话上下文（包括磁盘存档）");
+  // 点击前退一层：清空是破坏性的，但用户已明确要求一个直按钮；
+  // 保留可恢复性的手段是“存档立即重写成新会话”（不是不可逆）。
+  clear_button->on_click = [page] { page->clear_session(); };
+  (void)frame->title_bar()->add_trailing(std::move(clear_button));
+}
   st::ui::Element* slot = frame->content();
   app.set_content(std::move(frame));
 
@@ -2188,6 +2523,13 @@ int run_app(int argc, char** argv) {
         {static_cast<float>(options.width), static_cast<float>(options.height)});
   }
 
+  // **启动恢复**：有存档就把上次的对话与配置拉回来。
+  //
+  // 为何放在“引导弹窗”之前：存档里带着上次填的 base_url / api_key，
+  // 恢复成功后配置已就绪，就不该再弹一次配置窗（用户上次已经填过了）。
+  // 也为 `--demo` 之外的正常启动服务：关掉窗口再开，对话还在。
+  const bool restored = page->restore_session();
+
   // 首次运行引导：没有可用配置就把配置面板直接弹出来（无顶栏入口，这一步不可绕过）。
   // 必须在 start() 之后：弹窗走声明式 overlay，需要 UiRoot 与脚本宿主就绪。
   //
@@ -2197,12 +2539,17 @@ int run_app(int argc, char** argv) {
   const Config cfg = page->config.value();
   if (values.has("--demo") || cfg.ready()) {
     page->status.set({});
+    if (restored) {
+      st::log::out("小白：已恢复上次对话（{} 条消息，存档 {}）\n",
+                   page->messages.value().size(), xiaobai::session::store_path());
+    }
   } else {
     // 未配置时直接弹面板，不另写状态行（界面上不保留状态文字）。
     page->open_settings();
   }
 
   while (!app.quit_requested()) {
+    const std::int64_t frame_start_ms = st::time::now_ms();
     // 流式增量必须先于重组推进：State 在此标脏，紧接着 tick 才能把改动落地。
     // 为何不放在 build() 里：build 只在重组时跑，而重组又靠“状态脏了”触发——
     // 谁先动的问题会变成静默死锁（实测：状态永远停在「正在连接…」）。
@@ -2213,6 +2560,25 @@ int run_app(int argc, char** argv) {
     page->sync_title_badge();
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
+    // **连续保存**：内容真的变了就写盘。
+    //
+    // 放在 `tick()` 之后：此时这一帧的流式增量已经并入 State，
+    // 存下的就是用户当下看到的内容。
+    // 为何不只在退出时存：强杀/崩溃/流式中途关窗都会丢掉整段对话，
+    // 而测试时要先正常退出才能看文件（实测来回很慢）。
+    // 写成“变了才存”是因为流式时内容每帧都在长，无条件写会把磁盘打热。
+    (void)page->persist_if_changed();
+    // **必须交给框架安排节拍**（实测：不调它 = 跑满一个核）。
+    //
+    // 旧写法直接回到循环头：`app.tick()` 虽然只在有脏区时重绘，但**循环本身**
+    // 是纯忙等——用户看着一个不动也不输入的聊天窗，进程就在那里 100% 占一个核。
+    //
+    // `pace_loop` 的分工（见其注释）：
+    // · 有活（待重绘/动画/布局脏）→ 睡到帧预算余量，维持 60fps 节拍；
+    // · 空闲 → 等**控制通道可读**（有命令立刻醒）+ 夹到最近的定时唤醒点 +
+    //   4ms 上限兜底输入响应。
+    // 因此它既不会空转，也不会把响应度拖慢。
+    app.pace_loop(frame_start_ms);
   }
   // 收尾：结束仍在跑的后台线程
   if (page->job != nullptr) {

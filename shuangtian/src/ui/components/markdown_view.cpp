@@ -90,8 +90,8 @@ constexpr float kTableCellPadY{5.0f};        ///< 表格单元格上下内边距
 constexpr float kTableCellPad{8.0f};
 constexpr float kTableMinColumn{48.0f};
 constexpr float kDividerThickness{1.0f};
-constexpr float kHeadingBottomGap{8.0f};
-constexpr float kHeadingRuleGap{3.0f};
+constexpr float kHeadingBottomGap{6.0f};
+constexpr float kHeadingRuleGap{2.0f};
 constexpr float kBlockGap{12.0f};
 constexpr float kNestedGap{6.0f};
 constexpr float kDefaultViewWidth{640.0f};
@@ -99,12 +99,8 @@ constexpr float kMinViewWidth{80.0f};
 constexpr float kMinTextWidth{48.0f};
 /// “这一行已经顶到可用宽”的容差（逻辑 px）：顶到就说明它在折行。
 constexpr float kShrinkEpsilon{1.0f};
-/// 选中高亮带的四周留白（逻辑 px）。
-///
-/// 紧贴字形墨迹的色块看起来像“文字被关在框里”（直边字符尤其明显）；
-/// 留一点点边距后读感接近原生控件的选择高亮。
-constexpr float kSelectionPadX{2.5f};
-constexpr float kSelectionPadY{1.0f};
+// 选中高亮带的留白与圆角：`kSelectionPadX/Y` / `kSelectionRadius`
+// 定义在 `markdown_view.hpp`（回归测试要断言它们，实现与测试必须同一入口）。
 /// “还没有画过任何组”的哨兵（组首行下标空间里的无效值）。
 constexpr std::size_t kNoGroupHead{static_cast<std::size_t>(-1)};
 /// 滚轮/箭头键每格的**兑底**步长（优先取主题 `Metrics::wheel_step`，见 on_event；
@@ -113,8 +109,32 @@ constexpr float kWheelStep{48.0f};
 constexpr float kPageRatio{0.9f};
 constexpr std::uint32_t kMaxNestingDepth{32U};
 
+/// 标题字号相对正文基准的**倍数**（H1..H6）。
+///
+/// ## 为何不用主题的 `font_3xl..font_lg`
+///
+/// 主题那套（`34/26/20/17/15/15` 对 `font_base=15`）是按**文档阅读**调的。
+/// 直接搬到聊天场景就失真了：正文被调用方改成 12~13px 时，标题仍是绝对值，
+/// H1 变成 34px（正文的 **2.6 倍**）——“标题比正文字体层级差距过大”。
+///
+/// ## 取值
+///
+/// 1.35 / 1.25 / 1.15 / 1.08 / 1.00 / 1.00：
+/// · 13px 正文 → H1 = 17.6（只大 4.6px）。**层级靠字重 + 间距 + 分隔线区分**，
+///   不只靠字号——这是紧阶梯能成立的前提（标题都是 Bold/SemiBold，且 H1/H2 带下分隔线）；
+/// · 单调层次保留，H1 与正文的绝对差只剩 ~5px（旧实现是 21px）。
+///
+/// 为何不干脆全部同号（1.0）：那样 `#` 与 `######` 只剩字重与间距差异，
+/// 扫一眼标题看不清“这几段是并列还是子项”。保留 1.35~1.08 的细微阶梯即可。
+inline constexpr std::array<float, 6> kHeadingScale{1.35f, 1.25f, 1.15f, 1.08f, 1.00f, 1.00f};
+
 /// 标题上间距（H1..H6；`DESIGN.md` §5 的 4px 栅格）。
-constexpr std::array<float, 6> kHeadingMargins{24.0f, 20.0f, 16.0f, 14.0f, 12.0f, 10.0f};
+///
+/// **这一项对“层级跨度”的贡献比字号还大**（实测 13px 正文下）：
+/// H1 与正文的内容高差 21.2px 里，字号只占 ~10px，其余全来自
+/// 这里的第一项（24）+ `kHeadingBottomGap`（8）+ H1/H2 的分隔线夹距（6）。
+/// 所以压紧阶梯时它必须同向收紧，否则光改字号仍然“跳”。
+constexpr std::array<float, 6> kHeadingMargins{16.0f, 14.0f, 12.0f, 10.0f, 8.0f, 8.0f};
 
 
 // —— 形状填充辅助 ——
@@ -283,9 +303,13 @@ void append_inline_text(const std::vector<st::md::Inline>& inlines, std::string&
 // —— 构造与内容 ——
 
 MarkdownView::MarkdownView(std::string markdown) {
-  metrics_.heading_sizes = {34.0f, 26.0f, 20.0f, 16.0f, 14.0f, 14.0f};  // = 主题 font_3xl..font_base
-  metrics_.heading_margins = kHeadingMargins;
   metrics_.base = 14.0f;
+  // 标题字号跟着基准字号 × 压紧阶梯（与 `apply_theme` 同一口径，
+  // 否则“未接主题”与“接上主题”两种状态下的层级不一致）。
+  metrics_.heading_sizes = {metrics_.base * kHeadingScale[0], metrics_.base * kHeadingScale[1],
+                            metrics_.base * kHeadingScale[2], metrics_.base * kHeadingScale[3],
+                            metrics_.base * kHeadingScale[4], metrics_.base * kHeadingScale[5]};
+  metrics_.heading_margins = kHeadingMargins;
   metrics_.code = 13.0f;
   metrics_.table = 12.0f;
   // 内边距默认值只在这里给一次（`apply_theme` 不再覆盖它）：
@@ -367,8 +391,28 @@ void MarkdownView::set_base_font_size(float size) {
   const float next = size > 0.0f ? size : 0.0f;
   if (next == base_font_size_) return;
   base_font_size_ = next;
+  // **标题字号必须跟着重算**（不只改正文）。
+  //
+  // 旧实现这里只改 `base_font_size_`，标题字号留在上一轮（或默认值）——
+  // 于是“把正文改成 13px”之后，H1 仍是主题的 34px。
+  // 而 `apply_theme` 只在挂树/换主题时跑，**不会因为正文改字号而重跑**，
+  // 所以标题一直停在旧字号：这正是“标题与正文层级差距过大”的来源。
+  //
+  // `metrics_.base` 也在这里同步（与 `apply_theme` 同一取值口径），
+  // 否则本函数算出的标题字号会基于旧 base。
+  metrics_.base = next > 0.0f ? next : metrics_.base;
+  sync_heading_sizes();
+  style_.font_size = metrics_.base;
   needs_layout_ = true;
   mark_layout_dirty();
+}
+
+/// 按当前 `metrics_.base` 重算六档标题字号（`apply_theme` 与 `set_base_font_size` 共用）。
+void MarkdownView::sync_heading_sizes() {
+  const float base = metrics_.base > 0.0f ? metrics_.base : 14.0f;
+  metrics_.heading_sizes = {base * kHeadingScale[0], base * kHeadingScale[1],
+                            base * kHeadingScale[2], base * kHeadingScale[3],
+                            base * kHeadingScale[4], base * kHeadingScale[5]};
 }
 
 void MarkdownView::set_code_font_size(float size) {
@@ -384,15 +428,26 @@ void MarkdownView::set_code_font_size(float size) {
 void MarkdownView::apply_theme(const Theme& theme) {
   const Metrics& metrics = theme.metrics();
   TextMetrics next;
-  next.heading_sizes = {metrics.font_3xl, metrics.font_2xl, metrics.font_xl,
-                        metrics.font_lg,  metrics.font_base, metrics.font_base};
-  next.heading_margins = kHeadingMargins;
   // 排版三件套的组件侧落点：DSL `markdown(..., {.size = 16})` 走这里改正文
   // 基准字号（包装层把 `props.size` 写进 `set_base_font_size`，这里每帧回放），
   // `hex_color`/`color` 的显式覆盖同样末尾回放（盖过主题的 text 色）。
   next.base = text_size_override() > 0.0f ? text_size_override()
                                           : (base_font_size_ > 0.0f ? base_font_size_
                                                                     : metrics.font_base);
+  // 标题字号 = 正文基准 × 压紧的阶梯（见 `kHeadingScale` 的说明）。
+  //
+  // 不用主题的 `font_3xl..font_lg` 绝对值的两个理由（实测）：
+  // ① 那是按 `font_base=15` 的**文档阅读**调的，直接搬到聊天里层级跳太大；
+  // ② 它的绝对值不随调用方的正文基准变化——正文改成 12/13px 时，
+  //    H1 仍是 34px（2.6 倍），“标题与正文差距过大”由此而来。
+  //
+  // **先算好标题再整体赋值**（不调 `sync_heading_sizes()`）：后者读的是
+  // `metrics_.base`，而新 base 还在 `next` 里未赋值——就地算最直接。
+  const float heading_base = next.base > 0.0f ? next.base : 14.0f;
+  next.heading_sizes = {heading_base * kHeadingScale[0], heading_base * kHeadingScale[1],
+                        heading_base * kHeadingScale[2], heading_base * kHeadingScale[3],
+                        heading_base * kHeadingScale[4], heading_base * kHeadingScale[5]};
+  next.heading_margins = kHeadingMargins;
   next.code = code_font_size_ > 0.0f ? code_font_size_ : metrics.font_sm;
   next.table = metrics.font_xs;
   if (!(next == metrics_)) {
@@ -1662,6 +1717,20 @@ auto MarkdownView::content_point_of(math::Point control_point) const -> math::Po
   return math::Point{control_point.x - content.x, control_point.y - content.y + scroll_offset_};
 }
 
+auto MarkdownView::cursor_at(math::Point point) const noexcept -> MouseCursor {
+  // 不可选中且不处理链接时，一律 `Arrow`：框架约定“Arrow = 我没意见”，
+  // 会逐级向上回退（父容器声明的 Hand 仍会生效）。
+  if (!selectable_ && !open_links_) return MouseCursor::Arrow;
+  // `point` 是**元素坐标系的绝对点**（与 `on_event` 的 `event.position` 同口径），
+  // 必须先走 `content_point_of` 才能与 `rows_`/`text_x` 对齐。
+  // 少这一步的典型症状：光标在正文上不变成 I-beam，
+  // 而在**偏下 padding 那一带**才变（或反之）。
+  const math::Point content = content_point_of(point);
+  if (open_links_ && !link_at(content).empty()) return MouseCursor::Hand;
+  if (selectable_) return MouseCursor::Text;
+  return MouseCursor::Arrow;
+}
+
 void MarkdownView::paint_selection(const RenderContext& context, raster::Surface& canvas,
                                    const Palette& colors) const {
   if (!has_selection_) return;
@@ -1697,23 +1766,22 @@ void MarkdownView::paint_selection(const RenderContext& context, raster::Surface
       const math::Rect raw{origin_x, band_top, width, band};
       const math::Rect view{raw.x - kSelectionPadX, raw.y - kSelectionPadY,
                             raw.width + kSelectionPadX * 2.0f, raw.height + kSelectionPadY * 2.0f};
-      fill_rect_shape(canvas, view, colors.selection, 2.5f);
-      continue;
-    }
-    const std::size_t from = index == begin.line ? begin.offset : 0U;
+          fill_rect_shape(canvas, view, colors.selection, kSelectionRadius);
+    continue;
+  }
+  const std::size_t from = index == begin.line ? begin.offset : 0U;
     const std::size_t to = index == end.line ? end.offset : row.flat.size();
     if (from >= to) continue;
     // **逐行分段**：高亮区间 = 该行选中文字的**实际像素跨度**（不是整行矩形）。
     // 基准必须与 `caret_at` 一致：内容坐标 x = `origin_x + row.text_x + 行内偏移`。
     const float x0 = origin_x + row.text_x + offset_to_x(row, from);
     const float x1 = origin_x + row.text_x + offset_to_x(row, to);
-    // **高亮带四周留白**：紧贴墨迹的矩形看起来像“文字被关在框里”。
-    // 横向给 2.5px（首尾字符的直边不至于贴到色块边缘），
-    // 纵向上下各 1px（字形的升部/降部不会顶到色块边）。
-    const math::Rect raw{std::min(x0, x1), band_top, std::max(x1 - x0, 1.0f), band};
-    const math::Rect view{raw.x - kSelectionPadX, raw.y - kSelectionPadY,
-                          raw.width + kSelectionPadX * 2.0f, raw.height + kSelectionPadY * 2.0f};
-    fill_rect_shape(canvas, view, colors.selection, 2.5f);
+      // **高亮带四周留白**：紧贴墨迹的矩形看起来像“文字被关在框里”。
+  // 具体取值与上界见 `kSelectionPadX/Y` 的说明（padding 与圆角同向调整）。
+  const math::Rect raw{std::min(x0, x1), band_top, std::max(x1 - x0, 1.0f), band};
+  const math::Rect view{raw.x - kSelectionPadX, raw.y - kSelectionPadY,
+                        raw.width + kSelectionPadX * 2.0f, raw.height + kSelectionPadY * 2.0f};
+  fill_rect_shape(canvas, view, colors.selection, kSelectionRadius);
   }
 }
 

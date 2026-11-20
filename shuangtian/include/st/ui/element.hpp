@@ -1590,10 +1590,20 @@ class Element {
   /// 保留结构是因为"以后可能有"；空表不会颁假契约（比收错名静默失效好）。
   static constexpr std::span<const std::string_view> kUniversalPropertyNames{};
 
-  /// 基类的**只读**诊断名（动画五项；同由 `with_universal` 并入）。
-  static constexpr std::string_view kUniversalReadonlyNames[] = {
+  /// 基类的**只读**诊断名（动画五项 + 交互态 + 光标；同由 `with_universal_readonly` 并入）。
+  ///
+  /// `cursor` 为何在这里：它是**系统级效果，截图里根本不存在**。
+  /// 不暴露就只能靠人眼看，“悬停可选中文字应变 I-beam”这类回归完全没法钉。
+  /// 值由 `cursor_at(元素中心点)` 推出，写入无意义，所以是只读项。
+  ///
+  /// ⚠ 数组要用 **`inline static constexpr`**：类内的 `static constexpr` 数组
+  /// 在某些编译上下文下没有被当作隐式 inline，于是每个 TU 都发出一份
+  /// **外部链接**的定义，链接时报 `duplicate symbol`（实测：删尽所有 .o 与归档
+  /// 重编仍复现，`nm` 看到的绑定类型是 `R` 而不是 `r`）。
+  /// 加 `inline` 是这个问题的确定性解法，不依赖编译器的隐式处理。
+  inline static constexpr std::string_view kUniversalReadonlyNames[] = {
       "animation", "animation_running", "animation_opacity", "animation_translate",
-      "transition", "hovered", "hover_progress", "hover_effect"};
+      "transition", "hovered", "hover_progress", "hover_effect", "cursor"};
 
   /// 把**基类的通用名字**并进组件自己的表。
   ///

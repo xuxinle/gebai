@@ -44,6 +44,33 @@
 
 namespace st::ui {
 
+/// 选中高亮带的四周留白（逻辑 px）。
+///
+/// ## 为何放在公共头文件
+///
+/// 它是**可观测行为的一部分**（选中时色块比字形大多少），回归测试要断言它，
+/// 而测试不能包含 `.cpp` 里的内部常量。旧写法是在测试里再写一份
+/// `constexpr float kSelectionPadY = 1.0f;`——那两份必然漂移：
+/// 实现改成 3.5 后测试仍按 1.0 算期望值，于是“改一个观感数值就要去修一个测试”。
+/// 放在这里，实现与测试走**同一个入口**。
+///
+/// ## 取值
+///
+/// 横向 6、纵向 3.5（用户：“选中的文本 padding 再加多点”）。
+/// 从 2.5/1.0 加上来后，色块与字形之间有一圈明显的呼吸感，
+/// 不再像“给每个字加了下划线框”。
+///
+/// ## 上界约束（不能再加大）
+///
+/// 高亮带的 `band` 已含行高（`line_geometry` 给的是行盒高），纵向再加会让
+/// **相邻两行的高亮连成一片**：行距 1.6 倍字号时，单侧可用余量
+/// ≈ (1.6−1)/2 × 字号 ≈ 0.3 × 11px ≈ 3.3px。
+/// 要再大就得同时加行高，那是另一个观感改动。
+inline constexpr float kSelectionPadX{6.0f};
+inline constexpr float kSelectionPadY{3.5f};
+/// 高亮带圆角（跟随 padding 放大：小圆角配大 padding 会显得方正）。
+inline constexpr float kSelectionRadius{4.5f};
+
 /// Markdown 渲染视图：`set_markdown` 全量替换 / `append_chunk` 流式追加，可滚动。
 class MarkdownView : public Element {
  public:
@@ -165,6 +192,24 @@ class MarkdownView : public Element {
   [[nodiscard]] auto code_block_at(math::Point content_point) const -> int;
   /// 内容坐标处的**行盒**（空 = 越界）。
   [[nodiscard]] auto row_box_at(float content_y) const -> math::Rect;
+
+  /// 指针形态：**可选中文字处 = I-beam**，链接上 = 手形，其余交给上层。
+  ///
+  /// ## 为何要覆写（用户：“光标放到可以选中的文字上指针都要变”）
+  ///
+  /// 旧实现从未声明 `set_cursor`，于是 `Element` 默认给 `Arrow`——
+  /// 一个能拖选、能 Ctrl+C 的文档区域，鼠标放上去却是**普通箭头**，
+  /// 用户根本不知道那里可以选。
+  ///
+  /// ## 两个取值连同的道理
+  ///
+  /// · `Text`（I-beam）：可选中，选中后能复制；
+  /// · `Hand`：在**链接**上——那里点一下是"打开"而不是"选字"，
+  ///   于“可选中文字”是**两种不同意图**，不能都归到 I-beam。
+  ///
+  /// 返回 `Arrow` 时（不可选中、也不在链接上）按框架约定**逐级向上回退**，
+  /// 于是父容器声明的 `Hand`（例：整张卡片可点）仍会生效。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override;
 
   // —— 异步排版（SlowContent 壳的对接面，2026-10-19 性能轮）——
 
@@ -453,6 +498,12 @@ class MarkdownView : public Element {
   void rebuild_rows(const RenderContext& context, float width);
   /// 按**给定控件宽**重排内容（`measure` 与 `arrange` 共用唯一入口）。
   void set_layout_width(const RenderContext& context, float width);
+  /// 按当前 `metrics_.base` 重算六档标题字号。
+  ///
+  /// `apply_theme` 与 `set_base_font_size` **共用这个口径**：
+  /// 只改正文而不重算标题，标题就会停在旧字号上——
+  /// 那正是“标题与正文层级差距过大”的根因。
+  void sync_heading_sizes();
   /// 当前排好的行里，内容实际用到的最右 x（`shrink_to_fit` 用）。
   [[nodiscard]] auto intrinsic_content_width() const noexcept -> float;
   /// 本组件想要的排版宽（`max_width` → `available_width` → 兑底常量）。

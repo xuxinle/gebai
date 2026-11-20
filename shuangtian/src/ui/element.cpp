@@ -465,6 +465,20 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   // `hovered` 暴露给控制通道：悬浮是**只能看像素、看不出状态**的交互态，
   // 不给读取口就只能靠截图猜（自动化验证会很脆）。
   if (name == "hovered") return hovered_ ? "true" : "false";
+  // `cursor` 同理，而且更硬：光标是**系统级效果，截图里根本不存在**。
+  // 没有读取口时，“悬停可选中文字应变成 I-beam”这条只能靠人眼看——
+  // 回归测试完全没法钉。返回语义短串（`text`/`hand`/`arrow`…，见
+  // `mouse_cursor_name`）：与平台无关，可直接在断言里比。
+  //
+  // 读的是 **`cursor_at(元素中心点)`**，不是 `cursor()`：很多控件按位置细分光标
+  // （编辑器正文是 Text、行号栏是 Arrow；`MarkdownView` 在链接上是 Hand），
+  // 而 `cursor()` 只给"整体声明"，多数组件压根不调 `set_cursor`。
+  // 中心点代表"这个控件的主体区域"，是属性面能给出的最接近答案。
+  if (name == "cursor") {
+    const math::Point center{bounds_.x + bounds_.width * 0.5f,
+                             bounds_.y + bounds_.height * 0.5f};
+    return std::string(mouse_cursor_name(cursor_at(center)));
+  }
   if (name == "hover_progress") return std::format("{:.3f}", static_cast<double>(hover_progress()));
   if (name == "hover_effect") return hover_effect_.enabled ? "true" : "false";
   // 显式排版覆盖的读回口（与写入口 `set_text_*` 对称）：
@@ -678,8 +692,12 @@ auto Element::readonly_property_names() const -> std::vector<std::string_view> {
   // - `hovered` / `hover_progress` / `hover_effect`：交互态，**只能从像素/驱动事件产生**。
   //   曾经它们在可写表里，而“可写”意味着“`set` 必须生效”——那是做不到的
   //  （实测：`set hovered=true` 没任何效果，而表在宣布它能写）。
-  return {"animation", "animation_running", "animation_opacity", "animation_translate",
-          "transition", "hovered", "hover_progress", "hover_effect"};
+  // - `cursor`：**系统级效果，截图里根本不存在**，不暴露就只能靠人眼看
+  //  （“悬停可选中文字应变成 I-beam”这类回归完全没法钉）。
+  //   它由 `cursor_at(点)` 推出，与元素坐标有关，写入无意义。
+  return {"animation",       "animation_running", "animation_opacity", "animation_translate",
+          "transition",      "hovered",           "hover_progress",    "hover_effect",
+          "cursor"};
 }
 
 auto Element::property_schema() const -> std::span<const PropertyDesc> {
