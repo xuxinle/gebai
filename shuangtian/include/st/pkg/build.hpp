@@ -276,6 +276,40 @@ auto clear_content_hash_cache() -> void;
                                        const std::vector<std::string>& extra_flags)
     -> std::vector<std::string>;
 
+/// 目标自己的源文本里是否引用了某个标识符（按**词边界**匹配）。
+///
+/// 供能力级拆链的自动推导用（见 `build()` 里的 `ST_NO_WEBVIEW`）；
+/// 导出供回归断言（`tests/pkg_capability_pruning_test.cpp`）。
+///
+/// ## 为何必须按词边界
+///
+/// 纯子串匹配会让 `WebViewPort` / `WebViewAdapter` / 注释里的 `WebView` 全部命中——
+/// 而 `app.cpp` 的 `WebViewPortAdapter` 是**框架侧**装配件，不是“应用要用浏览器”。
+/// 词边界（前一字符不是 `[A-Za-z0-9_]`）把 `class WebView`、`new WebView`、
+/// `st::ui::WebView>` 这类真实引用留下，把 `XxxWebView` 排除。
+[[nodiscard]] auto mentions_identifier(std::string_view text, std::string_view identifier) -> bool;
+
+/// 档位标志是否真的到了**框架单元**的编译命令行（不变量，导出供回归断言）。
+///
+/// ## 为何做成一个可测的纯函数
+///
+/// "框架单元必须带档位标志"是**调用点**的责任（`build()` 与 `build_test_binary()`
+/// 各自调 `make_framework_flags` 时传什么），而漏传是**完全静默**的：
+/// 编译成功、链接成功、测试全绿，只有产物体积与帧率在变。实测代价：
+/// `make_framework_flags` 的第 4 个实参被误写成 `{}` 后——
+/// ① 框架代码退回 `-O0`（无任何优化开关）；
+/// ② 丢 `-ffunction-sections -fdata-sections` ⇒ 链接期 `--gc-sections` 无粒度可裁，
+///    未引用的框架代码整段进产物；
+/// ③ 框架单元不再命中 PCH（建立侧带档位标志，消费侧不带就不兼容）；
+/// 三者合计把 `xiangqi` 从 6.30 MB 撑到 10.09 MB（+60%）。
+///
+/// 判据用**用户能看见的事实**：给定档位标志，框架单元的命令行里必须能找到它们
+/// ——而不是去比内部数据结构的赋值（那只能证明"我传了"，不能证明"它进了命令行"）。
+/// 回归：`tests/pkg_framework_profile_flags_test.cpp`（回退修复必变红）。
+[[nodiscard]] auto framework_flags_carry_profile(const std::vector<std::string>& framework_unit_flags,
+                                                const std::vector<std::string>& profile_flags)
+    -> bool;
+
 /// 错误分类：`run_tests` 链路上哪些失败是「链接/构建失败」而非「用例断言红」。
 /// 返回 true = 链接失败类（产物没出来或子进程起不来，用例根本没跑）。
 /// 纯函数，供 `pkg_test_link_split_test` 断言分类边界。

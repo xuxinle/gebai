@@ -6847,9 +6847,131 @@ gallery（用 3D）仍保留 3D 符号 54 个、体积从 ≈9.5 MB → **6.56 M
 原子依赖，按文件白名单切会切碎）；排除第三方时必须连带排除引用它的框架源
 （如 `src/ext/script.cpp` 引 `JS_*`），否则链接报 undefined——清单作者自己保证。
 
+##### `ST_NO_WEBVIEW`：**自动推导**的能力裁剪（2026-11-21）
+
+| 宏 | 作用 | 实测收益 |
+|---|---|---|
+| `ST_NO_WEBVIEW` | `app.cpp`（不调 `create_win32_webview`）+ Impl 的 `webview` 成员降裸指针 + `webview_unsupported_reason()` 报“未编入” | WebView2 宿主 + 内嵌 `Loader.dll` **191 KB/应用** |
+
+**与 `ST_NO_SCRIPT` 的关键区别：它不写在清单里，由构建器自动推导。**
+`ST_NO_SCRIPT` 的教训是：手工开关只能靠人填，于 9 个目标里只有 gbcode 填了，
+其余照旧背 QuickJS。而“用不用某个组件”**构建器自己能看出来**——
+`target_uses_webview()` 扫**目标自己的源**（`targets.<名>.sources` 展开），
+按**词边界**找 `WebView`（所以 `WebViewPortAdapter` 不命中）：
+
+| 目标 | 命中 | 产物里还有 Loader 吗 |
+|---|---|---|
+| `gallery`（`new WebView` 演示页） | 是 | 是（8.37 MB 不变） |
+| `gebai_desktop`（整窗 WebView） | 是 | 是 |
+| `xiangqi` / `cefu` / `gbcode` 等 | 否 | **否**（xiangqi 7.96 → **7.69 MB**）|
+
+三条必须知道的事实：
+
+1. **宏必须进“框架单元”的命令行**，不是 `effective.defines`。被裁的是框架自己的
+   `app.cpp` 里的调用；而 `effective.defines` 只作用于非框架单元。放错地方的症状是
+   “构建成功、体积一动不动”（本次实测撞了一次）。所以它走 `make_framework_flags`
+   的 `capability_defines` 形参。
+2. **代价：框架对象不再全工程共享缓存**。带不同能力宏的目标用不同命令编同一批
+   框架源，缓存键不同（宏已进 `cache_key_for`，**不会串味**）。这是能力裁剪固有的取舍：
+   要么每个应用背 191 KB，要么少命中一部分缓存。
+3. **判据必须保守**。误判“要用”：多 191 KB；误判“不用”：真正用浏览器的应用拿到
+   “未编入”，**功能没了**。所以：只扫目标源、词边界匹配、任何读不到/解析失败都
+   **当作要用**；测试二进制**一律不裁**（它要验全部组件）。
+   回归：`tests/pkg_capability_pruning_test.cpp`（含逆向验证：去掉右边界匹配后
+   3 个用例必红）。
+
 > **剩余残留（已评估，暂不处理）**：`platform_d3d11.cpp` 因提供 D3D11 **画布**（GUI 必备）
 > 被链入，它的 `GpuScene3d` 实现（≈64 KB）随同一 `.o` 成员进产物。要彻底分离需拆文件
 > （`platform_d3d11.cpp` → 画布 / 三维两块），收益 0.8%、风险是动平台层——已记入 `docs/BACKLOG.md` P2。
+
+##### 按名创建的三条入口：**只有它们该背整套组件**（2026-11-21）
+
+“按名字造组件”（XML 标签 / 脚本 `ui.create` / 协议 `create`）与“C++ 里直 `new`”
+是两条不同的链接需求：
+
+- 直 `new`：那个组件 `.o` 因被引用而进产物，静态登记自动完成——**天然按需**；
+- 按名：编译期不知道会造哪个，**必须有人对导入锚点产生真实引用**，否则
+  `create_element("Tree")` 得到“认不出的标签”。后者必然意味着整套组件在产物里。
+
+问题在于：**后者是可选能力**，而当时它是无条件付的。三处拆分把它拆对了：
+
+| 拆点 | 从哪到哪 | 谁付代价 |
+|---|---|---|
+| 便利函数 | `dsl.cpp` → `dsl_convenience.cpp` | 只付给**真调了** `dsl::table(...)` 的应用 |
+| 样式表校验器 | `stylesheet.cpp` → `stylesheet_validate.cpp` | 只付给**测试/工具**（应用不调 `validate_stylesheet`） |
+| 全量导入 | `dsl.cpp` → `dsl_component_imports.cpp` | 只付给**XML / 脚本 / 协议**三条按名入口 |
+
+前两条是普通的“把死代码搬出去”；第三条有个**关键约束**必须记住：
+
+**全量导入只能被“按名创建”的入口强引用，不能被 `dsl::make_element` 直接引用。**
+`make_element` 是那三条入口的**共用工具**，而 `dsl.o` 是每个 UI 应用都链接的核心——
+在它里面引用导入 = 闸门永远关不上。
+
+三种写法里只有第三种成立（前两种都实测失败）：
+
+| 写法 | 结果 |
+|---|---|
+| `dsl.cpp` 直接调 | 强引用，任何链接 `dsl.o` 的应用都背整套组件（实测无收益） |
+| 静态初始化器自注册 + `dsl.cpp` 查注册表 | 没人引用时那个 `.o` 不进链接，注册器不运行 → XML 应用拿到“认不出的标签” |
+| **三条入口各自强引用**（现方案） | 不用按名创建的应用不链接它；XML / 脚本 / 协议应用照常工作 |
+
+实测收益（9 个应用合计 79.26 → **77.03 MB**；`gedou` 单应用 11.52 → **9.37 MB**）：
+
+| 应用 | 变化 | 说明 |
+|---|---|---|
+| `gedou` | 11.52 → **9.37 MB**（−2.15） | 一个重型组件都不用（8 个归零） |
+| `xiangqi` | 7.69 → **7.65 MB** | XML 应用，重型组件**全保留**（省不了是该省的） |
+
+**判据有两面，必须用两种手段**（缺一面都会奖励错误实现）：
+
+| 面 | 手段 | 在哪 |
+|---|---|---|
+| 体积：不引用就不进产物 | `nm -C <exe>.debug` 查不到重型组件符号 | **产物级** `tools/check_component_pruning.py` |
+| 功能：要引用就真能造 | `make_element(名)` 非空 | 单测 `tests/ui_component_import_gate_test.cpp` |
+
+体积那一面**不能写成单测**：`st_tests` 直传所有用例源、必然链接全部组件，
+单测进程里“重型组件永远在”。实测：把导入实现回退掉，单测依然全绿。
+产物级脚本做过逆向验证（回退 `import_all_components()` → `xiangqi` 掉到 5.85 MB
+且脚本报 `RESULT=FAIL`），所以它真的在测量这件事。
+
+**已知局限（记录在案，不假装有覆盖）**：四条按名入口（`xml_ui` / `script_bridge` /
+`control/server` / `make_element`）各自都调导入，所以回退**单条**时判据仍是绿的
+（另三条兑着）。这是有意的分层兜底而非漏洞，但意味着“单点回退”抓不到——
+要抓它就得把这四条收敛成一条，而那会把“哪些应用要付代价”变成耦合决策。
+
+> 更正：上面说的“四条”已收敛为**三条**（`xml_ui` / `script_bridge`），
+> `dsl::make_element` 与 `control/server` 不再引用导入——前者是每个应用都链的核心、
+> 后者是每个应用都链的控制通道，在那两处引用等于闸门永远关不上（实测 `gedou` 11.52 MB）。
+> 现行口径：控制通道的 `create` **只能造出该应用本来就有的组件**（这是对的口径），
+> 而不是“框架里有什么”。
+
+##### `custom<T>` 必须自己声明“我要 T”（按需链接下的必需动作）
+
+`dsl::custom<T>` 是**编译期**就知道类型的入口，而它曾经漏了一个关键动作：
+
+```cpp
+// 错：模板里“用了 T”（`dynamic_cast<T*>`）**不会**让 T 的 .cpp 进产物
+Element* e = c.create_element(element_type_name<T>(), ...);   // → 运行时得空，abort
+```
+
+原因：`element_type_name<T>()` 查的是**运行期 token 表**，而那张表由组件的 `.cpp`
+在静态初始化期填。按需链接下那个 `.cpp` 没人引用就不进产物 → 表里查不到 → 空名字。
+
+修法是在 `custom<T>` 里补一条强依赖，但**不能无条件** `import_components<T>()`：
+外部注册类型（`dsl::register_element_type<T>`）没有 `component_importer<T>::run` 定义，
+无条件导入会链接期报未定义（实测：`caiyun::DirectorBridge`）。所以分成两档：
+
+| 类型 | 判定 | 动作 |
+|---|---|---|
+| 内置组件 | `component_meta<T>` 有全特化（`ST_UI_COMPONENT`） | `import_one<T>()` |
+| 外部注册类型 | 无 `component_meta<T>` | 不导（它自己的 `.cpp` 本就会因 `register_element_type` 被引用）|
+
+判据：`st::ui::is_builtin_component<T>` + `import_if_builtin<T>()`
+（`component_registry.hpp`）。
+
+**这是本轮唯一一个由优化引出的真回归**（caiyun 启动 abort，
+`custom<T> 未注册的组件类型`）——记在这里是因为它不会在任何“体积/启动”判据里
+自发地暴露，只能靠**把每个应用真的起一次**。
 
 ### 7.5.3 合成目标（`kind = "group"`）：`st build all`
 
@@ -7178,6 +7300,13 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 - 只带框架自己的包含目录（`include` / `third_party`）与框架的宏；
 - **不吃工程的 PCH**（PCH 路径里带着工程目录）；
 - 语义上也更对：框架源不该被引用方的同名头影响。
+
+**但档位标志必须带上**（`-O2/-O1/-DNDEBUG/-g` 与 `-ffunction-sections -fdata-sections`）：
+它们是“所有单元一致”的口径，与工程私有宏无关。漏传会三层同时失效且**全部静默**——
+框架代码退回 `-O0`、`--gc-sections` 失去粒度（未引用代码整段进产物）、框架单元不再命中 PCH。
+实测代价：`xiangqi` release **6.30 → 10.09 MB（+60%）**。
+因此 `make_framework_flags` 的第 4 个形参（`profile_flags_list`）两处调用点都必须传档位标志；
+收到空列表时它会记 `ST_LOG_ERROR`（回归：`tests/pkg_framework_profile_flags_test.cpp`）。
 
 实测：新工程冷构建 ≈ 30 s，第二个工程 ≈ 4 s（59/60 单元命中）。
 

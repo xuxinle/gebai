@@ -17,16 +17,6 @@
 namespace st::ui {
 namespace {
 
-/// 校验器用的**最小页面**：一个空容器，只要能承载样式即可。
-///
-/// 为何需要真元素：`validate_stylesheet` 必须真跑一遍解析才能发现
-/// “键表里有、但 `apply_declaration` 没有分支”这种缺陷（只查表发现不了）。
-struct ProbePage : dsl::Component {
-  void build(dsl::Composer& c) override {
-    (void)dsl::column(c, {.width = 80.0f, .height = 60.0f, .key = "probe"}, [] {});
-  }
-};
-
 /// 键名归一：小写、`-` → `_`（CSS 习惯用 `-`，C++ 习惯用 `_`，两者都认）。
 auto normalize(std::string_view raw) -> std::string {
   std::string out;
@@ -563,40 +553,6 @@ auto apply_stylesheet(Element& element, std::string_view text, SheetReport* repo
   local.applied = applied;
   if (report != nullptr) *report = std::move(local);
   return applied;
-}
-
-auto validate_stylesheet(std::string_view text) -> SheetReport {
-  // **真的解析一遍**（不是只查表）。
-  //
-  // 为何不能只查 `group_of_key`（实测 2026-11-19）：
-  // 那只能验“名字在表里”，验不了“这个名字真的能落位”。
-  // 而“登了名字但忘了写 `apply_declaration` 分支”正是这一层**唯一的新增缺陷形态**
-  // （键表驱动的方式少写一条分支，编译器不会报任何东西）。
-  // 实测：写入一个表里有、解析层不认的键，只查表版的校验器仍然全绿。
-  //
-  // 现在用一个**临时元素**真跑一次 `apply_stylesheet`，
-  // 于是“表里有但落不了位”与“值不合法”都会被归进 `unknown`。
-  UiRoot scratch;
-  scratch.set_viewport({100.0f, 100.0f});
-  auto page = std::make_shared<ProbePage>();
-  if (dsl::mount(scratch, page) == nullptr) {
-    // 建不出探针元素时退回只查表（不应发生，但不因此崩掉校验器）。
-    SheetReport fallback;
-    for (const Declaration& decl : split_declarations(text)) {
-      if (!group_of_key(decl.key).has_value()) {
-        fallback.unknown.push_back(decl.key);
-      } else {
-        ++fallback.applied;
-      }
-    }
-    return fallback;
-  }
-  scratch.layout();
-  Element* probe = scratch.content();
-  if (probe == nullptr) return SheetReport{};
-  SheetReport report;
-  (void)apply_stylesheet(*probe, text, &report);
-  return report;
 }
 
 }  // namespace st::ui

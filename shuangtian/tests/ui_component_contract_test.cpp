@@ -43,6 +43,7 @@
 #include <string_view>
 #include <vector>
 
+#include "st/ui/components/all.hpp"  // 本用例要枚举**全部**组件（导入锚点见下）
 #include "st/ui/dsl.hpp"
 #include "st/ui/element.hpp"
 
@@ -51,6 +52,15 @@ namespace {
 using st::ui::Element;
 using st::ui::dsl::make_element;
 using st::ui::dsl::registered_element_types;
+
+/// 把所有组件的导入锚点引用一次。
+///
+/// > **为何用例自己得写这一行**：`registered_element_types()` 返回的是
+/// > **已经链接进产物的**组件（注册表是运行期事实，不是编译期清单）。
+/// > 它不再自行触发全量导入——那会把整套组件强引用进任何链接 `dsl.o` 的应用
+/// > （实测 `gedou` 白背 656 KB），而应用侧并不查组件清单。
+/// > 要枚举全集的一方（正是本用例）自己负责把全集拉进来。
+inline void ensure_all_components_imported() { st::ui::import_all_components(); }
 
 [[nodiscard]] auto contains(const std::vector<std::string_view>& names, std::string_view needle)
     -> bool {
@@ -64,6 +74,7 @@ using st::ui::dsl::registered_element_types;
 /// 这条同时是下面所有不变量能跑的前提——注册表里出现一个造不出的名字，
 /// 就意味着声明式/协议建的界面会**凭空少一块**（且不报错）。
 ST_TEST(contract_every_type_builds_and_answers_basics) {
+  ensure_all_components_imported();
   const auto names = registered_element_types();
   ST_CHECK(names.size() >= 49U);  // 组件库规模下界（防"清单被误删"；49 = 48 + ThemePicker）
   for (const std::string& name : names) {

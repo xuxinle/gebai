@@ -49,9 +49,22 @@ namespace st::raster {
 namespace {
 
 /// three.js 源码（编译期嵌入——与 `ui/declarative.js` 同一机制，不依赖运行时文件）。
+///
+/// ## `ST_NO_THREE`：未用即不存在的编译期裁剪
+///
+/// `three.cjs` 是 **1254 KB** 的嵌入数据，而它只服务“三维场景脚本”这一条路。
+/// 不用三维的 GUI 应用（象棋 / 代码编辑器 / 海报 / 桌面壳 …）根本不会调到这里，
+/// 但它们仍会因为**本文件被引用**而把整块数据拉进 `.rdata`。
+///
+/// 定义 `ST_NO_THREE` 后这里不再引用嵌入数据，`boot()` 直接报“未编入”：
+/// 三维场景脚本在那些应用里本来也不会被调用，所以用户可见行为不变。
 [[nodiscard]] auto three_source() -> std::string_view {
+#ifdef ST_NO_THREE
+  return {};  // 未编入：见 `boot()` 的空源分支（报“未编入”，不静默失败）
+#else
   const auto file = b::embed<"third_party/three/three.cjs">();
   return std::string_view(file.data(), file.length());
+#endif
 }
 
 /// RAII 包装：异常安全地释放 JSValue（QuickJS 是手写引用计数，漏一个就泄漏整个运行时）。
@@ -295,7 +308,15 @@ struct ThreeRuntime::Impl {
   void boot() {
     const auto source = three_source();
     if (source.empty()) {
+#ifdef ST_NO_THREE
+      // 与 `ST_NO_SCRIPT` 的口径一致：明确说“未编入”，不伪装成“资源缺失”——
+      // 后者会让人以为是打包坏了，去查一个根本不存在的缺文件。
+      failure_reason =
+          "三维场景脚本未编入本产物（构建时定义了 ST_NO_THREE；本应用不需要三维，"
+          "如需三维，去掉该宏重新构建）";
+#else
       failure_reason = "three.js 源码为空（嵌入式资源缺失：third_party/three/three.cjs）";
+#endif
       return;
     }
     runtime = JS_NewRuntime();

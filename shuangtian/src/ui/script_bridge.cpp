@@ -137,7 +137,11 @@ ScriptBridge::ScriptBridge(ScriptHost& script, UiRoot* root) : impl_(std::make_u
   // 运行时按数据增删行。没有它，纯 XML 写的应用只能做静态页面
   // （实测：任务清单示例的“行”无路可走）。组件工厂 `dsl::make_element` 是同一张表，
   // 所以 XML 里能写的类型这里也能建，建出来的元素同类、照样能被选择器寻址。
-  auto build_fn = [root](const std::vector<st::Json>& args) -> Result<st::Json> {
+      // 按**类型名**建元素（`ui.create("Tree")`）：必须确保整套组件已导入，
+    // 否则拿到的类型不在产物里。只住在这里：不跑脚本的应用不为它买单
+    // （实测 gedou 因此省下 656 KB，见 `dsl_component_imports.cpp` 头部）。
+    dsl::ensure_builtin_components_imported();
+auto build_fn = [root](const std::vector<st::Json>& args) -> Result<st::Json> {
     if (args.empty()) return st::unexpected(st::ErrorCode::Invalid, "ui.build 需要类型名");
     const std::string requested = st::json_as_string(args[0]);
     // ⚠ **别名也要认**：XML 里能写 `<Row>`/`<Column>`/`<Icon>`，而组件工厂只认注册名

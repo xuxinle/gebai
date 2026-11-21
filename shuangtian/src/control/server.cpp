@@ -1022,6 +1022,11 @@ auto Server::Impl::handle_ui_create([[maybe_unused]] Client& client, [[maybe_unu
   [[maybe_unused]] auto& root = host.root();
 const std::string type = json_get_string(params, "type");
 if (type.empty()) return unexpected(ErrorCode::Invalid, "type 不能为空");
+  // 协议 `create` 按类型名建元素。这里**不**主动全量导入：控制通道是每个应用
+  // 都链接的必链路径，在这里引用导入会让所有应用背整套组件（实测 gedou 11.52 MB）。
+  // 语义上也不需要它：`make_element` 只会造出**产物里已有**的组件，这是对的口径——
+  // “控制通道能造什么”等于“这个应用本来就有什么”，而不是“框架里有什么”。
+  // （XML / 脚本应用天然会全量导入；纯 `new` 的应用按名字造重组件本就该报未知类型。）
 auto created = ui::dsl::make_element(type);
 if (created == nullptr) {
   return unexpected(ErrorCode::Unsupported,

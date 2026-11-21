@@ -7008,6 +7008,103 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 
 ## P2
 
+### 产物体积：three.js 仍被链进不用三维的 GUI 应用（2026-11-21 量化，未做）
+
+**现状**：WebView2Loader（191 KB）已按“未用即不存在”自动裁掉（`ST_NO_WEBVIEW`，
+见 `DESIGN.md` §7.5.2）。**three.js（1254 KB）仍留在工程级 `embed` 里**，
+于是 `xiangqi` / `gbcode` / `gallery` / `louyue` / `xiaobai` / `gedou` 这 6 个
+既无三维场景、也不用 bpy 的目标，`.rdata` 里各多带 1254 KB。
+
+**实测**（`-Wl,-Map=` 逐输入段归因，release 档）：
+
+| 目标 | `.rdata` 里 three.js | 是否用得到 |
+|---|---|---|
+| caiyun / cefu / jianmu | 1254 KB | 是（三维场景 / bpy） |
+| xiangqi / gbcode / gallery / louyue / xiaobai / gedou | 1254 KB | **否** |
+
+**方向**：three.js 的消费者是 `src/raster/three_runtime.cpp` 的
+`b::embed<"third_party/three/three.cjs">()`。收窄它有两种路：
+
+1. **目标级 embed**：把该项从工程级 `embed` 移到真正要三维的
+   `targets.<名>.embed`。障碍是 `b::embed<...>()` 的 `static_assert`
+   （路径必须在**本目标**的嵌入集合内）——对不声明它的目标会直接编译失败。
+   需要给 `embed` 机制补一条“本目标未声明该资源 ⇒ 生成零字节占位 + 运行期降级”
+   的语义（`optional_embed` 已有类似机制，可复用/推广）。
+2. **能力宏**（与 `ST_NO_WEBVIEW` 同路）：`ST_NO_THREE` 把 `three_runtime.cpp`
+   里的 `b::embed` 引用包进 `#ifndef`。改动小，但 `three_runtime` 是库级单元，
+   要让宏到达它得走 `capability_defines`（机制已就绪）。
+
+**收益**：**1254 KB × 6 个目标 ≈ 7.3 MB**；对 `xiangqi`（现 7.69 MB）是 16% 量级。
+
+**判据（可复算）**：在产物里搜 three.js 的特征串（`THREE.REVISION`）；
+或看 `-Map` 里 `embed_lib_...three_three_cjs.cpp.o:(.rdata)` 是否出现在该目标行上。
+
+> **状态（2026-11-21）**：已按方向 2 落地（`ST_NO_THREE` 自动推导 + `capability_defines`）。
+> 收益兑现：cefu / gallery / louyue / gedou / xiaobai 各 −1.23~1.24 MB。本条关闭。
+
+### 产物体积：四条“按名创建”入口的分布，使单点回退不可检测（2026-11-21）
+
+**现状**（2026-11-21 末轮后已收缩为**两条**）：全量组件导入
+（`import_all_components()`）被两个地方各自强引用：`xml_ui.cpp`（`build_from_xml`）
+与 `script_bridge.cpp`（`ui.create`）。
+
+> 更正：本轮曾把它同时挂在 `dsl::make_element` 与 `control/server.cpp`（共四条），
+> 实测那是错的——那两处是**每个应用都链接**的核心，闸门因此永远关不上
+> （`gedou` 仍 11.52 MB）。现行口径：`make_element` 不引用导入，控制通道的 `create`
+> 只能造出“该应用本来就有的组件”（这是对的口径，不是缺陷）。
+
+机制与实测数据见 `DESIGN.md` §7.5.2 的同名小节。
+
+**后果**：回退**其中一条**调用时，产物级判据（`tools/check_component_pruning.py`）
+仍然是绿的——另一条兑着。
+
+**为何这不算漏洞、也先不改**：两层是有意的分层兜底（每条路径自己保证“我能按名造”），
+而且它们服务的入口确实不同。要把单点回退变成可检测，得收敛成一条，
+但那会把“哪些应用该付代价”变成耦合决策。
+
+**可行方向（若将来真要做）**：给每条入口各自的可执行探针（极小工程，只引一条入口），
+在产物上分别断言；而不是在现有应用上断言。
+
+### PTY 中止：“命令刚启动”的窗口内会**静默失效**（2026-11-21）
+
+**现象**：`terminal_pty_stop_interrupts_without_killing_the_shell` 在当前机器上
+**debug 档稳定红**（`dev` 档绿）——`Ctrl+C` 后 shell 不回提示符、`ping` 继续输出。
+
+**实测取证**（当时用两个临时探针，已删）：
+
+| 层 | 结果 |
+|---|---|
+| PTY 层（直接 `PtySession`） | `interrupt_foreground()` 返回 **1**，shell 回提示符，会话存活 |
+| 组件层（`Terminal` + 屏幕模型），dev 档 | 全绿 |
+| 组件层，**debug 档** | ④回提示符 / ⑤busy 回假 **双红** |
+| 组件层，debug 档 + 中断前**多等 1500ms** | 全绿 |
+
+**根因**：Windows 上的中止是“终止 shell 的**直接子进程**”，因此要求那个子进程
+**已经 spawn**。而测试用 `Write-Output ('ru'+'nning-9271'); ping -n 60 127.0.0.1`：
+标记由 PowerShell 内建 `Write-Output` 打（不产生子进程），`ping` 要等下一句才 spawn。
+“标记已出现、ping 还没起来”这段窗口里 `interrupt_foreground()` 找不到靶子、
+**返回 false 且无人报错**——用户按了中止却什么也没发生。
+
+**为何本轮只修了测试**：要真正关掉这个窗口，得在“无直接子进程”时**回退到别的手段**
+（写 `0x03`——它在**空闲**时有效，实测文档见 `platform_pty.cpp` 的说明），
+或者给 `PtySession` 加一个“前台进程是否已就绪”的查询让调用方重试。两者都改
+产品语义，超出“修不稳定测试”的范围。测试侧的错误已修正：改成等**子进程自己的输出**
+（`ping` 回的“回复”字样，命令行里拼不出来），而不是等内建 `echo` 的标记。
+
+**影响面**：用户在命令刚回车的那一两百毫秒内按中止，可能没有反应（需再按一次）。
+真终端里 `Ctrl+C` 在这个窗口内同样会被吞——所以优先级低，但**“静默”不对**：
+至少该在 `interrupt_foreground()` 返回 false 时告知“没找到可中止的命令”。
+
+## P2
+
+- [ ] **`dsl_convenience.cpp` 的注释量与源体量倒挂**（2026-11-21）
+  拆分时为了记下“为何不能住在一起”，该文件头写了较长理由；`dsl.cpp` 里
+  `ensure_builtin_components_imported` 也留了两份注释。事实无误、但
+  “注释比代码长”会诱使下一个人删掉。方向：把理由集中到 `DESIGN.md` §7.5.2，
+  源文件只留一行指针（同本仓其他地方的惯例）。优先级低：不影响行为。
+
+## P2
+
 - [ ] **桌面壳：置底/任务栏控制只在 Windows 实现，且副屏任务栏未覆盖**
   （2026-11-15，`st_desktop` 改全屏置底启动器时落下）：`fill_monitor` /
   `set_stay_at_bottom` / `set_system_taskbar_visible` 三项能力**只有 win32 后端实现**；

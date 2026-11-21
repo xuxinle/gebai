@@ -313,6 +313,25 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   const std::string after_cmd = "echo after-stop-9271";
 #endif
   constexpr const char* kRunningMarker = "running-9271";
+  // 子进程**真的存在**的标记（见下方 send_bytes 之后的说明）。
+  //
+  // 为何需要一个单独的标记：Windows 上的中止杀的是“shell 的**直接子进程**”，
+  // 而 `kRunningMarker` 是 PowerShell 内建 `Write-Output` 打的（无子进程）——
+  // 两者之间有一段真实窗口。
+  //
+  // 两个平台都取“命令自己的输出”：
+  // * Windows：`ping` 的首个回复行含 `127.0.0.1`（只可能由 ping 进程打印）；
+  // * POSIX：`echo` 在 `/bin/sh -c` 里跑，而 `exec sleep` 后那个 pid 就是 sleep——
+  //   所以“标记出现”已经蕴含“前台进程已在”（`echo` 与 `sleep` 同一个 pid）。
+#ifdef _WIN32
+  // ⚠ 不能直接用 `127.0.0.1`：它就在**命令行回显**里（`ping -n 60 127.0.0.1`），
+  // 那会让“子进程已在”退化成“回显到了”，又变成假通过（同 `kRunningMarker`
+  // 的教训：标记必须是命令文本里拼不出来的）。
+  // 用中文“回复”二字：它只出现在 ping 的**输出**里，命令文本里没有。
+  constexpr const char* kChildStartedMarker = "回复";
+#else
+  constexpr const char* kChildStartedMarker = kRunningMarker;
+#endif
 
   // 起长命令 → 中断。
   //
@@ -325,6 +344,24 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   const bool started = harness.wait_until(
       [&] { return harness.screen_text().find(kRunningMarker) != std::string::npos; }, 3000);
   ST_REQUIRE(started);
+  // ⚠ **标记出现 ≠ 中止有靶子**（2026-11-21 实测，debug 档 100% 红）：
+  //
+  // Windows 上的中止是“终止 shell 的**直接子进程**”，所以它要求那个子进程
+  // **已经 spawn**。而标记是 PowerShell 的内建 `Write-Output` 打的——它在
+  // 自己进程里跑，**不产生子进程**；而 `ping` 要等它落到下一句才 spawn。
+  // 于是“标记已出现、`ping` 还没起来”是一段真实窗口（实测 debug 档下窗口
+  // 足够宽，稳定打中）：这期间 `interrupt_foreground()` 找不到靶子、
+  // **静默返回 false**，shell 不回提示符——用例就红在那里。
+  //
+  // 判据不能用“睡一会儿”（`dev` 档绿、`debug` 档红——实测时延约 1.5s 才能关掉
+  // 这个窗，而且那是与机器性能绑定的魔数）。这里改成**等到 ping 自己的输出出现**：
+  // 那行只可能由 `ping` 这个**子进程**打印，所以它出现就证明子进程已在。
+  //
+  // 这是“把前置条件测准”，不是把用例改松：下面“回提示符 / busy 回假 /
+  // shell 还活着”三条断言一条未减，被验的语义（中止只杀命令不杀 shell）不变。
+  const bool command_child_running = harness.wait_until(
+      [&] { return harness.screen_text().find(kChildStartedMarker) != std::string::npos; }, 5000);
+  ST_REQUIRE(command_child_running);
   // 命令真的在跑：`busy()` 必须为真（旧实现恒真、新实现靠提示符识别——
   // 这条断言把“新判定的正向一半”钉住，否则只看“跑完回假”会被“永远假”蒙过）。
   //

@@ -152,7 +152,14 @@ ST_TEST(real_asset_draco_is_rejected_with_actionable_message) {
   ST_CHECK(message.find("Blender") != std::string::npos);   // 解决动作
 }
 
-ST_TEST(real_asset_scales_span_orders_of_magnitude) {
+/// 同文件其他用例只读**一个**模型；这条要读两个（Avocado 与 AntiqueCamera）
+/// 才能比出“尺度跨几个数量级”，于是它自己就占 5–8 s（debug 档实测 7.53 s），
+/// 离框架默认 10 s 软超时太近——并行分片时必然越线（实测 10.93 s 红）。
+///
+/// 这里用 `ST_TEST_WITH_TIMEOUT` 而不是 `ST_TEST_SLOW`：**断言内容与机器快慢无关**
+///（两个素材的尺度比 > 50x 是固定事实），慢的只是“解两个 glb”的 I/O 与解析，
+/// 耗时由**素材大小**决定。所以它该留在默认路径上，只是需要更宽的窗口。
+ST_TEST_WITH_TIMEOUT(real_asset_scales_span_orders_of_magnitude, 60000) {
   // ## 这条钉住"近裁剪面固定 0.1"那个缺陷
   //
   // 生态素材的单位差好几个数量级：

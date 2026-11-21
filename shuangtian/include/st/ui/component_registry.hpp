@@ -65,6 +65,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <type_traits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -167,9 +168,34 @@ struct component_importer {
 ///
 /// 它引用 `component_importer<T>::run`（定义在那个组件的 `.cpp` 里），
 /// 所以调用它 = 把那目标文件拉进产物。
+///
+/// ⚠ 只能用于**内置组件**（`ST_UI_COMPONENT` 声明过的）。外部注册类型
+/// （`dsl::register_element_type<T>`）没有 `component_importer<T>::run` 定义，
+/// 调用它会在链接期报未定义符号——需要“按类型自动导入”的地方请用
+/// `import_if_builtin<T>()`（它先判定再决定要不要导）。
 template <class T>
 inline void import_one() {
   detail::component_importer<T>::run();
+}
+
+/// `T` 是否是**内置组件**（有 `ST_UI_COMPONENT` → `component_meta<T>` 全特化）。
+///
+/// 判据只能用 `component_meta<T>`：它是内置组件的唯一标记（外部注册类型没有它）。
+template <class T, class = void>
+struct is_builtin_component : std::false_type {};
+
+template <class T>
+struct is_builtin_component<T, std::void_t<decltype(detail::component_meta<T>::name)>>
+    : std::true_type {};
+
+/// 内置则导入、外部注册则跳过。
+///
+/// 用于“编译期知道类型，但不知道它是不是内置组件”的地方（`dsl::custom<T>`）。
+/// 外部注册类型的 `.cpp` 本来就会被引用（它在那里 `register_element_type`），
+/// 因此**不需要**导入锥点；只有内置组件会因“没人引用”而被按需链接丢掉。
+template <class T>
+inline void import_if_builtin() {
+  if constexpr (is_builtin_component<T>::value) import_one<T>();
 }
 
 /// 导入若干组件。

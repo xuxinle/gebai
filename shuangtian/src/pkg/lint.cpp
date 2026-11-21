@@ -1,4 +1,5 @@
 #include "st/pkg/lint.hpp"
+#include "st/pkg/cpp_lex.hpp"
 
 #include <algorithm>
 #include <array>
@@ -168,172 +169,12 @@ constexpr std::array<RuleSpec, 19> kRules{{
     {"L19", "组件不得自定义与样式系统同名的属性面（用 using X = st::ui::X）", ""},
 }};
 
-/// 裸字符串（raw string）的**跨行状态**：`R"delim( … )delim"` 的定界符必须记住，
-/// 否则下一行开始就不知道该找 `)"` 还是 `)delim"`。
-///
-/// ## 为什么不能只用 bool（2026-11-06 实测代价）
-///
-/// 旧实现只有 `bool in_raw_string`，终结判据固定写死为 `)"`。而**带定界符**的裸串
-/// （`R"JS( … )JS"`、`R"PY( … )PY"`）的终结符是 `)JS"` —— 于是：
-/// - 内容里任意一处 `)"`（JS 里的 `f()"` 之类）就被当成终结，字符串状态**提前结束**；
-/// - 之后整段 C++ 代码被当成“字符串之外”或反过来，花括号标签栈整个错位。
-///
-/// 实测症状（`src/raster/three_runtime.cpp`）：第 381–709 整段被当成字符串**漏扫**
-/// （那一段里的代码一条规则都没检查过），而第 728–806 的花括号被算错，报出 9 条
-/// 假的 L8「可变全局」——全是函数内局部变量。**扫描器自己的词法错，看起来像代码违规**，
-/// 这是最坏的一类失效：它让人去修本来没问题的代码。
-struct RawStringState {
-  bool active{false};        ///< 是否正处在一段（可能跨行的）裸字符串里
-  std::string delimiter{};   ///< 定界符（无定界符的 `R"( … )"` 为空串）
-};
-
-/// 一行的**两层净化结果**（两个视图由**同一次词法扫描**产出）。
-///
-/// 为何必须合并：旧实现先 `strip_comments` 再 `strip_string_literals`，两条各自维护一套
-/// 状态。于是裸串内容里的 `//`（JS 注释、URL、正则）会被第一道当成行注释**截断整行**——
-/// 终结符如果写在 `//` 之后，第二道就永远看不到它，状态机卡在裸串里到文件末尾。
-/// 一次扫描、同时产出两个视图，从结构上消除这类“两道真源不同步”。
-struct LexedLine {
-  std::string uncommented{};  ///< 去掉注释、**保留**字符串内容（L15/L16 这类需看原文）
-  std::string code{};         ///< 再去掉字符串内容（花括号计数与关键字判定用）
-};
-
-/// 跨行的词法状态（注释块 + 裸字符串）。
-struct LexState {
-  bool in_block_comment{false};
-  RawStringState raw{};
-};
-
-/// 词法分析一行，**一次扫描产出两个视图**。
-///
-/// 状态机（优先级从高到低）：
-/// 1. 块注释中 → 找 `*/`，两视图都丢掉正文；
-/// 2. 裸字符串中 → 找 `) <定界符> "` 终结；内容进 `uncommented`，不进 `code`
-///    （**关键**：裸串里的 `//` 不是行注释，不能截断）；
-/// 3. 普通字符串/字符中 → 转义处理；内容进 `uncommented`，不进 `code`；
-/// 4. 行注释 → 本行剩余部分丢弃；
-/// 5. 裸串开头 `R"delim(` → 记住定界符并进入状态 2；定界符非法则当普通字符串起头
-///    （编译器自己会报那行的错，这里只需保证不把状态搞乱）；
-/// 6. 否则 → 普通字符，同时进两视图。
-[[nodiscard]] auto lex_line(std::string_view line, LexState& state) -> LexedLine {
-  LexedLine out;
-  out.uncommented.reserve(line.size());
-  out.code.reserve(line.size());
-  bool in_string = false;
-  bool in_char = false;
-
-  // 裸串终结判定：当前字符起是否正好是 `)` + 定界符 + `"`（无定界符时就是 `)"`）。
-  const auto raw_terminator_at = [&line, &state](std::size_t position) -> bool {
-    if (line[position] != ')') return false;
-    const std::size_t after_paren = position + 1;
-    const std::size_t quote_at = after_paren + state.raw.delimiter.size();
-    if (quote_at >= line.size()) return false;   // 本行放不下终结符（继续当内容）
-    if (line.compare(after_paren, state.raw.delimiter.size(), state.raw.delimiter) != 0) {
-      return false;
-    }
-    return line[quote_at] == '"';
-  };
-
-  for (std::size_t index = 0; index < line.size(); ++index) {
-    const char current = line[index];
-    const char next = index + 1 < line.size() ? line[index + 1] : '\0';
-
-    // ① 块注释中
-    if (state.in_block_comment) {
-      if (current == '*' && next == '/') {
-        state.in_block_comment = false;
-        ++index;
-      }
-      continue;
-    }
-
-    // ② 裸字符串中：内容只进 `uncommented`（`//` 在此**不是**行注释）
-    if (state.raw.active) {
-      if (raw_terminator_at(index)) {
-        const std::string terminator = ")" + state.raw.delimiter + "\"";
-        out.uncommented += terminator;
-        out.code += terminator;
-        index += state.raw.delimiter.size() + 1;
-        state.raw.active = false;
-        state.raw.delimiter.clear();
-        continue;
-      }
-      out.uncommented.push_back(current);
-      continue;
-    }
-
-    // ③ 普通字符串 / 字符中
-    if (in_string || in_char) {
-      out.uncommented.push_back(current);
-      if (current == '\\' && next != '\0') {
-        out.uncommented.push_back(next);
-        out.code.append("  ");
-        ++index;
-        continue;
-      }
-      if ((in_string && current == '"') || (in_char && current == '\'')) {
-        in_string = false;
-        in_char = false;
-        out.code.push_back(current);
-        continue;
-      }
-      out.code.push_back(' ');
-      continue;
-    }
-
-    // ④ 行注释：本行剩余部分丢弃
-    if (current == '/' && next == '/') break;
-    if (current == '/' && next == '*') {
-      state.in_block_comment = true;
-      ++index;
-      continue;
-    }
-
-    // ⑤ 裸字符串开头：`R"<定界符>(`。定界符最长 16 字符（C++ 标准上限），
-    //    且不得含空格/括号/反斜杠——遇到这些字符说明不是裸串开头。
-    if (current == 'R' && next == '"') {
-      const std::size_t delimiter_begin = index + 2;
-      std::size_t probe = delimiter_begin;
-      while (probe < line.size() && probe - delimiter_begin <= 16U && line[probe] != '(' &&
-             line[probe] != ' ' && line[probe] != ')' && line[probe] != '\\') {
-        ++probe;
-      }
-      if (probe < line.size() && line[probe] == '(') {
-        state.raw.active = true;
-        state.raw.delimiter = std::string(line.substr(delimiter_begin, probe - delimiter_begin));
-        const std::string opener = "R\"" + state.raw.delimiter + "(";
-        out.uncommented += opener;
-        out.code += opener;
-        index = probe;
-        continue;
-      }
-      // 非法定界符：退回普通字符串起头（那行编译时会报错，这里只保证状态不乱）
-      in_string = true;
-      out.uncommented.append("R\"");
-      out.code.append("R\"");
-      ++index;
-      continue;
-    }
-
-    if (current == '"') {
-      in_string = true;
-      out.uncommented.push_back(current);
-      out.code.push_back(current);
-      continue;
-    }
-    if (current == '\'') {
-      in_char = true;
-      out.uncommented.push_back(current);
-      out.code.push_back(current);
-      continue;
-    }
-
-    // ⑥ 普通代码字符
-    out.uncommented.push_back(current);
-    out.code.push_back(current);
-  }
-  return out;
-}
+// 词法净化（去注释 / 去字符串内容）已抽到 `st/pkg/cpp_lex.hpp` 共用：
+// 能力裁剪的「到底用了什么」判据也要用它（注释里的名字不算使用，见该头注释）。
+// 这里只保留**同名别名**，让下面所有规则代码一行都不用改。
+using LexState = st::pkg::lex::State;
+using LexedLine = st::pkg::lex::LexedLine;
+using st::pkg::lex::lex_line;
 
 /// 文件级豁免（均需在 `CONVENTIONS.md` §8 登记）：
 /// - **L6**：平台/指令集边界（`platform_*`、`simd*`）——系统 API 与 SIMD intrinsics 的

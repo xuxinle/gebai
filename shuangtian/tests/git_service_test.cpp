@@ -221,7 +221,18 @@ ST_TEST(git_service_parses_log_and_detail) {
   const auto& latest = entries.front();
   ST_CHECK_EQ(latest.subject, std::string("second：加行与中文文件"));
   ST_CHECK(!latest.short_hash.empty());
-  ST_CHECK_EQ(latest.short_hash.size(), std::size_t{7});
+  // **短哈希固定 8 位**（不是 git `%h` 的 7 位）。
+  //
+  // 这条断言曾经写 7 位，而实现一直是 8 位（`git_service.cpp` 的
+  // `entry.hash.substr(0, 8)`）——于是它每次都红。真因是实现有意固定位数：
+  // git 的 `%h` 会随仓库规模自动伸缩（小仓 7 位、大仓 8~9 位），同一列表里
+  // 哈希列宽会忽长忽短、对不齐；而“唯一性”不需向 git 让步（8 位在几十万提交
+  // 里也够区分，操作一律用完整 hash）。
+  //
+  // 所以把测就实现口径，并**钉死这个不变量**：将来若有人想“跟随 git 变长”，
+  // 这条会立刻变红并指向根因。
+  ST_CHECK_EQ(latest.short_hash.size(), std::size_t{8});
+  ST_CHECK(latest.hash.starts_with(latest.short_hash));
   ST_CHECK(!latest.author.empty());
   // HEAD ref（首条应有 HEAD -> main）。
   bool has_head_ref = false;

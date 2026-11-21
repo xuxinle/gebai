@@ -9,6 +9,19 @@
 #include "st/core/json.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/animation.hpp"
+// ## 为什么 XML 层负责导入**全部**组件
+//
+// XML / 脚本应用按**名字**造组件（`<Terminal>` / `<Table>` / `ui.create("Tree")`）。
+// 静态库“没人引用就不加载”，所以这些组件的 `.o` 不会因为“名字出现在 XML 里”
+// 就进产物——必须有人对导入锚点产生真实引用。
+//
+// 这个职责**应该住在 XML 层**，而不是 `dsl` 核心：
+// - 不用 XML 的应用（大部分）不再背任何用不到的组件；
+// - 用 XML 的应用本来就需要整套组件可用（它的作者写的是 XML，没法自己写 C++ import）。
+//
+// 实测代价（2026-11-21）：以前这个导入住在 `dsl.cpp`，于是 `gedou`（无 XML、
+// 无脚本、一个组件都不按名字建）白白背上 CodeEditor / Terminal / MarkdownView /
+// DiffView / HtmlView / Table / Tree / FileDialog 共 **656 KB**。
 #include "st/ui/dsl.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/ui_root.hpp"
@@ -414,6 +427,9 @@ auto build_from_xml_node(const st::xml::Node& node, XmlBuildReport* report,
 
 auto build_from_xml(std::string_view source, XmlBuildReport* report, const XmlBuildOptions& options)
     -> std::unique_ptr<Element> {
+  // XML 里写的是**组件名**（`<Scroll>` / `<Terminal>` …），必须先把整套组件导入进来，
+  // 否则 `create_element` 会报“认不出的标签”。只住在这里：不用 XML 的应用不为它买单。
+  dsl::ensure_builtin_components_imported();
   XmlBuildReport local;
   XmlBuildReport& out = report != nullptr ? *report : local;
   st::xml::Error error;

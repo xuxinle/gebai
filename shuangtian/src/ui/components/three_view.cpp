@@ -1126,7 +1126,12 @@ auto ThreeView::readonly_property_names() const -> std::vector<std::string_view>
   // 是遍历 `property_names()` + `readonly_property_names()` 生成的，
   // 没列进去就**永远不会被导出**——而症状是“属性读出来是空的”，
   // 看上去像“组件没实现”。
-  return Element::with_universal_readonly({"objects",      "backend",      "picked",       "selected_name",
+  // ⚠ `selected_name` **不在**这张表里：它同时被声明为**可写**（见 `property_names`
+  // 与 `set_property` 里对应的分支）——两表重名是自相矛盾的契约，
+  // `contract_property_name_lists_are_well_formed` 会红。选择“它确实可写”，
+  // 因为它在 `set_property` 里真的能选中节点（`invoke_action` 的 `select_name`
+  // 动作也走同一条路）。
+  return Element::with_universal_readonly({"objects",      "backend",      "picked",
           "error",        "hover_events", "click_events", "pick_distance",
           "paint_frames", "anim_time", "backend_rebuilds", "render_size",
           "mesh_stats", "first_anim_deg", "backend_pref", "camera_state", "frame_bounds"});

@@ -471,7 +471,18 @@ struct Application::Impl {
   ///
   /// 为何住 `Impl` 而不是 `Application`：`shell::webview` 的类型不该进公共头
   ///（`app.hpp` 已包含 `shell/shell.hpp`，再拉一份可选依赖没必要）。
+  ///
+  /// `ST_NO_WEBVIEW` 时降为裸指针（恒空）：与 `script` 同一个理由——
+  /// `unique_ptr<完整类型>` 的删除器会在 Impl 的构造/析构里实例化 `delete`，
+  /// 引用 `WebViewHost::~` → 整条 WebView2 链（含嵌入的 Loader DLL 191 KB）
+  /// 被拉回产物，“本应用不用浏览器”就白说了。裸指针不拥有，也无析构引用。
+#ifdef ST_NO_WEBVIEW
+  shell::webview::WebViewHost* webview{nullptr};
+  /// 同上：适配器也不拥有宿主（`attach` 只存裸指针），但它的 `unique_ptr` 声明
+  /// 本身不引用 `WebViewHost` 的任何符号，故无需拆分——保留 `unique_ptr`。
+#else
   std::unique_ptr<shell::webview::WebViewHost> webview{};
+#endif
   /// 把 `shell::webview::WebViewHost` 折接成 `ui::WebViewPort` 的适配器。
   ///
   /// 为何需要一层适配而不是让 `WebViewHost` 直接继承 `ui::WebViewPort`：
@@ -1275,10 +1286,14 @@ auto Application::webview_supported() const -> bool {
 
 auto Application::webview_unsupported_reason() const -> std::string {
   if (impl_->backend == nullptr) return "应用未启动（没有窗口）";
+#ifdef ST_NO_WEBVIEW
+  return "浏览器能力未编入本产物（构建时定义了 ST_NO_WEBVIEW；如需浏览器，去掉该宏重新构建）";
+#else
   if (impl_->webview == nullptr) {
     return "本后端无 WebView2 实现（无头 / 非 Windows）";
   }
   return impl_->webview->webview_unsupported_reason();
+#endif
 }
 
 auto Application::webview_port() -> ui::WebViewPort* { return impl_->webview_port.get(); }
@@ -2011,7 +2026,20 @@ auto Application::start() -> Status {
     // 浏览器宿主需要**顶层窗口句柄**与真实 DPI，两者都是 `create_window` 之后才有。
     // 而“没拿到窗口”时**不建**（而非建一个坏的）——`webview_port` 保持空，
     // 组件会如实退化为占位块。
+    //
+    // ## `ST_NO_WEBVIEW`：按需链接的编译期拆链（与 `ST_NO_SCRIPT` 同一套）
+    //
+    // 定义了它 = **不调用** `create_win32_webview`、不引用 `WebViewHost` 任何成员：
+    // 整个 `platform_win32_webview.o` 与它内嵌的 `WebView2Loader.dll`（191 KB）
+    // 都不进产物。不用浏览器的应用（大多数）靠它拿到“未用即不存在”。
+    //
+    // 为何**仍需**建一个空的 `webview_port`：`root_.set_webview_port()` 的语义是
+    // “端口在不在”，组件靠它区分“宿主没提供”与“端口没装”。空适配器的每个动作
+    // 都如实返回 `Unsupported`（见 `WebViewPort` 的默认实现），界面照常。
+    // 代价是 `WebViewPortAdapter` 本身（约 2 KB）会留下——它是纯粹的 `ui` 侧
+    // 窄接口，与 WebView2 无关，留着无害。
     auto webview_port = std::make_unique<WebViewPortAdapter>();
+#ifndef ST_NO_WEBVIEW
     if (auto host = shell::webview::create_win32_webview(backend_ptr->native_window(),
                                                         backend_ptr->device_scale());
         host != nullptr) {
@@ -2023,6 +2051,9 @@ auto Application::start() -> Status {
     } else {
       ST_LOG_INFO("嵌入浏览器（WebView2）：本后端无实现（无头/非 Windows）");
     }
+#else
+    ST_LOG_INFO("嵌入浏览器（WebView2）：未编入本产物（构建时定义了 ST_NO_WEBVIEW）");
+#endif
     impl_->webview_port = std::move(webview_port);
     root_.set_webview_port(impl_->webview_port.get());
   }

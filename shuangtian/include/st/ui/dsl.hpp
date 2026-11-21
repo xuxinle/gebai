@@ -772,6 +772,13 @@ struct BoxProps {
 /// 应用 BoxProps 到元素（padding/gap 等映射 Style 成员；id/key 先行截获）。
 void apply_box(Element& element, const BoxProps& props);
 
+/// 工厂没注册到该类型时的统一报错（**带类型名、可定位、直接 abort**）。
+///
+/// 为何导出：便利函数（`dsl::text` / `dsl::table` …）住在独立的
+/// `dsl_convenience.cpp`，它们也要报同一个错。放在这里是为了**只有一份文案**——
+/// 两处各写一个 `abort()` 会让“到底哪个类型没登记”这个信息在某一边丢掉。
+[[noreturn]] void fail_missing_element_factory(std::string_view type);
+
 /// 行容器（子元素声明在 children 回调里）。
 auto row(Composer& c, const BoxProps& props, std::function<void()> children) -> Element&;
 /// 列容器。
@@ -933,6 +940,16 @@ template <class T>
   // 于是保留着 `icon=refresh` / `hint=重新读取日志`，画面上是**两个刷新图标**。
   // 这类属性泄漏单看任一帧的代码都正确，错的是**跨帧的元素身份**。
   const std::string_view identity = !key.empty() ? key : std::string_view(props.key);
+  // ★ **这里必须声明“我要 T 这个组件”**。
+  //
+  // 为何不能靠“模板里用了 T”就够了：`T` 只在模板体里出现（`dynamic_cast<T*>`），
+  // 而那不需要 `T` 的 `.cpp` —— 它的静态登记（`ST_UI_COMPONENT` 写 token 表）
+  // 在另一个 `.o` 里。按需链接下那个 `.o` 没人引用就不进产物，于是
+  // `element_type_name<T>()` 查回空、`create_element` 拿到 nullptr，
+  // 最终在这里 abort（实测 caiyun：`custom<T> 未注册的组件类型: `）。
+  //
+  // `import_components<T>()` 取导入锥点的地址，把那条强依赖补上。
+  ::st::ui::import_if_builtin<T>();
   Element* element = c.create_element(element_type_name<T>(), st::empty_json_object(), identity);
   // 未知类型：**必须是显式错误**——静默返回假元素会让界面缺块而不报，最难查。
   // 这里不做异常（禁令 L5：业务错误走 Result/致命断言）：编译期类型 + 注册表
@@ -1345,7 +1362,28 @@ template <class T, class Fetcher, class Input>
 }
 
 /// 元素工厂：类型名 → 构造（dsl 内部与后续协议/脚本建元素共用；未知类型返回 nullptr）。
+///
+/// ## “按名字造组件”是**可选能力**，这里用注册表而非直接调用
+///
+/// 按名字造意味着**整套组件都得在产物里**（编译期不知道会造哪个）。
+/// 而只有 XML / 脚本 / 协议驱动的界面需要它——直 `new` 组件的应用不需要。
+///
+/// 所以全量导入的实现（`dsl_component_imports.cpp`）靠**静态初始化器自注册**
+/// 把函数挂到下面的注册表；本文件只在注册表非空时调用它。
+/// 效果：不用按名造组件的应用中，那个 `.o` 是归档成员、无人引用 → **不进产物**
+/// （实测 `gedou` 因此省下 656 KB）。
 [[nodiscard]] auto make_element(std::string type) -> std::unique_ptr<Element>;
+
+/// 保证**框架自带的全部组件**已导入（一次，惰性）。
+///
+/// 实现（与 `import_all_components()` 的调用）住在 `dsl_component_imports.cpp`。
+/// **只有按名创建的入口才调用它**：`xml_ui.cpp`（XML 标签）、`script_bridge.cpp`
+/// （`ui.create("Tree")`）、`control/server.cpp`（协议 `create`）。
+///
+/// 为什么必须这样分：`dsl::make_element` 只是上述三处的共用工具，若它在
+/// `dsl.cpp` 里直接引用本函数，链接器会把整套组件拉进**每一个** UI 应用
+/// （实测 `gedou` 白背 656 KB —— 它一个组件都不按名字建）。
+void ensure_builtin_components_imported();
 
 /// **外部（示例级）组件注册**：把一个自定义 `Element` 子类接入声明式。
 ///

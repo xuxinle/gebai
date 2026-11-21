@@ -1,5 +1,6 @@
 #include "st/pkg/build.hpp"
 #include "st/pkg/compiler.hpp"
+#include "st/pkg/cpp_lex.hpp"
 #include "st/pkg/embed.hpp"
 #include "st/pkg/memory.hpp"
 #include "st/pkg/framework.hpp"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <functional>
 #include <map>
 #include <semaphore>
 #include <set>
@@ -937,6 +939,18 @@ struct FrameworkFlags {
 
 /// 由框架清单构造框架标志集（框架单元专用：与引用方工程无关）。
 ///
+/// ## `capability_defines`：能力级拆链的宏（可空）
+///
+/// 为什么能力宏必须进到**框架单元**（而不是只进应用单元）：
+/// 被裁的是**框架自己**的代码（`src/app/app.cpp` 里的 `create_win32_webview` 调用），
+/// 应用侧根本没有任何引用可以“按需不拉”。所以“本目标不用浏览器”这件事
+/// 只能以宏的形式传到框架单元的编译命令行里。
+///
+/// ⚠ 代价（必须知道）：带不同能力宏的目标会用**不同的编译命令**编同一批框架源，
+/// 于是它们不再共享对象缓存（`pkg_framework_profile_flags_test` 不会提醒这件事）。
+/// 这是能力裁剪固有的取舍：要么每个应用背 191 KB，要么少命中一部分缓存。
+/// 宏已进缓存键（`cache_key_for` 里走 `unit_flags_for`），所以**不会串味**。
+///
 /// 清单（含框架自己的 `st.pkg`）恒写一份 **GCC 风格**跨平台标志，GCC 与 Clang 都直接吃。
 ///
 /// ⚠ **`framework_c_flags` 必须来自框架清单**（不是调用方工程的 `c_flags`）。
@@ -949,12 +963,33 @@ struct FrameworkFlags {
 ///
 /// 为什么"编译期没症状"必须写下来：框架自身构建时 `manifest` 就是框架清单，
 /// 两者恰好相等，所以**框架自己构建一百次都不会复现**——只有"独立工程引用框架"才暴露。
+///
+/// ## ⚠ 档位标志的形参是 `const std::vector<std::string>&`，**没有任何缺省值**
+///
+/// 这个签名是故意的：曾经有一版把第 4 个实参写成 `{}`（本意是修 `st test` 路径里
+/// `*flags` 传错形参位置的问题，结果把正确位置的档位标志也删了）。后果完全静默：
+/// ① 框架代码退回 GCC 默认 `-O0`；
+/// ② 丢 `-ffunction-sections -fdata-sections` ⇒ `--gc-sections` 无粒度可裁；
+/// ③ 框架单元不再命中 PCH（建立侧带档位标志，消费侧不带就不兼容）。
+/// 三者合计把 `xiangqi` 的 release 产物从 **6.30 MB** 撑到 **10.09 MB（+60%）**，
+/// 而编译、链接、测试用例全绿。
+/// 两个调用点（`build()` 与 `build_test_binary()`）都必须传 `*flags`；
+/// 回归见 `tests/pkg_framework_profile_flags_test.cpp`。
 [[nodiscard]] auto make_framework_flags(const Manifest& framework_manifest,
                                         const std::vector<std::string>& framework_include_dirs,
                                         const std::vector<std::string>& framework_c_flags,
                                         const std::vector<std::string>& profile_flags_list,
+                                        const std::vector<std::string>& capability_defines,
                                         const ResolvedToolchain& toolchain) -> FrameworkFlags {
   FrameworkFlags out;
+  // 档位标志为空 = 调用方漏传（不是"故意不要优化"）。宁可日志里大声报出来也不要静默降级：
+  // 这也是上面第 ①②③ 条永远不再以"体积/帧率悄悄变差"的形式回来。
+  // 用日志而不是断言/异常：这里是纯标志组装，抛错会把调用方（`build()`）拖进
+  // 全新的错误分支，偏离本函数的职责；而这类缺陷本来就该在**构建日志里一眼看到**。
+  if (profile_flags_list.empty()) {
+    ST_LOG_ERROR("框架单元的档位标志为空——调用点传了 `{{}}` 而不是档位标志："
+                 "框架代码会退回 -O0 且 --gc-sections 失效（产物体积会明显膨胀）");
+  }
   // 语言标准由**框架清单**的 `cxx_standard` 派生（不是调用方工程的）：框架源是按框架自己
   // 声明的标准写的，用调用方的标准去编它会造成"同一份源码按不同标准编出不同对象"，
   // 共享对象缓存的键也就随工程漂移。清单没写时 `parse_json` 已经填入缺省值，
@@ -968,6 +1003,8 @@ struct FrameworkFlags {
   }
   for (const auto& dir : framework_include_dirs) out.flags.push_back(std::format("-I{}", dir));
   for (const auto& item : toolchain.defines) out.flags.push_back(std::format("-D{}", item));
+  // 能力拆链宏：**必须紧跟档位标志之前/附近**，但语义上与档位并列（都是“本目标口径”）。
+  for (const auto& item : capability_defines) out.flags.push_back(std::format("-D{}", item));
   for (const auto& item : profile_flags_list) out.flags.push_back(item);
 
   // C 源专用标志：框架的 `c_flags`（含 `-include st_sqlite3_config.h` 这类前置头）
@@ -977,6 +1014,7 @@ struct FrameworkFlags {
   }
   for (const auto& dir : framework_include_dirs) out.c_flags.push_back(std::format("-I{}", dir));
   for (const auto& item : toolchain.defines) out.c_flags.push_back(std::format("-D{}", item));
+  for (const auto& item : capability_defines) out.c_flags.push_back(std::format("-D{}", item));
   for (const auto& item : profile_flags_list) out.c_flags.push_back(item);
   out.c_flags.push_back("-x");
   out.c_flags.push_back("c");
@@ -2217,6 +2255,142 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
 
  }  // namespace
 
+/// 档位标志是否真的到了框架单元的命令行（声明与取证见 `build.hpp`）。
+[[nodiscard]] auto framework_flags_carry_profile(const std::vector<std::string>& framework_unit_flags,
+                                                const std::vector<std::string>& profile_flags)
+    -> bool {
+  if (profile_flags.empty()) return false;
+  return std::ranges::all_of(profile_flags, [&](const std::string& flag) {
+    return std::ranges::find(framework_unit_flags, flag) != framework_unit_flags.end();
+  });
+}
+
+/// 按词边界找标识符（声明与理由见 `build.hpp`）。
+[[nodiscard]] auto mentions_identifier(std::string_view text, std::string_view identifier) -> bool {
+  if (identifier.empty() || text.size() < identifier.size()) return false;
+  const auto is_ident = [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+  };
+  std::size_t at = 0;
+  while ((at = text.find(identifier, at)) != std::string_view::npos) {
+    // 前边界：要么是开头，要么前一字符不是标识符字符。
+    // 后边界同理——`WebViewPort` 不应该因为含 `WebView` 就被当成“用了 WebView”。
+    const bool left_ok = at == 0 || !is_ident(text[at - 1]);
+    const std::size_t after = at + identifier.size();
+    const bool right_ok = after >= text.size() || !is_ident(text[after]);
+    if (left_ok && right_ok) return true;
+    at = after;
+  }
+  return false;
+}
+
+/// 目标自己的源里是否用到嵌入浏览器（见 `build()` 的 `ST_NO_WEBVIEW` 段）。
+///
+/// 只看**目标自己的源**：`targets.<名>.sources` 展开后的那些文件，
+/// 加上库级源里**属于目标自己**的部分。不含框架源（那里面有 `WebViewPortAdapter`，
+/// 是装配件而不是“应用要用浏览器”）。
+///
+/// 失败时一律**返回 true**（当作要用）：宁可多编 191 KB，不可让真正要用浏览器的
+/// 应用拿到“未编入”。
+[[nodiscard]] auto target_uses_webview(const Manifest& manifest, const BuildOptions& options) -> bool;
+
+/// 遍历**目标自己的源**文本，对每个文件调 `looks_like_use`；返回“任一命中”。
+///
+/// 三条保守规则（任一不满足就返回“用了”，见 `build.hpp` 的判据说明）：
+/// - 找不到目标 / 目标不是 `executable` / 源为空 → 当作要用；
+/// - 任何一个源读不出来 → 当作要用；
+/// - 只扫 C/C++ 源，跳过 `build/<档>/embed/**`（生成物）。
+///
+/// 抽成一个函数是因为能力会越来越多（WebView / 脚本 / 将来其它）：
+/// 每个能力只写自己的“什么算用到”，遍历与保守规则只维护一份。
+[[nodiscard]] auto target_matches_source(const Manifest& manifest, const BuildOptions& options,
+                                         const std::function<bool(std::string_view)>& looks_like_use)
+    -> bool {
+  const TargetSpec* target = manifest.find_target(options.target);
+  if (target == nullptr) {
+    // `st run <应用>` / `st build` 不带目标：清单里只有一个可执行目标时就是它。
+    const TargetSpec* only = nullptr;
+    std::size_t executable_count = 0;
+    for (const auto& candidate : manifest.targets) {
+      if (candidate.kind == "executable") {
+        ++executable_count;
+        only = &candidate;
+      }
+    }
+    if (executable_count != 1) return true;
+    target = only;
+  }
+  if (target == nullptr || target->sources.empty()) return true;
+  if (target->kind != "executable") return true;
+  for (const auto& pattern : target->sources) {
+    auto matches = fs::expand_glob(manifest.directory, pattern);
+    if (!matches) return true;
+    for (const auto& path : *matches) {
+      const std::string normalized = fs::normalize(path);
+      if (normalized.find("/embed/") != std::string::npos) continue;
+      if (!normalized.ends_with(".cpp") && !normalized.ends_with(".cc") &&
+          !normalized.ends_with(".cxx") && !normalized.ends_with(".hpp") &&
+          !normalized.ends_with(".h")) {
+        continue;
+      }
+      const auto text = fs::read_text(path);
+      if (!text.has_value()) return true;
+      // **先净化再判**：注释与字符串字面量里的名字不是“用了”。
+      // 实测：`cefu/src/main.cpp` 两处 `// …ThreeView…` 注释把 1254 KB 的
+      // three.js 骗进了产物。
+      if (looks_like_use(lex::strip_to_code(*text))) return true;
+    }
+  }
+  return false;
+}
+
+/// 目标自己的源里是否用到嵌入浏览器（声明与取证见 `build.hpp`）。
+[[nodiscard]] auto target_uses_webview(const Manifest& manifest, const BuildOptions& options) -> bool {
+  return target_matches_source(manifest, options, [](std::string_view text) {
+    return mentions_identifier(text, "WebView");
+  });
+}
+
+/// 目标自己的源里是否用到进程内脚本宿主（见 `build()` 的 `ST_NO_SCRIPT` 段）。
+///
+/// 两个征兆任一命中就算“用”：
+/// - `enable_script`（显式打开开关——`jianmu` / `xiangqi` / `cefu` 都这么写）；
+/// - `ScriptHost` / `script()`（直接用宿主对象或取其指针）。
+///
+/// 为何不把 `--enable-script` 的透传（`gbcode` 那种）算作“用”：那条路径只是把
+/// 命令行参数转发给 `AppOptions`，应用本身**没有内置脚本可跑**——宏定义后
+/// `script()` 恒空、控制协议报“未编入”，而那本来就是它当前的行为。
+///
+/// ⚠ 这是**唯一**一处比 WebView 判据宽松的地方（子串 `enable_script` 而非整词）：
+/// 它在源码里几乎只以赋值形式出现，没有同名长标识符；而漏判的代价是白背 1 MB。
+[[nodiscard]] auto target_uses_script(const Manifest& manifest, const BuildOptions& options) -> bool {
+  return target_matches_source(manifest, options, [](std::string_view text) {
+    return text.find("enable_script") != std::string_view::npos ||
+           mentions_identifier(text, "ScriptHost") ||
+           text.find(".script()") != std::string_view::npos;
+  });
+}
+
+/// 目标自己的源里是否用到三维场景脚本（见 `build()` 的 `ST_NO_THREE` 段）。
+///
+/// 三维这条路有多个入口，任一命中就算“用”（宁可多编不可漏编）：
+/// - `three_runtime` / `ThreeScene` / `scene3d`：直用运行时或场景类型；
+/// - `Scene3D` / `ThreeView`：用画布或视图组件；
+/// - `bpy`：bpy 也产出 `ThreeScene`（同一条渲染通路）；
+/// - `gltf` / `geom::`：三维资产加载。
+///
+/// 不用三维的 GUI 应用命中不到任何一个——它们拿到 `ST_NO_THREE`，
+/// 于是 1254 KB 的 `three.cjs` 不进 `.rdata`。
+[[nodiscard]] auto target_uses_three(const Manifest& manifest, const BuildOptions& options) -> bool {
+  return target_matches_source(manifest, options, [](std::string_view text) {
+    return mentions_identifier(text, "three_runtime") ||
+           mentions_identifier(text, "ThreeScene") || mentions_identifier(text, "Scene3D") ||
+           mentions_identifier(text, "ThreeView") || mentions_identifier(text, "scene3d_script") ||
+           mentions_identifier(text, "bpy_render") || mentions_identifier(text, "BpyScene") ||
+           mentions_identifier(text, "gltf");
+  });
+}
+
 /// 链接头部旗标：单一事实源（声明与理由见 `build.hpp`）。
 /// 匿名空间里的同名实现不动——它是命令行的内部拼装口径；导出这层只做同名转发，
 /// 保证“测试断言的就是链接实际用的”。
@@ -2807,6 +2981,62 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // 三个坑都是**静默**的（不报错、只少一个宏），用 `--verbose` 逐字读命令行才看得出来——
   // 那次排查正是在命令行里发现"一条 `-DST_LOG_DISABLED` 都没有"。
   if (!manifest.log_enabled) effective.defines.push_back("ST_LOG_DISABLED=1");
+  // 能力级**按需拆链**：目标没用某项能力，产物里就不要它——**自动推导，不用清单配**。
+  //
+  // ## 为何要自动推导而不是让作者写 `defines`
+  //
+  // `ST_NO_SCRIPT` 的教训：它是手工开关，于是 9 个目标里只有 gbcode 填了，
+  // 其余照样背 QuickJS。而“用不用”**构建器很清楚**（就是看目标源里有没有那个类），
+  // 让作者再骣写一遍只会漏。默认应当是“未用即不存在”。
+  //
+  // ## 判据：目标自己的源里出现了那个组件类型名
+  //
+  // `ui::WebView` 是 `webview_port` 唯一的消费者（`src/ui/components/webview.cpp`）；
+  // 应用要用它必须 `#include "st/ui/components/webview.hpp"` 并 `new WebView`。
+  // 所以“目标源里出现 `WebView`”就是“要用嵌入浏览器”的充分征兆。
+  //
+  // ⚠ 这个判据是**保守**的（宁可多编不可漏编）：误命中只会让产物多 191 KB，
+  // 而漏命中会让用户在用得到浏览器的应用里拿到“未编入”——后者不可接受。
+  // 所以只扫**目标自己的源**（`targets.<名>.sources`），不扫框架源（框架里
+  // `app.cpp` 本来就有 `WebViewPortAdapter`，那不属于“应用要用”）。
+  // ## 为何放进 `capability_defines` 而不是 `effective.defines`
+  //
+  // 被裁的是**框架自己**的代码（`app.cpp` 里的 `create_win32_webview` 调用），
+  // 所以宏必须到**框架单元**的编译命令行里；而 `effective.defines` 只作用于
+  // **非框架单元**（`unit_flags_for` 的 else 分支）。放错地方的症状是
+  // “构建成功、体积一动不动”——本次实测撞了一次。
+  std::vector<std::string> capability_defines;
+  if (!target_uses_webview(manifest, options)) {
+    capability_defines.push_back("ST_NO_WEBVIEW=1");
+  };
+  // 脚本宿主（QuickJS）：同一个推导套路。**实测最大的一块**——
+  // 不用脚本的应用各带 996 KB 的 `quickjs.c` + 64 KB `libunicode` + 44 KB `libregexp`。
+  //
+  // 判据与 WebView 不同，必须看两件事（缺一个就答错）：
+  //   ① 源码里出现 `enable_script = true`（显式要）——`gbcode` 等把
+  //      `options.common.app.enable_script` 间接传下去的，宏一律当作不要（
+  //      它们没有内置脚本可跑，`--enable-script` 本来就只是一条无效参数）；
+  //   ② 源码里出现 `ScriptHost` / `.script()`（直接用宿主）。
+  //
+  // ⚠ 与 `ST_NO_SCRIPT` 的旧口径**必须一致**：宏的语义是“不创建插件宿主、
+  // `script()` 恒返 nullptr、控制协议 `script` 方法报‘未编入’”。所以在**任何**
+  // 应用里定义它都只是“去掉一项本应用用不到的能力”，不影响已有功能。
+  if (!target_uses_script(manifest, options)) {
+    capability_defines.push_back("ST_NO_SCRIPT=1");
+  }
+  // 三维场景脚本（three.js 嵌入数据 1254 KB）：同一条推导链的第三项。
+  //
+  // 它比前两项更微妙：链接期只拉“被引用的成员”，所以嵌入数据对象只在
+  // `three_runtime.cpp` 的 `b::embed<...>()` 真被编译进去时才进产物。
+  // 但 `three_runtime` 本身很容易被别的路径（`scene3d_script` / `scene_report`）
+  // 拉进归档成员——一旦它进了，`three.cjs` 就会连坐进来。实测：
+  // 不用三维的应用里确实能看到 `THREE.REVISION` / `WebGLRenderer`。
+  //
+  // 判据看“真的碰三维”的符号（含 app 侧的 `scene3d` / `ThreeScene`），
+  // 而不是只看 `three_runtime`（后者可能只是被间接引用）。
+  if (!target_uses_three(manifest, options)) {
+    capability_defines.push_back("ST_NO_THREE=1");
+  }
   if (framework.has_value()) {
     const auto append = [](std::vector<std::string>& target, const std::vector<std::string>& extra) {
       target.insert(target.end(), extra.begin(), extra.end());
@@ -3026,13 +3256,25 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // 恰好相等（同一个清单），只有独立工程引用时才暴露——见 `make_framework_flags` 的注释。
   std::optional<FrameworkFlags> framework_flags;
   if (framework.has_value() || !framework_sources.empty()) {
-    // 框架单元用**框架自己的**标志集：**不传工程侧的 `flags`**。
+    // 框架单元用**框架自己的**标志集：**不传工程侧的 `flags`**（清单 `flags` /
+    // `--define` 那一路）。
     //
-    // 为何要与工程标志分开（`--define` 机制暴露）：`make_framework_flags` 会把传入的
-    // 工程 flags 并进去，而工程 flags 含 `--define` 的命令行宏——那会让**框架对象缓存
-    // 被某个目标的宏污染**：用 `--define APP_X=…` 构建过一次后，框架单元的缓存键就变，
-    // 下次换个宏值又得全量重编框架源（实测 366 单元全重编、每轮 2m30s）。
-    // 框架源不该知道应用私有宏，所以这里传空。
+    // 为何要与工程标志分开（`--define` 机制暴露）：工程 flags 里含 `--define` 的
+    // 命令行宏——那会让**框架对象缓存被某个目标的宏污染**：用 `--define APP_X=…`
+    // 构建过一次后，框架单元的缓存键就变，下次换个宏值又得全量重编框架源
+    // （实测 366 单元全重编、每轮 2m30s）。框架源不该知道应用私有宏。
+    //
+    // ⚠ **但第 4 个实参（档位标志）必须是 `*flags`**，不能是 `{}`：
+    // 它带的是 `-O2/-O1/-DNDEBUG/-g` 与 `-ffunction-sections -fdata-sections`——
+    // 与工程私有宏毫无关系，是**所有单元都必须一致**的档位口径。
+    // 曾经误传 `{}`（本意是修“`st test` 路径里把 `*flags` 错传到形参第 4 位以外的位置”，
+    // 结果把正确位置的档位标志一起删了），后果是三层且都不报错：
+    //   ① 框架单元回到 GCC 默认 `-O0`（无任何优化开关）——帧率与启动全线退化；
+    //   ② 丢 `-ffunction-sections -fdata-sections`，链接期 `--gc-sections` 无粒度可裁 →
+    //      整段保留，未引用的框架代码全进产物（实测同一份源码 6.30 MB → 10.09 MB，+60%）；
+    //   ③ 框架单元不再命中 PCH（PCH 建立侧带档位标志，消费侧不带就不兼容）→ 全量重编变慢。
+    // 判据（可复算）：`st build <目标> --profile release --verbose` 的框架单元命令行里
+    // 必须出现 `-O2` 与 `-ffunction-sections`；`objdump -h` 看框架 `.o` 的 `.text$` 段数量。
     //
     // **`framework_sources` 非空也要走这条**（关键，否则修复只对独立工程生效）：
     // 仓库内的目标（如 `apps/xiaobai`）引用框架是隐式的——它的清单里没有 `framework`
@@ -3044,7 +3286,8 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     // `manifest` 本身**就是**框架清单，直接用。
     framework_flags = make_framework_flags(
         manifest, framework.has_value() ? framework->include_dirs : manifest.include_dirs,
-        framework.has_value() ? framework->c_flags : manifest.c_flags, {}, *toolchain);
+        framework.has_value() ? framework->c_flags : manifest.c_flags, *flags, capability_defines,
+        *toolchain);
   }
   std::size_t rebuilt = 0;
   // check 模式：收集本次实际查过（哈希变化/首次）的单元源路径，用于状态写回。
@@ -3857,13 +4100,18 @@ namespace {
   std::vector<CompileUnit> units =
       make_units(effective, all, object_dir, third_party_paths, test_includes, framework_sources);
   std::optional<FrameworkFlags> framework_flags;
-  // 与 `build()` 同一条口径（见那里的长注释）：框架单元**不吃目标自己的 flags**。
-  // 除了 `--define` 污染缓存键，这里旧写法还把 `*flags` 传给了第一个形参位置之后的
-  // 第四个参数（`profile_flags_list` 的位置）——那份里含档位标志，框架单元会重复带上。
+  // 与 `build()` 同一条口径（见那里的长注释）：框架单元**不吃工程侧的清单 flags**
+  //（`--define` 会污染缓存键），但**必须吃档位标志**（第 4 个实参传入 `*flags`）——
+  // 它带 `-O2/-O1/-DNDEBUG` 与 `-ffunction-sections -fdata-sections`，
+  // 漏传就等于框架代码退回 `-O0` 且 `--gc-sections` 失效（见 `build()` 那段取证的 ①②③）。
+  //
+  // 第 5 个实参（能力拆链宏）**传空**：测试二进制必须带**全部**能力——
+  // 用例会验证 `ui::WebView` / 脚本宿主等，裁掉哪一个都会让对应用例变红（或更糟：
+  // 静默跑不到）。能力裁剪只是**交付产物**的事，不是测试的事。
   if (framework.has_value() || !framework_sources.empty()) {
     framework_flags = make_framework_flags(
         manifest, framework.has_value() ? framework->include_dirs : manifest.include_dirs,
-        framework.has_value() ? framework->c_flags : manifest.c_flags, {}, *toolchain);
+        framework.has_value() ? framework->c_flags : manifest.c_flags, *flags, {}, *toolchain);
   }
   std::size_t rebuilt = 0;
   auto compiled = compile_units(effective, options, units, *flags, *toolchain,

@@ -474,7 +474,7 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   // （编辑器正文是 Text、行号栏是 Arrow；`MarkdownView` 在链接上是 Hand），
   // 而 `cursor()` 只给"整体声明"，多数组件压根不调 `set_cursor`。
   // 中心点代表"这个控件的主体区域"，是属性面能给出的最接近答案。
-  if (name == "cursor") {
+  if (name == "mouse_cursor") {
     const math::Point center{bounds_.x + bounds_.width * 0.5f,
                              bounds_.y + bounds_.height * 0.5f};
     return std::string(mouse_cursor_name(cursor_at(center)));
@@ -695,9 +695,11 @@ auto Element::readonly_property_names() const -> std::vector<std::string_view> {
   // - `cursor`：**系统级效果，截图里根本不存在**，不暴露就只能靠人眼看
   //  （“悬停可选中文字应变成 I-beam”这类回归完全没法钉）。
   //   它由 `cursor_at(点)` 推出，与元素坐标有关，写入无意义。
+  //   名字用 `mouse_cursor`（不是 `cursor`）：`cursor` 已被 `Terminal` / `CodeEditor`
+  //   用作**文本光标**位置的可写属性——同名会让两张表重叠（契约用例会红）。
   return {"animation",       "animation_running", "animation_opacity", "animation_translate",
           "transition",      "hovered",           "hover_progress",    "hover_effect",
-          "cursor"};
+          "mouse_cursor"};
 }
 
 auto Element::property_schema() const -> std::span<const PropertyDesc> {

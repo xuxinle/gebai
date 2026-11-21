@@ -1595,6 +1595,8 @@ class Element {
   /// `cursor` 为何在这里：它是**系统级效果，截图里根本不存在**。
   /// 不暴露就只能靠人眼看，“悬停可选中文字应变 I-beam”这类回归完全没法钉。
   /// 值由 `cursor_at(元素中心点)` 推出，写入无意义，所以是只读项。
+  /// 名字用 `mouse_cursor` 而非 `cursor`：后者是**文本光标**位置（`Terminal` / `CodeEditor`
+  /// 的可写属性），两者语义不同，同名会让两张表重叠。
   ///
   /// ⚠ 数组要用 **`inline static constexpr`**：类内的 `static constexpr` 数组
   /// 在某些编译上下文下没有被当作隐式 inline，于是每个 TU 都发出一份
@@ -1603,7 +1605,7 @@ class Element {
   /// 加 `inline` 是这个问题的确定性解法，不依赖编译器的隐式处理。
   inline static constexpr std::string_view kUniversalReadonlyNames[] = {
       "animation", "animation_running", "animation_opacity", "animation_translate",
-      "transition", "hovered", "hover_progress", "hover_effect", "cursor"};
+      "transition", "hovered", "hover_progress", "hover_effect", "mouse_cursor"};
 
   /// 把**基类的通用名字**并进组件自己的表。
   ///
