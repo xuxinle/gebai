@@ -287,8 +287,8 @@ auto position_to_json(const Position& position) -> Json {
 auto range_from_json(const Json& value) -> Range {
   Range range{};
   if (!value.is_object()) return range;
-  range.start = position_from_json(json_at(value, "start"));
-  range.end = position_from_json(json_at(value, "end"));
+  range.start = position_from_json(json_child(value, "start"));
+  range.end = position_from_json(json_child(value, "end"));
   return range;
 }
 

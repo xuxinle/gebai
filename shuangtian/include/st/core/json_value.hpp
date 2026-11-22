@@ -202,7 +202,7 @@ class Json {
   [[nodiscard]] static auto object() -> Json;
   /// 共享 null 节点（只读）：缺键/越界/未初始化时的**可安全读取**的占位值。
   ///
-  /// 为何需要它：`json_at` / `operator[] const` 都得“返回一个引用但键不存在”，
+  /// 为何需要它：`json_child` / `operator[] const` 都得“返回一个引用但键不存在”，
   /// 而且这两个现在是头文件里的 `inline` 函数（见下方注），不能去 `.cpp` 里要单例。
   /// 函数内 `static` 在 C++ 里天然是**进程内唯一**（不需要 inline 变量），可直接用。
   [[nodiscard]] static auto null_node() noexcept -> const Json& {
@@ -320,7 +320,7 @@ class Json {
   ///
   /// ## 为何定义在头文件（不放到 .cpp）
   ///
-  /// 这是**最热的函数**：`json_get_*` / `json_at` / `json_path` / `operator[]` 全部经它。
+  /// 这是**最热的函数**：`json_get_*` / `json_child` / `json_path` / `operator[]` 全部经它。
   /// 放在 `.cpp` 里意味着跨 TU 无法内联，而内联的收益不在“省一次函数调用”（那只是几 ns）——
   /// 在于**键是字面量时编译器能把比较特化**。实测同一套数据、同一份代码：`.cpp` 版 8.2 ns/次，
   /// 头文件内联版 4.9 ns/次（与 header-only 的旧库同级）。框架里绝大多数调用都是

@@ -60,7 +60,7 @@ constexpr std::array<RuleSpec, 19> kRules{{
     // 几何/数学类型上的同名访问器（`Ray::at(t)` 取射线上一点）不是这个语义。
     // 用"行内豁免"而不是改正则：`(?<!...)` 后行断言在 std::regex 上会崩
     //（实测 lint 直接段错误），而那是一个更糟的取舍——规则复杂到跑不起来等于没有。
-    {"L12", "禁止 .at() 取值（键缺失即抛异常；用 json_at/find 或显式检查）", R"(\.at\s*\()"},
+    {"L12", "禁止 .at() 取值（键缺失即抛异常；用 json_child/find 或显式检查）", R"(\.at\s*\()"},
     // L13 需要作用域判断（「当前类是否继承 Element」「这行是否在 semantics_flags 覆写
     // 体内」都表达不成单行正则），由 `check_element_state()` 单独实现。
     {"L13", "组件不得遮蔽 Element 保护成员、semantics_flags 覆写不得重建标志", ""},

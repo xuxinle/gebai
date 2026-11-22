@@ -13,7 +13,7 @@ auto parse_text_edits(const Json& value) -> std::vector<TextEdit> {
   for (const auto& item : value) {
     if (!item.is_object()) continue;
     TextEdit edit{};
-    edit.range = range_from_json(json_at(item, "range"));
+    edit.range = range_from_json(json_child(item, "range"));
     edit.new_text = json_get_string(item, "newText");
     edits.push_back(std::move(edit));
   }
@@ -34,20 +34,20 @@ auto parse_workspace_edit(const Json& value) -> WorkspaceEdit {
       if (const std::string kind = json_get_string(item, "kind"); !kind.empty()) {
         // 资源操作的 uri 字段名随操作类型不同：`Create`/`Delete` 用 `uri`，
         // `Rename` 用 `oldUri`/`newUri`——两种都试，只用于给用户看的那行描述。
-        std::string uri = json_get_string(json_at(item, "options"), "uri");
-        if (uri.empty()) uri = json_get_string(json_at(item, "options"), "oldUri");
+        std::string uri = json_get_string(json_child(item, "options"), "uri");
+        if (uri.empty()) uri = json_get_string(json_child(item, "options"), "oldUri");
         result.skipped_resource_ops.push_back(
             uri.empty() ? kind : std::format("{} {}", kind, uri));
         continue;
       }
       FileEdits file{};
-      const Json& document = json_at(item, "textDocument");
+      const Json& document = json_child(item, "textDocument");
       file.uri = json_get_string(document, "uri");
       if (const Json* version = json_find(document, "version");
           version != nullptr && version->is_number_integer()) {
         file.version = version->get<std::int64_t>();
       }
-      file.edits = parse_text_edits(json_at(item, "edits"));
+      file.edits = parse_text_edits(json_child(item, "edits"));
       if (!file.uri.empty()) result.files.push_back(std::move(file));
     }
     if (!result.files.empty() || !result.skipped_resource_ops.empty()) return result;

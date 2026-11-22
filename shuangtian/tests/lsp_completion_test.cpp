@@ -128,7 +128,7 @@ ST_TEST(lsp_completion_trigger_characters) {
 
 ST_TEST(lsp_completion_detail_extraction) {
   const auto list = sample_completion_list();
-  const auto& with_docs = st::json_at(st::json_at(list, "items")[0], "documentation");
+  const auto& with_docs = st::json_child(st::json_child(list, "items")[0], "documentation");
   (void)with_docs;
   // 从原始 item 取详情：detail + documentation 拼接。
   const st::Json item = st::json_parse(

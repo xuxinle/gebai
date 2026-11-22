@@ -165,18 +165,18 @@ ST_TEST(gltf_gltf_text_can_be_parsed_by_others) {
   ST_CHECK_EQ(st::json_path(*document, "nodes").size(), 2U);   // 根 + 一个对象
   ST_CHECK_EQ(st::json_path(*document, "meshes").size(), 1U);
   const st::Json& primitive = st::json_path(
-      st::json_at(st::json_at(st::json_at(*document, "meshes")[0], "primitives")[0], "attributes"),
+      st::json_child(st::json_child(st::json_child(*document, "meshes")[0], "primitives")[0], "attributes"),
       "POSITION");
   ST_CHECK(primitive.is_number());
   ST_CHECK_EQ(primitive.get<int>(), 0);
-  ST_CHECK_EQ(st::json_at(st::json_at(st::json_at(*document, "meshes")[0], "primitives")[0], "mode")
+  ST_CHECK_EQ(st::json_child(st::json_child(st::json_child(*document, "meshes")[0], "primitives")[0], "mode")
                   .get<int>(),
               4);   // TRIANGLES
   // POSITION 的 min/max 是**规范要求**的（下游用它做包围盒/剔除，缺了会报警告）
-  ST_CHECK_EQ(st::json_at(st::json_at(*document, "accessors")[0], "min").size(), 3U);
-  ST_CHECK_EQ(st::json_at(st::json_at(*document, "accessors")[0], "max").size(), 3U);
+  ST_CHECK_EQ(st::json_child(st::json_child(*document, "accessors")[0], "min").size(), 3U);
+  ST_CHECK_EQ(st::json_child(st::json_child(*document, "accessors")[0], "max").size(), 3U);
   // 内嵌缓冲：data URI
-  const std::string uri = st::json_at(st::json_at(*document, "buffers")[0], "uri").get<std::string>();
+  const std::string uri = st::json_child(st::json_child(*document, "buffers")[0], "uri").get<std::string>();
   ST_CHECK(uri.rfind("data:", 0) == 0);
 
   // 读回来自家文本也必须还原几何

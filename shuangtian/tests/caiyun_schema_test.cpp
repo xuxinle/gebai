@@ -535,7 +535,7 @@ ST_TEST(json_schema_rejects_unknown_fields_at_every_level) {
   const st::Json schema = parse_json_schema();
   ST_CHECK(schema.contains("additionalProperties"));
   ST_CHECK(!schema.value("additionalProperties", true));
-  for (const auto& [name, node] : st::json_at(schema, "$defs").items()) {
+  for (const auto& [name, node] : st::json_child(schema, "$defs").items()) {
     if (node.value("additionalProperties", true)) {
       // 打印是哪个作用域漏了，便于直接改
       st::log::out("作用域 {} 未声明 additionalProperties:false\n", name);
@@ -549,7 +549,7 @@ ST_TEST(json_schema_covers_every_registered_field) {
   // "schema 里没这个字段"会互相矛盾。
   const st::Json schema = parse_json_schema();
   const st::Json& layer =
-      st::json_at(st::json_at(st::json_at(schema, "$defs"), "layer"), "properties");
+      st::json_child(st::json_child(st::json_child(schema, "$defs"), "layer"), "properties");
   ST_CHECK(layer.contains("model_spin"));
   ST_CHECK(layer.contains("model_bob"));
   ST_CHECK(layer.contains("kind"));
@@ -561,18 +561,18 @@ ST_TEST(json_schema_covers_every_registered_field) {
 ST_TEST(json_schema_maps_types_and_ranges) {
   const st::Json schema = parse_json_schema();
   const st::Json& layer =
-      st::json_at(st::json_at(st::json_at(schema, "$defs"), "layer"), "properties");
+      st::json_child(st::json_child(st::json_child(schema, "$defs"), "layer"), "properties");
 
   // 数字 + 范围
-  const st::Json& spin = st::json_at(layer, "model_spin");
+  const st::Json& spin = st::json_child(layer, "model_spin");
   ST_CHECK_EQ(spin.value("type", std::string{}), std::string("number"));
   ST_CHECK(spin.value("minimum", 0.0) < 0.0);
   ST_CHECK(spin.value("maximum", 0.0) > 0.0);
 
   // Dimension：数字或百分比串（`oneOf` 必须是两个对象元素，不是数组的数组）
-  const st::Json& x = st::json_at(layer, "x");
+  const st::Json& x = st::json_child(layer, "x");
   ST_CHECK(x.contains("oneOf"));
-  const st::Json& variants = st::json_at(x, "oneOf");
+  const st::Json& variants = st::json_child(x, "oneOf");
   ST_CHECK_EQ(variants.size(), std::size_t{2});
   ST_CHECK(variants[0].is_object());
   ST_CHECK(variants[1].is_object());
@@ -580,7 +580,7 @@ ST_TEST(json_schema_maps_types_and_ranges) {
   ST_CHECK_EQ(variants[1].value("type", std::string{}), std::string("string"));
 
   // Color：字符串 + 十六进制约束
-  const st::Json& fill = st::json_at(layer, "fill");
+  const st::Json& fill = st::json_child(layer, "fill");
   ST_CHECK_EQ(fill.value("type", std::string{}), std::string("string"));
   ST_CHECK_EQ(fill.value("pattern", std::string{}),
               std::string("^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$"));
@@ -590,7 +590,7 @@ ST_TEST(json_schema_requires_scenes) {
   // 没有 scenes 的脚本无法渲染——顶层必须把它标成 required，
   // 这样约束解码不会生成"合法但没有分镜"的脚本。
   const st::Json schema = parse_json_schema();
-  const st::Json& required = st::json_at(schema, "required");
+  const st::Json& required = st::json_child(schema, "required");
   bool has_scenes = false;
   for (const auto& item : required) {
     if (item.get<std::string>() == "scenes") has_scenes = true;
@@ -602,7 +602,7 @@ ST_TEST(json_schema_description_warns_about_aliases) {
   // 说明里带上"勿写 X"：约束解码看不到 description，
   // 但**读提示词的模型**能看到——两道防线各管一段。
   const st::Json schema = parse_json_schema();
-  const st::Json& spin = st::json_at(st::json_at(st::json_at(st::json_at(
+  const st::Json& spin = st::json_child(st::json_child(st::json_child(st::json_child(
       schema, "$defs"), "layer"), "properties"), "model_spin");
   const std::string desc = spin.value("description", std::string{});
   ST_CHECK(desc.find("model_rot") != std::string::npos);
@@ -616,9 +616,9 @@ ST_TEST(json_schema_links_nested_arrays) {
   // 自己的单测当时六条全绿，直到用标准校验器才暴露。
   const st::Json schema = parse_json_schema();
   const st::Json& sceneProps =
-      st::json_at(st::json_at(st::json_at(schema, "$defs"), "scene"), "properties");
-  const st::Json& layerArray = st::json_at(sceneProps, "layers");
-  const st::Json& layerItems = st::json_at(layerArray, "items");
+      st::json_child(st::json_child(st::json_child(schema, "$defs"), "scene"), "properties");
+  const st::Json& layerArray = st::json_child(sceneProps, "layers");
+  const st::Json& layerItems = st::json_child(layerArray, "items");
   ST_CHECK(layerItems.is_object());
   ST_CHECK_EQ(layerItems.value("$ref", std::string{}),
               std::string("#/$defs/layer"));
@@ -629,8 +629,8 @@ ST_TEST(json_schema_one_of_holds_objects_not_arrays) {
   // 写成 `[[{...}],[{...}]]` 是合法 JSON，但元 schema 校验直接失败——
   // 而约束解码器会拒掉整个 schema，这条路就白修了。
   const st::Json schema = parse_json_schema();
-  const st::Json& variants = st::json_at(
-      st::json_at(st::json_at(st::json_at(st::json_at(schema, "$defs"), "layer"),
+  const st::Json& variants = st::json_child(
+      st::json_child(st::json_child(st::json_child(st::json_child(schema, "$defs"), "layer"),
                    "properties"), "x"), "oneOf");
   ST_CHECK_EQ(variants.size(), std::size_t{2});
   for (const auto& item : variants) {

@@ -28,7 +28,7 @@
 /// ## 用法约定
 ///
 /// - **构造**：`Json::object()` / `Json::array()` / `Json::array({...})`，或直接赋标量。
-/// - **读**：`json_get_string/i64/double/bool/string_array`、`json_find`、`json_at`、`json_path`
+/// - **读**：`json_get_string/i64/double/bool/string_array`、`json_find`、`json_child`、`json_path`
 ///   ——都不抛，缺键给默认值或 null 节点。
 /// - **写**：`node["k"] = v`（对象）、`arr.push_back(v)` / `arr[i] = v`（数组）。
 /// - **遍历**：`for (const auto& [key, value] : node.items())`（对象）、
@@ -95,7 +95,7 @@ auto json_dump_to(std::string& out, const Json& value, bool pretty, std::uint32_
 ///
 /// | 操作 | 旧指针 |
 /// |---|---|
-/// | 只读（`find` / `json_at` / `contains` / `dump` / 遍历） | 有效 |
+/// | 只读（`find` / `json_child` / `contains` / `dump` / 遍历） | 有效 |
 /// | 插入新键、`push_back`（触发扩容时） | **失效**（元素被搬到新内存） |
 /// | `erase` / `erase_index` | **失效**（后面的元素前移） |
 ///
@@ -105,38 +105,53 @@ auto json_dump_to(std::string& out, const Json& value, bool pretty, std::uint32_
 /// 使用纪律：跨越任何写入操作时，重新 `find` 一次；或先用 `size()` 预留好容量。
 ///
 /// ## 为何是 inline 定义而非 .cpp 导出
-/// 这是全部读取路径的**唯一入口**（`json_at` / `json_get_*` / `json_path` 全经它）。
+/// 这是全部读取路径的**唯一入口**（`json_child` / `json_get_*` / `json_path` 全经它）。
 /// 放 `.cpp` 里跨 TU 不能内联，而内联的真正收益是**字面量键的比较特化**：
 /// 同一实现、同一数据，`.cpp` 版实测 8.2 ns/次；内联后 5.0 ns/次（与 header-only 的旧库同级）。
 [[nodiscard]] inline auto json_find(const Json& value, std::string_view key) noexcept -> const Json* {
   return value.find(key);
 }
 
-/// 取子节点引用；不存在时返回静态 null 节点（可安全读取、可 `is_null()` 判断）。
+/// 取子节点引用（**安全导航**）：取到就返回它，没有就返回共享 null 节点。
 ///
-/// ⚠ **不要用 `json_at(x,k).is_null()` 判断“键在不在”**：键不存在与键显式为 `null`
-/// 在这个调用上长得一模一样（都返回 null 节点）。要分辨就改用 `json_find`。
-/// `json_at` 的定位是“我确定要链式读，缺了也无所谓”。
-[[nodiscard]] inline auto json_at(const Json& value, std::string_view key) noexcept -> const Json& {
+/// ## 什么时候用这个，什么时候用 `json_find` / `json_has`
+///
+/// 三个函数的动词不同，不是重名：
+///
+/// | 问题 | 用哪个 |
+/// |---|---|
+/// | “这个键**写了没**？” | `json_has` |
+/// | 同上，且要拿到指针 | `json_find`（缺了是 `nullptr`） |
+/// | “**往下走一层**，缺了就当空值继续读” | `json_child` |
+///
+/// 典型场景：`json_child(json_child(root,"camera"),"eye")` —— 两级都可能缺，
+/// 但调用方只想拿一个“可能是空”的值，不想每层写一个 `if`。
+///
+/// ⚠ **不要用 `json_child(x,k).is_null()` 判断“键在不在”**：键不存在与键显式为 `null`
+/// 在这个调用上完全一样（都是 null 节点）。要分辨就用 `json_find` / `json_has`。
+///
+/// 旧名 `json_child` 已移除：它与 `json_find` 只差一个字母，而语义差一个数量级
+///（241 处 find 对 73 处 at，靠记忆区分是不可接受的）。
+[[nodiscard]] inline auto json_child(const Json& value, std::string_view key) noexcept -> const Json& {
   const Json* found = value.find(key);
   return found != nullptr ? *found : Json::null_node();
 }
 
 [[nodiscard]] inline auto json_get_string(const Json& value, std::string_view key,
                                           std::string_view fallback = {}) -> std::string {
-  return json_as_string(json_at(value, key), fallback);
+  return json_as_string(json_child(value, key), fallback);
 }
 [[nodiscard]] inline auto json_get_i64(const Json& value, std::string_view key,
                                        std::int64_t fallback = 0) -> std::int64_t {
-  return json_as_i64(json_at(value, key), fallback);
+  return json_as_i64(json_child(value, key), fallback);
 }
 [[nodiscard]] inline auto json_get_double(const Json& value, std::string_view key,
                                           double fallback = 0.0) -> double {
-  return json_as_double(json_at(value, key), fallback);
+  return json_as_double(json_child(value, key), fallback);
 }
 [[nodiscard]] inline auto json_get_bool(const Json& value, std::string_view key,
                                         bool fallback = false) -> bool {
-  return json_as_bool(json_at(value, key), fallback);
+  return json_as_bool(json_child(value, key), fallback);
 }
 /// 取字符串数组（非字符串元素被跳过；非数组返回空）。
 [[nodiscard]] auto json_get_string_array(const Json& value, std::string_view key)
@@ -160,7 +175,7 @@ auto json_dump_to(std::string& out, const Json& value, bool pretty, std::uint32_
 // |---|---|---|---|
 // | `json_has(x,"k")` | false | **true** | true |
 // | `json_find(x,"k")` | nullptr | 指针 | 指针 |
-// | `json_at(x,"k").is_null()` | true | true | false |  ← 前两种分不开
+// | `json_child(x,"k").is_null()` | true | true | false |  ← 前两种分不开
 
 /// 键**存在与否**（显式 `null` 也算存在）。
 ///

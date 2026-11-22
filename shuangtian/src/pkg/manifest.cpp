@@ -193,7 +193,7 @@ auto source_spec_from_object(const st::Json& json) -> Result<SourceSpec> {
   if (!json.is_object()) return unexpected(ErrorCode::Parse, "依赖来源必须是 JSON 对象");
   SourceSpec spec;
   const st::Json* nested = json_find(json, "source");
-  const st::Json& outer_sha256 = json_at(json, "sha256");
+  const st::Json& outer_sha256 = json_child(json, "sha256");
   if (nested != nullptr && nested->is_object()) {
     const auto kind = parse_source_kind(json_get_string(*nested, "kind", "path"));
     if (!kind) return forward_error(kind.error());
@@ -330,7 +330,7 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
     manifest.framework = std::move(spec);
   }
 
-  const st::Json& toolchains = json_at(json, "toolchains");
+  const st::Json& toolchains = json_child(json, "toolchains");
   if (toolchains.is_object()) {
     for (const auto& [name, value] : toolchains.items()) {
       if (!value.is_object()) {
@@ -355,7 +355,7 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
     }
   }
 
-  const st::Json& targets = json_at(json, "targets");
+  const st::Json& targets = json_child(json, "targets");
   if (!targets.is_null()) {
     if (!targets.is_object()) return unexpected(ErrorCode::Parse, "targets 必须是 JSON 对象");
     for (const auto& [name, value] : targets.items()) {
@@ -365,7 +365,7 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
     }
   }
 
-  const st::Json& dependencies = json_at(json, "dependencies");
+  const st::Json& dependencies = json_child(json, "dependencies");
   const st::Json* source_deps = nullptr;
   if (dependencies.is_array()) {
     source_deps = &dependencies;

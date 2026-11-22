@@ -115,8 +115,8 @@ inline constexpr std::size_t kKeepAliveLogLines = 200;
   }
   for (const auto name : {"ctrl", "shift", "alt", "meta"}) {
     // 注意：这里**不能**用 nlohmann 的 `at()`——它在键缺失时抛 out_of_range，而按修饰键
-    // 是否出现过是可选的（`{"kind":"click"}` 不带任何修饰键）。`json_at` 缺键返回 null 节点。
-    if (const Json& flag = json_at(params, name); flag.is_boolean() && json_as_bool(flag)) {
+    // 是否出现过是可选的（`{"kind":"click"}` 不带任何修饰键）。`json_child` 缺键返回 null 节点。
+    if (const Json& flag = json_child(params, name); flag.is_boolean() && json_as_bool(flag)) {
       const std::string key = name;
       if (key == "ctrl") flags[0] = true;
       if (key == "shift") flags[1] = true;
@@ -536,7 +536,7 @@ struct Server::Impl {
                                  ? 0
                                  : static_cast<std::uint64_t>(json_get_i64(*message, "id", 0));
     const std::string method = json_get_string(*message, "method");
-    const Json& params = json_at(*message, "params");
+    const Json& params = json_child(*message, "params");
     if (method.empty()) {
       fail(client, id, ErrorCode::Invalid, std::format("缺少 method——{}", kAgentOnlyNotice));
       return;
@@ -992,7 +992,7 @@ ui::Element* element = find_element(json_get_string(params, "id"));
 if (element == nullptr) {
   return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", json_get_string(params, "id")));
 }
-const Json& props = json_at(params, "props");
+const Json& props = json_child(params, "props");
 if (!props.is_object()) return unexpected(ErrorCode::Invalid, "props 必须是对象");
 // 被拒项与 changed 对偶回传（BACKLOG 4022 方向①）：拼错名字/值不再需要 diff
 // changed 才能发现。非空才带字段（与 ui.changed 事件的 "changed" 同一写法），
@@ -1693,7 +1693,7 @@ if (function.empty()) {
   return unexpected(ErrorCode::Invalid, "script 需要 code / function / on / off / bindings / state 之一");
 }
 std::vector<Json> arguments;
-const Json& raw_arguments = json_at(params, "args");
+const Json& raw_arguments = json_child(params, "args");
 if (raw_arguments.is_array()) {
   for (const Json& item : raw_arguments) arguments.push_back(item);
 }
@@ -2034,10 +2034,10 @@ auto Server::Impl::handle_perf([[maybe_unused]] Client& client, [[maybe_unused]]
     Json result = Json::object();
     result["report"] = std::move(*parsed);
     // 额外的**粗粒度摘要**：模型看一眼就知道要不要展开 `report`。
-    const Json& report = json_at(result, "report");
-    const Json& findings = json_at(report, "findings");
+    const Json& report = json_child(result, "report");
+    const Json& findings = json_child(report, "findings");
     result["finding_count"] = static_cast<std::uint64_t>(findings.size());
-    const Json& caveats = json_at(report, "caveats");
+    const Json& caveats = json_child(report, "caveats");
     // “这份数据能不能用来下结论”——把 ok=false 的条数直接报出来，
     // 比让调用方自己遍历数组更容易被用上。
     std::uint64_t blockers = 0;

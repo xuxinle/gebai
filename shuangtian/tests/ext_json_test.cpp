@@ -203,15 +203,15 @@ ST_TEST(json_accessors_degrade_to_defaults) {
   ST_CHECK_EQ(st::json_get_i64(*scalar, "anything", -1), -1);
 
   // 指针比较走布尔断言：`ST_CHECK_EQ` 需要可格式化类型，裸指针进不了 std::format
-  ST_CHECK(st::json_find(doc, "num") == &st::json_at(doc, "num"));
+  ST_CHECK(st::json_find(doc, "num") == &st::json_child(doc, "num"));
   ST_CHECK(st::json_find(doc, "missing") == nullptr);
-  ST_CHECK(st::json_at(doc, "missing").is_null());
+  ST_CHECK(st::json_child(doc, "missing").is_null());
 }
 
 /// 「键不存在」与「键存在但值为 null」是**两件不同的事**，必须能分辨。
 ///
-/// 为何单独钉住：`json_at` 对两者都返回静态 null 节点（它必须返回引用，
-/// 没有别的选择），于是 `json_at(x, k).is_null()` **无法**回答“这个键到底有没有”。
+/// 为何单独钉住：`json_child` 对两者都返回静态 null 节点（它必须返回引用，
+/// 没有别的选择），于是 `json_child(x, k).is_null()` **无法**回答“这个键到底有没有”。
 /// 而工程里这两种含义完全不同：
 ///   `{"detail": null}` —— 作者明确写了“没有详情”，保留这个键；
 ///   `{}`               —— 作者没提，用默认值。
@@ -231,9 +231,9 @@ ST_TEST(json_missing_key_is_distinguishable_from_explicit_null) {
   ST_CHECK(explicit_null->is_null());
   ST_CHECK(doc.contains("explicit_null"));
 
-  // 两者在 json_at 上**看起来一样**——这就是为什么不能用 is_null 判缺失
-  ST_CHECK(st::json_at(doc, "absent").is_null());
-  ST_CHECK(st::json_at(doc, "explicit_null").is_null());
+  // 两者在 json_child 上**看起来一样**——这就是为什么不能用 is_null 判缺失
+  ST_CHECK(st::json_child(doc, "absent").is_null());
+  ST_CHECK(st::json_child(doc, "explicit_null").is_null());
 
   // 「有值但为零/空」既不是缺失也不是 null
   const Json* zero = st::json_find(doc, "zero");
@@ -270,7 +270,7 @@ ST_TEST(json_find_pointer_is_invalidated_by_structural_writes) {
 
   // 只读操作不移动元素
   (void)doc.contains("anchor");
-  (void)st::json_at(doc, "anchor");
+  (void)st::json_child(doc, "anchor");
   (void)st::json_dump(doc);
   ST_CHECK(doc.find("anchor") == before);
 

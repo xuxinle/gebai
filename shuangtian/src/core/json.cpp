@@ -61,12 +61,12 @@ auto json_write_file(std::string_view path, const Json& value, bool pretty) -> S
   return fs::write_text(path, json_dump(value, pretty));
 }
 
-// `json_find` / `json_at` / `json_get_*` 定义在头文件（**热路径，需要内联**）：
+// `json_find` / `json_child` / `json_get_*` 定义在头文件（**热路径，需要内联**）：
 // 见 json.hpp —— 实测内联后字面量键能走比较特化。
 
 auto json_get_string_array(const Json& value, std::string_view key) -> std::vector<std::string> {
   std::vector<std::string> out;
-  const Json& node = json_at(value, key);
+  const Json& node = json_child(value, key);
   if (!node.is_array()) return out;
   out.reserve(node.size());
   for (const Json& item : node) {

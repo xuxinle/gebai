@@ -27,7 +27,7 @@ namespace {
   }
   location.uri = json_get_string(item, "uri");
   if (location.uri.empty()) return std::nullopt;
-  location.range = range_from_json(json_at(item, "range"));
+  location.range = range_from_json(json_child(item, "range"));
   return location;
 }
 
@@ -43,7 +43,7 @@ void collect_symbols(const Json& item, std::size_t depth, std::vector<DocumentSy
   if (const Json* range = json_find(item, "range"); range != nullptr) {
     symbol.range = range_from_json(*range);
   } else if (const Json* location = json_find(item, "location"); location != nullptr) {
-    symbol.range = range_from_json(json_at(*location, "range"));
+    symbol.range = range_from_json(json_child(*location, "range"));
   }
   out.push_back(std::move(symbol));
   // 递归子节点（子节点写在 `push_back` 之后，因此父在子前——大纲顺序天然正确）。
@@ -124,7 +124,7 @@ auto parse_workspace_symbols(const Json& result) -> std::vector<WorkspaceSymbol>
     const Json* location = json_find(item, "location");
     if (location != nullptr) {
       symbol.uri = json_get_string(*location, "uri");
-      symbol.range = range_from_json(json_at(*location, "range"));
+      symbol.range = range_from_json(json_child(*location, "range"));
     }
     if (symbol.name.empty()) continue;
     symbols.push_back(std::move(symbol));

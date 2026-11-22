@@ -6546,7 +6546,7 @@ nlohmann/json（25,526 行单头）已删除（`third_party/nlohmann/` 不再存
 |---|---|---|
 | 解析 | `json_parse` / `json_parse_file` | `Result` + **行/列/字节 + 附近内容**定位；嵌套深度在递归内计数（上限 128），超限返回 `Parse` 而不是爆栈 |
 | 序列化 | `json_dump` / `json_dump_to` / `json_write_file` / 成员 `node.dump(indent)` | 绝不抛：非法 UTF-8 输出为 U+FFFD，`NaN`/`Infinity` 写 `null` |
-| 读取 | `json_get_*` / `json_find`（返回 `const Json*`，缺键 nullptr）/ `json_at` / `json_path` / 成员 `value(k, fallback)` | **永不抛**：类型不符或键缺失退化为默认值/null 节点 |
+| 读取 | `json_get_*` / `json_find`（返回 `const Json*`，缺键 nullptr）/ `json_child` / `json_path` / 成员 `value(k, fallback)` | **永不抛**：类型不符或键缺失退化为默认值/null 节点 |
 | 遍历 | `items()`（`for (const auto& [k, v] : node.items())`）与直接迭代上的 `it.key()` / `it.value()` | 对象给键值对、数组给元素 |
 | 构造 | `Json::object()` / `Json::object({{...}})` / `Json::array({...})` / `obj["k"]=v` / `push_back` | 花括号构造不存在（编译错误） |
 
@@ -7514,7 +7514,7 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 | 14 | 根页面里的 `grow` 失效（整页缩在上半截） | `UiRoot::layout` 按内容**自然高度**排布根节点，根层的 `grow` 没有可分配空间 | 根内容按「至少铺满视口」排布（内容更高时保持自然高度） |
 | 15 | 自定义语言的"定义关键字"（`fn`/`def`）着色静默失效 | 扫描器只在**关键字表**里查，未查 `definition_keywords` | 命中定义关键字同样按关键字着色（它同时是"其后标识符是函数名"的判定依据） |
 | 16 | Ctrl+←/→ 按词移动会停在空白处（"回退到词首"落空一格） | 词移动实现只做单步跳过，未先跳过空白再找词边界 | 向左停在词首、向右停在词尾之后（与主流编辑器一致） |
-| 17 | 控制通道 `input.mouse` 直接**终止进程**（nlohmann `at()` 抛异常，无异常边界 → terminate） | JSON 迁移时按“首参是字符串字面量”启发式改写 `at()`，`params.at(name)`（变量键）被漏掉；而修饰键本就是可选的 | 改用 `json_at`；新增 lint 规则 **L12** 机械拦住同类写法（见 §8） |
+| 17 | 控制通道 `input.mouse` 直接**终止进程**（nlohmann `at()` 抛异常，无异常边界 → terminate） | JSON 迁移时按“首参是字符串字面量”启发式改写 `at()`，`params.at(name)`（变量键）被漏掉；而修饰键本就是可选的 | 改用 `json_child`；新增 lint 规则 **L12** 机械拦住同类写法（见 §8） |
 | 18 | 脚本里 `ui_get('editor').props` 为空 | `ui_get` 只返回元素基本信息，属性面只在控制通道 `get` 里拼装——同一元素两条路径两个样 | 抽出 `element_snapshot`，`get` 与 `ui_get` 共用 |
 | 19 | 内存受限时的错误消息是空洞的 `null` | 内存耗尽时 QuickJS 连异常对象都建不出来（构造它也要分配内存） | 识别该情况，直接给出“通常是内存超限：上限 N MiB”与实测值 |
 | 20 | 函数返回值静默变成 `{}` / 超大 `BigInt` 被静默截断 | 转换顺序上函数被当作“无键对象”；`JS_ToBigInt64` 超范围时仍返回成功并给出截断值 | 函数提前识别并报错；BigInt 改按十进制文本 + `from_chars` 精确判定，超范围退回字符串 |

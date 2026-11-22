@@ -134,17 +134,43 @@ inline constexpr Result<Unit> ok();          // 无值成功
 |---|---|---|
 | 解析 | `st::json_parse` / `json_parse_file`（`Result` + 行/列/字节定位） | —— |
 | 写盘 | `st::json_write_file`、`json_dump`、成员 `node.dump(2)` | —— |
-| 读键 | `json_get_string/i64/double/bool/string_array`、`json_find`（返回 `const Json*`，缺键 nullptr）、`json_at`、`json_path`、成员 `node.value("k", fallback)` | —— |
-| 查键存在 | `json_find(x,"k") != nullptr`、`x.contains("k")` | `json_at(x,"k").is_null()`（**分不清缺失与 null**，见下坑 1） |
+| 读键 | `json_get_string/i64/double/bool/string_array`、`json_child`、`json_path`、成员 `node.value("k", fallback)` | —— |
+| 问键在不存 | 见下方三动词对照表 | `json_child(x,"k").is_null()`（**分不清缺失与 null**，见下坑 1） |
 | 遍历对象 | `for (const auto& [k, v] : node.items())`；直接迭代时 `it.key()` / `it.value()` | —— |
 | 构造 | `Json::object()` / `Json::object({{"..."}})` / `Json::array({...})` / `obj["k"] = v` / `push_back` | `Json x{...}`（编译错误） |
 | 类型化取值 | `as_i64/as_u64/as_double/as_bool/as_string`、`get<T>()`（类型不符给默认值） | —— |
 
+### 取子节点的三个动词（**名字不同是因为问题不同**）
+
+这三个函数不是“同一个东西的三种写法”，选错会静默出错：
+
+| 你想问的 | 用 | 缺失时 | 显式 `null` 时 |
+|---|---|---|---|
+| “这个键**写了没**？” | `json_has(x,"k")` | `false` | **`true`** |
+| “同上，且我要拿到指针” | `json_find(x,"k")` | `nullptr` | 指针 |
+| “**往下走一层**，缺了就当空值继续读” | `json_child(x,"k")` | null 节点 | null 节点 |
+
+典型用法差异：
+
+```cpp
+// 导航：每一层都可能缺，但只想拿一个“可能是空”的值 → json_child
+const Json& eye = st::json_child(st::json_child(root, "camera"), "eye");
+const double x = st::json_get_double(eye, "x", 0.0);
+
+// 分支：必须知道“到底写了没” → json_has / json_has_value
+if (st::json_has(root, "detail")) { /* 作者写了这个键，即使是 null */ }
+if (st::json_has_value(root, "detail")) { /* 写了且给了非 null 的值 */ }
+```
+
+> 为何不叫 `json_at`：它与 `json_find` 只差一个字母，而语义差一个数量级
+> （全库 241 处 `find` 对 111 处 `at`，靠记忆区分不可接受）。旧名已彻底移除，无兼容别名——
+> 留着旧名就会有人继续用，而两者的错用方式是**静默**的。
+
 五条容易踩的坑（都有实际事故或审计依据）：
 
 1. **「键不存在」与「键存在但值为 null」必须用 `json_find` 分辨**，这是本库最容易写错的一处。
-   `json_at` 对两者都返回静态 null 节点（它返回引用，没别的选择），所以
-   `json_at(x,"k").is_null()` **无法**回答“这个键到底有没有”。而工程里这两种含义完全不同：
+   `json_child` 对两者都返回静态 null 节点（它返回引用，没别的选择），所以
+   `json_child(x,"k").is_null()` **无法**回答“这个键到底有没有”。而工程里这两种含义完全不同：
 
    ```jsonc
    {"detail": null}   // 作者明确写了“没有详情”，这个键要保留
@@ -598,7 +624,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L9 | `\.detach\s*\(`、`\.lock\s*\(`（裸互斥） | 无 |
 | L10 | 单参构造缺 `explicit`（提示级，不导致失败） | `// lint-allow: L10 原因` |
 | L11 | `\bstd::endl\b` | 无 |
-| L12 | `\.at\s*\(`（容器键/下标缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_at`/`json_find`——自研 `Json` 已无 `at()`；容器用 `find`） |
+| L12 | `\.at\s*\(`（容器键/下标缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_child`/`json_find`——自研 `Json` 已无 `at()`；容器用 `find`） |
 | L13 | 组件**遮蔽** `Element` 保护成员（`focused_`/`key_`…）；`semantics_flags` 覆写以 `SemanticsFlags flags{}` 起手 | 无（专用检查：需判断「当前类是否继承 `Element`」与「是否在覆写体内」，单行正则表达不了；同类先例 L8） |
 | L14 | `#include <windows.h>`/`<unistd.h>`/`<dlfcn.h>`/`<shellapi.h>`/`<winsock2.h>`/`<arpa/inet.h>`/`<netinet/in.h>`/`<sys/socket.h>`/`<poll.h>`/`<fcntl.h>`，以及直接用 `dlopen`/`dlsym`（§10 第 1 条：平台差异只能出现在 `platform_*`） | `platform_*.cpp`（单点封装）；`shell/backend.cpp`（需 `dlopen` 做**运行时后端探测**本身）；清单 `lint.exempt.L14` 登记的 `core/entry.cpp`（见下表） |
 | L15 | raw string 无定界符（`R"(`）——内容里的 `)"` 会提前终结（提示级） | 无（改用 `R"x(…)x"`；本仓实测踩过两次） |

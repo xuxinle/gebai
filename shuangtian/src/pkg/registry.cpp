@@ -639,7 +639,7 @@ auto graph_to_json(const ResolvedGraph& graph) -> st::Json {
 
 auto graph_from_json(const st::Json& json) -> Result<ResolvedGraph> {
   if (!json.is_object()) return unexpected(ErrorCode::Parse, "锁文件根节点必须是 JSON 对象");
-  const st::Json& packages = json_at(json, "packages");
+  const st::Json& packages = json_child(json, "packages");
   if (!packages.is_array()) return unexpected(ErrorCode::Parse, "锁文件缺少 packages 数组");
 
   ResolvedGraph graph;

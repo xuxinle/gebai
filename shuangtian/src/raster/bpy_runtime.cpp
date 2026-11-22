@@ -64,7 +64,7 @@ auto read_matrix(const Json& value) -> math::Mat4 {
 /// 读物体的几何（`vertices` 是每顶点 9 个 float 的交错表）。
 auto read_mesh(const Json& item) -> Mesh {
   Mesh mesh{};
-  const Json& verts = json_at(item, "vertices");
+  const Json& verts = json_child(item, "vertices");
   if (verts.is_array()) {
     mesh.vertices.reserve(verts.size() * Mesh::kVertexFloats);
     for (const auto& vertex : verts) {
@@ -74,7 +74,7 @@ auto read_mesh(const Json& item) -> Mesh {
       }
     }
   }
-  const Json& indices = json_at(item, "indices");
+  const Json& indices = json_child(item, "indices");
   if (indices.is_array()) {
     mesh.indices.reserve(indices.size());
     for (const auto& index : indices) {
@@ -93,7 +93,7 @@ auto read_material_node(const Json& value) -> Material {
   Material material{};
   if (!value.is_object()) return material;
 
-  const auto color = read_doubles(json_at(value, "base_color"), 3);
+  const auto color = read_doubles(json_child(value, "base_color"), 3);
   material.base_color = math::Vec3{static_cast<float>(color[0]),
                                    static_cast<float>(color[1]),
                                    static_cast<float>(color[2])};
@@ -108,7 +108,7 @@ auto read_material_node(const Json& value) -> Material {
 
 /// 读材质（兼容单材质旧格式：`item["material"]`）。
 auto read_material(const Json& item) -> Material {
-  return read_material_node(json_at(item, "material"));
+  return read_material_node(json_child(item, "material"));
 }
 
 /// 读相机。缺失时用一份保守默认（并已在 warnings 里报过）。
@@ -121,8 +121,8 @@ auto read_camera(const Json& value) -> Camera {
     camera.target = math::Vec3{0.0f, 0.3f, 0.0f};
     return camera;
   }
-  const auto eye = read_doubles(json_at(value, "eye"), 3);
-  const auto target = read_doubles(json_at(value, "target"), 3);
+  const auto eye = read_doubles(json_child(value, "eye"), 3);
+  const auto target = read_doubles(json_child(value, "target"), 3);
   camera.eye = math::Vec3{static_cast<float>(eye[0]), static_cast<float>(eye[1]),
                           static_cast<float>(eye[2])};
   camera.target = math::Vec3{static_cast<float>(target[0]),
@@ -227,7 +227,7 @@ auto read_lighting(const Json& items) -> Lighting {
   // ⚠ `Lighting.light_from` 是**指向光源**的方向（与 bpy 相机的 -Z 视线相反）。
   // Python 侧抽出来的是"灯光照向哪"（-Z），所以要**取负**——
   // 漏了这步的症状是"物体被从背面照亮、正面全黑"。
-  const auto direction = read_doubles(json_at(key, "direction"), 3);
+  const auto direction = read_doubles(json_child(key, "direction"), 3);
   lighting.light_from = math::Vec3{static_cast<float>(-direction[0]),
                                    static_cast<float>(-direction[1]),
                                    static_cast<float>(-direction[2])};
@@ -271,14 +271,14 @@ auto read_lighting(const Json& items) -> Lighting {
     if (i == key_index) continue;
     Light light{};
     light.kind = LightKind::Directional;   // extras 只支持平行光语义
-    const auto dir = read_doubles(json_at(items[i], "direction"), 3);
+    const auto dir = read_doubles(json_child(items[i], "direction"), 3);
     // 与主光一样：`Light.direction` 是**指向光源**，要取负
     light.direction = math::Vec3{static_cast<float>(-dir[0]), static_cast<float>(-dir[1]),
                                  static_cast<float>(-dir[2])};
-    const auto pos = read_doubles(json_at(items[i], "position"), 3);
+    const auto pos = read_doubles(json_child(items[i], "position"), 3);
     light.position = math::Vec3{static_cast<float>(pos[0]), static_cast<float>(pos[1]),
                                 static_cast<float>(pos[2])};
-    const auto rgb = read_doubles(json_at(items[i], "color"), 3);
+    const auto rgb = read_doubles(json_child(items[i], "color"), 3);
     light.color = math::Vec3{static_cast<float>(rgb[0]), static_cast<float>(rgb[1]),
                              static_cast<float>(rgb[2])};
     const double energy = json_get_double(items[i], "energy", 1000.0);
@@ -312,7 +312,7 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
   ThreeScene scene{};
 
   // ── 物体 ────────────────────────────────────────────────────────────
-  const Json& objects = json_at(root, "objects");
+  const Json& objects = json_child(root, "objects");
   if (objects.is_array()) {
     scene.objects.reserve(objects.size());
     for (const auto& item : objects) {
@@ -322,7 +322,7 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
       if (object.mesh.vertices.empty()) continue;   // 空几何不占位
       object.material = read_material(item);
       // 多材质槽位表：非空时渲染按 `mesh.material_groups` 逐组换材质
-      const Json& slots = json_at(item, "materials");
+      const Json& slots = json_child(item, "materials");
       if (slots.is_array()) {
         object.materials.reserve(slots.size());
         for (const auto& slot : slots) {
@@ -330,7 +330,7 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
         }
       }
       // 分组表：三元组 `[index_start, index_count, material_index]`
-      const Json& groups = json_at(item, "material_groups");
+      const Json& groups = json_child(item, "material_groups");
       if (groups.is_array()) {
         object.mesh.material_groups.reserve(groups.size() * 3U);
         for (const auto& group : groups) {
@@ -346,15 +346,15 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
           object.mesh.material_groups.clear();
         }
       }
-      object.world = read_matrix(json_at(item, "world"));
+      object.world = read_matrix(json_child(item, "world"));
       object.visible = json_get_bool(item, "visible", true);
       scene.objects.push_back(std::move(object));
     }
   }
 
   // ── 相机 / 灯光 / 诊断 ──────────────────────────────────────────────
-  scene.camera = read_camera(json_at(root, "camera"));
-  scene.lighting = read_lighting(json_at(root, "lights"));
+  scene.camera = read_camera(json_child(root, "camera"));
+  scene.lighting = read_lighting(json_child(root, "lights"));
 
   // ## 世界背景 → 环境反射色（2026-11-05 加）
   //
@@ -400,7 +400,7 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
   // 同一口径，两者走同一条 `encode_pixel` 输出链——这就是“三条输入路径同一内核”
   // 在背景上的体现。
   {
-    const Json& world = json_at(root, "world");
+    const Json& world = json_child(root, "world");
     if (world.is_array() && world.size() >= 3) {
       const auto rgb = read_doubles(world, 3);
       const math::Vec3 background{static_cast<float>(rgb[0]), static_cast<float>(rgb[1]),
@@ -421,7 +421,7 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
 
   // 「对标」声明与「脚本是否真的设了 world」——两者都必须从 Python 侧取，
   // 不能在 C++ 侧推（兼容层的 scene.world 永远非空，见 extract.py 的说明）。
-  const Json& compat = json_at(root, "compat");
+  const Json& compat = json_child(root, "compat");
   if (compat.is_string()) {
     scene.bpy_compat = compat.get<std::string>();
   }
@@ -431,7 +431,7 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
   //
   // Python 侧给出的是 `[strength, extent, resolution]` 三元组（或者 null）。
   // 用数组而不是对象：C++ 侧只需一次按下标取值，不必按名查三个字段。
-  const Json& shadow = json_at(root, "shadow");
+  const Json& shadow = json_child(root, "shadow");
   if (shadow.is_array() && shadow.size() >= 3) {
     scene.bpy_shadow = true;
     scene.bpy_shadow_strength = static_cast<float>(shadow[0].get<double>());
@@ -440,14 +440,14 @@ auto parse_extracted_json(std::string_view json_text) -> Result<ThreeScene> {
   }
 
   // 脚本声明的 AO（`__st_ao__`）→ `[strength, radius, samples]` 或 null。
-  const Json& ao = json_at(root, "ao");
+  const Json& ao = json_child(root, "ao");
   if (ao.is_array() && ao.size() >= 2) {
     scene.bpy_ao = true;
     scene.bpy_ao_strength = static_cast<float>(ao[0].get<double>());
     scene.bpy_ao_radius = static_cast<float>(ao[1].get<double>());
   }
 
-  const Json& warnings = json_at(root, "warnings");
+  const Json& warnings = json_child(root, "warnings");
   if (warnings.is_array()) {
     for (const auto& item : warnings) {
       if (item.is_string()) scene.warnings.push_back(item.get<std::string>());

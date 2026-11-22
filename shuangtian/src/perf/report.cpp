@@ -132,7 +132,7 @@ auto summarize_json(std::string_view text) -> ReportSummary {
   const Json& root = *parsed;
   summary.schema = json_get_string(root, "schema");
   summary.kind = json_get_string(root, "kind");
-  const Json& context = json_at(root, "context");
+  const Json& context = json_child(root, "context");
   summary.context.app = json_get_string(context, "app");
   summary.context.backend = json_get_string(context, "backend");
   summary.context.renderer = json_get_string(context, "renderer");
@@ -142,7 +142,7 @@ auto summarize_json(std::string_view text) -> ReportSummary {
   summary.context.device_scale = static_cast<float>(json_get_double(context, "device_scale", 1.0));
   summary.context.frames = static_cast<std::uint32_t>(json_get_i64(context, "frames"));
   // 关键标量：从 `sections.metrics` 收（生产者按"可跨运行比较"的项放进来）。
-  const Json& metrics = json_at(json_at(root, "sections"), "metrics");
+  const Json& metrics = json_child(json_child(root, "sections"), "metrics");
   if (metrics.is_object()) {
     for (const auto& [name, value] : metrics.items()) {
       if (value.is_number()) summary.metrics.emplace_back(name, value.get<double>());

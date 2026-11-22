@@ -55,7 +55,7 @@ using st::forward_error;
 using st::json_parse;
 using st::json_parse_file;
 using st::json_dump;
-using st::json_at;
+using st::json_child;
 using st::json_get_bool;
 using st::json_get_i64;
 using st::json_get_string;
@@ -394,9 +394,9 @@ auto command_perf(const PerfRequest& request) -> int {
   finish_child();
   trace("子进程已回收");
 
-  const Json& report = json_at(json_at(reply, "result"), "report").is_null()
-                            ? json_at(reply, "report")
-                            : json_at(json_at(reply, "result"), "report");
+  const Json& report = json_child(json_child(reply, "result"), "report").is_null()
+                            ? json_child(reply, "report")
+                            : json_child(json_child(reply, "result"), "report");
   const std::string report_text = json_dump(report, true);
   if (auto written = st::fs::write_text(report_path, report_text); !written) {
     st::eprint("报告写入失败（{}）: {}\n", report_path, written.error().to_string());
@@ -407,11 +407,11 @@ auto command_perf(const PerfRequest& request) -> int {
   if (request.as_json) {
     st::print("{}\n", report_text);
   } else {
-    const Json& context = json_at(report, "context");
+    const Json& context = json_child(report, "context");
     st::print("性能诊断：{}（{} / {}）\n", json_get_string(context, "app"),
               json_get_string(context, "backend"), json_get_string(context, "profile"));
     st::print("\n结论\n");
-    const Json& findings = json_at(report, "findings");
+    const Json& findings = json_child(report, "findings");
     if (findings.empty()) st::print("  （没有发现异常项）\n");
     for (const auto& finding : findings) {
       st::print("  [{}] {}\n", json_get_string(finding, "severity"),
@@ -424,7 +424,7 @@ auto command_perf(const PerfRequest& request) -> int {
       if (!action.empty()) st::print("      建议: {}\n", action);
     }
     st::print("\n口径\n");
-    for (const auto& caveat : json_at(report, "caveats")) {
+    for (const auto& caveat : json_child(report, "caveats")) {
       const bool ok = json_get_bool(caveat, "ok", true);
       st::print("  [{}] {}: {}\n", ok ? "ok" : "!!", json_get_string(caveat, "kind"),
                 json_get_string(caveat, "detail"));

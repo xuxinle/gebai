@@ -1348,7 +1348,7 @@ ST_TEST(ui_changed_event_carries_changed_ids) {
     if (!frame.has_value()) continue;
     if (!frame->contains("event")) continue;
     if ((*frame)["event"].get<std::string>() != "ui.changed") continue;
-    const Json& data = st::json_at(*frame, "data");
+    const Json& data = st::json_child(*frame, "data");
     if (!data.contains("changed")) continue;
     const Json& changed = data["changed"];
     ST_CHECK(changed.is_array());

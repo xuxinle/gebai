@@ -356,7 +356,7 @@ struct LspClient::Impl {
           list.reserve(items->size());
           for (const auto& item : *items) {
             Diagnostic diagnostic{};
-            diagnostic.range = range_from_json(json_at(item, "range"));
+            diagnostic.range = range_from_json(json_child(item, "range"));
             diagnostic.severity =
                 static_cast<int>(json_get_i64(item, "severity", 1));
             diagnostic.message = json_get_string(item, "message");
@@ -382,10 +382,10 @@ struct LspClient::Impl {
   }
 
   void parse_capabilities(const Json& result) {
-    const Json& server_info = json_at(result, "serverInfo");
+    const Json& server_info = json_child(result, "serverInfo");
     server_name = json_get_string(server_info, "name");
     server_version = json_get_string(server_info, "version");
-    const Json& caps = json_at(result, "capabilities");
+    const Json& caps = json_child(result, "capabilities");
     const auto has = [&caps](std::string_view key) {
       const Json* value = json_find(caps, key);
       return value != nullptr && !value->is_null() && *value != false;
@@ -396,7 +396,7 @@ struct LspClient::Impl {
     capabilities.references = has("referencesProvider");
     capabilities.document_symbol = has("documentSymbolProvider");
     capabilities.workspace_symbol = has("workspaceSymbolProvider");
-    if (const Json& completion = json_at(caps, "completionProvider");
+    if (const Json& completion = json_child(caps, "completionProvider");
         completion.is_object()) {
       capabilities.completion_resolve = completion.contains("resolveProvider") &&
                                         json_get_bool(completion, "resolveProvider");
