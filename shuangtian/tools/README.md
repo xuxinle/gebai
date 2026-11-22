@@ -155,6 +155,63 @@ py -3 tools/check_probes.py            # 全量报告
 py -3 tools/check_probes.py --strict   # 有 fail 即退 1（供提交前/CI 用）
 ```
 
+### 探针的分类与「为何不全删」
+
+2026-11-22 有人提议“把过期探针清掉”——**量完发现前提就是错的**，记在这里以免重犯。
+
+`tools/` 下 305 个 `.cpp`，按**引用去处**分类：
+
+| 类别 | 数量 | 判据 | 处置 |
+|---|---:|---|---|
+| A 进构建 | 221 | `st.pkg` 有登记 | 留 |
+| B 文档证据 | 75 | 被 `.md` 引用（“这个结论是这么测出来的”） | **必须留** |
+| C 脚本使用 | 1 | 被 `.py`/`.sh` 调用来产数据 | 留 |
+| D 探针互引 | 0 | 被其他 `.cpp` 引用 | —— |
+| E 无人引用 | **8** | 三类引用全空 | 逐个人工看（下面） |
+
+**关键教训：一个 `.cpp` 没登记进 `st.pkg` ≠ 它是垃圾。**
+B 类那 75 个是**取证档案**：`DESIGN.md` / `docs/PITFALLS.md` 引用它们作为
+实测结论的出处。删掉不会报错（因为它们不进构建），但会让“这个数字哪来的”永久失效。
+
+**健康度实测**（给全 `-I`、`-fsyntax-only`）：
+
+| | 数量 |
+|---|---:|
+| 能编过（活档案） | **268 / 305（88%）** |
+| 缺平台头（X11/Wayland/FreeType，本机不适用） | 7 |
+| 真编不过（依赖已删改的 API） | 30 |
+
+那 30 个已统一加上 `⚠ 已失效` 注释头（不改任何代码），说明失效原因与
+“当历史档案读”的口径，**没删**。原因分布：
+
+| 失效原因 | 个数 |
+|---|---:|
+| `Lighting::rim` 已删除 | 11 |
+| `Lighting::env_strength` / `env_sky` 已删除 | 4 |
+| 数据文件（`.inc`）已移除 | 3 |
+| 私头 `rasterize_internal.hpp` 已移除 | 2 |
+| `apps/*` 内部头已移除 | 2 |
+| 其余（签名变更、`SceneObjectSpec::rotate` 改名、缺 `<algorithm>` 等） | 8 |
+
+E 类那 8 个我们**也没删**——逐个读了文件头，每一个都记着具体的实测：
+
+| 文件 | 它记录的事实 |
+|---|---|
+| `cng_sha256_probe.cpp` | CNG（BCrypt，走 SHA-NI）对比框架自实现 267MB/s 的速度差 |
+| `content_hash_bench.cpp` | 新哈希与旧 FNV-1a 在同一份 259MB 上的对比 |
+| `unicode_path_probe.cpp` | 中文标点目录下 `fopen` 失败——**fs 层窄字符路径的根因** |
+| `dw_ab_vscode_ref.cpp` | VS Code（Chromium/DWrite）的字体渲染参数，扫 AA×gamma×对比度 |
+| `window_shadow_edge_cases_probe.cpp` | 非可缩放窗口 / 最大化后的 DWM 阴影边界 |
+| `bpy_script_mark_probe.cpp` | 用脚本自插 MARK 定位崩溃点（比 bisect 可靠） |
+| `materialize_roundtrip.cpp` | materialize_server 端到端耗时 |
+| `startup_candidates_probe.cpp` | 三个“简单高收益”启动优化候选的真实成本 |
+
+它们“无人引用”只是因为结论已写进文档、但文档里没回链到源文件。
+**代价是 32 KB，删掉的代价是永久丢失取证路径。**
+
+若将来真要清，判据应该是“这条结论已不可用/已被推翻”，而不是“没进构建”。
+
+
 三态判据（与 `st::probe::status` 同源）：
 
 - **fail**：确定的缺陷（清单漂移、裸读 `argv[i]`、有判据却无失败退出码）
