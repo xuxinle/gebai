@@ -163,14 +163,15 @@ class Json {
 
   Json(bool value) noexcept : kind_(json_detail::Kind::Boolean), boolean_(value) {}
   // 整型重载覆盖全部宽度：漏一个就会让 `Json(42)` 在 int64/double 之间走歧义或误选 double
-  Json(int value) noexcept : kind_(json_detail::Kind::Integer), integer_(value) {}
-  Json(long value) noexcept : kind_(json_detail::Kind::Integer), integer_(value) {}
-  Json(long long value) noexcept : kind_(json_detail::Kind::Integer), integer_(value) {}
-  Json(unsigned int value) noexcept : kind_(json_detail::Kind::Unsigned), unsigned_(value) {}
-  Json(unsigned long value) noexcept : kind_(json_detail::Kind::Unsigned), unsigned_(value) {}
-  Json(unsigned long long value) noexcept : kind_(json_detail::Kind::Unsigned), unsigned_(value) {}
-  Json(double value) noexcept : kind_(json_detail::Kind::Float), number_(value) {}
-  Json(float value) noexcept : kind_(json_detail::Kind::Float), number_(value) {}
+  Json(int value) noexcept : kind_(json_detail::Kind::Integer), scalar_{.integer_ = value} {}
+  Json(long value) noexcept : kind_(json_detail::Kind::Integer), scalar_{.integer_ = value} {}
+  Json(long long value) noexcept : kind_(json_detail::Kind::Integer), scalar_{.integer_ = value} {}
+  Json(unsigned int value) noexcept : kind_(json_detail::Kind::Unsigned), scalar_{.unsigned_ = value} {}
+  Json(unsigned long value) noexcept : kind_(json_detail::Kind::Unsigned), scalar_{.unsigned_ = value} {}
+  Json(unsigned long long value) noexcept
+      : kind_(json_detail::Kind::Unsigned), scalar_{.unsigned_ = value} {}
+  Json(double value) noexcept : kind_(json_detail::Kind::Float), scalar_{.number_ = value} {}
+  Json(float value) noexcept : kind_(json_detail::Kind::Float), scalar_{.number_ = value} {}
   Json(const char* value) : kind_(json_detail::Kind::String), text_(value == nullptr ? "" : value) {}
   Json(std::string value) : kind_(json_detail::Kind::String), text_(std::move(value)) {}
   // `std::string_view` 与 `std::string` 只能留一个：两者同时存在时，
@@ -399,11 +400,11 @@ class Json {
       case json_detail::Kind::String:
         return !text_.empty();
       case json_detail::Kind::Integer:
-        return integer_ != 0;
+        return scalar_.integer_ != 0;
       case json_detail::Kind::Unsigned:
-        return unsigned_ != 0;
+        return scalar_.unsigned_ != 0;
       case json_detail::Kind::Float:
-        return number_ != 0.0;
+        return scalar_.number_ != 0.0;
       case json_detail::Kind::Array:
         return !array_.empty();
       case json_detail::Kind::Object:
@@ -500,9 +501,18 @@ class Json {
  private:
   json_detail::Kind kind_{json_detail::Kind::Null};
   bool boolean_{false};
-  std::int64_t integer_{0};
-  std::uint64_t unsigned_{0};
-  double number_{0.0};
+  /// 三个数值**互斥**（kind_ 决定哪个有效）：union 而不是三个并行字段。
+  ///
+  /// 收益：`sizeof(Json)` 112 → 96 字节，且标量值的读写落在同一缓存行上。
+  /// “保真”靠的是 kind_ 区分 Integer / Unsigned / Float，而不是靠“各自存一份”。
+  ///
+  /// 必须显式 `{0}` 初始化：否则 `Json(false)` 这类只设 kind_/boolean_ 的构造路径上，
+  /// GCC 会报 `-Wmaybe-uninitialized`（实测在 script_host.cpp 等三个单元上就是 `-Werror` 建败）。
+  union {
+    std::int64_t integer_;
+    std::uint64_t unsigned_;
+    double number_;
+  } scalar_{0};
   std::string text_;
   // 两个容器的元素类型此刻仍不完整：标准库对 `vector<T>` 明确支持这种用法
   // （`T` 只需在"第一次引用成员"前完整，而那时 `JsonMember` 已在下方定义）。

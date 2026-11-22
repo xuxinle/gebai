@@ -150,11 +150,11 @@ auto Json::empty() const noexcept -> bool {
 auto Json::as_i64() const noexcept -> std::int64_t {
   switch (kind_) {
     case json_detail::Kind::Integer:
-      return integer_;
+      return scalar_.integer_;
     case json_detail::Kind::Unsigned:
-      return unsigned_ <= static_cast<std::uint64_t>(INT64_MAX) ? static_cast<std::int64_t>(unsigned_) : 0;
+      return scalar_.unsigned_ <= static_cast<std::uint64_t>(INT64_MAX) ? static_cast<std::int64_t>(scalar_.unsigned_) : 0;
     case json_detail::Kind::Float:
-      return static_cast<std::int64_t>(number_);
+      return static_cast<std::int64_t>(scalar_.number_);
     default:
       return 0;
   }
@@ -163,11 +163,11 @@ auto Json::as_i64() const noexcept -> std::int64_t {
 auto Json::as_u64() const noexcept -> std::uint64_t {
   switch (kind_) {
     case json_detail::Kind::Unsigned:
-      return unsigned_;
+      return scalar_.unsigned_;
     case json_detail::Kind::Integer:
-      return integer_ < 0 ? 0U : static_cast<std::uint64_t>(integer_);
+      return scalar_.integer_ < 0 ? 0U : static_cast<std::uint64_t>(scalar_.integer_);
     case json_detail::Kind::Float:
-      return number_ < 0 ? 0U : static_cast<std::uint64_t>(number_);
+      return scalar_.number_ < 0 ? 0U : static_cast<std::uint64_t>(scalar_.number_);
     default:
       return 0;
   }
@@ -176,11 +176,11 @@ auto Json::as_u64() const noexcept -> std::uint64_t {
 auto Json::as_double() const noexcept -> double {
   switch (kind_) {
     case json_detail::Kind::Float:
-      return number_;
+      return scalar_.number_;
     case json_detail::Kind::Integer:
-      return static_cast<double>(integer_);
+      return static_cast<double>(scalar_.integer_);
     case json_detail::Kind::Unsigned:
-      return static_cast<double>(unsigned_);
+      return static_cast<double>(scalar_.unsigned_);
     default:
       return 0.0;
   }
