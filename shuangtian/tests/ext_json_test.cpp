@@ -208,6 +208,102 @@ ST_TEST(json_accessors_degrade_to_defaults) {
   ST_CHECK(st::json_at(doc, "missing").is_null());
 }
 
+/// 「键不存在」与「键存在但值为 null」是**两件不同的事**，必须能分辨。
+///
+/// 为何单独钉住：`json_at` 对两者都返回静态 null 节点（它必须返回引用，
+/// 没有别的选择），于是 `json_at(x, k).is_null()` **无法**回答“这个键到底有没有”。
+/// 而工程里这两种含义完全不同：
+///   `{"detail": null}` —— 作者明确写了“没有详情”，保留这个键；
+///   `{}`               —— 作者没提，用默认值。
+/// 判据只能是 `json_find(x, k) == nullptr`（缺失）对 `!= nullptr && is_null()`（显式 null）。
+ST_TEST(json_missing_key_is_distinguishable_from_explicit_null) {
+  const auto parsed = st::json_parse(R"({"explicit_null":null,"zero":0,"empty":""})");
+  ST_REQUIRE(parsed.has_value());
+  const Json& doc = *parsed;
+
+  // 缺失：find 给 nullptr，两指针语义都是“没这个键”
+  ST_CHECK(st::json_find(doc, "absent") == nullptr);
+  ST_CHECK(!doc.contains("absent"));
+
+  // 显式 null：find 有指针，但节点 is_null()
+  const Json* explicit_null = st::json_find(doc, "explicit_null");
+  ST_REQUIRE(explicit_null != nullptr);
+  ST_CHECK(explicit_null->is_null());
+  ST_CHECK(doc.contains("explicit_null"));
+
+  // 两者在 json_at 上**看起来一样**——这就是为什么不能用 is_null 判缺失
+  ST_CHECK(st::json_at(doc, "absent").is_null());
+  ST_CHECK(st::json_at(doc, "explicit_null").is_null());
+
+  // 「有值但为零/空」既不是缺失也不是 null
+  const Json* zero = st::json_find(doc, "zero");
+  ST_REQUIRE(zero != nullptr);
+  ST_CHECK(!zero->is_null());
+  ST_CHECK_EQ(zero->as_i64(), 0);
+  const Json* empty = st::json_find(doc, "empty");
+  ST_REQUIRE(empty != nullptr);
+  ST_CHECK(!empty->is_null());
+  ST_CHECK(empty->as_string().empty());
+
+  // 两个语义明确的便捷 API：
+  //   json_has       —— “键写了没”，显式 null 也算写了
+  //   json_has_value —— “键写了且给了东西”，显式 null 算没给
+  ST_CHECK(!st::json_has(doc, "absent"));
+  ST_CHECK(st::json_has(doc, "explicit_null"));
+  ST_CHECK(st::json_has(doc, "zero"));
+
+  ST_CHECK(!st::json_has_value(doc, "absent"));
+  ST_CHECK(!st::json_has_value(doc, "explicit_null"));  // 显式 null ⇒ 没给
+  ST_CHECK(st::json_has_value(doc, "zero"));            // 0 是给了值
+  ST_CHECK(st::json_has_value(doc, "empty"));           // 空串也是给了值
+}
+
+/// `json_find` 返回的指针跨越**写入**就会失效（底层是 vector）。
+///
+/// 为何要钉：这是保序存储的必然代价，但它不报错、不崩，只是默默指向旧内存。
+/// 把它写成测试，后来的人改存储结构时能立即知道“改了什么契约”。
+ST_TEST(json_find_pointer_is_invalidated_by_structural_writes) {
+  Json doc = Json::object();
+  doc["anchor"] = std::string("anchor-value");
+  const Json* before = doc.find("anchor");
+  ST_REQUIRE(before != nullptr);
+
+  // 只读操作不移动元素
+  (void)doc.contains("anchor");
+  (void)st::json_at(doc, "anchor");
+  (void)st::json_dump(doc);
+  ST_CHECK(doc.find("anchor") == before);
+
+  // 插入足够多键 → vector 扩容重分配 → 地址改变
+  for (int index = 0; index < 200; ++index) doc["k" + std::to_string(index)] = index;
+  ST_CHECK(doc.find("anchor") != before);  // 必须重新 find
+  ST_CHECK_EQ(doc.find("anchor")->as_string(), std::string("anchor-value"));
+
+  // erase 也会让后面的元素前移
+  Json list = Json::array();
+  list.push_back(1);
+  list.push_back(2);
+  const Json* first = &list[0];
+  for (int index = 0; index < 200; ++index) list.push_back(index);
+  ST_CHECK(&list[0] != first);
+}
+
+/// `json_path` 对**空段宽容**：`a..b` / `.a.b` / `a.b.` 都等价于 `a.b`。
+///
+/// 这是刻意的（宽容处理点号，不把拼写噪音变成错误），但它有个必须知道的后果：
+/// **路径不会报错，只会返回 null 或误读**。所以路径取值只适合“确定结构”的场景。
+ST_TEST(json_path_tolerates_empty_segments) {
+  const auto parsed = *st::json_parse(R"({"a":{"b":7}})");
+  ST_CHECK_EQ(st::json_path(parsed, "a.b").as_i64(), 7);
+  ST_CHECK_EQ(st::json_path(parsed, "a..b").as_i64(), 7);   // 多余点被跳过
+  ST_CHECK_EQ(st::json_path(parsed, ".a.b").as_i64(), 7);   // 开头点被跳过
+  ST_CHECK_EQ(st::json_path(parsed, "a.b.").as_i64(), 7);   // 结尾点被跳过
+  ST_CHECK(st::json_path(parsed, "a.missing").is_null());
+
+  // 空路径返回整个文档（不是 null）——容易误用的边界
+  ST_CHECK(st::json_path(parsed, "").is_object());
+}
+
 ST_TEST(json_string_array_extraction_filters_non_strings) {
   const auto parsed = st::json_parse(R"({"a":["x","y"],"mixed":["ok",1,null,"fine"],"scalar":"z"})");
   ST_REQUIRE(parsed.has_value());

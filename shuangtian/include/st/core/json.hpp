@@ -87,6 +87,23 @@ auto json_dump_to(std::string& out, const Json& value, bool pretty, std::uint32_
 
 /// 查子节点（不存在或非对象返回 `nullptr`；返回指针指向 `value` 内部，生命周期同它）。
 ///
+/// 不知道用哪个时用这个：`nullptr` 与“有值但值为 null”是两回事，它都答得了。
+///
+/// ## ⚠ 指针有效期：**任何结构变更后都可能失效**
+///
+/// 对象/数组底层是 `std::vector`（保序的代价），所以：
+///
+/// | 操作 | 旧指针 |
+/// |---|---|
+/// | 只读（`find` / `json_at` / `contains` / `dump` / 遍历） | 有效 |
+/// | 插入新键、`push_back`（触发扩容时） | **失效**（元素被搬到新内存） |
+/// | `erase` / `erase_index` | **失效**（后面的元素前移） |
+///
+/// 实测：插入 200 个键后，原 `find("a")` 的地址已变。这与 `std::vector` 的
+/// 迭代器规则一致——**存的不是索引，而是地址**。
+///
+/// 使用纪律：跨越任何写入操作时，重新 `find` 一次；或先用 `size()` 预留好容量。
+///
 /// ## 为何是 inline 定义而非 .cpp 导出
 /// 这是全部读取路径的**唯一入口**（`json_at` / `json_get_*` / `json_path` 全经它）。
 /// 放 `.cpp` 里跨 TU 不能内联，而内联的真正收益是**字面量键的比较特化**：
@@ -96,6 +113,10 @@ auto json_dump_to(std::string& out, const Json& value, bool pretty, std::uint32_
 }
 
 /// 取子节点引用；不存在时返回静态 null 节点（可安全读取、可 `is_null()` 判断）。
+///
+/// ⚠ **不要用 `json_at(x,k).is_null()` 判断“键在不在”**：键不存在与键显式为 `null`
+/// 在这个调用上长得一模一样（都返回 null 节点）。要分辨就改用 `json_find`。
+/// `json_at` 的定位是“我确定要链式读，缺了也无所谓”。
 [[nodiscard]] inline auto json_at(const Json& value, std::string_view key) noexcept -> const Json& {
   const Json* found = value.find(key);
   return found != nullptr ? *found : Json::null_node();
@@ -123,5 +144,42 @@ auto json_dump_to(std::string& out, const Json& value, bool pretty, std::uint32_
 
 /// 路径式取值：`json_path(doc, "spec.source.kind")`——任一层缺失即返回静态 null 节点。
 [[nodiscard]] auto json_path(const Json& value, std::string_view dotted_path) noexcept -> const Json&;
+
+// ————————————————————————————————————————————————————————————————————————————
+// “键到底在不存” —— 三种不可互相替代的问法
+// ————————————————————————————————————————————————————————————————————————————
+//
+// 为什么值得单独开一节：这是 JSON 读写里最容易写错、且**错了不报错**的地方。
+// 三种状态在不少 API 上长得一样，但业务含义完全不同：
+//
+//   {"k": null}   ← 作者**写了**这个键，明确表达“没有”
+//   {}            ← 作者**没提**这个键，应该用默认值
+//   {"k": 0}      ← 有值，就是这个值（不是没值）
+//
+// | 问法 | 缺失 | 显式 null | 有值 |
+// |---|---|---|---|
+// | `json_has(x,"k")` | false | **true** | true |
+// | `json_find(x,"k")` | nullptr | 指针 | 指针 |
+// | `json_at(x,"k").is_null()` | true | true | false |  ← 前两种分不开
+
+/// 键**存在与否**（显式 `null` 也算存在）。
+///
+/// 与 `contains` 等价，但名字说清了“存在”而不是“有值”——
+/// 读代码的人不会把它误看成“非空”。
+[[nodiscard]] inline auto json_has(const Json& value, std::string_view key) noexcept -> bool {
+  return value.find(key) != nullptr;
+}
+
+/// 键存在**且值非 null**（即“真的给了个东西”）。
+///
+/// 这是“取可选字段”时通常真正想问的：`{"detail": null}` 与 `{}` 在业务上都算“没给”。
+/// 需要区分它们时再自己用 `json_find`。
+[[nodiscard]] inline auto json_has_value(const Json& value, std::string_view key) noexcept -> bool {
+  const Json* found = value.find(key);
+  return found != nullptr && !found->is_null();
+}
+
+// 刻意**没有** `json_missing()`：
+// 写成 `!json_missing(x,"k")` 的地方，读代码时要多转一次弯。`!json_has(...)` 直接可读。
 
 }  // namespace st

@@ -135,20 +135,37 @@ inline constexpr Result<Unit> ok();          // 无值成功
 | 解析 | `st::json_parse` / `json_parse_file`（`Result` + 行/列/字节定位） | —— |
 | 写盘 | `st::json_write_file`、`json_dump`、成员 `node.dump(2)` | —— |
 | 读键 | `json_get_string/i64/double/bool/string_array`、`json_find`（返回 `const Json*`，缺键 nullptr）、`json_at`、`json_path`、成员 `node.value("k", fallback)` | —— |
-| 查键存在 | `json_find(x,"k") != nullptr`、`x.contains("k")` | —— |
+| 查键存在 | `json_find(x,"k") != nullptr`、`x.contains("k")` | `json_at(x,"k").is_null()`（**分不清缺失与 null**，见下坑 1） |
 | 遍历对象 | `for (const auto& [k, v] : node.items())`；直接迭代时 `it.key()` / `it.value()` | —— |
-| 构造 | `Json::object()` / `Json::object({{...}})` / `Json::array({...})` / `obj["k"] = v` / `push_back` | `Json x{...}`（编译错误） |
+| 构造 | `Json::object()` / `Json::object({{"..."}})` / `Json::array({...})` / `obj["k"] = v` / `push_back` | `Json x{...}`（编译错误） |
 | 类型化取值 | `as_i64/as_u64/as_double/as_bool/as_string`、`get<T>()`（类型不符给默认值） | —— |
 
-三条容易踩的坑（都有实际事故）：
+五条容易踩的坑（都有实际事故或审计依据）：
 
-1. **`find` 返回的是指针，不是迭代器**。旧写法 `it != node.end()` 现在是编译错误；
+1. **「键不存在」与「键存在但值为 null」必须用 `json_find` 分辨**，这是本库最容易写错的一处。
+   `json_at` 对两者都返回静态 null 节点（它返回引用，没别的选择），所以
+   `json_at(x,"k").is_null()` **无法**回答“这个键到底有没有”。而工程里这两种含义完全不同：
+
+   ```jsonc
+   {"detail": null}   // 作者明确写了“没有详情”，这个键要保留
+   {}                  // 作者没提，应该用默认值
+   ```
+
+   判据：`json_find(x,"k") == nullptr` 是缺失；`found != nullptr && found->is_null()` 是显式 null。
+   契约钉在 `json_missing_key_is_distinguishable_from_explicit_null` 用例里。
+2. **`find` 返回的是指针，不是迭代器**。旧写法 `it != node.end()` 现在是编译错误；
    改为 `const Json* found = node.find("k"); if (found != nullptr)`。这是本次替换中
    **改动最多的调用点形态**（约 20 处）。
-2. **不要写 `Json x{Json::object()}`**。上一个版本的坑是“变成数组”，现在直接编不过——
+3. **不要写 `Json x{Json::object()}`**。上一个版本的坑是“变成数组”，现在直接编不过——
    但这意味着从旧代码里搬过来的花括号写法需要改成 `Json::object(...)`。
-3. **`get<T>()` 不再抛**。它现在是“类型不符给默认值”。如果你的逻辑依赖“类型错就该炸”，
+4. **`get<T>()` 不再抛**。它现在是“类型不符给默认值”。如果你的逻辑依赖“类型错就该炸”，
    请显式判断 `is_number()` / `is_string()` 再取值。
+5. **字符串读取是宽松的**（数字/布尔也能按文本读）。`json_get_string(x,"n","d")` 对
+   `{"n":42}` 返回 `"42"` 而不是 `"d"`。这是为了容错配置里的 `version: 1.0` 这类写法，
+   但**不是**无条件的——要严格类型就用 `as_string()`（非字符串返回空串）。
+6. **`json_find` 的指针跨越写入就会失效**。对象/数组底层是 `std::vector`（保序的代价），
+   所以插入新键、`push_back`（触发扩容时）、`erase` 都会让旧指针悬空；只读操作不影响。
+   实测：插入 200 个键后，原 `find("a")` 的地址已变。纪律：**跨越任何写入时重新 `find` 一次**。
 
 **新增头文件时必须自带 include**：旧库是个 2.5 万行的巨头，顺带提供了 `<cmath>`/`<memory>`/
 `<span>` 等常用头——替换后这些**不再传递**。本次就因此暴露了三处漏 include
