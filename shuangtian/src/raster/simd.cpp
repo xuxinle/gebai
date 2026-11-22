@@ -11,6 +11,10 @@
 // 由 backend() 能力自报测试抓出）。x64 平台基线即保证 SSE2。
 #if defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
 #include <emmintrin.h>
+// `_mm_shuffle_epi8` 是 **SSSE3**，不在 `<emmintrin.h>`（SSE2）里。
+// 之前靠 PCH 传递包含 `<immintrin.h>` 才编过——一旦不加载 PCH（或 MSVC 路径）
+// 就会报 "_mm_shuffle_epi8 was not declared"。显式包含才是稳的。
+#include <tmmintrin.h>
 #define ST_SIMD_X86 1
 #else
 #define ST_SIMD_X86 0
