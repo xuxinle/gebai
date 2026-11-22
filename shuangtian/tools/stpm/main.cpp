@@ -94,7 +94,7 @@ constexpr const char* kStpmVersion = "0.1.0";
 [[nodiscard]] auto is_boolean_option(std::string_view name) -> bool {
   static constexpr std::string_view kBooleanOptions[] = {
       "san", "list", "slow", "verbose", "v", "force", "all", "help", "rules",
-      "no-pch", "no-strip", "offline", "locked", "quiet", "release", "no-build",
+      "pch", "no-strip", "offline", "locked", "quiet", "release", "no-build",
   };
   return std::ranges::find(kBooleanOptions, name) != std::end(kBooleanOptions);
 }
@@ -194,6 +194,8 @@ void print_usage() {
                         不含 ~140 个一次性探针）。新增应用时把它加进 `all` 的 libraries。
                                                   --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
   产物本体可小 ~94%；gdb 会自动找分离符号）
+  --pch             启用预编译头（默认**关**：实测 108MB .gch 的加载固定成本
+  1.67s，全量构建反而慢 13%；详见 st::pkg::BuildOptions::use_pch 注释）
   --define NAME=VALUE 追加编译宏（可重复；只作用于本次构建，不改 st.pkg）
   用途：打包“配置已预置”的产物而不把部署参数提交进仓库。
   例：st build xiaobai --define 'XIAOBAI_MODEL=\"deepseek-v4.1-flash\"'
@@ -364,7 +366,10 @@ auto command_build(const Arguments& arguments) -> int {
   options.jobs_large = jobs_large > 0.0 ? static_cast<std::size_t>(jobs_large) : 0;
   const auto max_memory = arguments.number("max-memory", 0.0);
   options.max_memory_mb = max_memory > 0.0 ? static_cast<std::uint64_t>(max_memory) : 0;
-  options.use_pch = !arguments.has("no-pch");
+  // PCH 默认**关**（`--pch` 开）。实测它的 108 MB `.gch` 加载固定成本 1,669 ms，
+  // 而省下的标准库解析补不上：全量构建对照 有 PCH 11m42s 对 无 PCH 10m21s。
+  // 详见 `st::pkg::BuildOptions::use_pch` 的注释（含逐单元数据）。
+  options.use_pch = arguments.has("pch");
   // 调试信息分离默认开（`--no-strip` 关）：不分离的代价是“每个产物白胖 ~70MB”
   //（实测 dev 档 st.exe 76.96MB，其中 89% 是 `.debug_*`），而分离的代价是零。
   options.strip_debug = !arguments.has("no-strip");

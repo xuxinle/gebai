@@ -1022,8 +1022,18 @@ san 档需要 sanitizer 运行库，MinGW 发行版多数不带——构建前�
 详见 `docs/BUILD_CHECK.md`。
 
 **clang 是第二编译器（不替默认档）**。实测对比见 `docs/BUILD_TEST_PERF.md`：
-不用 PCH 时 clang 快 7%，而**日常构建（带 PCH）gcc 快 15%**——所以默认仍是 g++。
-但 clang 必须保留为**可选门禁**：它拓出过多处 GCC 看不到的自家代码缺陷
+
+> ⚠ **2026-11-22 前提已变**：原结论是「不用 PCH 时 clang 快 7%，而日常构建（带 PCH）
+> gcc 快 15%——所以默认仍是 g++」。但 PCH 已改为**默认关**（实测它是净损失，见
+> `BuildOptions::use_pch`），于是“日常构建”现在就是无 PCH 口径。重测：
+> **clang 快 6.2%**（4 个代表单元合计 5401ms 对 gcc 5757ms）。
+> 默认编译器**仍保持 g++**，但理由要换——不再是“快”，而是：
+> **它是主档位的产物来源**（所有 .o/产物验收在 g++ 下进行），且 clang 在 Windows 上
+> 可能误取 MSVC 的 C++ 标准库（实测 `clang++ -std=c++23` 会 include
+> `VC/Tools/MSVC/.../include/string` 而失败），环境稳定性不如 mingw g++。
+> 想追编译速度可以 `st build --toolchain=clang`，但那是“快 6%”对“多一套工具链风险”。
+
+clang 必须保留为**可选门禁**：它拓出过多处 GCC 看不到的自家代码缺陷
 （死函数、未使用的 lambda 捕获、未使用的私有字段、`size_type→difference_type` 隐式变号、
 系统头里的变号转换），这类差异在 GCC 上永远不会报。工具链专属的告警收敛写在清单的
 `toolchains.<名>.suppressions`（**只用于 vendored 第三方头**，不往工程级 `flags` 里写——

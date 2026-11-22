@@ -75,7 +75,21 @@ struct BuildOptions {
   ///（同一份 DWARF 只是换了个文件，且 gdb 自动认它）。想要单文件调试时
   ///（拷一个文件到别处 gdb）用 `--no-strip`。
   bool strip_debug{true};
-  bool use_pch{true};                 ///< 使用预编译头（`include/st/pch.hpp`）加速
+  /// 使用预编译头（`include/st/pch.hpp`）。
+  ///
+  /// ## 为何**默认关**（2026-11-22 实测反转了原结论）
+  ///
+  /// 原先默认开，理由是“标准库头解析占单文件编译大头”。实测证明那是错的：
+  /// 本仓的 PCH 产物是 **108 MB** 的 `.gch`，加载它的**固定成本 1,669 ms**
+  ///（极小空单元：无 PCH 78 ms → 有 PCH 1,748 ms），而它省下的标准库解析
+  /// 即使拿最重的 `<format>`+`<filesystem>` 单元也只值 700 ms 左右。
+  ///
+  /// 后果：**每个单元都变慢**，且单元越小越吃亏（`color.cpp` +22%、`json.cpp` +17%、
+  /// `build.cpp` +2%）。全量构建对照（均 3000+ 单元强制重建）：
+  /// 有 PCH 编译段 11m42s，无 PCH **10m21s**（+81 秒 / +13%）。
+  ///
+  /// 想回到旧行为用 `st build --pch`。
+  bool use_pch{false};
   std::vector<std::string> extra_include_dirs{};
   std::vector<std::string> extra_flags{};
   /// **命令行宏**（`st build --define NAME=VALUE`）：裸名，不加 `-D`。

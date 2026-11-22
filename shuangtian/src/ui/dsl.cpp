@@ -18,11 +18,24 @@
 #include "st/core/print.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/stylesheet.hpp"
-// 声明式包装函数（`row` / `button` / `tabs` …）要**强类型**地用具体组件，
-// 所以这里一次性拿全部组件头——**这是本文件自己的需要，不是框架的默认**。
-// 应用不需要跟着全量：它们可以只 include 自己要的那几个头并调
-// `st::ui::import_components<T>()`（见 `st/ui/components/all.hpp`）。
-#include "st/ui/components/all.hpp"
+// ## 为何只 include **五个**具体组件头，而不是 `components/all.hpp`
+//
+// 旧注释的理由是“声明式包装函数（`row`/`button`/`tabs`…）要强类型地用具体组件”，
+// 但那些包装函数**早已拆到 `dsl_convenience.cpp`**。本文件现在只剩 3 处真的用到
+// 具体组件类型：
+//   - `Composer::connect` 对 `Button` 做 `dynamic_cast`（事件直连）
+//   - 属性应用里的 `svg::parse_color`（色值解析）
+//   - `window_frame` / `title_bar` 两个包装（`WindowFrame`/`TitleBar`）
+//
+// 而 `all.hpp` 会拉进 **79 个组件头**。实测换成下面这五个后同一 TU：
+//   编译 5.90s → **4.14s（−30%）**，预处理 131,723 → 111,611 行（−15.3%）。
+// `Button`/`MenuBar`/`MenuPanel` 分别住在 button.hpp 与 menu.hpp（后者含两个类，
+// 所以组件头名与类名并非一一对应，别按类名去猜文件名）。
+#include "st/ui/components/button.hpp"
+#include "st/ui/components/menu.hpp"
+#include "st/ui/components/title_bar.hpp"
+#include "st/ui/components/window_frame.hpp"
+#include "st/ui/svg.hpp"
 
 #include "st/core/json.hpp"
 
