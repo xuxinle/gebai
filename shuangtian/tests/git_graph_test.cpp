@@ -56,7 +56,8 @@ namespace {
       -> bool {
     st::process::Options options;
     options.cwd = root;
-    std::vector<std::string> full{"-c", "core.quotepath=false"};
+    std::vector<std::string> full{"-c", "core.quotepath=false", "-c", "user.email=t@t", "-c",
+                                  "user.name=t"};
     full.insert(full.end(), args.begin(), args.end());
     const auto result = st::process::run("git", full, options);
     (void)expect_tail;
@@ -67,9 +68,10 @@ namespace {
     return st::fs::write_text(root + "/" + name, text).has_value();
   };
 
-  if (!git({"init", "-q", "."})) return false;
-  if (!git({"config", "user.email", "t@t"})) return false;
-  if (!git({"config", "user.name", "t"})) return false;
+  // 身份靠 `-c` 注入（上面 lambda 已带），不再两条 `git config`：
+  // 实测单次 spawn 50-65 ms，本文件 3 条用例 × 2 次 ≈ 0.35 s 纯浪费。
+  // `--template=` 置空跳过 hooks 模板拷贝（本夹具不跑 hook）。
+  if (!git({"init", "-q", "--template=", "."})) return false;
 
   // base
   if (!write_file("a.txt", "a\n")) return false;

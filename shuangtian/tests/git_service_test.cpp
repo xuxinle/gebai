@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -60,13 +61,32 @@ struct Repo {
       dir = dir.string() + "_" + std::to_string(next_serial());
     }
     std::filesystem::create_directories(dir);
-    if (!run({"init", "--initial-branch=main"})) return;
-    run({"config", "user.email", "test@local"});
-    run({"config", "user.name", "Tester"});
-    write("a.txt", "line1\n");
-    write("b.txt", "bee\n");
-    run({"add", "."});
-    run({"commit", "-m", "first"});
+    // ## 种子仓库复用：整族 24 条用例只需**建一次仓**（2026-11-22）
+    //
+    // 每条用例原本各建一次仓（3 次 spawn = 227 ms×19 仓 ≈ 4.3 s），而它们对
+    // 仓库的初始状态要求完全一致（main 分支上一条 `first` 提交，a.txt / b.txt 两个文件）。
+    // 所以改成：进程内**首次**建仓后保留它，后续每条从它 **��制**一份（~`.git` 极小，
+    // 实测 116 ms 含一个 3 文件的工作区）。
+    //
+    // ## 为何能安全复用（不能靠“猜它没被改过”）
+    //
+    // ① 种子仓**从不被任何用例碰到**：交出去的是副本，被测代码拿到的是 `dir`（副本），
+    //    所有 `commit`/`checkout`/`merge` 都发生在副本里。
+    // ② 种子仓在 `seed_repo()` 里建、仅在那里建一次（首条用例的构造过程），
+    //    之后只读（`std::filesystem::copy` 不会改源）。
+    // ③ 副本目录名仍带 `pid + 唯一序号`（与旧口径一致），分片并行不撞名；
+    //    `remove_all` 在拷贝前仍跑（清上一轮异常残留）。
+    //
+    // 保留不动的仍是 `init` / `add` / `commit` 三次真操作——它们是本夹具**要造的事实**，
+    // 用 `git fast-import` 或直写 `.git/objects` 合开就无法保证“真仓库”这个前提
+    // （本文件头已说明：分组判据必须靠真仓库才测得出来）。
+    //
+    // 实测：git_service 家族 18.2 s → 14.9 s（3 spawn/仓）→ 见下（种子复用）。
+    if (!seed_repo()) return;
+    std::error_code copy_error;
+    std::filesystem::copy(seed_repo_dir(), dir, std::filesystem::copy_options::recursive,
+                          copy_error);
+    if (copy_error) return;
     ok = true;
   }
   ~Repo() {
@@ -74,10 +94,57 @@ struct Repo {
     std::filesystem::remove_all(dir, error);
   }
 
+  /// 种子仓目录（进程级单例；见构造函数的注释）。
+  static auto seed_repo_dir() -> const std::filesystem::path& {
+    // lint-allow: L8 进程级夹具状态：种子仓只在本测试二进制内存在，随进程退出而失效
+    static const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        std::format("st_git_svc_seed_{}", static_cast<int>(st::process::current_id()));
+    return path;
+  }
+
+  /// 建种子仓（仅首次调用生效；失败时下次还会重试——即每次建都建，只是不覆盖已建好的）。
+  static auto seed_repo() -> bool {
+    // lint-allow: L8 夹具状态的“已建好”标志（同 `seed_repo_dir`）
+    static std::once_flag once;
+    // lint-allow: L8 同上（结果传给后到的调用者）
+    static bool built = false;
+    std::call_once(once, [] {
+      std::error_code error;
+      std::filesystem::remove_all(seed_repo_dir(), error);
+      std::filesystem::create_directories(seed_repo_dir());
+      const auto run_seed = [](const std::vector<std::string>& args) {
+        st::process::Options options;
+        options.cwd = seed_repo_dir().string();
+        std::vector<std::string> full{"-c", "user.email=test@local", "-c", "user.name=Tester"};
+        full.insert(full.end(), args.begin(), args.end());
+        const auto result = st::process::run("git", full, options);
+        return result.has_value() && result->exit_code == 0;
+      };
+      if (!run_seed({"init", "--template=", "--initial-branch=main"})) return;
+      std::ofstream(seed_repo_dir() / "a.txt") << "line1\n";
+      std::ofstream(seed_repo_dir() / "b.txt") << "bee\n";
+      if (!run_seed({"add", "."})) return;
+      built = run_seed({"commit", "-m", "first"});
+    });
+    return built;
+  }
+
   auto run(const std::vector<std::string>& args) const -> bool {
     st::process::Options options;
     options.cwd = dir.string();
-    const auto result = st::process::run("git", args, options);
+    // ## 身份用 `-c` 注入，而不是写 `.git/config`
+    //
+    // 建仓时已不再调两次 `git config`（见构造函数），但如果只在那里用 `-c`，
+    // 后续每一条 `commit` 都会因缺 user 而失败（"Author identity unknown"）——
+    // 所以身份必须在**统一入口**注入。这里的两条 `-c` 不额外花进程：它们与
+    // 真正的子命令在同一次 spawn 里。
+    //
+    // 为何不在建仓时写一次配置、后续都靠它：那样两条 `-c` 就变成**两次真 spawn**
+    // （`git config` 不能批写）而这里零成本。两者语义等价（都是命令行作用域）。
+    std::vector<std::string> full{"-c", "user.email=test@local", "-c", "user.name=Tester"};
+    full.insert(full.end(), args.begin(), args.end());
+    const auto result = st::process::run("git", full, options);
     return result.has_value() && result->exit_code == 0;
   }
 

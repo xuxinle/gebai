@@ -18,6 +18,7 @@
 #include <system_error>
 #include <vector>
 
+#include "st/core/process.hpp"
 #include "st/test/test.hpp"
 
 #include "apps/gbcode/git_service.hpp"
@@ -37,11 +38,12 @@ struct NestedRepo {
     inner = root / "sub";
     std::filesystem::create_directories(inner, ec);
     if (ec) return;
-    if (!run_git(root, {"init", "-q", "-b", "main"})) return;
-    (void)run_git(root, {"config", "user.email", "t@local"});
-    (void)run_git(root, {"config", "user.name", "T"});
+    if (!run_git(root, {"init", "-q", "-b", "main", "--template="})) return;
     std::ofstream(inner / "file.txt") << "alpha\nbeta\n";
     (void)run_git(root, {"add", "."});
+    // 身份靠 `-c` 注入（见 `run_git`），不再两条 `git config`：
+    // 实测单次 spawn 50-65 ms，两条 `config` 就是 ~0.12 s 白等。
+    // `--template=` 置空跳过 hooks 模板拷贝（本夹具不跑 hook）。
     ok = run_git(root, {"commit", "-qm", "first"});
     if (ok) {
       // 改一行（留在工作区、不提交）——差异的“新侧”就该有它。
@@ -54,15 +56,23 @@ struct NestedRepo {
     std::filesystem::remove_all(root, ec);
   }
 
+  /// 跑一条 git 子命令（不经 shell：参数直接传，免引号与转义问题）。
+  ///
+  /// ## 为何从 `std::system("cd /d … && git …")` 改成 `process::run`
+  ///
+  /// 旧写法每条命令都要起一次 `cmd.exe`，再由它起 `git.exe`——**两次进程创建**
+  /// 而只做一件事；且 `>nul 2>&1` 把 git 的报错全部吞掉（夹具失败时无从诊断）。
+  /// `process::run` 是仓内同一套子进程封装（其它夹具都在用），一次 spawn 且能拿到输出。
+  ///
+  /// 身份用 `-c` 注入（与 `--template=` 同理）：“建仓 + 身份”从 3 条命令降到 1 条。
   static auto run_git(const std::filesystem::path& cwd,
                       const std::vector<std::string>& args) -> bool {
-    std::string command = "git";
-    for (const auto& arg : args) {
-      command += " ";
-      command += arg;
-    }
-    command = "cd /d \"" + cwd.string() + "\" && " + command + " >nul 2>&1";
-    return std::system(command.c_str()) == 0;
+    st::process::Options options;
+    options.cwd = cwd.string();
+    std::vector<std::string> full{"-c", "user.email=t@local", "-c", "user.name=T"};
+    full.insert(full.end(), args.begin(), args.end());
+    const auto result = st::process::run("git", full, options);
+    return result.has_value() && result->exit_code == 0;
   }
 };
 

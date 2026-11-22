@@ -75,6 +75,14 @@ class Registry {
   void add_slow(std::string name, std::function<void()> body);
   /// 带来源文件注册慢用例。
   void add_slow(std::string name, std::function<void()> body, std::string file);
+  /// 带来源文件与显式软超时的慢用例注册（`ST_TEST_WITH_TIMEOUT_SLOW` 用）。
+  ///
+  /// 为何需要这一个组合：慢用例与实际耗时可能**同时**成立——集成级用例真编译一个工程
+  /// （18 s）既是“耗时由环境决定、不该进内循环”的慢用例，又需要覆盖默认 10 s 的软超时。
+  /// 只给其中一个维度就会露馅：只标 slow 则 `--slow` 跑它时误报超时失败；
+  /// 只给超时则它每轮全量都跑（实测独占一片 18 s，是全量壁钟的 60%）。
+  void add_slow(std::string name, std::function<void()> body, std::string file,
+                std::int64_t timeout_ms);
   [[nodiscard]] auto cases() -> std::vector<Case>&;
 
   void record_failure(std::string_view file, int line, std::string message);
@@ -168,6 +176,12 @@ struct SlowRegistrar {
   SlowRegistrar(std::string_view name, std::function<void()> body, std::string_view file) {
     Registry::instance().add_slow(std::string(name), std::move(body), std::string(file));
   }
+  /// 带来源文件与显式软超时的注册（`ST_TEST_WITH_TIMEOUT_SLOW` 宏展开自动传 `__FILE__`）。
+  SlowRegistrar(std::string_view name, std::function<void()> body, std::string_view file,
+                std::int64_t timeout_ms) {
+    Registry::instance().add_slow(std::string(name), std::move(body), std::string(file),
+                                  timeout_ms);
+  }
 };
 
 }  // namespace st::test
@@ -203,6 +217,24 @@ struct SlowRegistrar {
   static void st_test_case_##test_name();                                         \
   namespace {                                                                     \
     const ::st::test::Registrar st_test_registrar_##test_name{                       \
+      #test_name, &st_test_case_##test_name, __FILE__, (timeout_ms)};              \
+  }                                                                               \
+  static void st_test_case_##test_name()
+
+/// 慢用例 + 显式软超时（两个维度的**交集**）。
+///
+/// 为何这个组合必须单独给一个宏：慢与超时是两个**正交**维度，而集成级用例两者都占——
+/// 既“耗时由环境决定、不该进默认内循环”（slow），又“会比默认 10 s 线长”（timeout）。
+/// 只用 `ST_TEST_SLOW` 会在 `--slow` 轮里误报超时失败；只用 `ST_TEST_WITH_TIMEOUT`
+/// 会让它每轮全量都跑。后者是实测代价（2026-11-22）：
+/// `independent_project_builds_links_and_runs` 按普通用例注册，全量 16 片时它**独占一片**
+/// 跑 12~18 s，而其余 15 片早已跑完（测试程序 32.3 s 壁钟里它占了 60%）。
+/// 反证：`test_main.cpp` 与 `tests/skip_visibility_test.cpp` 的注释都按“它是 SLOW 用例”
+/// 写的——“文档说 A、代码写 B”正是这条被漏掉的注册口径。
+#define ST_TEST_WITH_TIMEOUT_SLOW(test_name, timeout_ms)                           \
+  static void st_test_case_##test_name();                                         \
+  namespace {                                                                     \
+    const ::st::test::SlowRegistrar st_test_registrar_##test_name{                   \
       #test_name, &st_test_case_##test_name, __FILE__, (timeout_ms)};              \
   }                                                                               \
   static void st_test_case_##test_name()

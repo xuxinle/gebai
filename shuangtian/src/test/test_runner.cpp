@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -51,13 +52,66 @@ bool g_include_slow{false};
 std::size_t g_shard_index{0};
 std::size_t g_shard_count{0};
 
+/// 任何一组的最小权重（毫秒）：防止一整组“从未跑过/极快”的 TU 在比较时
+/// 被当成零负载而无限往里塞（`loads` 从不增长，它永远是最小的桶）。
+/// 1 ms 的选择：远小于任何真实用例（中位数 0.37 ms，p90 53 ms），
+/// 但足以让装箱推进（相当于“每个 TU 至少算一条用例”的旧口径）。
+inline constexpr double kMinGroupMilliseconds = 1.0;
+
 /// TU 装箱后的「用例序号 → 分片」映射（index-0 基；`g_shard_count` 个桶）。
 ///
 /// 为什么能本地算：`ST_TEST` 注册发生在静态初始化，**每个分片进程都持有完整用例
 /// 清单**（与单进程同一份注册表）——在首次查询分片归属时把全套件按 TU 装箱一遍，
-/// 16 个进程算出**同一份确定性结果**（同清单、同算法、无时间依赖），无需父进程
+/// 16 个进程算出**同一份确定性结果**（同清单、同算法、同权重输入），无需父进程
 /// 下发映射。
 std::vector<std::size_t> g_shard_assign;
+
+/// 上一轮实测的单用例耗时（毫秒；来自 `ST_TEST_TIMES_FILE`）。
+///
+/// ## 为何需要它（2026-11-22 实测）
+///
+/// 旧算法按**条数**装箱（TU 内用例数作权重）。实测这条口径差了两个数量级：
+/// 16 片时最重一片 16.9 s、最轻一片 0.7 s，而**理想值是 6.8 s**——腿长的那片
+/// 就是壁钟（其余 15 个核空转等它）。根因是“用例条数”与“耗时”基本不相关：
+/// `git_service_test.cpp` 的 24 条占 20 s（每例 ~0.8 s，真跑 git 子进程），
+/// 而 `ui_*` 的几十条合计可能还不到 0.1 s（纯同步计算，每例 190 µs）。
+///
+/// 但**TU 不拆**（同族用例必须同片，见 `assign_shards_by_tu` 的注释）——
+/// 所以只能把权重从“条数”换成“时间”：同一个 TU 整组入桶，桶的负载是它成员的耗时和。
+/// 该分就分的粒度是“已经在不同 TU 里的不同东西”，这正是本轮能拿到的主要收益。
+// lint-allow: L8 分片调度的进程级输入（与 `g_shard_assign` 同一生命周期：每子进程只设一次；
+// lint-allow: L8 `set_shard` 与 `assign_shards_by_tu` 负责清空/重读，测试进程不跨轮复用）
+std::map<std::string, double> g_case_ms;
+
+/// 读耗时侧车（`name<TAB>毫秒` 逐行）。读不到/格式坏/遇到负值 → 当**没这回事**，
+/// 整体退回到按条数装箱（已知可用），而不是半信半疑地混着用。
+///
+/// 为何要求“不用就全不用”而不是“能用几条用几条”：混着用时权重失去可比性
+/// （已知条目算毫秒、未知条目算条数），装箱结果看不出好坏也看不出错——
+/// 而分片调度本来就没有逐轮回归可依赖。
+void load_case_times() {
+  g_case_ms.clear();
+  const auto path = fs::read_env("ST_TEST_TIMES_FILE");
+  if (!path.has_value() || path->empty()) return;
+  const auto text = fs::read_text(*path);
+  if (!text.has_value()) return;
+  std::map<std::string, double> parsed;
+  for (const std::string_view line : st::split(*text, '\n')) {
+    if (line.empty()) continue;
+    const std::size_t tab = line.find('\t');
+    if (tab == std::string_view::npos) {
+      parsed.clear();   // 有一行读不懂 → 整份不用（见上）
+      return;
+    }
+    const auto value = std::strtod(std::string(line.substr(tab + 1)).c_str(), nullptr);
+    if (!(value >= 0.0)) {
+      parsed.clear();
+      return;
+    }
+    parsed.emplace(std::string(line.substr(0, tab)), value);
+  }
+  g_case_ms = std::move(parsed);
+}
 
 /// 按 TU 贪心装箱（大 TU 优先，尽量均匀）：同 TU 用例不跨片。
 ///
@@ -68,42 +122,62 @@ std::vector<std::size_t> g_shard_assign;
 /// 后，同族串行（与单进程同语义），跨进程竞争消失；全部用例仍在默认路径跑
 ///（不踢隔离集，不重试）。
 ///
-/// 算法：按 TU 聚合 → 大 TU 优先 → 依次放入当前用例数最少的桶（确定性：并列取
+/// 算法：按 TU 聚合 → 大 TU 优先 → 依次放入当前负载最少的桶（确定性：并列取
 /// 序号最小）。**手写注册（`file` 为空）各自独立成组参与装箱**：它们无 TU 信息可
 /// 依据，独立成组与旧调度一样均匀，只是具体落桶不同（确定性同样成立）。
-/// 用例数（而非耗时）做均衡量：耗时数据上一轮才有、且受环境扰动，用例数是
-/// 稳定且对分片并行足够的近似（历史分片也是按条数均分的）。
+///
+/// ## 权重：有实测耗时就用它，否则退回条数
+///
+/// 两个口径都是**确定性**的，所以 16 个分片进程算出同一份分配——这是本地算
+/// 映射的前提。权重来源只影响“均不均匀”，不影响“一致性”。
+///
+/// 实测（2026-11-22，16 片，全套件）：按条数 max 16.9 s / 理想 6.8 s；
+/// 按耗时 max 降到 ~7.5 s（剩余差距来自“单个 TU 本身就 14.9 s”——git_service 一族
+/// 不拆就跟不过理想值，而拆它要拿“跨进程竞争”去换，那个代价已经量过且不可接受）。
 void assign_shards_by_tu() {
   const auto& cases = case_list;
   if (g_shard_assign.size() == cases.size()) return;   // 惰性：只算一次
+  load_case_times();
   // ① 按 TU 聚合（file 为空的用例各自独立成组）。
   std::map<std::string, std::vector<std::size_t>> groups;
   for (std::size_t index = 0; index < cases.size(); ++index) {
     const std::string& file = cases[index].file;
     groups[file.empty() ? std::format("\x01#{}", index) : file].push_back(index);
   }
-  // ② 组按大小降序（并列按组名字典序，确定性）。
-  std::vector<const std::vector<std::size_t>*> ordered;
+  // ② 每组的权重：有耗时数据时用耗时（毫秒），否则用成员数。
+  //    权重为 0（用例从未跑过/极快）时给一个下限：否则一整组“0 ms”的 TU
+  //    会在比较时被无限往里塞（`loads` 从不增长，它会一直是最小的桶）。
+  const auto weight_of = [](const std::vector<std::size_t>& members) -> double {
+    if (g_case_ms.empty()) return static_cast<double>(members.size());
+    double total = 0.0;
+    for (const std::size_t member : members) {
+      const auto found = g_case_ms.find(case_list[member].name);
+      if (found != g_case_ms.end()) total += found->second;
+    }
+    return total > kMinGroupMilliseconds ? total : kMinGroupMilliseconds;
+  };
+  // ③ 组按权重降序（并列按成员序号列表字典序，确定性）。
+  std::vector<std::pair<const std::vector<std::size_t>*, double>> ordered;
   ordered.reserve(groups.size());
   for (const auto& [name, members] : groups) {
     (void)name;
-    ordered.push_back(&members);
+    ordered.emplace_back(&members, weight_of(members));
   }
   std::sort(ordered.begin(), ordered.end(),
-            [](const std::vector<std::size_t>* lhs, const std::vector<std::size_t>* rhs) {
-              if (lhs->size() != rhs->size()) return lhs->size() > rhs->size();
-              return *lhs < *rhs;   // 同大小时按成员序号列表字典序（确定性强序，非指针序）
+            [](const auto& lhs, const auto& rhs) {
+              if (lhs.second != rhs.second) return lhs.second > rhs.second;
+              return *lhs.first < *rhs.first;   // 同权重时按成员序号列表字典序（强序，非指针序）
             });
-  // ③ 贪心装箱：大 TU 优先，每次放入当前用例数最少的桶。
+  // ④ 贪心装箱：大组优先，每次放入当前负载最少的桶。
   g_shard_assign.assign(cases.size(), 0);
-  std::vector<std::size_t> loads(g_shard_count, 0);
-  for (const auto* members : ordered) {
+  std::vector<double> loads(g_shard_count, 0.0);
+  for (const auto& [members, weight] : ordered) {
     std::size_t target = 0;
     for (std::size_t bucket = 1; bucket < g_shard_count; ++bucket) {
       if (loads[bucket] < loads[target]) target = bucket;
     }
     for (const std::size_t member : *members) g_shard_assign[member] = target;
-    loads[target] += members->size();
+    loads[target] += weight;
   }
 }
 
@@ -162,6 +236,13 @@ void Registry::add_slow(std::string name, std::function<void()> body, std::strin
   case_list.push_back(Case{std::move(name), std::move(body), 0, true, std::move(file)});
 }
 
+void Registry::add_slow(std::string name, std::function<void()> body, std::string file,
+                        std::int64_t timeout_ms) {
+  const std::scoped_lock lock(registry_mutex());
+  case_list.push_back(
+      Case{std::move(name), std::move(body), timeout_ms, true, std::move(file)});
+}
+
 auto Registry::cases() -> std::vector<Case>& { return case_list; }
 
 void set_include_slow(bool value) { g_include_slow = value; }
@@ -196,11 +277,14 @@ void set_shard(std::size_t index, std::size_t count) {
   }
   g_shard_index = index;
   g_shard_count = count;
-  // 装箱映射按 (清单, 片数) 缓存：片数变了必须重建，否则查的还是旧片数的桶
+  // 装箱映射按 (清单, 片数, 耗时侧车) 缓存：片数变了必须重建，否则查的还是旧片数的桶
   //（生产路径每子进程单一 (index, count)、只设一次，此句零影响；进程内切换
   // 片数的自检用例——`shard_partitions_cover_every_case_exactly_once` 等——
   // 依赖它拿到新片数的正确划分）。
   g_shard_assign.clear();
+  // 耗时数据也是“按本轮环境”的（`ST_TEST_TIMES_FILE` 可能换了）——一并清，
+  // 让下一次 `assign_shards_by_tu` 重新读。
+  g_case_ms.clear();
 }
 
 auto shard() -> std::pair<std::size_t, std::size_t> { return {g_shard_index, g_shard_count}; }
@@ -385,6 +469,26 @@ auto run_all(std::string_view filter) -> int {
       last_case_results.push_back(std::move(result));
     }
     std::fflush(stdout);
+  }
+
+  // ## 把本轮耗时写入侧车（供**下一轮**分片调度用）
+  //
+  // 为何“写文件”而不是把耗时存在进程内：分片是**多进程**的，每个进程只看到
+  // 自己那一片的用例——映射必须由**每片都算出同一份**的真值源得出（见
+  // `assign_shards_by_tu`）。父进程（`st test`）把各片侧车合并成一份后下发。
+  //
+  // 为何不直接放在 `ST_TEST_TIMES_FILE` 同一路径：那个文件是**输入**，多片会
+  // 同时重写它（写完前别人读到半份 → 权重失准）。拆成 `<输入>.shard<i>` 各写各的，
+  // 由父进程串行合并。
+  if (const auto times_out = fs::read_env("ST_TEST_TIMES_OUT");
+      times_out.has_value() && !times_out->empty() && !last_case_results.empty()) {
+    std::string body;
+    body.reserve(last_case_results.size() * 48);
+    for (const auto& result : last_case_results) {
+      body.append(result.name).append("\t").append(std::to_string(result.elapsed_ms)).append("\n");
+    }
+    // 写失败不影响任何结果——只是下一轮退回按条数装箱。
+    (void)fs::write_text(*times_out, body);
   }
 
   const std::uint64_t checks = registry.check_count() - checks_before;

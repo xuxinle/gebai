@@ -2,7 +2,128 @@
 
 > 用途：编译器对比（gcc vs clang）与测试并行提速的**唯一基准**。全部数字为本机实测，
 > 每项都写清口径（几轮、取什么统计量、输出去哪），否则数字不可复核。
-> 快照时间：2026-10-06。机器：**28 逻辑核 / 32 GB / Windows 11**。
+> 快照时间：2026-10-06（§7 为 2026-11-22 增补）。机器：**28 逻辑核 / 32 GB / Windows 11**。
+
+## 7. 测试构建/运行提速（2026-11-22）
+
+口径：`cmd /c "st ... > tmp\perf\m.txt 2>&1"`（输出必须重定向，见 §0 第 1 条），
+3 轮取最小值；`st` = `build/bin/st.exe`（自举产物，dev 档）。
+
+### 7.1 结果
+
+| 操作 | 改前 | 改后 | 倍数 | 省下的时间去哪了 |
+|---|---|---|---|---|
+| `st test <过滤词>`（无改动） | **5.42 s** | **1.14 s** | **4.8×** | 2.9 s 链接 + 1.5 s objcopy 分离 → 0 |
+| `st test <过滤词> --no-build` | 0.70 s | **0.65 s** | — | 本来就是纯跑 |
+| `st test`（全量，16 片） | **32.3 s** | **12.3 s** | **2.6×** | 集成用例 18 s + git 夹具 5 s + 分片失衡 |
+| `st build st`（无改动） | 2.67 s | **0.35 s** | 7.6× | 同第一条（链接跳过） |
+| `st build`（无改动，含测试刷新） | 0.63 s | 0.63 s | — | 一直很快 |
+
+关于最值钱的那一条（**改一行测试 → 看到结果**）：
+
+| | 改前 | 改后 |
+|---|---|---|
+| 改一个测试文件 → 重编 + 重链 + 跑该族 | ~14.5 s | **9.5 s** |
+
+剩下的 9.5 s 拆开：编译 1 单元 ~1.2 s、链接 ~2.9 s（静态链 766 个对象）、
+分离调试信息 **~4.0 s**（`objcopy` 三步共处理 ~200 MB 产物）、跑用例 ~0.6 s。
+分离那 4 s 看起来可省（增量时复用上轮 `.debug`），但那会让调试符号指向旧二进制
+——**正确性降级换速度**，明确不做（`build.cpp` 那段注释记了理由）。
+
+### 7.2 四条根因（每条都有实测证据）
+
+**① 测试二进制每次都重链（占内循环 81%）**
+
+`build()` 有「链接指纹 + 跳过」机制，而 `build_test_binary()` **直接调 `link()`、
+从不读写 `.link` 戳**——`build/dev/bin/st_tests.exe.link` 在改前**从未存在过**
+（ls 一下就是根因证据）。于是「0 单元重编」的 `st test` 仍要付 2.9 s 链接 + 1.5 s
+分离，而它真正想跑的用例只占 0.6 s。
+
+修法：把指纹计算抽成 `link_fingerprint_of()`（编译器族 / 链接集合 / 每对象的 `.meta`
+内容哈希 / 档位标志 / `--define` / 链接旗标 / 尾部参数 / 目标名 / `system` / 图标哈希 /
+**`strip_debug`**），两侧共用一份；`build_test_binary()` 在 `compile_units` 之后先比指纹。
+
+**② 集成用例被当成普通用例（独占一片 18 s）**
+
+`independent_project_builds_links_and_runs` 用 `ST_TEST_WITH_TIMEOUT` 注册，
+而 `src/test/test_main.cpp` 与 `tests/skip_visibility_test.cpp` 的注释**都按它是 SLOW 写的**
+（“默认不跑慢用例……需要真编译的集成用例”）。文档说 A、代码写 B——代码才是运行时真相。
+于是它每轮全量都跑；16 片并行时其余 15 片 6 s 就完了，它还在自己那一片里编译。
+
+修法：新增 `ST_TEST_WITH_TIMEOUT_SLOW`（slow 与 timeout 是两个正交维度，交集必须有宏），
+改用它 → 默认全量不跑，`--slow` 与显式指名照常跑（仍吃 60 s 超时）。
+回归：`tests/skip_visibility_test.cpp` 的 `slow_set_contains_integration_case`
+（**查注册表**的 `Case::slow` 与 `timeout_ms`，不是查 `--list`——`list_cases` 不过滤慢用例）。
+
+**③ git 夹具在子进程上白烧时间**
+
+实测单次 `git` spawn **50-65 ms**（Windows 进程创建 + MSYS 启动 + 配置链）。
+`git_service` 家族 19-24 个仓库 × 每仓 6 次（init/config×2/add/commit）= ~5-7 s 纯开销。
+
+两刀：
+- `--template=` 置空（跳过 hooks 模板，85→64 ms）+ 身份用 `-c user.email=… user.name=…`
+  注入（`git config` 两次 → 0 次，**加在建仓与本夹具 `run()` 两处**，后者保证后续 `commit` 也不缺身份）；
+- **种子仓复用**：全族用例对初始仓库的要求完全一致，进程内建一次、其余 `copy` 一份
+  （`git_service` 3 spawn/仓 → 1；`gbcode_branches` 11 spawn/仓 → 1）。
+
+实测：`git_service` **18.19 s → 10.85 s**（−40%）；`gbcode_branches` 单例 1.14 s → **0.10 s**。
+
+**④ 分片按「条数」装箱，与耗时基本不相关**
+
+旧算法用「用例条数」当负载。实测 16 片最重 **16.9 s**、最轻 **0.7 s**，理想值 6.8 s
+——其余 15 个核在等最重那一片。
+
+修法：权重换成**上一轮实测耗时**（侧车 `build/<档位>/bin/test-times.txt`，由 `st test`
+自动采集合并），**TU 原子性不变**（同族用例必须同片，那是 git_service 随机误伤的根修）。
+
+实测片内耗时分布：
+
+| 口径 | 最重片 | 最轻片 | 理想 |
+|---|---|---|---|
+| 按条数（旧） | 16.9 s | 0.7 s | 6.8 s |
+| 按耗时（新） | 11.6 s | 6.0 s | 7.2 s |
+
+剩下那片 11.6 s 是 `git_service` **单个 TU 本身**的耗时——不拆 TU 就下不了限，
+而拆分正是当初随机误伤的**反面做法**（见 `assign_shards_by_tu` 的注释与
+`docs/BACKLOG.md` 的「git_service 家族分片并行随机误伤」条目）。
+
+删掉侧车文件即退回按条数：实测 13.82 s（vs 11.86 s），这条是逆向验证。
+
+### 7.3 正确性与稳定性证据
+
+- **串行 vs 16 片逐用例比对**：`missing=0 extra=0 failDiff=0`（两份 JUnit 各 3095 例）。
+  注意必须用 `--format junit --junit-out <路径>`——分片模式下 `ST_JUNIT_XML` 会被父进程
+  **每片覆写**，外层的值不生效（踩过一次：拿到的是一份 819 例的旧报告）。
+- **稳定性**：连跑 5 轮，每次 `exit=0`、`3095 passed / 0 failed`。
+- **逆向验证**（逐条回退，确认对应判据变红）：
+  - 把集成用例改回 `ST_TEST_WITH_TIMEOUT` → `slow_set_contains_integration_case` 在
+    `found->slow` 处红；
+  - 改测试源 → 必须重链并跑到新代码（`exe.last_write_time` 变化）；
+  - `--no-strip` / 回默认 → 各判一次必须重链（`strip_debug` 入了指纹）；
+  - `st build --define A=1` → 重链；同 define 再来一次 → 跳过；回退 → 重链；
+  - `--force` → 重链；
+  - 删耗时侧车 → 退回按条数且变慢（13.82 s vs 11.86 s）。
+
+### 7.4 复现命令
+
+```powershell
+# 基线（必须重定向到文件，否则终端重绘污染数字）
+cmd /c "build\bin\st.exe test code_editor              > tmp\perf\a.txt 2>&1"
+cmd /c "build\bin\st.exe test code_editor --no-build   > tmp\perf\b.txt 2>&1"
+cmd /c "build\bin\st.exe test                          > tmp\perf\c.txt 2>&1"
+cmd /c "build\bin\st.exe build st                      > tmp\perf\d.txt 2>&1"
+
+# 逐用例一致性（串行 vs 16 片）
+build\bin\st.exe test --no-build --test-jobs 1 --format junit --junit-out tmp\cmp-serial.xml
+build\bin\st.exe test --no-build              --format junit --junit-out tmp\cmp-shard16.xml
+# 然后比对两份 XML 的用例名集合与 pass/fail 状态
+
+# 看分片模式（有没有用耗时表）
+get-content .st\logs\test-lib---*.log | select-string "按实测耗时装箱|按用例条数装箱"
+# 看片内耗时和（逐片日志里累加 PASS/FAIL/SKIP 行的耗时）
+get-childitem .st\logs\test-shard-*-of-16.log | sort-object LastWriteTime -descending | select -first 16
+```
+
 
 ## 0. 测量纪律（三条，踩过才写下来）
 

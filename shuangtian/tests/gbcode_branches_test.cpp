@@ -21,6 +21,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <filesystem>
+#include <format>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -34,7 +37,11 @@ namespace {
 [[nodiscard]] auto git_ok(const std::string& cwd, const std::vector<std::string>& args) -> bool {
   st::process::Options options;
   options.cwd = cwd;
-  std::vector<std::string> full{"-c", "core.quotepath=false"};
+  // 身份+quotepath 一次带齐：这三条 `-c` 不额外花进程（与子命令同一次 spawn），
+  // 而写成 `git config x y` 就是三次**真的** spawn——实测单次 50-65 ms，
+  // 本文件 4 条用例 × 每仓 3 次 = 12 次 ≈ 0.7 s 纯浪费。
+  std::vector<std::string> full{"-c", "core.quotepath=false", "-c", "user.email=t@t", "-c",
+                                "user.name=t"};
   full.insert(full.end(), args.begin(), args.end());
   const auto result = st::process::run("git", full, options);
   return result.has_value() && result->exit_code == 0;
@@ -46,10 +53,51 @@ namespace {
 /// ① 一个真 remote（才会有 `refs/remotes/<name>/HEAD` 这种别名）；
 /// ② `git remote set-head --auto`（否则别名不存在，测不到缺陷）；
 /// ③ 一个**名字含 `/` 的本地分支**（`feature/x`）——它是第 2 条判据的照妖镜。
+///
+/// ## 种子复用：4 条用例只**建一次**仓（2026-11-22）
+///
+/// 4 条用例对仓库的初始状态要求**完全一致**（这就是本函数的全部产物），而建一次要
+/// 11 次 git 子进程（实测单次 50-65 ms，合计 ~1.2 s）。所以：进程内首次建好后保留，
+/// 后续每条 `copy` 一份（`.git` + 3 个文件，实测 ~116 ms）。
+///
+/// 安全前提（与 `git_service_test.cpp` 的 `Repo` 同一套）：种子仓**从不被用例碰到**——
+/// 交出去的是副本，`read_branches` 只读。分片并行仍安全：副本名带 `pid + 序号`。
+///
+/// ⚠ 必须是**副本**而不是共享同一个目录：`read_branches` 虽然只读，但同一进程里
+/// 多条用例并发跑（用例在线程里），而且外部 git 可能在仓里写 index 缓存——
+/// 副本把“同族用例共享可变资源”这个风险彻底关掉。
+[[nodiscard]] auto seed_repo_dir() -> const std::string& {
+  // lint-allow: L8 夹具种子仓：仅本测试二进制内、随进程退出失效
+  static const std::string path =
+      (std::filesystem::temp_directory_path() /
+       std::format("st_branches_seed_{}", static_cast<int>(st::process::current_id())))
+          .string();
+  return path;
+}
+
+[[nodiscard]] auto build_seed_repo(const std::string& root) -> bool;
+
 [[nodiscard]] auto make_repo(const std::string& root) -> bool {
-  if (!git_ok(root, {"init", "-q", "."})) return false;
-  (void)git_ok(root, {"config", "user.email", "t@t"});
-  (void)git_ok(root, {"config", "user.name", "t"});
+  // lint-allow: L8 夹具的“种子已就绪”标志（与 seed_repo_dir 配套）
+  static std::once_flag once;
+  // lint-allow: L8 同上
+  static bool seeded = false;
+  std::call_once(once, [] {
+    std::error_code error;
+    std::filesystem::remove_all(seed_repo_dir(), error);
+    std::filesystem::create_directories(seed_repo_dir());
+    seeded = build_seed_repo(seed_repo_dir());
+  });
+  if (!seeded) return false;
+  std::error_code copy_error;
+  std::filesystem::remove_all(root, copy_error);
+  std::filesystem::copy(seed_repo_dir(), root, std::filesystem::copy_options::recursive,
+                        copy_error);
+  return !copy_error;
+}
+
+[[nodiscard]] auto build_seed_repo(const std::string& root) -> bool {
+  if (!git_ok(root, {"init", "-q", "--template=", "."})) return false;
   if (!st::fs::write_text(root + "/a.txt", "a\n").has_value()) return false;
   if (!git_ok(root, {"add", "."})) return false;
   if (!git_ok(root, {"commit", "-qm", "base"})) return false;
@@ -57,7 +105,7 @@ namespace {
   if (!git_ok(root, {"branch", "feature/x"})) return false;
   // 一个 bare 远程仓库 + 把 base 推上去（这样 remote 有真分支，set-head 才有目标）。
   const std::string remote = root + "/remote.git";
-  if (!git_ok(root, {"init", "-q", "--bare", remote})) return false;
+  if (!git_ok(root, {"init", "-q", "--bare", "--template=", remote})) return false;
   if (!git_ok(root, {"remote", "add", "origin", remote})) return false;
   if (!git_ok(root, {"push", "-q", "origin", "HEAD:refs/heads/master"})) return false;
   if (!git_ok(root, {"fetch", "-q", "origin"})) return false;

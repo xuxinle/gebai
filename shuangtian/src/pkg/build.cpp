@@ -2571,6 +2571,118 @@ auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> b
   return *digest == recorded_hash;
 }
 
+/// 链接指纹：把「决定产物内容的一切」压成一个 FNV 哈希串（16 位十六进制）。
+///
+/// ## 为什么必须有一份共用实现
+///
+/// 指纹一旦算错，两个方向都是**静默缺陷**：
+///
+/// · 算得太宽（含时间戳、命令行的临时路径）⇒ 每次都判「变了」⇒ 退回「每次重链」；
+/// · 算得太窄（漏了某个输入）⇒ 改了它也不重链 ⇒ 产物是旧的，构建还报「完成」。
+///
+/// 所以它必须是**唯一一份**：`build()`（目标产物）与 `build_test_binary()`（测试二进制）
+/// 用同一个函数算。历史教训（2026-11-22 实测）：`build_test_binary` 原本**根本没有**
+/// 链接跳过这一步（直接调 `link()`，也从不读写 `.link` 戳），而 `build()` 有——
+/// 于是「0 单元重编」的 `st test <过滤词>` 仍然每次付 **2.9 s 链接 + 1.5 s objcopy 分离**
+/// （`build/dev/bin/st_tests.exe.link` 在这台机器上**从未存在过**，这就是根因的直接证据）。
+///
+/// ## 内容清单（顺序固定，任何一项变化都必须重链）
+///
+/// ① 编译器族（gcc 与 clang 的 ABI 不同，换编译器必须重链）；
+/// ② 是否按需链接（归档 vs 直铺 `.o` —— 链接方式变了行为完全不同）；
+/// ③ 链接集合（对象路径按序）**与每个对象的出生快照**（`.meta` 里的内容哈希）；
+/// ④ 档位标志（`-O1 -g1 …`）；
+/// ⑤ 命令行宏（`--define`）——它在 `compile_units` 内部拼进命令行，**不在档位标志里**，
+///    漏掉就是「宏改了但产物还是旧值」那条实测缺陷（BACKLOG 2026-11-18）；
+/// ⑥ 链接期专属旗标（`-static` / `--gc-sections` / `-fuse-ld=…`）；
+/// ⑦ 命令尾部的链接参数（系统库、`extra_flags`）；
+/// ⑧ 目标名；
+/// ⑨ 子系统（`console` / `gui`）与图标内容哈希（PE 头与资源段的唯一来源）；
+/// ⑩ 是否分离调试信息——**必须入指纹**：`--no-strip` 的产物带着完整 DWARF，
+///    与分离过的产物是**两份不同的字节**。漏掉它意味着「`st build --no-strip` 之后
+///    再 `st build` 会报『无需重链』而产物仍是不分离的那份」（与⑤同一类静默缺陷）。
+///
+/// 不含时间戳：`git checkout` / `stash pop` 会整批刷新 mtime 而内容一字未改
+/// （按时间判等于白等一轮重链），而 `.o` 从共享缓存 restore 时 mtime 又可能停在旧条目
+/// 那一刻（内容换了时间却没动，按时间判会静默拿旧产物）。
+[[nodiscard]] auto link_fingerprint_of(const Manifest& manifest, const BuildOptions& options,
+                                       const std::vector<CompileUnit>& link_units,
+                                       const std::vector<std::string>& profile_flags_list,
+                                       const ResolvedToolchain& toolchain,
+                                       std::string_view target_name) -> std::string {
+  std::string material(compiler_kind_name(toolchain.kind));
+  material.append("\n#archive");  // 按需链接：链接方式变了必须重链（归档 vs 直铺 .o）
+  for (const auto& unit : link_units) {
+    material.append("\n").append(unit.object);
+    const auto meta = fs::read_text(deps_meta_path(unit.object));
+    material.append("\t").append(meta.value_or("missing"));
+  }
+  for (const auto& flag : profile_flags_list) material.append("\n@").append(flag);
+  for (const auto& define : options.extra_defines) material.append("\n-D").append(define);
+  // 链接期专属旗标与尾部参数：与 `link()` 命令行**同源**（同一组纯函数算出来），
+  // 只改链接参数也必须重链（实测：`-static` 改了不重链，libwinpthread-1.dll 一直在）。
+  for (const auto& flag : detail_link_only_flags_for(toolchain.platform, toolchain.kind,
+                                                     toolchain.cross(), toolchain.extra_flags)) {
+    material.append("\n&").append(flag);
+  }
+  for (const auto& flag : detail_link_tail_flags_for(toolchain.platform,
+                                                     resolve_system_libraries(manifest, toolchain),
+                                                     toolchain.extra_flags)) {
+    material.append("\n+").append(flag);
+  }
+  material.append("\n<").append(target_name).append(">");
+  // 链接期**非源文件**的输入：子系统与图标资源。
+  // 不纳入的代价（实测）：改 `system: console → gui` 或换 `.ico` 后，单元一个没变 →
+  // 指纹不变 → 「链接已跳过」→ 产物还是旧的（PE 头仍是 CONSOLE、图标还是上一份）。
+  const TargetSpec* spec = nullptr;
+  for (const auto& candidate : manifest.targets) {
+    if (candidate.name == target_name) {
+      spec = &candidate;
+      break;
+    }
+  }
+  material.append("\n~system=").append(spec != nullptr ? spec->system : std::string{});
+  if (spec != nullptr && !spec->icon.empty()) {
+    const std::string icon_path = (options.root.empty() ? std::string{"."} : options.root) + "/" +
+                                  spec->icon;
+    material.append("\n~icon=").append(icon_path).append("\t");
+    const auto icon_bytes = fs::read_bytes(icon_path);
+    // 用字节哈希（`read_bytes` 返回 `Result<Bytes>`，不是 optional——
+    // 先前写成 `if (icon_hash)` 判的是 Result 对象本身，恒为真）。
+    if (icon_bytes) {
+      material.append(std::to_string(st::hash::fnv1a64_bytes(*icon_bytes)));
+    } else {
+      material.append("missing");
+    }
+  }
+  // 分离调试信息与否决定产物字节（见本函数头注释 ⑩）。
+  material.append("\n~strip=").append(options.strip_debug ? "1" : "0");
+  // `--force` 不进指纹：它是「这一轮忽略判定」，不是产物的属性；
+  // 由调用方的 `up_to_date` 先判它（见 `link_is_up_to_date`）。
+  return std::string(st::hash::fnv1a64_hex(material));
+}
+
+/// 链接跳过的出生戳路径（与产物同目录同寿命）。
+[[nodiscard]] auto link_stamp_path(const std::string& output) -> std::string {
+  return output + ".link";
+}
+
+/// 产物是否已经是最新的：指纹未变 + 产物在 + 本轮没有任何单元重编。
+///
+/// 三个条件缺一不可：
+/// · **指纹变了** ⇒ 参与链接的输入变了，必须重链；
+/// · **产物不在** ⇒ 无从跳过（首次构建、被手工删掉）；
+/// · **本轮有单元重编** ⇒ 哪怕指纹算出来一样也不能跳过——重编出来的对象可能是新字节
+///   （`.meta` 写失败、或编译器在同样输入下产出不同字节），此时按指纹跳过等于
+///   「编了但没链」，产物与对象不一致。宁可多链一次。
+[[nodiscard]] auto link_is_up_to_date(const std::string& output, std::string_view fingerprint,
+                                      std::size_t units_rebuilt) -> bool {
+  if (units_rebuilt != 0) return false;
+  if (!fs::is_regular_file(output)) return false;
+  const auto stamp = fs::read_text(link_stamp_path(output));
+  return stamp.has_value() && *stamp == fingerprint;
+}
+
 /// 在**编译器旁边**找 binutils 工具（`objcopy` / `objdump`），找不到再回退 PATH。
 ///
 /// 为何先找编译器旁：交叉工具链的 `x86_64-w64-mingw32-objcopy` 与它的 gcc 同装，
@@ -3668,82 +3780,21 @@ if (target->kind == "group") {
   std::vector<CompileUnit> link_units = units;
   link_units.insert(link_units.end(), target_units.begin(), target_units.end());
 
-  // 链接期专属旗标（`-static`/`--gc-sections`/`-fuse-ld=…` 等）：与 `link()` 命令行
-  // 同源（`link_only_flags_for()`，纯函数）——指纹纳入它，只改链接旗标也必须重链。
-  // 不纳入的代价见该函数注释（实测：`-static` 改了不重链，libwinpthread-1.dll
-  // 一直在产物导入表里）。
-  const std::vector<std::string> applied_link_flags =
-      detail_link_only_flags_for(toolchain->platform, toolchain->kind, toolchain->cross(),
-                                 toolchain->extra_flags);
-  // 命令尾部的链接参数（系统库、extra_flags）同样入指纹：只改清单这一行也应该重链。
-  const std::vector<std::string> applied_tail_flags = detail_link_tail_flags_for(
-      toolchain->platform, resolve_system_libraries(manifest, *toolchain),
-      toolchain->extra_flags);
-
   // 链接跳过：参与链接的东西**一个都没变**就不重链。
   //
-  // 指纹的内容：编译器族 + 链接集合（对象路径按序）+ 编译标志 + 链接期旗标
-  // + 每个对象的出生快照（`.meta` 里的内容哈希）——不含时间戳，也不靠“产物比对象新”。
-  //
-  // 为何不看时间：`git checkout` 会整批刷时间戳（白重链），而\.o 从共享缓存 restore 时
-  // 时间戳又可能停在旧条目那一刻（内容换了时间却没动，旧实现会静默拿旧产物）。
-  const auto link_fingerprint = [&]() -> std::string {
-    std::string material(compiler_kind_name(toolchain->kind));
-    material.append("\n#archive");  // 按需链接：链接方式变了必须重链（归档 vs 直铺 .o）
-    for (const auto& unit : link_units) {
-      material.append("\n").append(unit.object);
-      const auto meta = fs::read_text(deps_meta_path(unit.object));
-      material.append("\t").append(meta.value_or("missing"));
-    }
-    for (const auto& flag : *flags) material.append("\n@").append(flag);
-    // **命令行宏必须入指纹**（2026-11-18 修，实测缺陷）：
-    // `*flags` 里只有**档位标志**（`-O1 -g1 …`）——编译宏是 `compile_units`
-    // 内部另行组装的，不在这个向量里。于是“只改 `--define`”时：
-    // 对象会因为缓存键含宏而重编，但链接指纹不变 → “链接已跳过” →
-    // **产物还是上一个宏的值**（实测：`--define XIAOBAI_MODEL="A"` 之后换成 "B"，
-    // `.link` 戳一字未变，exe 里仍是 A）。
-    // 这类缺陷完全静默（构建报“完成”），只能把宏自己纳入指纹。
-    for (const auto& define : options.extra_defines) material.append("\n-D").append(define);
-    // 链接期专属旗标：同属“只改链接参数”的静默风险面（见下方 system/icon 注释），
-    // 2026-11-09 补入（实测：`-static` 改了不重链，libwinpthread-1.dll 一直在产物里）。
-    for (const auto& flag : applied_link_flags) material.append("\n&").append(flag);
-    for (const auto& flag : applied_tail_flags) material.append("\n+").append(flag);
-    material.append("\n<").append(target->name).append(">");
-    // 链接期**非源文件**的输入：子系统与图标资源。
-    //
-    // 不纳入指纹的代价（实测）：改 `system: console → gui` 或换 `.ico` 后，
-    // 单元一个没变 → 指纹不变 → “链接已跳过” → 产物还是旧的
-    // （PE 头仍是 CONSOLE、图标还是上一份），而构建输出说“完成”。
-    // 这类“只改了链接参数”的改动完全静默，只能靠 --force 才生效。
-    material.append("\n~system=").append(target->system);
-    if (!target->icon.empty()) {
-      const std::string icon_path = (options.root.empty() ? std::string{"."} : options.root) +
-                                    "/" + target->icon;
-      material.append("\n~icon=").append(icon_path).append("\t");
-      // 用字节哈希（`read_bytes` 返回 `Result<Bytes>`，不是 optional——
-      // 先前写成 `if (icon_hash)` 判的是 Result 对象本身，恒为真）。
-      const auto icon_bytes = fs::read_bytes(icon_path);
-      if (icon_bytes) {
-        material.append(std::to_string(st::hash::fnv1a64_bytes(*icon_bytes)));
-      } else {
-        material.append("missing");
-      }
-    }
-    return std::string(st::hash::fnv1a64_hex(material));
-  }();
-  const std::string link_stamp_path = output + ".link";
+  // 指纹口径与 `build_test_binary()` **共用一份实现**（见 `link_fingerprint_of` 的长注释）：
+  // 两块各算一份必然在边界条件上给出不同答案，而两边都只会在「改了却没生效」时
+  // 被人发现——而那已经太晚了。
+  const auto link_fingerprint =
+      link_fingerprint_of(manifest, options, link_units, *flags, *toolchain, target->name);
   // 产物旁的出生快照：壳层源 → 内容哈希。`st run` 据此判“能不能直接跑现有产物”，
   // 与 `st build` 的增量判定同一套口径（内容而不是时间）。
   const auto write_source_stamp = [&]() {
     (void)fs::write_text(output + ".srcs", target_source_stamp(manifest, *target));
   };
-  const bool up_to_date = [&]() {
-    if (options.force || rebuilt != 0 || stats.units_rebuilt != 0) return false;
-    if (!fs::is_regular_file(output)) return false;
-    // 参与链接的集合/标志/对象内容变了（含"少了某个源文件"）→ 必须重链
-    const auto stamp = fs::read_text(link_stamp_path);
-    return stamp.has_value() && *stamp == link_fingerprint;
-  }();
+  const bool up_to_date = !options.force &&
+                          link_is_up_to_date(output, link_fingerprint,
+                                             rebuilt + stats.units_rebuilt);
   if (up_to_date) {
     // ## 把“为何不重链”记成一句人读的话（2026-11-08）
     //
@@ -3787,7 +3838,7 @@ if (target->kind == "group") {
   stats.linked = true;
   stats.link_ms = (time::now_ns() - link_start) / 1'000'000;
   // 记下本次链接的"成分"，下次据此判断能否跳过（写失败只是下次多链一次，不影响正确性）
-  (void)fs::write_text(link_stamp_path, link_fingerprint);
+  (void)fs::write_text(link_stamp_path(output), link_fingerprint);
   write_source_stamp();
   stats.artifact = output;
   stats.runs_on_host = toolchain->runs_on_host();
@@ -3870,7 +3921,44 @@ namespace {
     shard_reports[index] = fs::join(shard_dir, std::format("shard-{}.xml", index + 1));
   }
 
-    ST_LOG_INFO("测试分片：{} 片并行（每片一个测试进程；片内顺序不变）", shards);
+  // ## 逐用例耗时侧车：按实测耗时装箱（详见 `assign_shards_by_tu` 的注释）
+  //
+  // 三份路径各有分工，均在产物目录（`build/<档位>/bin/`，跟随产物生命周期，不污染仓库根）：
+  //   `test-times.txt`         —— 合并后的**真值源**，下轮用作输入；
+  //   `test-times.txt.shardN`  —— 各片自己的输出（避免 16 片同时写同一个文件）；
+  //   `test-times.readby`      —— 输入文件的**内容哈希**，标记“这一版已作为输入用过”。
+  //
+  // ## 合并的入口条件是「输入表没自上次合并后变过」
+  //
+  // 为何不能无脑合：`st test` 在编辑内循环里被反复调，耗时数据只在跑了几何量的
+  // 用例后才有意义。一个命中 10 条用例的 filter 跑轮**不该**把全量套件的耗时表
+  // 洗成“只剩这 10 条”（其余 3085 条会变成未知 → 当 0 权重 → 全塞进一个片）。
+  //
+  // ## 为何把“记录”放在**合并之后**
+  //
+  // `readby` 记录的是“上一轮合并后写下的那份表的哈希”。合并前先算 `times_stamp`
+  // 只能描述**旧**表——拿它去比，永远会对得上（旧表 = 旧表），于是默认表、每轮都说
+  // “可用”（但指向的仍是旧表，无意义）。真正的语义是事后回填：
+  //   本轮开始：`times_usable = (readby == hash(当前表))` —— 跟“上轮合完的样子”比；
+  //   本轮结束：写入新表 → 立即把 `readby` 写成**新表**的哈希。
+  // 于是“表在两次跑之间被手改/换过”会自然失配 → 本轮先不用它（安全方向）。
+  const std::string times_input = fs::join(fs::parent(output), "test-times.txt");
+  const std::string times_readby = times_input + ".readby";
+  // 指纹用**内容**而非 mtime：与全仓增量口径一致（`git checkout` 会整批刷 mtime），
+  // 且表只有几十 KB，读一次与 stat 差不多贵，而少一条“时间戳不可信”的假设。
+  const auto table_hash = [&times_input]() -> std::string {
+    const auto text = fs::read_text(times_input);
+    if (!text.has_value()) return "absent";
+    return st::hash::fnv1a64_hex(*text);
+  };
+  const bool times_usable = fs::read_text(times_readby).value_or(std::string{}) == table_hash();
+  std::vector<std::string> shard_times(shards);
+  for (std::size_t index = 0; index < shards; ++index) {
+    shard_times[index] = fs::join(shard_dir, std::format("times-{}.txt", index + 1));
+  }
+
+    ST_LOG_INFO("测试分片：{} 片并行（每片一个测试进程；片内顺序不变）{}", shards,
+                times_usable ? "· 按实测耗时装箱（test-times.txt）" : "· 按用例条数装箱（无耗时表）");
   // 用线程池而不是裸 std::thread：与编译侧同一套并发原语（RAII 回收、可诊断）。
   //
   // ## 输出去向：**子进程自己 tee**（控制台 + 文件两个出口），父进程不拦截
@@ -3907,6 +3995,9 @@ namespace {
       process::Options run_options{.env = base_env, .capture_output = false};
       run_options.env["ST_JUNIT_XML"] = shard_reports[index];
       run_options.env["ST_TEST_SHARD_LOG"] = shard_logs[index];
+      // 下轮用于装箱的输入（旧表）+ 本轮自己的输出（各写各的，父进程串行合）。
+      if (times_usable) run_options.env["ST_TEST_TIMES_FILE"] = times_input;
+      run_options.env["ST_TEST_TIMES_OUT"] = shard_times[index];
       auto result = process::run(output, args, run_options);
       const std::scoped_lock lock(result_mutex);
       if (!result) {
@@ -3969,6 +4060,26 @@ namespace {
       return forward_error(status.error());
     }
     ST_LOG_INFO("JUnit 报告已合并（{} 片，失败用例 {}）", shards, merged_failed);
+  }
+  // ## 合并逐用例耗时（供**下一轮**分片装箱）
+  //
+  // 条件：本轮每片都真写了侧车（有片崩溃 → 它那批用例的耗时缺失 → 不合并，
+  // 保持旧表；半份表造成的“未知当 0 权重”会把用例全塞进一个片）。
+  // 写失败不影响任何结果：下一轮只是退回按条数装箱。
+  if (std::size_t written = 0; true) {
+    std::string merged;
+    for (const auto& path : shard_times) {
+      const auto text = fs::read_text(path);
+      if (!text.has_value()) continue;
+      ++written;
+      merged.append(*text);
+    }
+    if (written == shards && !merged.empty()) {
+      if (fs::write_text(times_input, merged).has_value()) {
+        // **合并后**才记“这一版已用过”（见上面那段关于入口条件的注释）。
+        (void)fs::write_text(times_readby, table_hash());
+      }
+    }
   }
   (void)fs::remove_all(shard_dir);
   return failed_total;
@@ -4121,7 +4232,6 @@ namespace {
                       std::format("测试构建失败（编译段）：{}", compiled.error().message));
   }
   ST_LOG_INFO("测试构建：{} 单元（重编 {}）", units.size(), rebuilt);
-
   const std::string output = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
   // 按需链接同样适用测试二进制：**入口/runner/用例直传**，其余（框架/第三方/库源）归档。
   //
@@ -4146,6 +4256,28 @@ namespace {
       test_archived.push_back(unit);
     }
   }
+  // ## 链接跳过：与 `build()` **同一条口径**（2026-11-22）
+  //
+  // 这里曾经**没有**这一步：直接调 `link()` 且从不写 `.link` 戳。后果是「0 单元重编」
+  // 的 `st test` 仍然每次付 **2.9 s 链接 + 1.5 s objcopy 分离**——而它占了
+  // `st test <过滤词>`（实测 5.4 s）的 **81%**。日常内循环（“改一行跑一下”）付的
+  // 就是这个钱，而真正想看的用例执行只占 0.6 s。
+  //
+  // 判据必须三件同时成立（见 `link_is_up_to_date` 的注释）：指纹未变、产物在、
+  // 本轮**没有**任何单元重编。指纹自己也不含时间戳（`git checkout` 会整批刷 mtime）。
+  //
+  // 注意这里传的是 `units`（= `test_archived ∪ test_direct`）：它既是 `link()`
+  // 实际收到的**全部对象**，也是归档会拉进去的成员集，所以“链接集合变了”必然
+  // 在指纹里体现（删了一个测试源 → 指纹变 → 重链）。
+  const auto run_fingerprint =
+      link_fingerprint_of(effective, options, units, *flags, *toolchain, "st_tests");
+  if (!options.force && link_is_up_to_date(output, run_fingerprint, rebuilt)) {
+    // 产物最新：跳过的**只有**链接与分离，`.srcs` 出生快照仍要重写——它是
+    // “测试源改过没有”的真值源，而 `refresh_stale_test_binary` 靠它判是否要重建。
+    (void)fs::write_text(test_binary_stamp_path(output), test_source_stamp(*tests, object_dir));
+    ST_LOG_INFO("测试链接已跳过：对象与链接标志均未变（无需重链）");
+    return output;
+  }
   auto linked = link(manifest, options, test_archived, output, *flags, *toolchain, {},
                      &test_direct);
   if (!linked) {
@@ -4158,6 +4290,16 @@ namespace {
   // 测试二进制同样分离调试信息：它是**开发用**产物，但每次都链、而且比 gallery 大得多
   // （几百个单元全静态链入）——留着 70MB 的 `.debug_*` 只会白占磁盘与拷贝时间。
   // 崩了照样能回溯：`addr2line -e st_tests.debug` 或直接交给 gdb（它自己认分离符号）。
+  //
+  // ## 实测：这一步占“改一行测试”总成本的 42%（保留，不做取舍）
+  //
+  // 改一行测试 → 重编 1 单元 + 重链 + 分离 + 跑该族，实测 **9.5 s**，拆分：
+  //   链接 ~2.9 s（静态链 766 个对象，不可避免）
+  //   分离 ~4.0 s（`--only-keep-debug` + `--strip-all` + `--add-gnu-debuglink`
+  //              三步共处理 ~200 MB 产物）
+  //   编译 ~1.2 s（1 个单元）+ 跑用例 ~0.6 s
+  // 一个诱人的省法是“增量构建时复用上轮的 `.debug`”，但那会让调试符号指向旧二进制
+  // ——**正确性降级换速度**，而真需要调试时人已经处于紧张状态。不做。
   if (options.strip_debug) {
     if (auto stripped = separate_debug_info(output, toolchain->compiler_path,
                                            toolchain->executable_suffix, options.verbose);
@@ -4170,6 +4312,8 @@ namespace {
   // 会被当成“没改”，测试一直跑旧二进制。
   (void)fs::write_text(test_binary_stamp_path(output),
                        test_source_stamp(*tests, object_dir));
+  // 链接指纹落盘（写失败只是下次多链一次，不影响正确性）。
+  (void)fs::write_text(link_stamp_path(output), run_fingerprint);
 
   return output;
 }

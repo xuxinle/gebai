@@ -28,6 +28,7 @@
 /// 不付真构建的成本。pkg_integration 侧的接线（ST_SKIP 替代 print+return）由
 /// 代码评审与缺失环境实跑覆盖（见文件头验证清单）。
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -95,4 +96,35 @@ ST_TEST(skip_is_visible_in_report_line_summary_and_exit_code) {
 
   // ③ 退出码：跳过不是失败（环境前置缺失 ≠ 被测对象缺陷）。
   ST_CHECK_EQ(ran->exit_code, 0);
+}
+
+/// 集成用例必须**真地**在 SLOW 集里（不是只在注释里说它是 SLOW）。
+///
+/// ## 为何需要这条回归
+///
+/// `independent_project_builds_links_and_runs` 一直被当作“慢用例”讨论：
+/// `src/test/test_main.cpp` 的注释说「为何默认不跑慢用例」并点名那类用例包括
+/// 「需要真编译的集成用例」，本文件头也说「它是 SLOW 用例（默认不跑）」——
+/// 但它实际用的是 `ST_TEST_WITH_TIMEOUT`（**普通**用例），于是它每轮全量都跑。
+/// 实测代价（2026-11-22）：全量 16 片时它独占一片跑 18s，其余 15 片 6s 就完了，
+/// 测试程序壁钟 32.3s 里它占 60%。注释与代码相悖时，**代码才是运行时真相**。
+///
+/// ## 判据为何是「直接查注册表」而不是跑一遍
+///
+/// `Case::slow` 正是 `run_all` 用来决定“默认跑不跑”的那个字段（`item.slow &&
+/// !include_slow()`），所以查它就是查运行时真相，且零成本。
+/// 曾经想用 `--list` 判定，但那不行：`list_cases` **不过滤慢用例**（它列的是
+/// “注册了哪些”，不是“默认会跑哪些”）——拿它做判据会得出相反结论。
+///
+/// 同时钉 `timeout_ms == 60000`：只把 slow 标上、把超时降回默认 10s 的话，
+/// `--slow` 轮会把它误报成「超过软超时上限」（而那是真正想避免的那类假红）。
+ST_TEST(slow_set_contains_integration_case) {
+  constexpr std::string_view kCase = "independent_project_builds_links_and_runs";
+  const auto& cases = ::st::test::Registry::instance().cases();
+  const auto found = std::find_if(cases.begin(), cases.end(),
+                                  [&](const ::st::test::Case& item) { return item.name == kCase; });
+  ST_REQUIRE(found != cases.end());       // 用例被删了也要报出来（否则本回归静默失效）
+  ST_CHECK(found->slow);                  // ← 被钉的那个字段（默认不跑）
+  ST_CHECK_EQ(found->timeout_ms, std::int64_t{60'000});   // 慢≠可以短超时
+  ST_CHECK(!found->file.empty());         // 分片按 TU 装箱靠它（为空会被当成独立组）
 }

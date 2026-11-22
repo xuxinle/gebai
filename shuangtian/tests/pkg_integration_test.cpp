@@ -113,7 +113,20 @@ ST_MAIN(run_app)
 /// Linux ~18s / Windows 9~13s，共享机器还会被邻居抬高）——不覆盖默认 10s 的话
 /// 把「框架默认值不适合集成用例」误报成被测对象问题（2026-10-15 Windows 全量
 /// 实测 12.43s 误红，用例本身成功：产物输出 integration-ok）。
-ST_TEST_WITH_TIMEOUT(independent_project_builds_links_and_runs, 60'000) {
+///
+/// ## 为何是 `ST_TEST_WITH_TIMEOUT_SLOW`（双重口径，2026-11-22 修）
+///
+/// 两个维度它都占：**耗时由环境决定**（真编译，~12-18s）+ **超过默认 10s 软超时**。
+/// 旧注册只用 `ST_TEST_WITH_TIMEOUT`，于是它**每轮全量都跑**——实测 16 片并行时
+/// 它独占一片跑 18s，其余 15 片 6s 就完了，测试程序整体壁钟 32.3s 里它占 60%。
+/// 而本仓另两处注释（`src/test/test_main.cpp` 的「默认不跑慢用例」、
+/// `tests/skip_visibility_test.cpp` 的「它是 SLOW 用例（默认不跑）」）
+/// **都按它是 SLOW 写的**——“文档说 A、代码写 B”就是这条被漏掉的注册口径。
+///
+/// 修后的口径：默认全量不跑它（与其它集成/性能用例一致）；`st test --slow`
+/// 与显式指名（`st test independent_project`）照常跑，仍然吃 60s 超时。
+/// 回归见 `tests/skip_visibility_test.cpp` 的 `slow_set_contains_integration_case`。
+ST_TEST_WITH_TIMEOUT_SLOW(independent_project_builds_links_and_runs, 60'000) {
   if (const char* disabled = std::getenv("ST_INTEGRATION_BUILD");
       disabled != nullptr && std::string_view(disabled) == "0") {
     ST_SKIP("[独立工程] ST_INTEGRATION_BUILD=0 → 跳过（真构建被显式关闭，非通过）");
