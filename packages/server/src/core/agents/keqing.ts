@@ -36,6 +36,7 @@ import { basename, dirname, isAbsolute, join } from "node:path"
 import { resolveAuthMode, resolveGebaiHome } from "../base/config"
 import type { SubAgentDef, Tool } from "../base/types"
 import { AgentSidecar, defaultSpawn, keqingSourceDir, type SidecarCtx, type SidecarSpawnFn } from "./sidecar"
+import { withScriptEnvDefaults } from "../support/child-env"
 
 /** 解释器解析（{python} 占位，其他语言 manifest 直接写可执行体路径/命令名）：
  *  GEBAI_PYTHON_DIR（解释器目录或可执行体完整路径；目录时补拼 python.exe/python）
@@ -228,10 +229,10 @@ export async function ensureBuilt(
   const expanded = expandCommand(buildCmd, dir, manifest, null)
   if (expanded.error) throw new Error(`build 命令占位解析失败: ${expanded.error}`)
   const spawn = opts.spawn ?? defaultSpawn
-  // process.env 值可 undefined：过滤后拼接（Bun.spawn env 类型要求全 string）
+  // 构建命令可能自己调 python（如 CMake 驱动的代码生成、脚本式构建）：与脚本子进程同口径（PATH 归一 + 编码默认值）
   const proc = spawn(expanded.command, {
     cwd: dir,
-    env: { ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][]), ...(opts.env ?? {}) },
+    env: withScriptEnvDefaults({ ...process.env, ...(opts.env ?? {}) }),
   })
   let out = ""
   const decoder = new TextDecoder()
@@ -335,8 +336,9 @@ export async function launchKeqing(
   const cwd = manifest.cwd ? manifest.cwd.replace(/\{GEBAI_HOME\}/g, home) : dir
   // 基础环境继承：保留 PATH/SYSTEMROOT 等进程基础变量（Windows 下 python 编解码/subprocess 初始化依赖
   // SYSTEMROOT；极小 env 会让驱动启动即卡死无报错），manifest env 覆盖同名项；GEBAI_AGENT_DIR
-  // 供驱动定位子代理项目专属资产（如 python 驱动加载 {agent_dir}/tools.py 合并专属工具）
-  const sidecarEnv: Record<string, string> = { ...process.env, GEBAI_HOME: home, GEBAI_AGENT_DIR: dir, ...(manifest.env ?? {}) }
+  // 供驱动定位子代理项目专属资产（如 python 驱动加载 {agent_dir}/tools.py 合并专属工具）。
+  // py 驱动的标准流与文件读写都受宿主代码页支配，故经 withScriptEnvDefaults 给编码默认值。
+  const sidecarEnv: Record<string, string> = withScriptEnvDefaults({ ...process.env, GEBAI_HOME: home, GEBAI_AGENT_DIR: dir, ...(manifest.env ?? {}) })
   const sidecar = new AgentSidecar({
     command: () => {
       // 每次启动重新解析占位符（venv 创建后边车重启自动切换解释器）

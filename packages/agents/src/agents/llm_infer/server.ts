@@ -1022,7 +1022,10 @@ const inspect: Tool = {
     const r = await ctx.runCommand(`python "${join(home, "scripts", "inspect-gguf.py")}" ${argv.join(" ")}`, {
       timeoutMs: 300000,
       workdir: home,
-      env: { PYTHONIOENCODING: "utf-8" },
+      // PYTHONUTF8=1：GGUF 元数据里含非 ASCII 字符串（模型名/作者/分词器词表），只给
+      // PYTHONIOENCODING 不够——它只改标准流，`open()` 仍按系统代码页（简中 cp936）读，
+      // 脚本里显式 `open(..., encoding=...)` 之外的读取会抛 UnicodeDecodeError。
+      env: { PYTHONUTF8: "1" },
     })
     const out = (r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim()
     return { output: out || `解析无输出（exit ${r.code}）` }

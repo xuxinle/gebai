@@ -78,6 +78,26 @@ describe("Sandbox 豁免用户（auth=none 默认用户不受用户沙箱控制�
       rmSync(home, { recursive: true, force: true })
     }
   })
+
+  test("exec: 脚本子进程默认带 PYTHONUTF8=1（用户显式设置则不覆盖）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sandbox-pyutf8-"))
+    const sb = new Sandbox({ home, enabled: false })
+    // 只用系统 shell 读环境（不依赖本机装没装 python）
+    const probe = process.platform === "win32" ? `$env:PYTHONUTF8` : `printf '%s' "$PYTHONUTF8"`
+    const prev = process.env.PYTHONUTF8
+    try {
+      delete process.env.PYTHONUTF8
+      const def = await sb.exec(probe, { cwd: home })
+      expect(def.stdout.trim()).toBe("1")
+      // 任务 env 显式关闭：默认值不得覆盖（那是用户有意切换编码姿态的唯一手段）
+      const off = await sb.exec(probe, { cwd: home, env: { PYTHONUTF8: "0" } })
+      expect(off.stdout.trim()).toBe("0")
+    } finally {
+      if (prev === undefined) delete process.env.PYTHONUTF8
+      else process.env.PYTHONUTF8 = prev
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("Sandbox.exec (Windows 编码)", () => {

@@ -17,6 +17,7 @@ import { spawn } from "node:child_process"
 import { basename } from "node:path"
 import { FrameReader, encodeFrame } from "./protocol"
 import type { LspServerPick } from "./registry"
+import { withScriptEnvDefaults } from "../support/child-env"
 
 /** 子进程抽象（测试注入替身，不真起进程）。 */
 export interface LspProc {
@@ -135,11 +136,13 @@ export interface LspSessionOptions {
   initTimeoutMs?: number
 }
 
-/** 空进程环境基准（process.env 过滤 undefined + 会话附加项）。 */
+/** 进程环境基准（process.env 过滤 undefined + 会话附加项，再统一口径：PATH 归一 + 编码默认值）。
+ *  语言服务器是长期运行的任意进程（含 Python 侧的 pylsp/ruff），与脚本子进程同口径给
+ *  `PYTHONUTF8=1`——否则它对中文路径/注释的读写按系统代码页走。 */
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) out[k] = v
-  return { ...out, ...(extra ?? {}) }
+  return withScriptEnvDefaults({ ...out, ...(extra ?? {}) })
 }
 
 /** Windows 盘符与空格/中文路径 → file URI（`C:\a b\c.ts` → `file:///C:/a%20b/c.ts`）。 */

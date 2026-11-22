@@ -291,11 +291,12 @@ async function runLegacyPy(code: string, input: string | undefined, timeoutMs: n
   const scriptPath = `${ctx.workdir}/.gebai_py_${randomUUID().replace(/-/g, "")}.py`
   await writeFile(scriptPath, finalCode)
   try {
-    // -X utf8 / PYTHONUTF8=1：强制 UTF-8 输出（Windows 默认 GBK 会造成乱码）
+    // 解释器命令行带 `-X utf8`，与子进程 env 的默认值（scriptChildEnv 里的 `PYTHONUTF8=1`）同口径：
+    // 两条路径（本地工具桥 / 本降级路径）的编码姿态必须一致，否则同一段脚本换个分支就换一种行为。
     const py = await resolvePythonCmd(ctx)
     const { stdout, stderr, code: exit } = await ctx.runCommand(`${py} -X utf8 "${scriptPath}"`, {
       workdir: ctx.workdir,
-      env: { ...ctx.env, PYTHONUTF8: "1" },
+      env: ctx.env,
       input,
       timeoutMs,
     })
@@ -333,7 +334,9 @@ export async function runPythonBridge(
   const scriptPath = `${ctx.workdir}/.gebai_py_${randomUUID().replace(/-/g, "")}.py`
   await writeFile(scriptPath, script)
   const pythonCmd = await resolvePythonCmd(ctx)
-  const env = { ...scriptChildEnv(ctx), PYTHONUTF8: "1" }
+  // 编码姿态由 scriptChildEnv 统一给（`PYTHONUTF8=1`，用户显式设置则不覆盖），命令行另带 `-X utf8`
+  // 双保险；两者同义，不重复在这里写 env。
+  const env = scriptChildEnv(ctx)
   const isWin = process.platform === "win32"
 
   return new Promise<PyRunResult>((resolve) => {

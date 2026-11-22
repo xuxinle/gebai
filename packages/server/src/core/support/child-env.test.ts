@@ -1,13 +1,14 @@
 /**
- * `withCanonicalPath` 单测：Windows 上裸命令名解析成败的那一条硬约束（见实现文件头的实测表）。
+ * 脚本子进程 env 的统一口径单测：两条硬约束各自的回归。
  *
- * 为何值得单独钉住：这个函数的错误形态是**静默的**——env 里少一个大写 `PATH`，子进程仍然启动、
- * 只是解析到了 WindowsApps 的别名存根（exit 49、stderr 为空）。没有这组用例，只能靠
- * 「某台 Windows 机器上的某个测试恰好红了」来发现，且红出来的是一句 `[exit 49]`，
- * 指向的是「python 坏了」而不是「env 键名错了」。
+ * ① PATH 键名（Windows 上裸命令名解析成败）；② Python UTF-8 模式默认值（系统代码页的编码陷阱）。
+ * 两者的错误形态都是**静默的**：少一个大写 `PATH` → 子进程仍启动、只是解析到了 WindowsApps 别名存根
+ * （exit 49、stderr 为空）；少 `PYTHONUTF8=1` → 打印可能正常、`open()` 却按 cp936 走
+ * （写中文/emoji 才炸，或默默落成 GBK 字节）。没有这组用例，只能靠「某台 Windows 机器上某个测试恰好红了」
+ * 发现，红出来的还是一句指向错误方向的报错。
  */
 import { describe, expect, test } from "bun:test"
-import { withCanonicalPath } from "./child-env"
+import { withCanonicalPath, withPythonUtf8, withScriptEnvDefaults } from "./child-env"
 
 describe("子进程 env 的 PATH 归一化", () => {
   test("Windows 规范的 Path 键 → 归一为大写 PATH（缺了它裸命令名解析会落到别名存根）", () => {
@@ -47,5 +48,32 @@ describe("子进程 env 的 PATH 归一化", () => {
     const src = { Path: "x", FOO: "1" }
     withCanonicalPath(src)
     expect(src).toEqual({ Path: "x", FOO: "1" })
+  })
+})
+
+describe("子进程 env 的编码默认值（Python UTF-8 模式）", () => {
+  test("未设置时补 PYTHONUTF8=1（Windows 默认代码页的编码陷阱）", () => {
+    expect(withPythonUtf8({ A: "1" })).toEqual({ A: "1", PYTHONUTF8: "1" })
+  })
+
+  test("用户/任务 env 显式设置则尊重（含 0——那是关闭 UTF-8 模式的唯一手段）", () => {
+    expect(withPythonUtf8({ PYTHONUTF8: "0" })).toEqual({ PYTHONUTF8: "0" })
+    expect(withPythonUtf8({ PYTHONUTF8: "" })).toEqual({ PYTHONUTF8: "" })
+  })
+
+  test("幂等：重复调用不再叠加键", () => {
+    const once = withPythonUtf8({ A: "1" })
+    expect(withPythonUtf8(once)).toEqual(once)
+  })
+
+  test("最终口径：编码默认值 + PATH 归一一次到位（PATH 归一在最后）", () => {
+    expect(withScriptEnvDefaults({ Path: "C:\\a", FOO: "1" })).toEqual({ PATH: "C:\\a", FOO: "1", PYTHONUTF8: "1" })
+    expect(withScriptEnvDefaults({ PYTHONUTF8: "0", PATH: "p" })).toEqual({ PYTHONUTF8: "0", PATH: "p" })
+  })
+
+  test("最终口径不修改入参", () => {
+    const src = { Path: "x" }
+    withScriptEnvDefaults(src)
+    expect(src).toEqual({ Path: "x" })
   })
 })

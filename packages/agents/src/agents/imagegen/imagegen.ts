@@ -77,7 +77,10 @@ function runPython(args: string[], cwd: string): Promise<RunResult> {
   return new Promise((resolvePromise) => {
     const child = spawn(pythonBin(process.env as Record<string, string>), args, {
       cwd,
-      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+      // PYTHONUTF8=1 而不是只给 PYTHONIOENCODING：后者只改标准流，`open()` 的默认编码仍是系统
+      // 代码页（简中 cp936）——脚本里读写中文路径/文本会抛 UnicodeEncodeError 或落成 GBK 字节。
+      // 本调用不经沙箱（直接 spawn），所以默认值得在这里自己给。
+      env: { ...process.env, PYTHONUTF8: "1" },
     })
     let stdout = ""
     let stderr = ""

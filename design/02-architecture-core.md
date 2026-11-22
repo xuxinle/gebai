@@ -2480,7 +2480,7 @@ TTL 内全群消息直接命中；群成员表没有此人/单聊时再逐条查
 - 脚本执行类工具（`sh`、`py`）的输出以 Markdown 代码块独立渲染
 - **执行超时**：`py`/`js` 子进程设超时上限（默认 5 分钟，可经 `timeout` 参数按次调整，上限 540 秒不晚于引擎 9 分钟兜底），超时按进程树终止；`sh` 走统一后台机制，`timeout` 为同步等待窗口（默认 60 秒、上限 120 秒），到期转后台而非终止（见「sh 执行」；同步回退路径下同值为杀进程上限）
 - **用户中断的结果形态**：被中断的工具调用结果统一带 `[interrupted by user]` 标记（脚本类工具另带自身中断标记与中断前已产生的输出；未执行/未完成的调用写明「本次调用未执行」），执行中被停的调用另报**已执行时间**（「（已执行 12.3 秒）」，按取消信号到达时刻计时；未及执行的调用不报）——模型下一轮据此区分「用户停止」与执行超时、引擎错误（见「核心Agent流程 · 中断与取消」）
-- **编码**：`py` 强制 UTF-8 模式（`python -X utf8` + 环境变量 `PYTHONUTF8=1`），避免 Windows 下默认 GBK 输出造成乱码/解析问题
+- **编码**：`py` 强制 UTF-8 模式（`python -X utf8` + env 默认值 `PYTHONUTF8=1`），避免 Windows 下默认 GBK 输出造成乱码/解析问题；该默认值对所有脚本子进程统一（`withScriptEnvDefaults`，见「脚本执行环境」→「子进程 env 的统一口径」），用户显式设置 `PYTHONUTF8` 则不被覆盖
 - **解释器自适应**：`py` 执行前按 `python3` → `python` → `py` 顺序探测可用命令（`--version` 退出码判定，结果缓存），适配 Linux（多为 `python3`）与 Windows（多为 `python`/`py`），无需配置
 
 #### 脚本执行环境
@@ -2499,8 +2499,18 @@ TTL 内全群消息直接命中；群成员表没有此人/单聊时再逐条查
 - **工作目录标注**：`sh`/`py` 在**非会话默认目录**执行（`workdir` 参数、`project` 参数路由或项目绑定会话）时输出末尾标注「（cwd: …）」——按 cwd 发现目标的工具（`bun test` 等）目录不对时一眼可辨（「命令在哪个目录跑的」不再靠猜）；`sh` 的退出码直接读返回结果的 `exitCode` 字段（无需 `echo $?` / `%errorlevel%` / `$LASTEXITCODE`——Windows 分支已由命令行包装段带出）
 - **输出大小**：工具输出超过截断阈值走上下文保护（截断落盘），防止内存膨胀
 - **输出纯净化**：`sh`/`py`/`js`/`bg_task` 的脚本输出统一经 `core/support/script-output.ts` 清洗——去 ANSI 控制序列、CRLF → LF、去行尾空白、连续空行压缩、去首尾空行（顺序、缩进、行号与错误文本等正文一律不动）：这些噪声对模型无信息量（Windows 子进程逐行带 `\r`、彩色输出带转义序列）
-- **子进程 env 的 PATH 归一（`core/support/child-env.ts` 的 `withCanonicalPath`，sh/py/js 脚本子进程与后台任务共用）**：Windows 上 `process.env` 的 PATH 键名是 **`Path`**（系统规范写法），而 `spawn(file)` 在 `file` 不含路径、需按名解析时**只认传入 env 里的精确大写 `PATH`**：只有 `Path` 时视同没有 PATH，回退到父进程的 PATH——而父进程 PATH 里 `%LOCALAPPDATA%\Microsoft\WindowsApps` 排在真解释器之前，那里面的 `python.exe` 是商店的**应用执行别名存根**，执行返回 9009（落成退出码 49、**stderr 为空**）。症状是一句无任何线索的 `[exit 49]`。故凡「自拼 env 再 spawn 裸命令名」处一律过一遍归一：**PATH 类键去重为大写 `PATH`**（大小写变体视为同一键，后者胜；属 Windows 环境变量名不区分大小写的语言事实）、**空串 PATH 视为「有」**（显式收紧搜索路径不能被当成没过）、**丢弃 `undefined` 值**。实测（Windows 11 + Bun 1.3.14，同一裸命令 `python`）：`{PATH:真值}` → 真 Python；`{Path:真值}` → 存根 exit 49；不传 env → 真 Python。
-  这条也约束了**测试替身**：凡替身里用 `{...process.env}` 包 env 再 spawn 裸命令名，必须同样归一，否则替身会稳定地失败在存根上（而产品路径可能完全正常）。同理，**探测与执行必须同口径**（py 的 `resolvePythonCmd` 走 `ctx.runCommand`、桥/旧路径用 `scriptChildEnv`，两处都归一），否则会出现「探到的能跑 `--version`、执行时却是另一个东西」的错配。
+- **子进程 env 的统一口径（`core/support/child-env.ts` 的 `withScriptEnvDefaults`，sh/py/js 脚本子进程、后台任务、客卿边车、LSP 会话、子Agent 自建 Python 调用共用）**：两条约束一次到位——PATH 键名归一 + Python UTF-8 模式默认值。
+  **① PATH 归一**：Windows 上 `process.env` 的 PATH 键名是 **`Path`**（系统规范写法），而 `spawn(file)` 在 `file` 不含路径、需按名解析时**只认传入 env 里的精确大写 `PATH`**：只有 `Path` 时视同没有 PATH，回退到父进程的 PATH——而父进程 PATH 里 `%LOCALAPPDATA%\Microsoft\WindowsApps` 排在真解释器之前，那里面的 `python.exe` 是商店的**应用执行别名存根**，执行返回 9009（落成退出码 49、**stderr 为空**）。症状是一句无任何线索的 `[exit 49]`。故凡「自拼 env 再 spawn 裸命令名」处一律过一遍归一：**PATH 类键去重为大写 `PATH`**（大小写变体视为同一键，后者胜；属 Windows 环境变量名不区分大小写的语言事实）、**空串 PATH 视为「有」**（显式收紧搜索路径不能被当成没过）、**丢弃 `undefined` 值**。实测（Windows 11 + Bun 1.3.14，同一裸命令 `python`）：`{PATH:真值}` → 真 Python；`{Path:真值}` → 存根 exit 49；不传 env → 真 Python。
+  **② Python UTF-8 模式默认值**：默认在脚本子进程 env 里补 `PYTHONUTF8=1`（等价于命令行 `-X utf8`）——Windows 上 Python 的默认编码取决于系统 ANSI 代码页（简中 cp936/GBK），它同时管**三条通道**：`sys.stdout.encoding`（打印）、`open()` 的默认 `encoding`（文件读写）、`sys.argv`/`os.environ` 的解码；任一道命中 GBK 编不了的字符（emoji、部分生僻字）就抛 `UnicodeEncodeError`，写文件则静默落成 GBK 字节（下游按 UTF-8 读就是乱码）。**`PYTHONIOENCODING` 不能替代它**（本机实测，Python 3.12 + PowerShell 承载）：
+
+  | 注入 | utf8_mode | stdout | `open()` 默认 | 写「中文与 emoji」 |
+  |------|-----------|--------|---------------|--------------------|
+  | 无 | 0 | gbk | cp936 | UnicodeEncodeError |
+  | `PYTHONIOENCODING=utf-8` | 0 | utf-8 | **cp936** | UnicodeEncodeError |
+  | `PYTHONUTF8=1` | 1 | utf-8 | utf-8 | 正常（落 UTF-8 字节） |
+
+  即 `PYTHONIOENCODING` 只改标准流、**文件读写仍是本地代码页**（「打印正常、写文件炸」的典型来源）。故 `py` 工具的两条路径同口径：桥路径由 `scriptChildEnv` 给 env、旧路径（沙箱/安全模式/降级）命令行另带 `-X utf8`；子Agent 自己 spawn 的 Python（imagegen / llm_infer）同样给 `PYTHONUTF8=1` 而不是只给 `PYTHONIOENCODING`。**优先级**：只在未设置时填——用户/任务 env 显式写了 `PYTHONUTF8`（含 `0`）就尊重它，那是他们有意切换编码姿态的唯一手段。
+  这两条也约束了**测试替身**：凡替身里用 `{...process.env}` 包 env 再 spawn 裸命令名，必须同样归一，否则替身会稳定地失败在存根上（而产品路径可能完全正常）。同理，**探测与执行必须同口径**（py 的 `resolvePythonCmd` 走 `ctx.runCommand`、桥/旧路径用 `scriptChildEnv`，两处都归一），否则会出现「探到的能跑 `--version`、执行时却是另一个东西」的错配。
 
 #### 后台任务（三类同一管理面 `bg_task`）
 

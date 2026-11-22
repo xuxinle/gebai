@@ -1,7 +1,14 @@
 /**
- * 子进程环境的 PATH 归一化（**Windows 裸命令名解析的硬约束**）。
+ * 脚本子进程环境的**统一口径**（sh / py / js / 后台任务 / 客卿边车共用）。
  *
- * ## 为什么必须做这件事（一次实测出来的静默失效）
+ * 分两件事，都是「同一个缺陷在多个 spawn 点各拼一份 env」的收敛：
+ *
+ * 1. `withCanonicalPath` —— PATH 键名归一（Windows 裸命令名解析的硬约束）；
+ * 2. `withPythonUtf8` —— Python UTF-8 模式默认值（Windows 默认 GBK 的编码陷阱）；
+ *
+ * 调用方只需用最终的 `withScriptEnvDefaults`。
+ *
+ * ## 为什么必须做 PATH 归一（一次实测出来的静默失效）
  *
  * Windows 上 `process.env` 的 PATH 键名是 **`Path`**（首字母大写、其余小写），这是系统的规范写法。
  * 但 Node / Bun 的 `spawn(file, ...)` 在 `file` 不含路径、需要**按名解析可执行文件**时，
@@ -69,4 +76,47 @@ export function withCanonicalPath(env: Record<string, string | undefined>): Reco
   }
   if (pathValue !== undefined) out.PATH = pathValue
   return out
+}
+
+/**
+ * 脚本子进程的**编码默认值**：Python 的 UTF-8 模式（`PYTHONUTF8=1`）。
+ *
+ * ## 为什么必须在「派生子进程」这一层给，而不能指望命令自己带
+ *
+ * Windows 上 Python 的默认编码取决于系统 ANSI 代码页（简中即 cp936/GBK），它同时管三条通道：
+ * `sys.stdout.encoding`（打印）、`open()` 的默认 `encoding`（文件读写）、`sys.argv`/`os.environ`
+ * 的解码。任一通道命中 GBK 编不了的字符（emoji、部分生僻字）就抛 `UnicodeEncodeError`；
+ * 写文件则静默落成 GBK 字节，下游按 UTF-8 读就是乱码。脚本是用户/模型任意书写的代码，
+ * 不可能要求每条命令自己指定编码。
+ *
+ * ## 为什么是 `PYTHONUTF8` 而不是 `PYTHONIOENCODING`
+ *
+ * 两者不是一回事（本机实测，Python 3.12 + PowerShell 承载）：
+ *
+ * | 注入 | utf8_mode | stdout | `open()` 默认 | 写「中文与 emoji」 |
+ * |------|-----------|--------|---------------|--------------------|
+ * | 无 | 0 | gbk | cp936 | UnicodeEncodeError |
+ * | `PYTHONIOENCODING=utf-8` | 0 | utf-8 | **cp936** | UnicodeEncodeError |
+ * | `PYTHONUTF8=1` | 1 | utf-8 | utf-8 | 正常（落 UTF-8 字节） |
+ *
+ * 即 `PYTHONIOENCODING` 只改标准流，**文件读写仍是本地代码页**——这正是「打印正常、写文件炸」
+ * 那类难排查现象的来源。`PYTHONUTF8=1` 才覆盖全部三条通道（等价于命令行 `-X utf8`）。
+ *
+ * ## 优先级
+ *
+ * **只在未设置时填**：用户/任务 env 里显式写了 `PYTHONUTF8`（含 `0`）就尊重它——
+ * 那是他们有意切换编码姿态的唯一手段，默认值不该覆盖。
+ */
+export function withPythonUtf8(env: Record<string, string>): Record<string, string> {
+  if (env.PYTHONUTF8 !== undefined) return env
+  return { ...env, PYTHONUTF8: "1" }
+}
+
+/**
+ * 脚本子进程环境的**最终口径**（sh / py / js / 后台任务 / 客卿边车共用）：先填编码默认值，
+ * 再归一 PATH 键名。顺序有语义——PATH 归一必须在最后（见 `withCanonicalPath` 的实测表），
+ * 而编码默认值只补键、不动 PATH。
+ */
+export function withScriptEnvDefaults(env: Record<string, string | undefined>): Record<string, string> {
+  return withCanonicalPath(withPythonUtf8(withCanonicalPath(env)))
 }
