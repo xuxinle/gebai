@@ -66,13 +66,13 @@ ST_TEST(caiyun_render_preset_null_deletes) {
   const st::Json overrides = parse(R"({"extra_lights": null})");
   const st::Json merged = caiyun::merge_preset(base, overrides);
 
-  ST_CHECK(merged.find("extra_lights") == merged.end());
+  ST_CHECK(merged.find("extra_lights") == nullptr);
   // 其他键不受影响
   ST_CHECK(merged["ambient"].get<double>() > 0.09);
 
   // 对照组：空数组 ≠ null。空数组是"一个空的补光列表"，键要留下。
   const st::Json empty_list = caiyun::merge_preset(base, parse(R"({"extra_lights": []})"));
-  ST_CHECK(empty_list.find("extra_lights") != empty_list.end());
+  ST_CHECK(empty_list.find("extra_lights") != nullptr);
   ST_CHECK(empty_list["extra_lights"].size() == 0);
 }
 
@@ -84,7 +84,7 @@ ST_TEST(caiyun_render_preset_array_replaces_wholesale) {
   // 整体替换：长度变成 1，且项内容就是覆盖方给的
   ST_CHECK(merged["l"].size() == 1);
   ST_CHECK(merged["l"][0]["v"].get<double>() > 8.9);
-  ST_CHECK(merged["l"][0].find("n") != merged["l"][0].end());
+  ST_CHECK(merged["l"][0].find("n") != nullptr);
 }
 
 ST_TEST(caiyun_render_preset_applies_and_leaves_no_trace) {
@@ -105,14 +105,14 @@ ST_TEST(caiyun_render_preset_applies_and_leaves_no_trace) {
   }
 
   // 相机：front 预设的 eye 在，preset 键没了
-  ST_CHECK(script["camera"].find("preset") == script["camera"].end());
+  ST_CHECK(script["camera"].find("preset") == nullptr);
   ST_CHECK(script["camera"]["eye"].is_array());
   ST_CHECK(script["camera"]["fov"].get<double>() > 43.0);
 
   // 光照：ambient 被覆盖成 0.30，extra_lights 被 null 删掉，preset 键没了
-  ST_CHECK(script["lighting"].find("preset") == script["lighting"].end());
+  ST_CHECK(script["lighting"].find("preset") == nullptr);
   ST_CHECK(script["lighting"]["ambient"].get<double>() > 0.29);
-  ST_CHECK(script["lighting"].find("extra_lights") == script["lighting"].end());
+  ST_CHECK(script["lighting"].find("extra_lights") == nullptr);
   // 未被覆盖的项来自 studio 预设（diffuse 0.52）
   ST_CHECK(script["lighting"]["diffuse"].get<double>() > 0.51);
 }

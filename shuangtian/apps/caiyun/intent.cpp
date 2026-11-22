@@ -48,23 +48,23 @@ auto parse_intent(std::string_view markdown) -> Result<IntentSpec> {
   }
 
   spec.raw = *parsed;
-  if (const auto it = parsed->find("duration_s"); it != parsed->end() && it->is_number()) {
+  if (const st::Json* it = parsed->find("duration_s"); it != nullptr && it->is_number()) {
     spec.duration_s = it->get<double>();
   }
-  if (const auto it = parsed->find("tolerance_s"); it != parsed->end() && it->is_number()) {
+  if (const st::Json* it = parsed->find("tolerance_s"); it != nullptr && it->is_number()) {
     spec.tolerance_s = std::max(0.0, it->get<double>());
   }
-  if (const auto it = parsed->find("size"); it != parsed->end() && it->is_array() &&
+  if (const st::Json* it = parsed->find("size"); it != nullptr && it->is_array() &&
                                                     it->size() == 2) {
     spec.size = std::pair<int, int>{static_cast<int>((*it)[0].get<double>()),
                                     static_cast<int>((*it)[1].get<double>())};
   }
-  if (const auto it = parsed->find("must_show"); it != parsed->end() && it->is_array()) {
+  if (const st::Json* it = parsed->find("must_show"); it != nullptr && it->is_array()) {
     for (const auto& item : *it) {
       if (item.is_string()) spec.must_show.push_back(item.get<std::string>());
     }
   }
-  if (const auto it = parsed->find("tone"); it != parsed->end() && it->is_string()) {
+  if (const st::Json* it = parsed->find("tone"); it != nullptr && it->is_string()) {
     spec.tone = it->get<std::string>();
   }
   return spec;

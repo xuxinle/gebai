@@ -84,9 +84,16 @@ ST_TEST(xiaobai_tool_schema_json_shape_is_object_not_array) {
   ST_CHECK(path->is_object());
   ST_CHECK_EQ(st::json_as_string(*st::json_find(*path, "type")), std::string("string"));
 
-  // 对照：花括号写法确实会变成数组（这就是当时的错）。
-  const st::Json wrong = st::Json{{{"path", field("string")}}};
-  ST_CHECK(wrong.is_array());
+  // 对照：旧库的 `Json{{...}}` 会把对象写成数组（这就是当时的错，会把整个应用打死）。
+  // 新实现**没有**接受花括号的构造——那条歧义写法现在是编译错误，不可能再到运行期出错。
+  // 这条用例改为钉住“唯一合法的当场造对象写法”的产物形状。
+  const st::Json immediate = st::Json::object({{"path", field("string")}});
+  ST_CHECK(immediate.is_object());
+  ST_CHECK(!immediate.is_array());
+  const st::Json* immediate_path = st::json_find(immediate, "path");
+  ST_REQUIRE(immediate_path != nullptr);
+  ST_CHECK(immediate_path->is_object());
+  ST_CHECK_EQ(st::json_as_string(*st::json_find(*immediate_path, "type")), std::string("string"));
 }
 
 ST_TEST(xiaobai_tool_edit_requires_match) {

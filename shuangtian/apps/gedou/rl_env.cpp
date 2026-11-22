@@ -404,10 +404,10 @@ auto rl_schema_json() -> std::string {
   root["observation_dim"] = observation_dim();
   Json fields = Json::array();
   for (const ObservationField& field : kFields) {
-    fields.push_back(Json{{"name", std::string(field.name)},
-                          {"meaning", std::string(field.meaning)},
-                          {"low", field.low},
-                          {"high", field.high}});
+        fields.push_back(Json::object({{ "name", std::string(field.name) },
+                                   { "meaning", std::string(field.meaning) },
+                                   { "low", field.low },
+                                   { "high", field.high }}));
   }
   root["observation"] = std::move(fields);
   Json actions = Json::array();
@@ -416,12 +416,12 @@ auto rl_schema_json() -> std::string {
   }
   root["actions"] = std::move(actions);
   root["action_count"] = kRlActionCount;
-  root["reward"] = Json{{"damage_dealt", RewardConfig{}.damage_dealt},
-                        {"damage_taken", RewardConfig{}.damage_taken},
-                        {"hit_bonus", RewardConfig{}.hit_bonus},
-                        {"win_bonus", RewardConfig{}.win_bonus},
-                        {"lose_penalty", RewardConfig{}.lose_penalty},
-                        {"step_penalty", RewardConfig{}.step_penalty}};
+  root["reward"] = Json::object({{ "damage_dealt", RewardConfig{}.damage_dealt },
+                                 { "damage_taken", RewardConfig{}.damage_taken },
+                                 { "hit_bonus", RewardConfig{}.hit_bonus },
+                                 { "win_bonus", RewardConfig{}.win_bonus },
+                                 { "lose_penalty", RewardConfig{}.lose_penalty },
+                                 { "step_penalty", RewardConfig{}.step_penalty }});
   root["max_frames"] = 60 * 40;
   return st::json_dump(root);
 }

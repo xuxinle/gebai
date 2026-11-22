@@ -115,7 +115,8 @@ auto read_proposal(std::string_view package_root, std::string_view id) -> Result
   proposal.decided_at = st::json_get_string(*parsed, "decided_at");
   proposal.decision_note = st::json_get_string(*parsed, "decision_note");
   proposal.superseded_by = st::json_get_string(*parsed, "superseded_by");
-  if (const auto it = parsed->find("changes"); it != parsed->end()) proposal.changes = *it;
+  // `find` 返回 `const Json*`（缺键为 nullptr），不再是迭代器——不能直接拿它做 if 初始化器的声明类型。
+  if (const st::Json* found = parsed->find("changes"); found != nullptr) proposal.changes = *found;
   return proposal;
 }
 

@@ -1563,7 +1563,7 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
     primitive["attributes"] = attributes;
     if (has_skin) {
       // 所有蒙皮对象共用 `skins[0]`（导出选项里只接受一副骨架）
-      primitive["extras"] = Json{{"skinned", true}};
+      primitive["extras"] = Json::object({{"skinned", true}});
     }
     if (!geom.indices.empty()) {
       primitive["indices"] = static_cast<std::int64_t>(index_accessor);
@@ -1727,7 +1727,7 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
       const math::Mat4 bind = options.skeleton->bind_matrix_at(i);
       const math::Mat4 world = st::raster::inverse_bind_from_world(bind);
       node["matrix"] = matrix_json(world);
-      node["extras"] = Json{{"autoJoint", true}};
+      node["extras"] = Json::object({{"autoJoint", true}});
       nodes.push_back(node);
       const auto index = static_cast<std::int64_t>(nodes.size() - 1U);
       node_index_of.emplace(joint, index);

@@ -96,8 +96,8 @@ shuangtian/
 │   └── **/platform_*.cpp # 平台/系统 API 单点封装（禁令受控例外）
 ├── tests/<层>_<模块>_test.cpp
  ├── apps/{gallery,gbcode,louyue,caiyun,xiangqi}/  # 应用：组件面 / 编辑器面 / 光栅面 / 动效面 / 纯 XML+JS 面（见根 README「应用」节）
-├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：nlohmann/json、quickjs-ng、
-│                         # batterycenter/embed、sqlite（amalgamation 源码内置）；
+├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：quickjs-ng、
+│                         # batterycenter/embed、sqlite（amalgamation 源码内置）、three、webview2；
 │                         # 来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
 └── docs/                 # 控制协议规范、设计 token 表等
 ```
@@ -6513,23 +6513,48 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 `ext` 是**外部基础设施的适配层**，与自研的 `core/raster/text/ui` 分层明确：这里放的是
 “不值得自己写、但必须控住边界”的能力。两个模块，两种姿态：
 
-**`st/core/json.hpp`（必需）**——基于 nlohmann/json 的**薄封装**，不是重新实现 JSON。
-封装存在的唯一理由是**把 nlohmann 的抛异常接口收敛成 `Result` 风格**
-（本框架不设通用异常边界，抛出去就是 `std::terminate`）：
+**`st/core/json.hpp`（必需）——自研实现**，不是第三方薄封装。
+
+实现分三层：`json_value.hpp`（值类型/保序对象/零抛出访问）、`json_parse.hpp`（解析与序列化
+声明）、`json.cpp` + `json_parse.cpp`（实现）。**外部依赖为零**——旧版依赖的
+nlohmann/json（25,526 行单头）已删除（`third_party/nlohmann/` 不再存在）。
+
+**为什么不用第三方**：不是“不好用”，而是**接口语义与本框架的错误契约冲突**，
+且冲突方式是“编译不报错、运行期炸”（四条都有实测事故）：
+
+| 旧库行为 | 实测后果 |
+|---|---|
+| `at()` 键缺失抛 `out_of_range` | 框架无通用异常边界 → `std::terminate`（鼠标事件修饰键缺席把整个应用干掉） |
+| const `operator[]` 键缺失是 **UB** | 取可选字段时崩溃/读随机内存（控制通道回包构造失败） |
+| 花括号造数组 | `Json x{Json::object()}` → `[{}]`，之后按对象用即抛 `type_error.305` |
+| `get<T>()` 类型不符抛 `type_error` | 用例里未捕获异常带走整个测试进程 |
+
+四条**可测承诺**（`tests/ext_json_test.cpp` 逐条钉住）：
+
+1. **零抛出**：除内存耗尽外没有成员会抛。缺键/越界/类型不符一律退化为空值——
+   `const operator[]` 缺键返回共享 null 节点（**不是 UB**），`as_i64()` 对字符串返回 0。
+2. **无歧义构造**：`Json{}` = null、`Json::object()` = `{}`、`Json::array()` = `[]`、
+   `Json::object({{"k", v}})` / `Json::array({1,2})` = 当场造容器。**没有**接受花括号的
+   隐式构造——`Json x{...}` 是**编译错误**（宁可编译期报错，也不要运行期得到 `[{}]`）。
+3. **保序**：对象按插入顺序存储（`std::vector<JsonMember>`），因为清单/lock 是给人读、
+   被 git diff 的产物；`find` 是线性扫描（实测对象普遍 ≤ 20 键，缓存友好的顺序内存上与
+   哈希表差异在纳秒级）。
+4. **数字保真**：整数/无符号/浮点分型存储。`2^53+1`、雪花 ID、`uint64` 最大值逐位往返；
+   `1.0` 不写成 `1`、`-0.0` 保持负零。
 
 | 面 | 接口 | 语义 |
 |---|---|---|
-| 解析/写盘 | `json_parse` / `json_parse_file` / `json_write_file` | 失败即 `Result`；解析前先做**嵌套深度预检**（上限 128，防递归下降爆栈）、失败时用抛出式解析取**字节/行列位置**再翻译成错误 |
-| 读取 | `json_get_*` / `json_find` / `json_at` / `json_path` | **永不抛**：类型不符或键缺失退化为默认值/null 节点（“配置写错不该让进程崩”） |
-| 构造 | 直接用 nlohmann 原生（`Json::object()` / `obj["k"]=v`） | 不再包一层 |
+| 解析 | `json_parse` / `json_parse_file` | `Result` + **行/列/字节 + 附近内容**定位；嵌套深度在递归内计数（上限 128），超限返回 `Parse` 而不是爆栈 |
+| 序列化 | `json_dump` / `json_dump_to` / `json_write_file` / 成员 `node.dump(indent)` | 绝不抛：非法 UTF-8 输出为 U+FFFD，`NaN`/`Infinity` 写 `null` |
+| 读取 | `json_get_*` / `json_find`（返回 `const Json*`，缺键 nullptr）/ `json_at` / `json_path` / 成员 `value(k, fallback)` | **永不抛**：类型不符或键缺失退化为默认值/null 节点 |
+| 遍历 | `items()`（`for (const auto& [k, v] : node.items())`）与直接迭代上的 `it.key()` / `it.value()` | 对象给键值对、数组给元素 |
+| 构造 | `Json::object()` / `Json::object({{...}})` / `Json::array({...})` / `obj["k"]=v` / `push_back` | 花括号构造不存在（编译错误） |
 
-类型用 `ordered_json`（**保留键插入顺序**）：清单与 lock 文件要被人读、被 git diff，
-排序会让一次无关的读取-回写产生满屏 diff。
-
-**为什么换掉自研实现**（实测，非偏好）：旧实现在 `src/core/json.cpp` 里把**所有数字统一存 `double`**，
-于是 `9007199254740993`(2^53+1) 写成 `…992`、雪花 ID `1234567890123456789` 变 `1.2345678901234568e+18`
-且 `as_i64()` 差 21；`1.0` 被吞成 `1`、`-0` 变 `0`（整型/浮点语义不保真）；而且它**没有任何单测**。
-换成 nlohmann 后整数/浮点分型存储，三个失真点全部消失，并顺带获得成熟测试与 fuzz 覆盖。
+**收益（实测）**：包含 `st/core/json.hpp` 的单 TU 预处理 **33,825 行**（旧版经 nlohmann 为
+**138,435 行**，降 76%）；自研实现共 **2,136 行**（`json_value.hpp` 589 +
+`json_parse.hpp` 53 + `json_value.cpp` 446 + `json_parse.cpp` 713 + `json.cpp` 185 +
+`json.hpp` 107 + `json_fwd.hpp` 43），替代 25,526 行第三方单头。并且不再有
+第三方异常边界、UTF-8 静默损坏、初始化列表这三类雷。
 
 **`st/ext/script.hpp`（可选）**——嵌入式 JS（QuickJS）。定位是“界面逻辑的表达层”：
 主题计算、批量属性变换、联动规则这些“用代码写比用配置写短”的场景。
@@ -6622,7 +6647,7 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 
 ### 7.1 定位
 自研包管理器：不依赖系统包管理器、不用 CMake/Make、不下载二进制（源码级内联优先，保证可审计与可离线）。
-框架本体的外部依赖**直接内联在 `third_party/`**（nlohmann/json、quickjs-ng、batterycenter/embed、sqlite），其余**全部自研**；
+框架本体的外部依赖**直接内联在 `third_party/`**（quickjs-ng、batterycenter/embed、sqlite、three.js、webview2），其余**全部自研**——包括 JSON（`st/core/json.hpp`，见 §6.6）；
 第三方**源码**直接内联在 `third_party/`（来源/许可/校验和见 `third_party/SOURCES.md`）；
 stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直驱编译）。
 

@@ -300,7 +300,7 @@ auto convert_json_to_js(JSContext* ctx, const Json& value, std::uint32_t depth,
   }
   if (value.is_number_float()) return JS_NewFloat64(ctx, value.get<double>());
   if (value.is_string()) {
-    const std::string& text = value.get_ref<const std::string&>();
+    const std::string& text = value.as_string();
     return JS_NewStringLen(ctx, text.data(), text.size());
   }
   if (value.is_array()) {

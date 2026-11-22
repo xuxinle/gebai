@@ -125,9 +125,9 @@ ST_TEST(caiyun_proposal_accept_writes_history_with_effect) {
   const auto& accept = (*history)[1];
   ST_CHECK(accept.action == "accept");
   ST_CHECK(accept.detail.is_object());
-  const auto effect_node = accept.detail.find("effect");
-  ST_CHECK(effect_node != accept.detail.end());
-  if (effect_node != accept.detail.end()) {
+  const st::Json* effect_node = accept.detail.find("effect");
+  ST_CHECK(effect_node != nullptr);
+  if (effect_node != nullptr) {
     ST_CHECK((*effect_node)["mean_diff_pct"].get<double>() > 3.2);
     ST_CHECK((*effect_node)["verdict"].get<std::string>().find("局部改动") != std::string::npos);
   }

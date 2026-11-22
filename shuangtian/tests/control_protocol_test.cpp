@@ -478,7 +478,7 @@ ST_TEST(ui_create_and_remove_elements) {
   const std::string button_id = button_reply["result"]["id"].get<std::string>();
 
   // 建出来的元素是**真值树的一员**：get/set 照常可用（同一份语义）
-  Json got = probe.call("get", Json{{"id", button_id}});
+  Json got = probe.call("get", Json::object({{"id", button_id}}));
   ST_CHECK(got.value("ok", false));
   ST_CHECK_EQ(got["result"]["props"]["label"].get<std::string>(), "开始");
   Json set_params = Json::object();
@@ -487,7 +487,7 @@ ST_TEST(ui_create_and_remove_elements) {
   new_props["label"] = "已改";
   set_params["props"] = new_props;
   ST_CHECK(probe.call("set", set_params).value("ok", false));
-  Json again = probe.call("get", Json{{"id", button_id}});
+  Json again = probe.call("get", Json::object({{"id", button_id}}));
   ST_CHECK_EQ(again["result"]["props"]["label"].get<std::string>(), "已改");
 
   // 未知类型：明确报错（不静默成功）
@@ -996,16 +996,17 @@ ST_TEST(capture_pixel_size_comes_from_the_export_not_the_request) {
   // 全量跑时后面所有用例都不再执行，且崩溃点看起来完全与真正原因无关。
   // 因此取值一律走 `find_result`：取不到就**报断言失败**并返回空。
   const auto find_result = [](const Json& reply) -> const Json* {
-    const auto it = reply.find("result");
-    return it != reply.end() && it->is_object() ? &(*it) : nullptr;
+    // `find` 直接返回 `const Json*`（缺键为 nullptr）——不再需要与 `end()` 比对。
+    const Json* it = reply.find("result");
+    return it != nullptr && it->is_object() ? it : nullptr;
   };
   auto size_of = [&](const Json& reply) -> std::pair<std::int64_t, std::int64_t> {
     const Json* result = find_result(reply);
     ST_CHECK(result != nullptr);
     if (result == nullptr) return {0, 0};
-    const auto it = result->find("pixel_size");
-    ST_CHECK(it != result->end());
-    if (it == result->end()) return {0, 0};
+    const Json* it = result->find("pixel_size");
+    ST_CHECK(it != nullptr);
+    if (it == nullptr) return {0, 0};
     return std::pair<std::int64_t, std::int64_t>{it->value("width", std::int64_t{0}),
                                                  it->value("height", std::int64_t{0})};
   };

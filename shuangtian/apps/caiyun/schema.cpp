@@ -859,7 +859,7 @@ auto schema_to_json_schema() -> std::string {
     if (!props.contains(std::string(key))) return;
     st::Json array = st::Json::object();
     array["type"] = "array";
-    array["items"] = st::Json{{"$ref", std::string(ref)}};
+    array["items"] = st::Json::object({{"$ref", std::string(ref)}});
     props[std::string(key)] = std::move(array);
   };
   // 场景里的图层、三维脚本的对象、关键帧/轨道：型状都在这三处嵌套。
@@ -873,7 +873,7 @@ auto schema_to_json_schema() -> std::string {
   st::Json root_props = scope_properties(SchemaScope::Script);
   st::Json scenes = st::Json::object();
   scenes["type"] = "array";
-  scenes["items"] = st::Json{{"$ref", "#/$defs/scene"}};
+  scenes["items"] = st::Json::object({{"$ref", "#/$defs/scene"}});
   root_props["scenes"] = std::move(scenes);
   root["type"] = "object";
   root["properties"] = std::move(root_props);

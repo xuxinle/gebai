@@ -104,25 +104,57 @@ inline constexpr Result<Unit> ok();          // 无值成功
 - 格式化一律 `std::format`。
 - 路径用 `st::Path`（封装 `std::filesystem::path`，隔离平台差异）。
 
-### 3.8 JSON 与外部依赖
+### 3.8 JSON
 
-**JSON 一律走 `st/core/json.hpp` 的封装面**，不直接调用 nlohmann 的原生接口：
+**JSON 一律走 `st/core/json.hpp` 的封装面**。底层是**本仓自研实现**（`json_value.hpp` +
+`json_parse.hpp` + `json.cpp`），不再依赖 nlohmann/json —— 替换动因是旧库的**接口语义**
+与本框架的错误契约冲突，且冲突方式是“编译不报错、运行期炸”（四条都有实测事故，见
+`include/st/core/json_value.hpp` 文件头的对照表）：
 
-| 场景 | 允许 | 禁止（会抛异常或语义不保真） |
+| 旧库行为 | 实测后果 |
+|---|---|
+| `at()` 键缺失抛 `out_of_range` | 框架无通用异常边界 → `std::terminate`（鼠标事件修饰键缺席把整个应用干掉） |
+| const `operator[]` 键缺失是 **UB** | 取可选字段时崩溃/读随机内存（控制通道回包构造失败） |
+| 花括号造数组 | `Json x{Json::object()}` → `[{}]`，之后按对象用即抛 `type_error.305` |
+| `get<T>()` 类型不符抛 `type_error` | 用例里未捕获异常带走整个测试进程（1268 条在第 800 条处消失） |
+
+自研实现的四条**可测承诺**（`tests/ext_json_test.cpp` 逐条钉住）：
+
+1. **零抛出**：除内存耗尽外没有任何成员会抛。缺键/越界/类型不符一律退化为空值——
+   `const operator[]` 缺键返回共享 null 节点（**不是 UB**），`as_i64()` 对字符串返回 0。
+   **因此 `at()` 根本不存在**（L12 也就不再需要针对 Json 的口径）。
+2. **无歧义构造**：`Json{}` = null、`Json::object()` = `{}`、`Json::array()` = `[]`、
+   `Json::object({{"k", v}})` / `Json::array({1,2})` = 当场造容器。**没有**接受花括号的
+   隐式构造——`Json x{...}` 现在是**编译错误**（宁可编译期报错，也不要运行期得到 `[{}]`）。
+3. **保序**：对象按插入顺序存储（`vector`），因为清单/lock 是给人读、被 git diff 的产物。
+4. **数字保真**：整数/无符号/浮点分开存。`2^53+1`、雪花 ID、`uint64` 最大值逐位往返；
+   `1.0` 不写成 `1`、`-0.0` 保持负零（“是浮点”本身是语义）。
+
+| 场景 | 推荐（不会抛） | 禁用（旧库抛异常接口） |
 |---|---|---|
-| 解析 | `st::json_parse` / `json_parse_file` | `Json::parse`（抛 parse_error） |
-| 写盘 | `st::json_write_file` | `Json::dump` 直接写文件（非法 UTF-8 会抛） |
-| 读键 | `json_get_string/i64/double/bool/string_array`、`json_find`、`json_at`、`json_path` | `Json::at()`（L12）、`Json::value()`、const `operator[]`（键缺失是 UB） |
+| 解析 | `st::json_parse` / `json_parse_file`（`Result` + 行/列/字节定位） | —— |
+| 写盘 | `st::json_write_file`、`json_dump`、成员 `node.dump(2)` | —— |
+| 读键 | `json_get_string/i64/double/bool/string_array`、`json_find`（返回 `const Json*`，缺键 nullptr）、`json_at`、`json_path`、成员 `node.value("k", fallback)` | —— |
 | 查键存在 | `json_find(x,"k") != nullptr`、`x.contains("k")` | —— |
-| 构造 | nlohmann 原生（`Json::object()` / `obj["k"] = v` / `push_back`） | —— |
+| 遍历对象 | `for (const auto& [k, v] : node.items())`；直接迭代时 `it.key()` / `it.value()` | —— |
+| 构造 | `Json::object()` / `Json::object({{...}})` / `Json::array({...})` / `obj["k"] = v` / `push_back` | `Json x{...}`（编译错误） |
+| 类型化取值 | `as_i64/as_u64/as_double/as_bool/as_string`、`get<T>()`（类型不符给默认值） | —— |
 
-两条容易踩的坑（都有实际事故）：
+三条容易踩的坑（都有实际事故）：
 
-1. **`at()` 会终止进程**。nlohmann 的 `at()` 在键缺失时抛 `out_of_range`，而本框架**不设通用异常边界**，
-   于是它直接冒泡成 `std::terminate`（曾因鼠标事件的修饰键缺席把整个应用干掉）。一律用 `json_at`。
-2. **花括号是“造数组”信号**。`Json x{Json::object()}` 会命中 `initializer_list` 构造，
-   得到「含一个空对象的数组」而不是对象（曾导致控制通道响应构造失败）。要么用 `=` 拷贝初始化，
-   要么用 `Json::object()` 直接初始化。
+1. **`find` 返回的是指针，不是迭代器**。旧写法 `it != node.end()` 现在是编译错误；
+   改为 `const Json* found = node.find("k"); if (found != nullptr)`。这是本次替换中
+   **改动最多的调用点形态**（约 20 处）。
+2. **不要写 `Json x{Json::object()}`**。上一个版本的坑是“变成数组”，现在直接编不过——
+   但这意味着从旧代码里搬过来的花括号写法需要改成 `Json::object(...)`。
+3. **`get<T>()` 不再抛**。它现在是“类型不符给默认值”。如果你的逻辑依赖“类型错就该炸”，
+   请显式判断 `is_number()` / `is_string()` 再取值。
+
+**新增头文件时必须自带 include**：旧库是个 2.5 万行的巨头，顺带提供了 `<cmath>`/`<memory>`/
+`<span>` 等常用头——替换后这些**不再传递**。本次就因此暴露了三处漏 include
+（`scene_describe.hpp` 缺 `<memory>`/`<cstdint>`、`script_bridge.hpp` 缺 `<memory>`、
+`caiyun/schema.hpp` 缺 `<span>`、`ui_property_schema_test.cpp` 缺 `<cmath>`）。
+自查：`py -3 tools/check_selfcontained.py`。
 
 **第三方源码纪律**（`third_party/`）：
 
@@ -305,10 +337,12 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 - **判据要选“与被测机制同构”的那个量**：判例——验证“按墨迹居中”时，
   用“墨迹中心 vs 盒中心”：它直接对应被测的那件事。
   而“字在不在盒里”这类弱判据，把居中改成行盒居中也是绿的。
-- **断言不能先读可能不存在的字段**：nlohmann 的 `operator[] const` 缺键是 **UB
+- **断言不能先读可能不存在的字段**：旧库（nlohmann）的 `operator[] const` 缺键是 **UB
   （断言崩溃）**。曾经写“先读 `reply["error"]` 再查 `ok`”，于是回退实现后
   响应里没 `error` 字段，测试**直接崩**而不是优雅变红——逆向验证脚本判它失败，
   而真正的问题是断言写法不稳。顺序永远是：先 `ST_CHECK(!ok)`，再 `if (contains(...))`。
+  现实现下 `operator[]` 缺键返回 null 节点（不再是 UB），但**这条纪律仍然成立**：
+  断言未提供的字段→语义上就是在赌“没给也算对”，反而掩盖真问题。
 
 ### 7.2 涉及桩/替身的契约，桩必须复现被测的那一段行为
 
@@ -547,7 +581,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L9 | `\.detach\s*\(`、`\.lock\s*\(`（裸互斥） | 无 |
 | L10 | 单参构造缺 `explicit`（提示级，不导致失败） | `// lint-allow: L10 原因` |
 | L11 | `\bstd::endl\b` | 无 |
-| L12 | `\.at\s*\(`（键缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_at`/`json_find`，容器用 `find`） |
+| L12 | `\.at\s*\(`（容器键/下标缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_at`/`json_find`——自研 `Json` 已无 `at()`；容器用 `find`） |
 | L13 | 组件**遮蔽** `Element` 保护成员（`focused_`/`key_`…）；`semantics_flags` 覆写以 `SemanticsFlags flags{}` 起手 | 无（专用检查：需判断「当前类是否继承 `Element`」与「是否在覆写体内」，单行正则表达不了；同类先例 L8） |
 | L14 | `#include <windows.h>`/`<unistd.h>`/`<dlfcn.h>`/`<shellapi.h>`/`<winsock2.h>`/`<arpa/inet.h>`/`<netinet/in.h>`/`<sys/socket.h>`/`<poll.h>`/`<fcntl.h>`，以及直接用 `dlopen`/`dlsym`（§10 第 1 条：平台差异只能出现在 `platform_*`） | `platform_*.cpp`（单点封装）；`shell/backend.cpp`（需 `dlopen` 做**运行时后端探测**本身）；清单 `lint.exempt.L14` 登记的 `core/entry.cpp`（见下表） |
 | L15 | raw string 无定界符（`R"(`）——内容里的 `)"` 会提前终结（提示级） | 无（改用 `R"x(…)x"`；本仓实测踩过两次） |
@@ -614,7 +648,10 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 > 不应被惩罚（`dsl.cpp` 的 `tls_composer` 即正确用例）。
 
 > L12 只收 `.at(` 而不收 `.value()`：`value()` 是自有组件的常见 getter 名（`Slider::value()` 等），
-> 文本级规则无法区分接收者类型，收进来会天天误报。Json 上的 `.value()` 由 §3.8 的约定与评审把关。
+> 文本级规则无法区分接收者类型，收进来会天天误报。
+> **JSON 替换后**：`st::Json` 上已不存在会抛的 `at()`/`value()` 语义（前者没有，后者缺键给默认值），
+> L12 对 Json 的约束从“防崩溃”降为“风格一致”；但容器（`std::vector`/`std::map`）的 `.at()`
+> 仍会抛，**这条规则继续有效且不应当放宽**。
 
 `st lint --explain <rule>` 打印规则详情。lint **确实**检查**禁用 include**（L14：系统头只能出现在 `platform_*` 与已登记豁免里）——
 这条自 2026-10 起由规则实现（此前仅是本节的纸面断言，见 `docs/BACKLOG.md`）。

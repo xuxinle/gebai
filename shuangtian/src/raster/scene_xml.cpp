@@ -947,8 +947,8 @@ auto object_to_xml(const Json& object, std::string& out, std::string_view indent
     out += " gltf=\"" + std::string(xml::escape(gltf)) + "\"";
   }
 
-  const auto children = object.find("children");
-  if (children == object.end() || children->empty()) {
+  const Json* children = object.find("children");
+  if (children == nullptr || children->empty()) {
     out += "/>\n";
     return;
   }
@@ -982,8 +982,8 @@ auto serialize_scene_xml(const SceneSpec& spec) -> std::string {
   write_struct("camera", "Camera");
   // Lighting：extra_lights → <ExtraLight> 子元素。
   if (const Json* node = json_find(json, "lighting"); node != nullptr) {
-    const auto extra = node->find("extra_lights");
-    if (extra == node->end() || extra->empty()) {
+    const Json* extra = node->find("extra_lights");
+    if (extra == nullptr || extra->empty()) {
       out += "  <Lighting";
       write_json_attrs(*node, out);
       out += "/>\n";
@@ -1018,8 +1018,8 @@ auto serialize_scene_xml(const SceneSpec& spec) -> std::string {
   }
 
   if (const Json* anim = json_find(json, "animation"); anim != nullptr) {
-    const auto tracks = anim->find("tracks");
-    if (tracks == anim->end() || tracks->empty()) {
+    const Json* tracks = anim->find("tracks");
+    if (tracks == nullptr || tracks->empty()) {
       out += "  <Animation";
       write_json_attrs(*anim, out);
       out += "/>\n";

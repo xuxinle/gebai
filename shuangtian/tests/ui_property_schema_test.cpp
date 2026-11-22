@@ -14,6 +14,8 @@
 
 #include "st/ui/property_schema.hpp"
 
+#include <cmath>
+
 #include "st/core/json.hpp"
 #include "st/test/test.hpp"
 

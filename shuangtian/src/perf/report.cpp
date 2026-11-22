@@ -144,8 +144,8 @@ auto summarize_json(std::string_view text) -> ReportSummary {
   // 关键标量：从 `sections.metrics` 收（生产者按"可跨运行比较"的项放进来）。
   const Json& metrics = json_at(json_at(root, "sections"), "metrics");
   if (metrics.is_object()) {
-    for (auto it = metrics.begin(); it != metrics.end(); ++it) {
-      if (it.value().is_number()) summary.metrics.emplace_back(it.key(), it.value().get<double>());
+    for (const auto& [name, value] : metrics.items()) {
+      if (value.is_number()) summary.metrics.emplace_back(name, value.get<double>());
     }
   }
   return summary;

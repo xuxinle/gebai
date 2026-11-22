@@ -796,10 +796,10 @@ auto Match::snapshot() const -> std::string {
   Json root = Json::object();
   root["phase"] = phase_ == RoundPhase::Fight ? "fight" : "over";
   root["frame"] = frame_index_;
-  root["arena"] = Json{{"left", arena_.left},
-                       {"right", arena_.right},
-                       {"ground", arena_.ground},
-                       {"center", arena_.center()}};
+  root["arena"] = Json::object({{ "left", arena_.left },
+                                { "right", arena_.right },
+                                { "ground", arena_.ground },
+                                { "center", arena_.center() }});
   if (const auto who = winner(); who.has_value()) root["winner"] = *who;
   Json sides = Json::array();
   for (int side = 0; side < 2; ++side) {
@@ -825,8 +825,8 @@ auto Match::snapshot() const -> std::string {
     item["combo"] = fighter.combo;
     item["alive"] = fighter.alive();
     const math::Rect box = active_hitbox(side);
-    item["hitbox"] = Json{{"x", box.x}, {"y", box.y}, {"width", box.width},
-                          {"height", box.height}};
+    item["hitbox"] = Json::object({{ "x", box.x }, { "y", box.y }, { "width", box.width },
+                                   { "height", box.height }});
     sides.push_back(std::move(item));
   }
   root["fighters"] = std::move(sides);
@@ -838,12 +838,12 @@ auto Match::snapshot() const -> std::string {
     const AttackSpec& spec = attack_spec(move);
     if (!is_attack(move)) continue;
     moves[std::string(move_name(move))] =
-        Json{{"damage", spec.damage},
+        Json::object({{"damage", spec.damage},
              {"reach_near", spec.reach_near * kBodyScale},
              {"reach_far", spec.reach_far * kBodyScale},
              {"hitstun", spec.hitstun},
              {"knockdown", spec.knockdown},
-             {"unblockable", spec.unblockable}};
+             {"unblockable", spec.unblockable}});
   }
   root["moves"] = std::move(moves);
   return st::json_dump(root);

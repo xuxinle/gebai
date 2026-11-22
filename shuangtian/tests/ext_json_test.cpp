@@ -1,4 +1,4 @@
-/// JSON 层测试（`st::ext::json`，底层 nlohmann/json）。
+/// JSON 层测试（`st::ext::json` —— 自研实现，见 `include/st/core/json_value.hpp`）。
 ///
 /// 覆盖两类关注点：
 /// 1. **保真**——这正是替换自研实现的动因（旧实现数字统一存 `double`，2^53+1 与雪花 ID 失真）；

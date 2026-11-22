@@ -378,7 +378,7 @@ struct LabState {
 void install_bridge(st::ui::ScriptBridge& bridge, LabState& state) {
   (void)bridge.expose("lab.scenes", [&state](const std::vector<Json>&) -> st::Result<Json> {
     Json out = Json::array();
-    for (const auto& scene : state.scenes) out.push_back(Json{{"name", scene.name}});
+    for (const auto& scene : state.scenes) out.push_back(Json::object({{"name", scene.name}}));
     return out;
   });
   (void)bridge.expose("lab.current", [&state](const std::vector<Json>&) -> st::Result<Json> {

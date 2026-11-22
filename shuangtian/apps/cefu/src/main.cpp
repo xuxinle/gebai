@@ -259,8 +259,8 @@ class CeFu {
       entry.owner = obj.value("owner", std::string{});
       entry.scope = obj.value("scope", std::string{R"({"kind":"global"})"});
       const auto list_of = [&obj](const char* key, std::vector<std::string>& out) {
-        const auto it = obj.find(key);
-        if (it == obj.end() || !it->is_array()) return;
+        const st::Json* it = obj.find(key);
+        if (it == nullptr || !it->is_array()) return;
         for (const auto& v : *it) {
           if (v.is_string()) {
             out.push_back(v.get<std::string>());
@@ -945,7 +945,7 @@ auto run_app(int argc, char** argv) -> int {
     out["pitch"] = camera.pitch;
     out["distance"] = camera.distance;
     out["fov_y_degrees"] = camera.fov_y_degrees;
-    out["target"] = Json{{{"x", camera.target.x}, {"y", camera.target.y}, {"z", camera.target.z}}};
+    out["target"] = Json::object({{"x", camera.target.x}, {"y", camera.target.y}, {"z", camera.target.z}});
     return out;
   });
   (void)bridge.expose("cefu.graph_set_camera", [&](const std::vector<Json>& args) -> st::Result<Json> {

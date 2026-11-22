@@ -31,8 +31,8 @@ auto merge_preset(const st::Json& base, const st::Json& override_values) -> st::
       out.erase(key);  // null = 删掉预设里的这一项
       continue;
     }
-    const auto existing = out.find(key);
-    if (existing != out.end() && existing->is_object() && it.value().is_object()) {
+    const st::Json* existing = out.find(key);
+    if (existing != nullptr && existing->is_object() && it.value().is_object()) {
       out[key] = merge_preset(*existing, it.value());  // 逐键深合并
     } else {
       out[key] = it.value();  // 数组 / 标量：整体替换
@@ -172,15 +172,15 @@ auto apply_render_presets(st::Json& model_script,
                           std::string_view where) -> Result<void> {
   const auto merge_one = [&](std::string_view key, const std::vector<RenderPreset>& table,
                              std::string_view kind) -> Result<void> {
-    const auto node = model_script.find(std::string{key});
-    if (node == model_script.end()) return {};  // 没写这一层：不动
+    const st::Json* node = model_script.find(std::string{key});
+    if (node == nullptr) return {};  // 没写这一层：不动
 
     // 两种写法都收：
     //   "camera": {"preset": "hero", "fov": 30}   ← 预设 + 覆盖
     //   "camera": {"eye": [...], ...}             ← 完整写法（当前行为）
     if (!node->is_object()) return {};
-    const auto preset_name_node = node->find("preset");
-    if (preset_name_node == node->end()) return {};  // 没用预设
+    const st::Json* preset_name_node = node->find("preset");
+    if (preset_name_node == nullptr) return {};  // 没用预设
     if (!preset_name_node->is_string()) {
       return st::unexpected(
           ErrorCode::Parse,

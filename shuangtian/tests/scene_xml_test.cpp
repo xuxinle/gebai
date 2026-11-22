@@ -23,9 +23,21 @@
 namespace {
 
 /// 两份 SceneSpec 是否语义等价（经 serialize_scene 的规范化 Json 比对）。
-auto same_scene(const st::raster::SceneSpec& a, const st::raster::SceneSpec& b) -> bool {
-  return st::json_dump(st::raster::serialize_scene(a)) ==
-         st::json_dump(st::raster::serialize_scene(b));
+///
+/// 不等价时把**第一处差异**写进 `failure`——只报“不等价”会逼人再手写一份对比脚本。
+auto same_scene(const st::raster::SceneSpec& a, const st::raster::SceneSpec& b,
+                std::string* failure = nullptr) -> bool {
+  const std::string left = st::json_dump(st::raster::serialize_scene(a), true);
+  const std::string right = st::json_dump(st::raster::serialize_scene(b), true);
+  if (left == right) return true;
+  if (failure != nullptr) {
+    std::size_t index = 0;
+    while (index < left.size() && index < right.size() && left[index] == right[index]) ++index;
+    const std::size_t from = index > 200 ? index - 200 : 0;
+    *failure = "规格不等价（偏移 " + std::to_string(index) + "）\n  第一份：…" + left.substr(from, 400) +
+               "\n  第二份：…" + right.substr(from, 400);
+  }
+  return false;
 }
 
 /// XML → spec → XML → spec，两份 spec 语义等价（往返一致性）。
@@ -43,8 +55,8 @@ auto roundtrip_ok(const std::string& xml, std::string* failure = nullptr) -> boo
     }
     return false;
   }
-  if (!same_scene(*first, *second)) {
-    if (failure != nullptr) *failure = "往返语义不等价\n产物：\n" + out;
+  if (!same_scene(*first, *second, failure)) {
+    if (failure != nullptr && failure->empty()) *failure = "往返语义不等价\n产物：\n" + out;
     return false;
   }
   return true;

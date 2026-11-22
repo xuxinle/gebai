@@ -26,6 +26,8 @@
 /// 事实与诊断分开而不是混在一起：前者是"数据"，后者是"意见"。
 /// 混在一起会让调用方难以只取数据（而取数据是最常见的用法）。
 
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 

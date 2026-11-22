@@ -118,7 +118,7 @@ struct Card {
   Json options{Json::array()};
 
   auto as_json() const -> Json {
-    Json out{{"id", id}, {"kind", kind}, {"title", title}, {"body", body}};
+    Json out = Json::object({{"id", id}, {"kind", kind}, {"title", title}, {"body", body}});
     if (!from.empty()) out["from"] = from;
     if (!due.empty()) out["due"] = due;
     if (options.is_array() && !options.empty()) out["options"] = options;
@@ -712,11 +712,11 @@ struct CardStore {
     auto it = std::find_if(cards.begin(), cards.end(), [&](const Card& c) { return c.id == id; });
     if (it == cards.end()) return as_json();   // 已处理过（重复点击）：不报错
 
-    Json record{{"type", "answer"},
-                {"id", id},
-                {"kind", it->kind},
-                {"answer", value},
-                {"answered_at_ms", st::time::now_ms()}};
+    Json record = Json::object({{"type", "answer"},
+                                {"id", id},
+                                {"kind", it->kind},
+                                {"answer", value},
+                                {"answered_at_ms", st::time::now_ms()}});
 
     // 双写：WS 送达 agent + 落盘留底。
     // 为何两份都要：WS 可能恰好断在这一刻（send 失败就靠盘）；而盘上有记录
@@ -756,11 +756,11 @@ struct CardStore {
       // 文件降级路径：WS 没连上时才读（连上了以 WS 为准，避免两路打架）
       if (link == nullptr || !link->connected()) poll_inbox();
 
-       Json peer{{"connected", link != nullptr && link->connected()},
- {"name", link != nullptr && link->connected() ? "agent 控制器" : ""},
- // status_text 带上重连提示：断线重连中 vs 从未连上，对用户是两件事
- {"detail", link != nullptr ? link->status_text(link_retry_hint) : "未初始化"}};
-      Json out{{"cards", as_json()}, {"peer", peer}};
+      Json peer = Json::object({{"connected", link != nullptr && link->connected()},
+                                {"name", link != nullptr && link->connected() ? "agent 控制器" : ""},
+                                // status_text 带上重连提示：断线重连中 vs 从未连上，对用户是两件事
+                                {"detail", link != nullptr ? link->status_text(link_retry_hint) : "未初始化"}});
+      Json out = Json::object({{"cards", as_json()}, {"peer", peer}});
       return out;
     });
 
@@ -803,14 +803,14 @@ struct CardStore {
       }
       const bool ok = st::platform::open_external(url);
       st::log::out("[相期] 打开外部链接（{}）：{}\n", ok ? "成功" : "失败", url);
-      return Json{{{"ok", ok}, {"url", url}}};
+      return Json::object({{"ok", ok}, {"url", url}});
     });
 
      (void)bridge.expose("link.status", [this](const std::vector<Json>&) -> st::Result<Json> {
- return Json{{"connected", link != nullptr && link->connected()},
- {"detail", link != nullptr ? link->status_text(link_retry_hint) : "未初始化"},
- // 重连进度：界面据此显示“重试中”，而不是默默改成“未连接”
- {"retrying", !link_retry_hint.empty()}};
+ return Json::object({{ "connected", link != nullptr && link->connected() },
+                      { "detail", link != nullptr ? link->status_text(link_retry_hint) : "未初始化" },
+                      // 重连进度：界面据此显示“重试中”，而不是默默改成“未连接”
+                      { "retrying", !link_retry_hint.empty() }});
  });
 
     // 窗口尺寸：轻提示形态需要把窗口缩到小尺寸。
@@ -1772,7 +1772,7 @@ auto run_app(int argc, char** argv) -> int {
         // agent 主动撤回某张卡（如它自己解决了）
         if (msg.contains("id")) {
           const std::string id = st::json_as_string(msg["id"]);
-          (void)store.answer(id, Json{{"dismissed_by", "agent"}});
+          (void)store.answer(id, Json::object({{"dismissed_by", "agent"}}));
         }
       }
     }

@@ -195,7 +195,7 @@ ST_TEST(xml_ui_properties_go_through_apply_properties_not_a_second_path) {
   // 反向：用 `apply_properties`（协议 set 的同一份实现）改它，读得到。
   UiRoot root;
   const st::Json changed =
-      st::ui::apply_properties(root, *button, st::Json{{ "label", "已启动" }});
+      st::ui::apply_properties(root, *button, st::Json::object({{ "label", "已启动" }}));
   ST_CHECK(!changed.empty());
   ST_CHECK_EQ(stat_of(*button, "label"), std::string("已启动"));
 }

@@ -94,7 +94,8 @@ auto read_snapshot(std::string_view dir) -> Result<Snapshot> {
   snap.height = static_cast<int>(st::json_get_i64(*parsed, "height", 0));
   snap.fps = st::json_get_double(*parsed, "fps", 30.0);
   snap.total_frames = static_cast<int>(st::json_get_i64(*parsed, "total_frames", 0));
-  if (const auto frames = parsed->find("frames"); frames != parsed->end() && frames->is_array()) {
+  const st::Json* frames = parsed->find("frames");
+  if (frames != nullptr && frames->is_array()) {
     for (const auto& item : *frames) {
       if (!item.is_object()) continue;
       SnapshotFrame frame{};

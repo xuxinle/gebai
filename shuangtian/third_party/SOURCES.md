@@ -5,7 +5,6 @@
 
 | 依赖 | 版本 | 许可 | 用途 | 形态 |
 |---|---|---|---|---|
-| [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 | MIT | JSON 解析/序列化（替代原自研 st::json） | single-header（上游官方分发形态） |
 | [quickjs-ng](https://github.com/quickjs-ng/quickjs) | 0.17.0 | MIT | 嵌入式 JS 引擎（应用内脚本层，可选） | 多文件 C 源码（仅保留引擎必需文件；已剔除 tests/CLI/wasm 与 quickjs-libc.c——后者提供 std/os 模块，本框架默认不给脚本系统访问能力） |
 | [batterycenter/embed](https://github.com/batterycenter/embed) | 1.2.19 | Apache-2.0 | 编译期资源嵌入（b::embed<"path">()，含开发期热重载） | 上游为单 CMakeLists.txt；此处 vendor 其运行时与模板，构建期生成改由 stpm 原生实现（我们不依赖 CMake）——对照说明见 vendor/battery/UPSTREAM.md |
 | [SQLite](https://sqlite.org/) | 3.50.2 | Public domain | 嵌入式数据库（`st::ext::Database`） | **amalgamation**（上游官方推荐的源码内置形态）：`sqlite3.c` + `sqlite3.h` + `sqlite3ext.h`；**编译期开关集中在 `sqlite/st_sqlite3_config.h`**（上游文件一字未改） |
@@ -15,7 +14,7 @@
 ## 合规要求（保留声明与许可）
 
 - **Apache-2.0**（batterycenter/embed）：保留 `LICENSE` 与修改声明，见 `battery/UPSTREAM.md`
-- **MIT**（nlohmann/json、quickjs-ng、three.js）：保留版权与许可文本，见各自目录 `LICENSE`
+- **MIT**（quickjs-ng、three.js）：保留版权与许可文本，见各自目录 `LICENSE`
 - **Public domain**（SQLite）：保留官方声明，见 `sqlite/SQLITE_PUBLIC_DOMAIN.txt`（无强制署名义务，但仍随源码附上）
 - **MIT**（Microsoft WebView2 SDK）：保留许可与第三方声明，见 `webview2/LICENSE.txt` 与 `webview2/NOTICE.txt`（上游 NOTICE 含其内嵌组件的许可清单，随 SDK 一同分发）
 
@@ -46,7 +45,6 @@ python -c "import hashlib,sys;b=open(sys.argv[1],'rb').read();print(hashlib.sha2
 
 | 文件 | 字节 | SHA-256（前 16 位） |
 |---|---:|---|
-| `nlohmann/json.hpp` | 953436 | `aaf127c04cb31c40...` |
 | `quickjs/LICENSE` | 1212 | `96f73f9d2a16c21a...` |
 | `quickjs/builtin-array-fromasync.h` | 5639 | `f41eb2eb028832cf...` |
 | `quickjs/builtin-iterator-zip-keyed.h` | 15993 | `24446c6157a043cf...` |
@@ -76,10 +74,6 @@ python -c "import hashlib,sys;b=open(sys.argv[1],'rb').read();print(hashlib.sha2
 | `sqlite/sqlite3ext.h` | 38149 | `b184dd1586d93513...` |
 
 ## 来源与裁剪记录
-
-### nlohmann/json 3.12.0
-
-- 来源：`https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp`
 
 ### quickjs-ng 0.17.0
 

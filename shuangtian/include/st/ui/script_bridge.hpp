@@ -40,6 +40,7 @@
 /// 以及"哪些函数被暴露了"的可查询面（诊断用）。应用不该直接碰引擎原语。
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 

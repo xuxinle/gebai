@@ -90,13 +90,13 @@ namespace {
       if (!layer.model_script.empty()) {
         const auto parsed = st::json_parse(layer.model_script);
         if (parsed && parsed->is_object()) {
-          const auto objs = parsed->find("objects");
-          if (objs != parsed->end() && objs->is_array()) {
+          const st::Json* objs = parsed->find("objects");
+          if (objs != nullptr && objs->is_array()) {
             for (const auto& obj : *objs) {
               if (!obj.is_object()) continue;
-              const auto shape_it = obj.find("shape");
-              if (shape_it == obj.end() || !shape_it->is_string()) continue;
-              const std::string inner = shape_it->get<std::string>();
+              const st::Json* shape_node = obj.find("shape");
+              if (shape_node == nullptr || !shape_node->is_string()) continue;
+              const std::string inner = shape_node->get<std::string>();
               if (inner.rfind(kObjPrefix, 0) == 0) note(inner.substr(kObjPrefix.size()));
             }
           }
