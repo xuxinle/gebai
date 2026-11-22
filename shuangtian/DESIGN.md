@@ -1052,12 +1052,12 @@ CodeEditor 的 copy/cut **双写**（平台写失败静默降级，进程内永�
 
 组件 copy 动作面（全部走 `invoke <id> copy`，写失败如实返回 false）：
 - `Text`/`Heading` = 全文（标签无选区概念）
-- `Input`/`TextArea` = 全文（无选区概念；**Input 密码态拒绝**——真实文本进剪贴板等于泄露）；只读不拦（只读展示正是复制高频场景）；Ctrl+C 键盘路径同步接通
+- `Input`/`TextArea` = 全文（无选区概念）；只读不拦（只读展示正是复制高频场景）；Ctrl+C 键盘路径同步接通
 - `MarkdownView` = 原文源码（用户要的正是可编辑的那份）
 - `Terminal` = 整屏纯文本（选区建设中）——兑现了空转多年的 copy 动作面
 - `CodeEditor` = 选区
 
-回归：`tests/ui_clipboard_test.cpp` 七条（假 provider 断言写入内容/失败透传/密码拒绝/双写优先级）
+回归：`tests/ui_clipboard_test.cpp` 七条（假 provider 断言写入内容/失败透传/密码框同口径/双写优先级）
 + `shell_backend_test` headless 读写闭环一条 + gbcode e2e [5b]（编辑器/Text 复制 → 粘贴读回）。
 
 **脚本侧的剪贴板（2026-11-11）**：`ScriptBridge` 构造时（传入 `UiRoot` 时）内置
@@ -1693,8 +1693,10 @@ Row 里，断言给子面板的约束 == 真实分栏几何）、
 
 **权限与语义边界**：
 
-- `Input` 密码框：选区恒空、`selected_text()` 恒空、`Ctrl+A/X` 被拒、双击不选词、
-  `copy` 返回 false——**不给任何绕过掩码取明文的口子**。
+- `Input` 密码态：**与普通文本框只差字符形状**——拖选/双击选词/三击/`Ctrl+A/C/X`
+  /复制/粘贴全部照常，`selected_text()` 与剪贴板拿到的是明文（与浏览器
+  `<input type=password>` 一致）；区别只在**画成 `•`**。要临时看明文就点框内右侧的
+  眼睛钮（`password_visible` 属性；`password_reveal` 默认开，明文态图标转主色）。
 - `TextArea` 只读模式：**仍可选中与复制**（只读 = 不能改，不是不能选；
   这正是它区别于 disabled 的地方）。
 - `Text` / `Heading` 默认**不可选**（`set_selectable(true)` 才开）：静态标签

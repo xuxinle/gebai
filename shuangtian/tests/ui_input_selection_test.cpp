@@ -68,6 +68,12 @@ struct Harness {
 
   void advance_time(double seconds) { context.time_seconds = seconds; }
 
+  /// 重新走一遍排布（改样式/槽位后几何要重算）。
+  void rearrange() {
+    widget.measure(context, st::ui::Constraints{.max_width = 600.0f, .max_height = 40.0f});
+    widget.arrange(context, st::math::Rect{0.0f, 0.0f, 300.0f, 40.0f});
+  }
+
   /// 在 x 处按下/拖动（用于拖选与双击）。
   auto press(float x, bool shift = false, double when = 0.0, int button = 1) -> bool {
     context.time_seconds = when;
@@ -195,15 +201,93 @@ ST_TEST(input_selection_double_click_selects_word) {
 }
 
 ST_TEST(input_selection_password_disabled) {
-  // **安全边界**：密码框不得有选区、不得拷出明文。
+  // **密码态与普通文本框同口径**：掩码只是显示层，选区/选中文本照常工作。
+  //
+  // 历史：这条用例原本断言“密码框选区恒空、selected_text 恒空”——那是把
+  // “不泄露明文”错做成了“砍掉编辑能力”。用户要的是“除字符不显示外与普通框
+  // 一致”，所以现在的判据反过来：**能用**，且可用性不因密码态退化。
   Harness<Input> h;
   h.widget.set_password(true);
   h.widget.set_text("secret123");
-  h.key("a", false, true);   // Ctrl+A 应被拒
-  ST_CHECK(!h.widget.has_selection());
-  ST_CHECK_EQ(h.widget.selected_text(), std::string{});
-  h.widget.set_selection(0U, 6U);   // 程序化设置也应被 has_selection 无视
-  ST_CHECK_EQ(h.widget.selected_text(), std::string{});
+  h.key("a", false, true);   // Ctrl+A 全选
+  ST_CHECK(h.widget.has_selection());
+  ST_CHECK_EQ(h.widget.selected_text(), std::string("secret123"));
+  // 程序化设置同样生效（与普通框一致）
+  h.widget.set_selection(0U, 6U);
+  ST_CHECK_EQ(h.widget.selected_text(), std::string("secret"));
+  // 但**画出来的是掩码**：屏幕字符串里不应出现明文
+  ST_CHECK(h.widget.semantics_value().find("secret") == std::string::npos);
+  // 双击选词也照常（与普通框同一分支）
+  h.widget.clear_selection();
+  h.widget.set_text("secret123");
+  h.press(0.0f, false, 0.0);
+  h.press(0.0f, false, 0.2);
+  ST_CHECK(h.widget.has_selection());
+}
+
+// ———————————————————————— Input：密码态「显示/隐藏」切换 ————————————————————————
+
+ST_TEST(input_password_reveal_toggles_display_only) {
+  // 切换钮只改**显示**：`value()` / `selected_text()` 从一开始就是明文。
+  Harness<Input> h;
+  h.widget.set_password(true);
+  h.widget.set_text("hunter2");
+  ST_CHECK(h.widget.password_reveal());      // 默认就带切换钮（密码框本就应该能看一眼）
+  ST_CHECK(!h.widget.password_visible());    // 默认掩码
+  ST_CHECK_EQ(h.widget.semantics_value(), std::string("•••••••"));
+
+  h.widget.set_password_visible(true);
+  ST_CHECK(h.widget.password_visible());
+  ST_CHECK_EQ(h.widget.semantics_value(), std::string("hunter2"));   // 显示层切成明文
+  ST_CHECK_EQ(h.widget.value(), std::string("hunter2"));             // 值一直是明文（没变过）
+
+  // 属性面同一状态（协议 `set password_visible=true` 走这里）
+  ST_CHECK(h.widget.set_property("password_visible", "false"));
+  ST_CHECK(!h.widget.password_visible());
+  ST_CHECK_EQ(h.widget.get_property("password_visible").value_or("?"), std::string("false"));
+}
+
+ST_TEST(input_password_reveal_resets_when_password_mode_changes) {
+  // 把“刚才瞥了一眼”带到下一个密码框上是真事故（复用时尤甚）：
+  // 进入/离开密码态一律回到掩码。
+  Harness<Input> h;
+  h.widget.set_password(true);
+  h.widget.set_text("pw");
+  h.widget.set_password_visible(true);
+  ST_CHECK(h.widget.password_visible());
+  h.widget.set_password(false);
+  h.widget.set_password(true);
+  ST_CHECK(!h.widget.password_visible());
+
+  // 关掉切换钮时也不能停在明文态（按钮没了就没法切回去）
+  h.widget.set_password_visible(true);
+  h.widget.set_password_reveal(false);
+  ST_CHECK(!h.widget.password_visible());
+}
+
+ST_TEST(input_password_reveal_slot_is_reclaimed_when_disabled) {
+  // 切换钮占的是**输入框内右侧槽位**：关掉它，槽位必须真的收回
+  //（否则“关掉按钮”只是不画，右边仍空一块）。
+  //
+  // 判据用**可算的几何**而不数像素：槽位收放的直接证据是**下拉箭头的位置**——
+  // 它排在眼睛左侧，眼睛槽消失后箭头必须向外（向右）移一格，且位移恰等于槽宽。
+  Harness<Input> h;
+  h.widget.set_password(true);
+  h.widget.set_dropdown(true);
+  h.rearrange();
+  const auto eye = h.widget.password_reveal_rect();
+  const auto arrow_with_eye = h.widget.dropdown_rect();
+  ST_REQUIRE(!eye.is_empty());
+  ST_REQUIRE(!arrow_with_eye.is_empty());
+
+  h.widget.set_password_reveal(false);
+  h.rearrange();
+  const auto arrow_without_eye = h.widget.dropdown_rect();
+  ST_CHECK(h.widget.password_reveal_rect().is_empty());
+  ST_REQUIRE(!arrow_without_eye.is_empty());
+  ST_CHECK(arrow_without_eye.x > arrow_with_eye.x);
+  ST_CHECK_NEAR(arrow_without_eye.x - arrow_with_eye.x, eye.width, 0.5f);
+  ST_CHECK(arrow_without_eye.right() <= h.widget.bounds().right());
 }
 
 ST_TEST(input_selection_multibyte_safe) {

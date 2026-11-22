@@ -112,7 +112,7 @@ auto slider(Composer& c, float value, std::function<void(float)> on_change,
 }
 
 auto input(Composer& c, std::string value, std::function<void(std::string)> on_input,
-           const BoxProps& props, bool password) -> Element& {
+           const BoxProps& props, bool password, bool password_reveal) -> Element& {
   Element* element = c.create_element("Input", st::Json::object(), props.key);
   if (element == nullptr) {
     fail_missing_element_factory("Input");
@@ -125,6 +125,11 @@ auto input(Composer& c, std::string value, std::function<void(std::string)> on_i
     if (input_element->value() != value) input_element->set_text(value);
     // 密码态也幂等写（`set_password` 自身有相等早退，这里写直白些与 set_text 对齐）
     if (input_element->password() != password) input_element->set_password(password);
+    // 切换钮开关同理幂等写（它自带相等早退）。注意顺序：`set_password` 会把
+    // “明文显示”复位，所以这一行必须在它之后。
+    if (input_element->password_reveal() != password_reveal) {
+      input_element->set_password_reveal(password_reveal);
+    }
     if (on_input) {
       input_element->on_change = [on_input](std::string_view v) { on_input(std::string(v)); };
     }

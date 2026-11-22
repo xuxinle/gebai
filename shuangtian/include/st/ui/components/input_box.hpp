@@ -23,7 +23,9 @@ namespace st::ui {
 ///
 /// 交互：点击定位光标、`Home`/`End`/方向键移动、`TextInput` 插入、`Backspace`/`Delete` 删除、
 /// `Enter` 触发 `on_submit`；内容变化触发 `on_change`。光标闪烁由 `context.time_seconds` 驱动（1s 周期）。
-/// 语义：`text` 暴露占位符（无障碍名称），`value` 暴露当前文本（密码态为掩码 `•`）。
+/// 密码态与普通文本**只差字符形状**：掩码是纯显示层，选中/复制/双击选词/输入法
+/// 全部照常（右侧另有“显示/隐藏”切换钮，见 `set_password_reveal`）。
+/// 语义：`text` 暴露占位符（无障碍名称），`value` 暴露当前文本（密码态且掩码时为掩码 `•`）。
 class Input : public Element {
  public:
   Input();
@@ -49,6 +51,24 @@ class Input : public Element {
   void set_placeholder(std::string text);
   /// 密码模式：显示掩码 `•`（`value()` 仍返回明文）。
   void set_password(bool value) noexcept;
+
+  // —— 密码态的「显示/隐藏」切换 ——
+  //
+  // 掩码是**纯显示层**：选中、拖选、双击选词、`Ctrl+A/C/X`、剪贴板、输入法
+  // 与普通文本框完全一致（除“字符画成 `•`”之外没有第二处差别）。
+  // 切换按钮长在输入框**内部右端**——与内嵌下拉同一套排布规则（右侧预留槽位、
+  // 命中区在框内），否则会得到“输入框 + 旁边一个按钮”两个视觉体。
+
+  /// 密码态下是否提供切换按钮（**默认开启**：密码框本该能看一眼再决定）。
+  /// 关闭时右侧槽位被收回（文字可用宽度变宽）。
+  void set_password_reveal(bool enabled);
+  [[nodiscard]] auto password_reveal() const noexcept -> bool { return password_reveal_; }
+  /// 当前是否以**明文**显示。**只影响显示**：`value()` 恒为明文。
+  /// 进入密码态时复位为 `false`（切换模式不该顺带把秘密摊开）。
+  void set_password_visible(bool visible);
+  [[nodiscard]] auto password_visible() const noexcept -> bool { return password_visible_; }
+  /// 切换按钮的命中矩形（测试/自动化定位用；非密码态或未开启时为空矩形）。
+  [[nodiscard]] auto password_reveal_rect() const noexcept -> math::Rect { return reveal_rect_; }
   /// 前缀图标名（图标集名，如 `"search"`；为空则不占格子也不画）。
   void set_icon_prefix(std::string_view icon_name);
 
@@ -114,7 +134,7 @@ class Input : public Element {
   void clear_selection() noexcept { select_anchor_ = kNoSelection; }
   /// 是否有非空选区。
   [[nodiscard]] auto has_selection() const -> bool;
-  /// 选中文本（**密码框恒为空**——不给“绕过掩码取明文”的口子）。
+  /// 选中文本（与普通文本框同口径：选中什么就返回什么；掩码只影响绘制）。
   [[nodiscard]] auto selected_text() const -> std::string;
 
   [[nodiscard]] auto value() const noexcept -> const std::string& { return text_; }
@@ -172,8 +192,14 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   bool theme_style_owned_{false};
   /// 无缝背景（不画底/不画边，透出父级）。
   bool seamless_bg_{false};
- [[nodiscard]] auto inner_box(const RenderContext& context) const -> math::Rect;
+   [[nodiscard]] auto inner_box(const RenderContext& context) const -> math::Rect;
   [[nodiscard]] auto display_text() const -> std::string;
+  /// 切换按钮是否在当前形态下存在（密码态 + 未被关掉）。
+  [[nodiscard]] auto reveal_active() const noexcept -> bool {
+    return password_ && password_reveal_;
+  }
+  /// 切换按钮的槽宽（逻辑 px）；不可用时为 0（`inner_box` 不扣它）。
+  [[nodiscard]] auto reveal_slot_width(const RenderContext& context) const -> float;
   [[nodiscard]] auto cursor_x(const RenderContext& context) const -> float;
   /// 给定**字节索引** → 屏幕 x（与 `cursor_x` 同算法；选区高亮两端用它）。
   [[nodiscard]] auto index_to_x(const RenderContext& context, std::size_t text_index) const -> float;
@@ -246,6 +272,12 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
 
  private:
   bool password_{false};
+  /// 密码态是否提供切换按钮（默认开）。
+  bool password_reveal_{true};
+  /// 当前是否明文显示（只影响显示层）。
+  bool password_visible_{false};
+  /// 切换按钮命中区（`arrange` 时算定；绘制与命中都用它，单一真源）。
+  math::Rect reveal_rect_{};
   /// 光标闪烁状态机（协议见 `st/ui/blink.hpp`）。`mutable`：`paint_content` 是 const。
   mutable BlinkCursor caret_blink_{};
 

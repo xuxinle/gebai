@@ -21,7 +21,7 @@ auto w = std::make_unique<st::ui::Input>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`value` · `placeholder` · `password` · `enabled` · `visible` · `dropdown` · `dropdown_open` · `dropdown_options`
+**可读写**：`value` · `placeholder` · `password` · `password_reveal` · `password_visible` · `enabled` · `visible` · `dropdown` · `dropdown_open` · `dropdown_options`
 
 **只读**（能 `get`，`set` 不生效）：`selection`
 

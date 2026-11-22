@@ -178,6 +178,62 @@ ST_TEST(ui_input_embedded_dropdown_narrows_text_area) {
   ST_CHECK(arrow.right() <= with_dropdown.bounds().right());
 }
 
+ST_TEST(ui_input_password_reveal_button_is_drawn) {
+  // 密码态的“显示/隐藏”切换钮：**必须真画出来**，且在框内右侧。
+  //
+  // 为何要数像素：“属性面/几何都对、屏上啥也没有”是本仓反复踩过的一类
+  // （`icon_prefix` 当年就是这样：槽位留了、从不绘制）。
+  Fixture masked_fixture;
+  Input masked;
+  masked.set_password(true);
+  masked.set_text("hunter2");
+  render(masked, masked_fixture);
+
+  const Rect eye = masked.password_reveal_rect();
+  ST_REQUIRE(!eye.is_empty());
+  const Rect box = masked.bounds();
+  ST_CHECK(eye.x > box.x);
+  ST_CHECK(eye.right() <= box.right());
+  // 取样区内缩 4px 避开控件自身描边（与下拉箭头那条同一口径）
+  const Rect inner{eye.x + 4.0f, eye.y + 4.0f, std::max(1.0f, eye.width - 8.0f),
+                   std::max(1.0f, eye.height - 8.0f)};
+  ST_CHECK(differing_pixels(masked_fixture.canvas, inner,
+                           masked_fixture.theme.colors().surface_sunken) > 8);
+
+  // 对照：同一区域在**非密码框**上必须是纯底——证明差异来自眼睛而不是别的东西
+  Fixture plain_fixture;
+  Input plain;
+  render(plain, plain_fixture);
+  ST_CHECK(plain.password_reveal_rect().is_empty());
+  ST_CHECK(differing_pixels(plain_fixture.canvas, inner,
+                           plain_fixture.theme.colors().surface_sunken) == 0);
+}
+
+ST_TEST(ui_input_password_reveal_click_toggles_and_keeps_caret) {
+  // 点眼睛 = 切显示态：① 真的切了；② **不抢焦点**（切完还能接着打字）；
+  // ③ 光标位置不变（不能把用户的插入点顶到文末——那是 `set_text` 的语义）。
+  Fixture fixture;
+  Input input;
+  input.set_password(true);
+  input.set_text("abcdef");
+  input.set_cursor_index(2);
+  render(input, fixture);
+
+  const Rect eye = input.password_reveal_rect();
+  ST_REQUIRE(!eye.is_empty());
+  st::ui::Event press;
+  press.kind = st::ui::EventKind::MouseDown;
+  press.button = 1;
+  press.position = st::math::Point{eye.center().x, eye.center().y};
+  ST_CHECK(input.on_event(fixture.context, press));
+  ST_CHECK(input.password_visible());
+  ST_CHECK_EQ(input.cursor_index(), std::size_t{2});   // 光标没被顶到文末
+
+  // 再点一下：遮回去（同一入口可逆）
+  ST_CHECK(input.on_event(fixture.context, press));
+  ST_CHECK(!input.password_visible());
+}
+
 ST_TEST(ui_input_embedded_dropdown_pick_fills_text) {
   // 选中列表项 ⇒ 回填输入框 + 通知 `on_change` + `on_dropdown_pick`。
   // 这是本控件存在的意义（手填与选择共用一个字段），必须钉住。

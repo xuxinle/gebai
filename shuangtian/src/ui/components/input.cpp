@@ -34,6 +34,11 @@ constexpr float k_input_min_width = 160.0f;
 constexpr float k_dropdown_slot_width = 26.0f;
 /// 下拉按钮里的桂格图标边长（比 `k_icon_size` 小一点：它在本就窄的槽里）
 constexpr float k_dropdown_icon_size = 14.0f;
+/// 密码态「显示/隐藏」按钮的槽宽（逻辑 px）。与下拉槽同一尺度：
+/// 两者都是“输入框内右侧的小按钮”，槽宽不一致会让它们看着像两套体系。
+constexpr float k_reveal_slot_width = 26.0f;
+/// 切换按钮的图标边长（与 `k_dropdown_icon_size` 同级：同排的两个小图标）
+constexpr float k_reveal_icon_size = 15.0f;
 constexpr float k_textarea_default_lines = 4.0f;
 
 [[nodiscard]] constexpr auto is_continuation(char value) noexcept -> bool {
@@ -119,8 +124,11 @@ Input::Input() {
 auto Input::cursor_at(math::Point point) const noexcept -> MouseCursor {
   if (!visible() || !enabled_) return MouseCursor::Arrow;
   if (!bounds_.contains(point)) return MouseCursor::Arrow;
-  // 箭头区 = 按钮（“可点”），其余 = 文本（“可选/可输入”）。
+  // 箭头区/眼睛区 = 按钮（“可点”），其余 = 文本（“可选/可输入”）。
   if (dropdown_enabled_ && !dropdown_rect_.is_empty() && dropdown_rect_.contains(point)) {
+    return MouseCursor::Hand;
+  }
+  if (reveal_active() && !reveal_rect_.is_empty() && reveal_rect_.contains(point)) {
     return MouseCursor::Hand;
   }
   return MouseCursor::Text;
@@ -149,7 +157,36 @@ void Input::set_placeholder(std::string text) {
 void Input::set_password(bool value) noexcept {
   if (password_ == value) return;
   password_ = value;
-  mark_dirty();
+  // **进入/离开密码态都把“明文显示”复位**：
+  // 否则“刚才瞥过一眼密码框”这个动作会把状态带到下一个密码框上
+  //（同一个 Input 复用时最为明显：新密码直接以明文出现）。
+  password_visible_ = false;
+  // 切换按钮的槽位有无会影响文字可用宽 → 必须重排，不只是重绘。
+  mark_layout_dirty();
+}
+
+void Input::set_password_reveal(bool enabled) {
+  if (password_reveal_ == enabled) return;
+  password_reveal_ = enabled;
+  if (!enabled) password_visible_ = false;   // 按钮没了就不该停在明文态
+  // 槽位变化会改变可用文字宽（与 `set_dropdown` 同一理由）。
+  mark_layout_dirty();
+}
+
+void Input::set_password_visible(bool visible) {
+  // **不限于密码态**：状态本身总是成立（写什么读回就是什么），只是非密码态下
+  // 它没有任何可见效果（本来就不遮）。这样属性面才守“声明即可写”的契约——
+  // 否则通用护栏（`property_names` 里每个名字都能 `set` 成功）会当场亮红。
+  if (password_visible_ == visible) return;
+  password_visible_ = visible;
+  // 明文与掩码的**字形宽度不同**（`•` vs 原文），自动宽度下会改变控件尺寸
+  // → 重排而不只是重绘。
+  mark_layout_dirty();
+}
+
+auto Input::reveal_slot_width(const RenderContext& context) const -> float {
+  (void)context;
+  return reveal_active() ? k_reveal_slot_width : 0.0f;
 }
 
 void Input::set_icon_prefix(std::string_view icon_name) {
@@ -293,6 +330,8 @@ auto Input::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "value" || name == "text") return text_;
   if (name == "placeholder") return placeholder_;
   if (name == "password") return password_ ? "true" : "false";
+  if (name == "password_reveal") return password_reveal_ ? "true" : "false";
+  if (name == "password_visible") return password_visible_ ? "true" : "false";
   if (name == "enabled") return enabled() ? "true" : "false";
   if (name == "visible") return visible() ? "true" : "false";
   if (name == "selection") {
@@ -331,6 +370,14 @@ auto Input::set_property(std::string_view name, std::string_view value) -> bool 
   }
   if (name == "password") {
     set_password(value == "true" || value == "1");
+    return true;
+  }
+  if (name == "password_reveal") {
+    set_password_reveal(value == "true" || value == "1");
+    return true;
+  }
+  if (name == "password_visible") {
+    set_password_visible(value == "true" || value == "1");
     return true;
   }
   if (name == "dropdown") {
@@ -374,8 +421,8 @@ auto Input::set_property(std::string_view name, std::string_view value) -> bool 
 auto Input::property_names() const -> std::vector<std::string_view> {
   // 只列**可读写**属性（契约见 `Element::property_names`）。
   return Element::with_universal(
-      {"value", "placeholder", "password", "enabled", "visible",
-       "dropdown", "dropdown_open", "dropdown_options"});
+      {"value", "placeholder", "password", "password_reveal", "password_visible", "enabled",
+       "visible", "dropdown", "dropdown_open", "dropdown_options"});
 }
 
 auto Input::readonly_property_names() const -> std::vector<std::string_view> {
@@ -401,7 +448,6 @@ auto Input::invoke_action(std::string_view action, std::string_view argument) ->
     return true;
   }
   if (action == "select_all") {
-    if (password_) return true;   // 密码框不做选区
     select_anchor_ = 0U;
     cursor_ = text_.size();
     mark_dirty();
@@ -426,9 +472,10 @@ auto Input::invoke_action(std::string_view action, std::string_view argument) ->
   }
   if (action == "copy") {
     // 有选区 → 拷选区；无选区 → 保持旧语义（拷全文，兼容既有调用方）。
-    // 密码框拒绝：把真实文本写进剪贴板等于把密码泄露到任何能读剪贴板的地方。
+    // 密码框与其他文本框同口径：掩码是**显示层**，剪贴板拿到的永远是明文
+    //（与浏览器 `<input type=password>` 一致）。
     // 空文本/无宿主 → false（如实上报，不假装成功）。
-    if (password_ || host() == nullptr) return false;
+    if (host() == nullptr) return false;
     const std::string text = has_selection() ? selected_text() : text_;
     if (text.empty()) return false;
     return host()->host_set_clipboard_text(text);
@@ -440,14 +487,17 @@ auto Input::inner_box(const RenderContext& context) const -> math::Rect {
   const Metrics& metrics = context.theme.metrics();
   const float leading =
       metrics.space_md + (icon_prefix_.empty() ? 0.0f : k_icon_slot_width + metrics.space_sm);
-  // 右侧下拉槽：扣在**文字可用宽**里（否则文字会盖到箭头上）。
-  const float trailing = metrics.space_md + dropdown_slot_width(context);
+  // 右侧槽：下拉箭头与密码眼睛各占一格（两个都开时**并排**，各拿自己那格），
+  // 扣在**文字可用宽**里（否则文字会盖到按钮上）。
+  const float trailing = metrics.space_md + dropdown_slot_width(context) +
+                         reveal_slot_width(context);
   const math::Insets insets{leading, metrics.space_xs, trailing, metrics.space_xs};
   return bounds_.inset(style_.padding).inset(insets);
 }
 
 auto Input::display_text() const -> std::string {
-  if (!password_) return text_;
+  // 掩码只在“密码态 + 未选择明文”时生效。
+  if (!password_ || password_visible_) return text_;
   std::string masked;
   masked.reserve(text_.size());
   for (std::size_t index = 0; index < text_.size();) {
@@ -561,6 +611,7 @@ auto Input::caret_rect_now(const RenderContext& context) const -> math::Rect {
 
 void Input::arrange(const RenderContext& context, math::Rect rect) {
   Element::arrange(context, rect);
+  const Metrics& metrics = context.theme.metrics();
   // **在这里就把插入点算好**（输入法候选窗要用）。
   //
   // 为何不能等 `paint_content`：`publish_ime_caret()` 在**聚焦时**与**几何变化后**
@@ -569,15 +620,21 @@ void Input::arrange(const RenderContext& context, math::Rect rect) {
   // `arrange` 拿得到 `RenderContext`（能算真实文字宽）且 `bounds_` 已确定，
   // 是唯一同时具备两者的时机。
   last_caret_rect_ = caret_rect_now(context);
-  // 下拉按钮命中区：贴**输入框右内边缘**，高撑满
-  // （宽 = 槽宽；右侧图标的 12px 右边距与 `inner_box` 的 trailing 同源）。
+  // 右侧按钮命中区：贴**输入框右内边缘**，高撑满（与下拉同一算式：右侧
+  // 图标的 12px 右边距与 `inner_box` 的 trailing 同源），宽 = 各自己的槽宽。
+  // 两个都开时**并排**：眼睛在内、箭头更靠内（从右往左依次排）。
+  const float edge = bounds_.right() - style_.padding.right - metrics.space_md;
   if (dropdown_enabled_) {
-    const Metrics& metrics = context.theme.metrics();
-    const float w = k_dropdown_slot_width;
-    dropdown_rect_ = math::Rect{bounds_.right() - style_.padding.right - metrics.space_md - w,
-                                bounds_.y, w, bounds_.height};
+    dropdown_rect_ = math::Rect{edge - k_dropdown_slot_width - reveal_slot_width(context),
+                                bounds_.y, k_dropdown_slot_width, bounds_.height};
   } else {
     dropdown_rect_ = math::Rect{};
+  }
+  if (reveal_active()) {
+    reveal_rect_ = math::Rect{edge - k_reveal_slot_width, bounds_.y, k_reveal_slot_width,
+                              bounds_.height};
+  } else {
+    reveal_rect_ = math::Rect{};
   }
   // 已展开的面板跟随控件移动（窗口缩放/重排后锚点不能停在旧坐标）。
   if (dropdown_panel_ != nullptr && dropdown_open_) {
@@ -604,7 +661,8 @@ void Input::measure(const RenderContext& context, const Constraints& constraints
     const float leading =
         metrics.space_md + (icon_prefix_.empty() ? 0.0f : k_icon_slot_width + metrics.space_sm);
     width = port.measure_width(sample, style_.font_size) + leading + metrics.space_md +
-            k_cursor_width + dropdown_slot_width(context) + style_.padding.horizontal();
+            k_cursor_width + dropdown_slot_width(context) + reveal_slot_width(context) +
+            style_.padding.horizontal();
     width = std::max(width, k_input_min_width);
   }
   float height = style_.has_explicit_height() ? style_.height : metrics.control_height;
@@ -692,12 +750,28 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
     Icon::draw(canvas, dropdown_open_ ? "chevron-up" : "chevron-down", glyph, arrow_color, 0.0f);
   }
 
+  // —— 密码态「显示/隐藏」按钮（右侧眼睛）——
+  //
+  // 语义用图标表达：`eye` = “现在看不见，点我展开”，`eye-off` = “现在看得见，点我遮住”。
+  // 明文态用主色：它是个**与安全相关的非默认状态**，靠颜色跟毗邻的灰图标区分，
+  // 否则用户会以为“我刚才真的没点”。
+  if (reveal_active() && !reveal_rect_.is_empty()) {
+    const math::Color eye_color =
+        !usable ? colors.text_faint
+                : (password_visible_ ? colors.primary
+                                     : (hovered() ? colors.text : colors.text_muted));
+    const math::Rect glyph{reveal_rect_.x + (reveal_rect_.width - k_reveal_icon_size) * 0.5f,
+                           reveal_rect_.y + (reveal_rect_.height - k_reveal_icon_size) * 0.5f,
+                           k_reveal_icon_size, k_reveal_icon_size};
+    Icon::draw(canvas, password_visible_ ? "eye-off" : "eye", glyph, eye_color, 0.0f);
+  }
+
   canvas.push_clip_rect(box);
   // —— 选区高亮（2026-10-14）——
   // 画在文本**之下**，且用与光标同一套「字节索引 → x」映射（`index_to_x`）——
   // 两处各算一份必然错位（掩码串与原文的索引对齐已经在那边处理过了）。
   // 垂直方向与光标一致（行框内居中），保证“高亮包住字”而不是贴着行底。
-  if (usable && has_selection() && !password_) {
+  if (usable && has_selection()) {
     const auto [from, to] = ordered_selection();
     const float x0 = index_to_x(context, from);
     const float x1 = index_to_x(context, to);
@@ -758,8 +832,7 @@ auto Input::handle_key(const Event& event) -> bool {
     return invoke_action("copy", {});
   }
   if (ctrl && (key == "x" || key == "X")) {
-    // 剪切：密码框拒绝（与 copy 同一安全边界）。
-    if (password_) return true;
+    // 剪切：与普通文本框完全一致（掩码只是显示层，不拦编辑）
     if (!has_selection()) return true;   // 无选区：无事发生（不删全框）
     if (host() != nullptr) {
       const std::string picked = selected_text();
@@ -786,7 +859,6 @@ auto Input::handle_key(const Event& event) -> bool {
         return true;
       }
       if (ctrl && (key == "a" || key == "A")) {
-        if (password_) return true;   // 密码框不做选区
     select_anchor_ = 0U;
     cursor_ = text_.size();
     mark_dirty();
@@ -871,6 +943,12 @@ auto Input::on_event(const RenderContext& context, Event& event) -> bool {
         set_dropdown_open(!dropdown_open_);
         return true;
       }
+      // 密码眼睛：与下拉同一优先级（它是按钮，不能走“定位光标”那条路）。
+      // 点击**不抢焦点**：切换后用户往往要接着打字，输入框不该失焦。
+      if (reveal_active() && !reveal_rect_.is_empty() && reveal_rect_.contains(event.position)) {
+        set_password_visible(!password_visible_);
+        return true;
+      }
       const std::size_t hit = index_at_x(context, event.position.x);
       // —— 连击判定（双击选词 / 三击整行）——
       // 时间取自 `RenderContext::time_seconds`（事件不带时间戳）。
@@ -881,14 +959,6 @@ auto Input::on_event(const RenderContext& context, Event& event) -> bool {
       last_click_ms_ = now_ms;
       last_click_x_ = event.position.x;
 
-      if (password_) {
-        // 密码框：只有光标，没有选区（连双击也不给）。
-        cursor_ = hit;
-        select_anchor_ = kNoSelection;
-        selecting_ = false;
-        mark_dirty();
-        return true;
-      }
       if (click_streak_ == 2) {
         // 双击：选中该位置的**词**（词界由公共算法给）。
         const auto [begin, end] = components_internal::word_range_at(text_, hit);
@@ -979,8 +1049,7 @@ auto Input::ordered_selection() const -> std::pair<std::size_t, std::size_t> {
 }
 
 auto Input::has_selection() const -> bool {
-  // 密码框不做选区（连“看起来有选区”也不做：那会诱使用户以为能拷）。
-  if (password_) return false;
+  // 密码态与普通文本同口径（掩码只改“画成什么”，不影响可选性）。
   const auto [from, to] = ordered_selection();
   return to > from;
 }
@@ -991,8 +1060,9 @@ auto Input::selection() const -> std::pair<std::size_t, std::size_t> {
 }
 
 auto Input::selected_text() const -> std::string {
-  // 密码框：空（不给绕过掩码取明文的口子）。
-  if (password_ || !has_selection()) return {};
+  // 与普通文本框同口径：**选中什么就返回什么**，即便当前是密码态。
+  // 掩码只影响“画成什么”，不影响“选的是什么”。
+  if (!has_selection()) return {};
   const auto [from, to] = ordered_selection();
   return text_.substr(from, to - from);
 }

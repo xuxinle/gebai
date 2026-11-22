@@ -103,9 +103,11 @@ ST_TEST(input_copy_action_and_ctrl_c) {
   auto event = ctrl_key_event("c");
   ST_CHECK(field.on_event(idle_context(), event));
   ST_CHECK_EQ(root.last_written, std::string("hello 单行"));
-  // 密码框拒绝（真实文本进剪贴板 = 泄露）。
+  // 密码框与其他文本框同口径：掩码只影响**画成什么**，剪贴板拿到明文。
+  // （与浏览器 `<input type=password>` 一致：能选就能拷。）
   field.set_password(true);
-  ST_CHECK(!field.invoke_action("copy", {}));
+  ST_CHECK(field.invoke_action("copy", {}));
+  ST_CHECK_EQ(root.last_written, std::string("hello 单行"));
   // 空文本 → false。
   field.set_password(false);
   field.set_text({});
