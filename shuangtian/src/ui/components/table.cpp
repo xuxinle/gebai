@@ -122,15 +122,13 @@ auto Table::cell_tone(std::size_t row, std::size_t column) const -> CellTone {
 void Table::set_graph(std::vector<GraphNodeSpec> nodes, std::vector<GraphEdgeSpec> edges) {
   graph_nodes_ = std::move(nodes);
   graph_edges_ = std::move(edges);
-  // 泳道带占宽 = 最大道号（`lane_inset` 读它）。
+  // 泳道带占宽 = 道数（`lane_inset` 读它）。
   std::size_t widest = 0;
   for (const GraphNodeSpec& node : graph_nodes_) widest = std::max(widest, node.lane + 1U);
   for (const GraphEdgeSpec& edge : graph_edges_) {
     widest = std::max({widest, edge.from_lane + 1U, edge.to_lane + 1U});
   }
-  // 每道占 2 个“字符格”：这个 2 不是笔误——它来自早期字符网格的度量
-  //（`* ` / `| ` 两字符一道），与 `lane_inset()` / 绘制端的 `cell` 计算同一口径。
-  lane_columns_ = widest * 2U;
+  lane_count_ = widest;
   mark_layout_dirty();
 }
 
@@ -138,26 +136,76 @@ void Table::clear_graph() {
   if (graph_nodes_.empty() && graph_edges_.empty()) return;
   graph_nodes_.clear();
   graph_edges_.clear();
+  lane_count_ = 0;
   mark_layout_dirty();
+}
+
+auto Table::lane_count_used() const noexcept -> std::size_t { return lane_count_; }
+
+/// 道间距：**固定 `kLanePitch`**，只在预算不够放下时才压缩。
+///
+/// 见头文件 `kLanePitch` 的注释：旧口径把预算当“分摊量”，四道时道间距只剩 8.5px。
+/// 这里改用“先给足、放不下再压”的次序（两行间用 clamp 表达）：
+///
+///   需求带宽 = kLanePitch × 道数 + 2 × kLaneBandPadding
+///   实际带宽 = max(预算, 需求带宽)   → 预算只当下限（见下面的注释）
+///   实际道间距 = max(kLanePitchMin, (实际带宽 − 留白) / 道数)
+///
+/// ⚠ 为何预算是**下限**而不是上限：旧默认值 28 是为“单道竖线”时代定的，
+/// 它只够一道。若当上限用，四道就会被默默压成 8.5px——而调用方几乎不会
+/// 主动去调一个“我不想调”的参数，结果是“多道分支图一律挤成一团”。
+/// 带宽变宽的代价是首列往右移，而那正是**应该**的（画图需要地方）。
+[[nodiscard]] auto Table::lane_inset() const noexcept -> float {
+  const std::size_t lanes = lane_count_used();
+  if (lanes == 0U) return 0.0f;
+  const float needed = kLanePitch * static_cast<float>(lanes) + kLaneBandPadding * 2.0f;
+  return std::max(lane_column_width_, needed);
+}
+
+auto Table::graph_metrics() const noexcept -> GraphMetrics {
+  GraphMetrics metrics;
+  const std::size_t lanes = lane_count_used();
+  if (lanes == 0U) return metrics;   // 没开泳道图（全 0 = 无定义）
+  const float band = lane_inset();
+  // 道间距 = (带宽 − 两侧留白) / 道数，夹到 [kLanePitchMin, kLanePitch]。
+  //
+  // 夹上限是 `kLanePitch`：预算给得再宽，道也不会被拉得稀稀落落
+  //（参照里道间距是固定的，带宽变宽只表现为右侧留白）。
+  metrics.lane_pitch = std::clamp((band - kLaneBandPadding * 2.0f) / static_cast<float>(lanes),
+                                  kLanePitchMin, kLanePitch);
+  metrics.band_width = band;
+  const float scale = metrics.lane_pitch / kLanePitch;
+  metrics.line_width = std::clamp(kLaneLineWidthMin * std::max(0.7F, scale), kLaneLineWidthMin,
+                                  kLaneLineWidthMax);
+  // 节点半径：跟随道间距，但夹在参照口径内，并不吃掉行高。
+  //
+  // 参照实测直径 10~11px（半径 ≈ 5）：取 `lane_pitch × 0.21` = 5.0（道间距 24 时）。
+  // 上限 `row_height × 0.2`（行高 28 → 5.6）防大圆点贴住相邻节点。
+  const float row_cap = row_height_at(0) * 0.20f;
+  metrics.dot_radius =
+      std::clamp(metrics.lane_pitch * 0.21F, kLaneDotRadiusMin,
+                 std::min({kLaneDotRadiusMax, row_cap}));
+  metrics.curve_bend_rows = kLaneCurveBendRows;
+  metrics.curve_stub_rows = kLaneCurveStubRows;
+  metrics.curve_handle_ratio = kLaneCurveHandleRatio;
+  return metrics;
 }
 
 void Table::paint_node_edge_graph(raster::Surface& canvas, const Palette& colors,
                                   std::size_t first_row, std::size_t last_row, float clip_left,
                                   float clip_right) const {
-  const float band_x = bounds_.x + 4.0f;
-  const float cell =
-      lane_columns_ > 0U
-          ? std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_))
-          : 7.0f;
-  const float lane_width = std::max(1.5f, std::min(2.5f, cell * 0.18f));
-  // 圆点半径：跟格宽走，并用最小行高做**宽松**封顶。
+  const GraphMetrics metrics = graph_metrics();
+  if (metrics.lane_pitch <= 0.0f) return;   // 没开泳道图
+  const float band_x = bounds_.x + kLaneBandPadding;
+  const float lane_width = metrics.line_width;
+  const float dot_radius = metrics.dot_radius;
+  // 第 `lane` 道的中心 x：首道距带左缘 `kLaneBandPadding`，之后每道 +`lane_pitch`。
   //
-  // 下界 2.6px（直径 5.2）：再小就分不清“节点”与“线”（线宽 1.5~2.5）。
-  const float min_row_h = std::min(row_height_at(0), row_height_ * 0.4f);
-  const float dot_radius =
-      std::max(2.6f, std::min({4.2f, cell * 0.40f, min_row_h * 0.70f * 0.5f}));
+  // ⚠ 旧写法是 `band_x + cell * (lane*2 + 0.5)`（“道 = 两个字符格”时代的残留），
+  // 它隐含地假设道间距 = 2×cell；现在道间距是独立参数，再那样算就会
+  // 让画出来的道位置与 `lane_inset()` 报出的带宽不一致（首字会被道盖住或留一大块空白）。
   const auto lane_x = [&](std::size_t lane) {
-    return band_x + cell * (static_cast<float>(lane) * 2.0f + 0.5f);
+    return band_x + metrics.lane_pitch * static_cast<float>(lane);
   };
   const auto row_center_y = [&](std::size_t row) {
     const math::Rect box = row_rect(row);
@@ -187,20 +235,40 @@ void Table::paint_node_edge_graph(raster::Surface& canvas, const Palette& colors
       canvas.fill_rect(math::Rect{cx - lane_width * 0.5f, top, lane_width, bottom - top}, paint);
       continue;
     }
-    // 跨道：三次贝塞尔；控制点从端点**垂直引出** → 端点处与竖线切向连续（无折角）。
+    // 跨道：**弯段长度 = min(纵向跨度, K × 行高)**，两端留短竖直段，
+    // 余下全部归终点侧竖直段（见 `kLaneCurveBendRows` 的两种错法）。
+    //
+    // · 相邻行换道（跨度≈1 行高）：弯段铺满整条边 ⇒ 观感上就是一条贯穿的曲线；
+    // · 跨多行换道：弯段只占开头约 0.9 行高，余下全是竖直——
+    //   这就是“分叉/合入是曲线、而长距离回边不拖成一条斜线”的统一形状。
     const float from_x = lane_x(edge.from_lane);
     const float to_x = lane_x(edge.to_lane);
     const float span = std::abs(to_y - from_y);
-    const float handle = std::max(row_height_ * 0.5f, span * 0.45f);
+    const float row_height_now = row_height_at(0);
+    const float stub = std::min(span * 0.25F, row_height_now * metrics.curve_stub_rows);
+    const float bend = std::min(std::max(0.0F, span - stub), row_height_now * metrics.curve_bend_rows);
+    const float bend_end = from_y + stub + bend;
+    // 对称手柄：不对称会未端出现折角（实测过 0.38/0.04，黄线走水平后突然下折）。
+    const float handle = bend * metrics.curve_handle_ratio;
     math::Path line;
     line.move_to(math::Point{from_x, from_y});
-    line.cubic_to(math::Point{from_x, from_y + handle}, math::Point{to_x, to_y - handle},
-                  math::Point{to_x, to_y});
+    // ① 起点竖直线段（很短，主要让曲线从节点处平滑起弯）。
+    line.line_to(math::Point{from_x, from_y + stub});
+    // ② 弯曲段。
+    if (bend > 0.01F) {
+      line.cubic_to(math::Point{from_x, from_y + stub + handle},
+                    math::Point{to_x, bend_end - handle}, math::Point{to_x, bend_end});
+    }
+    // ③ 终点竖直线段（吸收剩余纵向距离）。
+    line.line_to(math::Point{to_x, to_y});
     canvas.stroke_path(line, paint, lane_width,
                        raster::StrokeStyle{raster::LineCap::Round, raster::LineJoin::Round});
   }
 
   // ── 第二遍：节点（盖在边上）──
+  //
+  // 用 `fill_circle` 而不是圆角方块：参考形态里节点是实心圆，而圆角方块的
+  // 圆角是四段贝塞尔的近似（小直径看不出，直径一大就显“圆角方”）。
   for (const GraphNodeSpec& node : graph_nodes_) {
     if (node.row < first_row || node.row >= last_row) continue;
     if (node.row >= rows_.size()) continue;
@@ -210,24 +278,14 @@ void Table::paint_node_edge_graph(raster::Surface& canvas, const Palette& colors
     if (cx >= clip_right || cx <= clip_left) continue;
     const float cy = box.y + box.height * 0.5f;
     const math::Color color = Table::lane_color(node.lane, colors);
-    canvas.fill_rect(
-        math::Rect{cx - dot_radius, cy - dot_radius, dot_radius * 2.0f, dot_radius * 2.0f},
-        raster::Paint::solid(color), dot_radius);
+    canvas.fill_circle(math::Point{cx, cy}, dot_radius, raster::Paint::solid(color));
   }
 }
 
 void Table::set_lane_column_width(float width) {
-  // 夹到合理范围：太窄画不出线、太宽就是在抢内容区。
-  lane_column_width_ = std::clamp(width, 8.0f, 240.0f);
+  // 夹到合理范围：太窄连一道都放不下、太宽就是在抢内容区。
+  lane_column_width_ = std::clamp(width, 8.0f, 400.0f);
   mark_layout_dirty();
-}
-
-auto Table::lane_inset() const noexcept -> float {
-  if (lane_columns_ == 0U) return 0.0f;
-  // `lane_column_width_` 当作**整条泳道带的宽度上限**，字符列宽 = 总宽 / 列数
-  //（上限 14px，免得 2 列就撑满）。
-  const float cell = std::min(14.0f, lane_column_width_ / static_cast<float>(lane_columns_));
-  return cell * static_cast<float>(lane_columns_) + 8.0f;
 }
 
 void Table::clear_rows() {
@@ -236,7 +294,9 @@ void Table::clear_rows() {
   // ⚠ 色调/泳道表**同样要清**：否则下一次 `add_row` 后旧数据还挂着，
   // 新行会拿到上一批的行位（颜色/泳道错位，而画面看着“有值只是不对”）。
   cell_tones_.clear();
-  lane_columns_ = 0;
+  lane_count_ = 0;   // ⚠ 与 `graph_nodes_` 同步清（否则带宽按旧道数算，首列错位）
+  graph_nodes_.clear();
+  graph_edges_.clear();
   hovered_row_ = kNoRow;
   selected_row_ = std::nullopt;  // 数据没了：选中索引必然悬空
   // **纵向滚动位置不当场归零**：
@@ -653,51 +713,34 @@ auto Table::row_at(math::Point point) const noexcept -> std::size_t {
   return index < rows_.size() ? index : kNoRow;
 }
 
-/// 泳道色：**按道号自动生成，不设上限**（语义与理由见头文件 `Table::lane_color`）。
+/// 泳道色：**只错色相**（语义与理由见头文件 `Table::lane_color`）。
 [[nodiscard]] auto Table::lane_color(std::size_t lane_index, const Palette& colors) -> math::Color {
   // 第 0 道：主题主色。它是“当前所在分支”，也负责让分支图与界面主色一致。
   if (lane_index == 0U) return colors.primary;
 
-  // —— 亮度/饱和度：**从主题主色自身推**，不写死 ——
+  // —— 只错色相，饱和与明度**全统一** ——
   //
-  // 写死会踩两个相反方向的坑：暗色主题下偏暗的色看不清（与深底拉不开），
-  // 浅色主题下偏亮的色刺眼（像荧光笔）。拿 primary 的 HSL 做基准、只换色相，
-  // 就等于“同一套语气、不同颜色”。
-  const auto [base_hue, base_saturation, base_lightness] = colors.primary.to_hsl();
-  (void)base_hue;
-  (void)base_saturation;
-  (void)base_lightness;
-
-  // —— 取色：**三维分层**（不设上限，任意两道都可区分）——
+  // 参照口径（VS Code Git Graph 实测）：四道分别是 H203/H320/H122/H36，
+  // 而 S 都是 100%、L 都是 42%——即“同一个明度上换色相”。
   //
-  // 单用色相黄金角不够：它只保证“不回到同一个色相”，保证不了“任意两道 RGB 距离
-  // 够远”。实测（16 道）：单黄金角最差对 RGB 距离仅 24～32——画成 2px 细线
-  // 就是同一色。
+  // 这比“色相+明度+饱和三维轮转”好在两处：
+  //   ① 观感一致：每条道一样鲜亮；三维轮转下第 2 道起就会偏暗/偏灰，
+  //      看上去像“某些分支被置灰了”（用户反馈的原话是“不够鲜亮”）。
+  //   ② 16 道内辨识度更高：实测最小色距 71 vs 62（RGB 曼哈顿距离）。
   //
-  // 所以三个维度轮流错开：色相（20° 步进远小于 180°，相邻道一眼能分）、
-  // 明度（8 档）、饱和（4 档）。三者周期互不为倍数，最小公倍数 =
-  // (360/20) × 8 × 4 = 576 道才可能重复——远超任何真实分支数（本仓 git log
-  // 实测最多 4 道并行）。而“每多一道就换一档”意味着**不需要任何上限**，
-  // 这正是“不限制颜色数量”。
+  // 代价：色相 20° 步进时 **18 道回到同色**（360/20 = 18）。
+  // 这个取舍是用户确认过的：真实仓库极少超过 16 道并行分支
+  //（本仓 git log 实测最多 4 道），而这 16 道内的观感与辨识度都要紧得多。
   //
-  // 参数是脚本搜出来的（实测 64 道内最差对 RGB 距离 52，> 0 即不重色）：
-  // 手推“黄金角 + 明度偏移”两次都被实测判死（最差对 29 / 32），搜参数才靠谱。
+  // 饱和度/明度为何用**常量**而不从 primary 推：
+  // 从 primary 推会在浅色主题下得到“接近白色”的淡色（浅底上彻底看不见），
+  // 而固定 100%/42% 在深底与浅底上都能立住（深底上是亮色、浅底上是暗色，
+  // 两侧都与底色拉开距离）。
   constexpr float kHueStep = 20.0F;
-  constexpr std::size_t kLightnessSteps = 8;
-  constexpr std::size_t kSaturationSteps = 4;
+  constexpr float kLaneSaturation = 1.0F;
+  constexpr float kLaneLightness = 0.42F;
   const float hue = kHueStep * static_cast<float>(lane_index);
-  // 明度：在 [0.34, 0.76] 均分 8 档——下限保证深底上不沉底，上限保证浅底上不发飘。
-  const float lightness =
-      0.34F + (0.76F - 0.34F) *
-                  (static_cast<float>(lane_index % kLightnessSteps) /
-                   static_cast<float>(kLightnessSteps - 1));
-  // 饱和：在 [0.50, 0.92] 均分 4 档，用**不同步长**轮转（×3）——避免与明度同步。
-  const float saturation =
-      0.50F + (0.92F - 0.50F) *
-                  (static_cast<float>((lane_index * 3U) % kSaturationSteps) /
-                   static_cast<float>(kSaturationSteps - 1));
-
-  return math::Color::from_hsl(hue, saturation, lightness);
+  return math::Color::from_hsl(hue, kLaneSaturation, kLaneLightness);
 }
 
 void Table::paint_content(const RenderContext& context, raster::Surface& canvas) const {

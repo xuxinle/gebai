@@ -57,8 +57,8 @@ using st::ui::Theme;
 
 constexpr int kCanvasW = 420;
 constexpr int kCanvasH = 260;
-/// 圆点半径上界（与 `table.cpp` 里 `dot_radius` 的夹取上限一致）。
-constexpr float kDotRadiusMax = 4.2F;
+/// 圆点半径夹取上限（与 `Table::kLaneDotRadiusMax` 同一入口，不写死数字）。
+constexpr float kDotRadiusMax = Table::kLaneDotRadiusMax;
 
 /// 每行一个节点、全在 0 道，相邻行之间一条同道边——最朴素、也最容易看清线头的数据。
 [[nodiscard]] auto make_lane_table(std::size_t rows) -> std::unique_ptr<Table> {
@@ -129,6 +129,16 @@ constexpr float kDotRadiusMax = 4.2F;
   return canvas;
 }
 
+/// 某一道中心的 x（**与绘制端同源**：读 `graph_metrics()`，不写死偏移）。
+///
+/// 为何不手算：旧写法把 `band_x + 4 + cell*0.5` 写死，而几何一改（道间距从
+/// “分摊”改成固定 24）它就默默指到别处——量到空白，表现为“线悬空”。
+[[nodiscard]] auto lane_center_x(const Table& table, std::size_t lane) -> float {
+  const Table::GraphMetrics metrics = table.graph_metrics();
+  const Rect row = table.row_rect(0);
+  return row.x + Table::kLaneBandPadding + metrics.lane_pitch * static_cast<float>(lane);
+}
+
 }  // namespace
 
 /// **首行圆点上方不许有墨迹**（表头裁切边界到首行圆点之间）。
@@ -171,10 +181,13 @@ ST_TEST(table_last_row_lane_has_no_dangling_stub_below) {
   ST_CHECK_EQ(ink, 0);
 }
 
-/// **颜色按道自动生成、不设上限**：任意道数下，任意两道的颜色都必须可区分。
+/// **颜色只错色相**：任意两道在 16 道内都必须可区分，且**饱和度/明度一致**。
 ///
 /// 判据用「RGB 距离」而非“色相不同”：色相算出来的差值好看，但两个色相若落在
-/// 同样的明暗区间，画成 2px 细线后屏幕上仍是同一团颜色（实测过的坑）。
+/// 同样的明暗区间，画成细线后屏幕上仍是同一团颜色。
+///
+/// 同时验证“只错色相”这条口径：各道饱和度与明度必须**相等**——
+/// 否则又回到了“某些道被置灰”的观感（那正是改掉三维轮转的原因）。
 ST_TEST(table_lane_colors_are_generated_without_cap) {
   const Theme theme = Theme::dark();
   // 16 道远超旧的 3 色循环——旧实现下第 0/3/6/9… 道必然同色。
@@ -183,7 +196,7 @@ ST_TEST(table_lane_colors_are_generated_without_cap) {
   Table table(std::move(columns));
   table.set_row_height(20.0f);
   table.add_row({"only"});
-  // 只要把泳道带宽撑到 16 道（`lane_columns_` 由最大道号决定），不必真的有 16 个节点。
+  // 只要把泳道带宽撑到 16 道（`lane_count_` 由最大道号决定），不必真的有 16 个节点。
   std::vector<Table::GraphNodeSpec> nodes{Table::GraphNodeSpec{.row = 0, .lane = 0}};
   std::vector<Table::GraphEdgeSpec> edges{Table::GraphEdgeSpec{
       .from_row = 0, .from_lane = 0, .to_row = 0, .to_lane = kLanes - 1}};
@@ -217,8 +230,28 @@ ST_TEST(table_lane_colors_are_generated_without_cap) {
   }
   st::log::out("[table] {} 道最接近的一对为 #{} / #{}，RGB 距离 = {}\n", kLanes,
                closest_pair / 100, closest_pair % 100, closest);
-  // 60 是“2px 细线在屏幕上仍能一眼分开”的经验下限（同色时距离为 0）。
+  // 60 是“细线在屏幕上仍能一眼分开”的经验下限（同色时距离为 0）。
   ST_CHECK(closest > 60);
+
+  // —— “只错色相”这条口径本身要钉住 ——
+  //
+  // 若哪天又改成“明度/饱和也轮转”，上面那条色距断言依然能绿（距离够远），
+  // 但观感会回到“某些道被置灰”——本条就是那个回归的护栏。
+  // 判据：除第 0 道（主题主色，刻意不同）外，其余各道的**饱和度与明度相同的**。
+  const auto [h0, s0, l0] = colors[1].to_hsl();
+  (void)h0;
+  for (std::size_t lane = 2; lane < kLanes; ++lane) {
+    const auto [hue, saturation, lightness] = colors[lane].to_hsl();
+    (void)hue;
+    if (std::abs(saturation - s0) > 0.02F || std::abs(lightness - l0) > 0.02F) {
+      st::log::out("[table] 道 #{} 的饱和度/明度与道 #1 不同：{:.2f}/{:.2f} vs {:.2f}/{:.2f}\n",
+                   lane, static_cast<double>(saturation), static_cast<double>(lightness),
+                   static_cast<double>(s0), static_cast<double>(l0));
+      ST_CHECK(false);
+    }
+  }
+  st::log::out("[table] 各道饱和度={:.2f} 明度={:.2f}（统一 ⇒ 只错色相）\n",
+               static_cast<double>(s0), static_cast<double>(l0));
 }
 
 /// **线不悬空**：可视区里每个节点的上下两侧（除首/末节点外）都必须有线相连。
@@ -234,9 +267,12 @@ ST_TEST(table_lane_edges_touch_their_nodes) {
   const Rect box{0.0f, 0.0f, 340.0f, 260.0f};
   const Canvas canvas = render(*table, box, theme);
 
-  // 取第 1 道（lane 0）的中心 x：band_x = bounds.x + 4，cell = 14（lane_column_width 默认）。
-  const Rect row0 = table->row_rect(0);
-  const int cx = static_cast<int>(row0.x + 4.0f + 7.0f);
+  // 取第 1 道（lane 0）的中心 x：**从 `lane_x` 本身的定义算**，不写死偏移。
+  //
+  // ⚠ 旧写法是 `row0.x + 4.0f + 7.0f`（那时带宽预算 28、道间距 14）：
+  // 改成固定道间距 24 后道中心移到 `x + kLaneBandPadding`，旧写法偏了 3px，
+  // 于是拿一个偏离圆心的竖列去量“上方有没有线”——量到的全是空白，假红。
+  const int cx = static_cast<int>(std::lround(lane_center_x(*table, 0)));
 
   /// 某行中线上方/下方 4px 处是否有泳道墨迹。
   const auto has_ink_at = [&](float y) {

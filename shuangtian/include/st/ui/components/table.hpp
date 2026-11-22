@@ -56,7 +56,7 @@ class Table : public Element {
   static constexpr float kScrollBarHeight{3.0f};    ///< 滚动指示条宽（px）
   static constexpr float kSelectedAccentWidth{3.0f};///< 选中行左缘主色条宽（px）
 
-  /// 泳道色（第 `lane_index` 道的连线与圆点用色）——**自动生成，不设上限**。
+  /// 泳道色（第 `lane_index` 道的连线与圆点用色）——**自动生成**。
   ///
   /// ## 为何按道号生成而不是用一张固定色表
   ///
@@ -65,9 +65,18 @@ class Table : public Element {
   /// 意味着并行分支一旦超过表的长度，“第 0 道”与“第 3 道”就同色——而那往往
   /// 正是两个**不同**分支，观感上等于把两条不相干的线当成同一条。
   ///
-  /// 这里用色相环上的**黄金角**（137.508°）跳步：该增量无限不循环，任意前 N 道
-  /// 都不会回环重合，也不需要预知 N 或维护色表。饱和度/亮度取主题 `primary`
-  /// 自身 HSL 为基准（只换色相），于是暗色主题下够亮、浅色主题下不刺眼。
+  /// ## 取色规则：**只错色相**（S=100%、L=42% 全统一）
+  ///
+  /// 参照 VS Code Git Graph 实测：四道 H203/H320/H122/H36，而饱和度都是 100%、
+  /// 明度都是 42%。这比“色相 + 明度 + 饱和三维轮转”好在：
+  ///   ① 观感一致——每条道一样鲜亮（三维轮转下第 2 道起就偏暗/偏灰，
+  ///      看上去像“某些分支被置灰了”）；
+  ///   ② 16 道内辨识度更高（实测最小色距 71 vs 62）。
+  ///
+  /// 色相 20° 步进。**代价：18 道回到同色**（360/20 = 18）——这是经用户确认的
+  /// 取舍：真实仓库极少超过 16 道并行分支（本仓实测最多 4 道）。
+  ///
+  /// 第 0 道仍是主题 `primary`（“当前所在分支”与界面主色保持一致）。
   ///
   /// 公开为静态函数的理由：它是一条**纯函数、可复算的判断依据**——测试可以直接
   /// 断言“任意两道色距够远”，不必依赖截图像素采样（像素采样到的常是抗锯齿
@@ -95,14 +104,31 @@ class Table : public Element {
   void set_cell_tone(std::size_t row, std::size_t column, CellTone tone);
   [[nodiscard]] auto cell_tone(std::size_t row, std::size_t column) const -> CellTone;
 
-  /// 行首**泳道标记**（图形分支线）：每行一个列号（0 起），负值 = 不画。
+  /// 设泳道带的**宽度预算**（逻辑 px；默认 28）。
   ///
-  /// 设在该列位置画泳道（负值保持默认 28px；0 会吃掉列宽，不要传）。
+  /// ## 语义：是**上限**，不是每道的宽
+  ///
+  /// 道间距是固定的（`kLanePitch` = 24px，与参照口径一致），带宽 = 道间距 × 道数
+  /// + 两侧留白。本函数给的是**最多让出多少**：
+  ///
+  ///   · 道数少（带宽需求 < 预算）⇒ 按 `kLanePitch` 给足，不把宽“平均分掉”；
+  ///   · 道数多（带宽需求 > 预算）⇒ 按预算压缩（但不低于 `kLanePitchMin`）——
+  ///     那是“为了不抢内容区”的合理让步。
+  ///
+  /// ⚠ 旧语义是“整条带的宽，每道分 `width / (2 × 道数)`”：4 道时道间距只剩 8.5px，
+  /// 圆点几乎贴在一起（参照是 24px）。两种语义的差别在“道数多”时暴露：
+  /// 前者是“分摊”，后者是“限额”。
   ///
   /// 这个宽度是**真的从左边留出来**的：开了泳道的表格，各列的 `bounds_` 从
   /// `x + lane_inset()` 起算（见 `column_x`），否则第一个字会与泳道圆点叠在一起——
   /// 实测症状就是“提交信息的首字被竖线和圆点盖住”。
   void set_lane_column_width(float width);
+
+  /// 泳道带当前实际占宽（逻辑 px；未开泳道图时为 0）。
+  ///
+  /// 与 `set_lane_column_width` 的关系：这是**实际让出**的宽，受上面那套
+  /// “固定道间距 + 预算上限”规则决定，不一定等于传入的预算值。
+  [[nodiscard]] auto lane_inset() const noexcept -> float;
 
   // ── 行首连线图：**节点-边平面** ──────────────────────────────
   //
@@ -138,6 +164,89 @@ class Table : public Element {
   /// ② 两个端点都在 `nodes` 里（越界的边会被裁掉，表现为“线断一截”）。
   void set_graph(std::vector<GraphNodeSpec> nodes, std::vector<GraphEdgeSpec> edges);
   void clear_graph();
+
+  // ── 泳道图几何（可被测试直接引用）──
+  //
+  // 为何要抽成常量而不是写在绘制函数里：这四条是**观感参数**，改一格就是一屏的
+  // 观感变化。抽出来之后测试与实现走同一个入口（否则会出现“探针里改好了、
+  // 应用里没生效”而测试全绿——本仓库实测漏接过一次）。口径与实测依据见
+  // `paint_node_edge_graph` 的注释与 `DESIGN.md`（搜「泳道图的绘制几何：固定道间距」）。
+  struct GraphMetrics {
+    /// 道间距（逻辑 px）。
+    float lane_pitch{0.0f};
+    /// 线宽（逻辑 px）。
+    float line_width{0.0f};
+    /// 节点半径（逻辑 px）。
+    float dot_radius{0.0f};
+    /// 弯曲段长度与两端竖直段（以行高为单位）与手柄比例。
+    float curve_bend_rows{0.0f};
+    float curve_stub_rows{0.0f};
+    float curve_handle_ratio{0.0f};
+    /// 泳道带实际占宽（= `lane_inset()` 的值；与 `lane_pitch` 同源）。
+    float band_width{0.0f};
+  };
+
+  /// 道间距（逻辑 px）：**固定档，不随道数缩**。
+  ///
+  /// ## 为何固定（2026-11-22，实测口径）
+  ///
+  /// 旧口径把 `lane_column_width` 当成**整条泳道带的宽度**，每道分到
+  /// `width / (2 × 道数)`——于是道数一多，每道就被压窄：实测 4 道时
+  /// 道间距只剩 **8.5px**（gbcode 的 `set_lane_column_width(34)`），而参照口径是 **24px**，
+  /// 窄了近 3 倍。后果不是“挤一点”而是**看不成图**：24px 才刚够“圆点 + 线 + 一点留白”，
+  /// 8.5px 下圆点几乎贴在一起。
+  ///
+  /// 而 `lane_column_width` 本来就是调用方在“侧栏窄/宽”场景下调的**总预算**——
+  /// 那是“最多让出多少给泳道图”，不应该变成“每道只能这么宽”。两条语义不同。
+  /// 现在：**道间距固定**（`kLanePitch`），带宽 = 道间距 × 道数 + 两侧留白，
+  /// 由 `lane_inset()` 如实报出；`lane_column_width` 只当**上限**（超出时
+  /// 按上限压缩，那时才真的变窄——那是“为了不抢内容区”的合理让步）。
+  inline static constexpr float kLanePitch = 24.0F;
+  /// 道间距的下限：低于它就只能压到“圆点贴着线”。
+  inline static constexpr float kLanePitchMin = 12.0F;
+  /// 泳道带两侧留白（左边缘到首道中心 / 末道中心到带右缘）。
+  inline static constexpr float kLaneBandPadding = 8.0F;
+
+  /// 线宽（逻辑 px）：夹到 `[kLaneLineWidthMin, kLaneLineWidthMax]`。
+  ///
+  /// 参照实测：竖线 **2px**（y=80 那类行的蓝色宽度）；跨道曲线因抗锯齿
+  /// 视觉上略粗，但线宽本身同为 2px。
+  inline static constexpr float kLaneLineWidthMin = 2.0F;
+  inline static constexpr float kLaneLineWidthMax = 2.8F;
+  /// 节点半径（逻辑 px）：下界要“一眼看出是圆点”，上界不能吃掉行高。
+  ///
+  /// 参照实测：直径 **10~11px**（含抗锯齿；实心约 9px）⇒ 半径 ≈ 5px。
+  inline static constexpr float kLaneDotRadiusMin = 4.4F;
+  inline static constexpr float kLaneDotRadiusMax = 5.4F;
+  /// 跨道曲线的纵向模型（实测反推）：**弯曲段长度 = min(纵向跨度, K)**，
+  /// 两端各留很短的竖直段，余下全部归终点侧竖直段。
+  ///
+  /// ## 为何不能按跨距成比例（两种错法都实测过）
+  ///
+  /// | 错法 | 后果 |
+  /// |---|---|
+  /// | 手柄 = 跨度 × 0.5（整条边一条贝塞尔）| 跨 5 行时被拉成贯穿全程的缓斜线：0.5 行处只走 **6%** |
+  /// | 弯曲段只 0.55 行高（固定很短）| 相邻行换道时弯段放不下：50% 处已走 **0.85**（参照 0.50）|
+  ///
+  /// 正确规律（三条曲线实测）：
+  /// · **相邻行换道**（跨度 ≈ 1 行高）：弯段铺满整条边⇒ 就是一条贯穿的贝塞尔；
+  /// · **跨多行换道**（跨度 ≫ 1 行高）：弯段只占开头约 0.9 行高，余下全是竖直。
+  ///
+  /// 取 K = 0.92 × 行高（实测：相邻行弯段≈33px、跨2道弯段≈21~33px）。
+  inline static constexpr float kLaneCurveBendRows = 0.92F;
+  /// 两端留的竖直段（占行高）：实测锚点处约 2px、行高 36 ⇒ 0.06。
+  inline static constexpr float kLaneCurveStubRows = 0.06F;
+  /// 弯段内的两个手柄（对称，占弯段长度）。
+  ///
+  /// 对相邻行换道的完整路径（含两端竖直）做最小二乘拟合得 h ≈ 0.7（rms 0.026）。
+  /// 取对称值而不是不对称：不对称（0.38/0.04）在出图时末端出现明显折角
+  ///（黄线走水平后突然下折）——拟合可以容纳它，但观感不对。
+  inline static constexpr float kLaneCurveHandleRatio = 0.70F;
+
+  /// 当前生效的泳道图几何（测试/诊断用；`lane_pitch` 为 0 表示没开泳道图）。
+  [[nodiscard]] auto graph_metrics() const noexcept -> GraphMetrics;
+
+
   [[nodiscard]] auto graph_nodes() const noexcept -> const std::vector<GraphNodeSpec>& {
     return graph_nodes_;
   }
@@ -296,8 +405,8 @@ class Table : public Element {
   [[nodiscard]] auto column_x(std::size_t column) const noexcept -> float;
   /// 指针所在行（不在数据行内返回 kNoRow）。
   [[nodiscard]] auto row_at(math::Point point) const noexcept -> std::size_t;
-  /// 泳道带占掉的左缘宽度（没开泳道时为 0）。
-  [[nodiscard]] auto lane_inset() const noexcept -> float;
+  /// 泳道图用到的最大道号 + 1（未开泳道图时为 0）。
+  [[nodiscard]] auto lane_count_used() const noexcept -> std::size_t;
 
   static constexpr std::size_t kNoRow = static_cast<std::size_t>(-1);
 
@@ -337,14 +446,16 @@ class Table : public Element {
  /// 表头是否绘制（关掉后 `header_height()` 返回 0，行区顶到边）。
  bool show_header_{true};
    /// 行首连线图：**节点-边**（`set_graph`）。空 = 不画泳道图。
- std::vector<GraphNodeSpec> graph_nodes_{};
- std::vector<GraphEdgeSpec> graph_edges_{};
- /// 泳道带宽（“字符格”数）的缓存：`set_graph` 时按最大道号 × 2 算。
- ///
- /// 那个 2 来自早期字符网格的度量（`* ` / `| ` 两字符一道），与 `lane_inset()`
- /// 和绘制端的 `cell` 计算共用同一口径——改一处就要三处一起改。
- std::size_t lane_columns_{0};
- float lane_column_width_{28.0f};
+   std::vector<GraphNodeSpec> graph_nodes_{};
+  std::vector<GraphEdgeSpec> graph_edges_{};
+  /// 泳道图用到的最大道号 + 1（`set_graph` 时算好；`lane_inset` 读它）。
+  ///
+  /// ⚠ 旧字段叫 `lane_columns_`（= 道数 × 2），那个 2 来自早期字符网格度量
+  ///（`* ` / `| ` 两字符一道）。改成正片道间距后它没有意义了——
+  /// 留下一个会误导人的名字比删掉更贵。
+  std::size_t lane_count_{0};
+  /// 泳道带**预算宽度**（调用方设的上限，见 `set_lane_column_width`）。
+  float lane_column_width_{28.0f};
 
   /// 上一帧实际绘制的可见行区间（半开）——与 `Tree::last_visible_first_` 同一手法。
   /// `mutable`：`paint_content` 是 const（「绘制不改元素状态」是框架硬约束）。
