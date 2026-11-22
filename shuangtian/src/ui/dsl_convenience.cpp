@@ -240,7 +240,7 @@ auto markdown(Composer& c, std::function<std::string()> source, const BoxProps& 
     // 排版三件套的下放（dsl.hpp 的 markdown 声明注释早已承诺，此前从未接上）
     //（见 `MarkdownView::apply_theme` 里的同一段说明）：
     //   `size`  → 正文字号（`set_base_font_size`，盖过主题的 font_base；
-    //             代码块字号与标题阶梯仍按主题算）；
+    //             其余字号与纵向度量全部由它派生，见 `MarkdownView::derive_metrics`）；
     //   `color`/`hex_color` → 文字色显式覆盖（每帧回放，盖过主题的 text 色）。
     // 不接的话，DSL 侧写了 `.size = 16` 首帧看似生效、下一帧被 apply_theme 盖回
     //（文档承诺与实现脱节的静默失效）。

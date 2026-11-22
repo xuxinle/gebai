@@ -19,12 +19,14 @@
 /// ## 本文件钉什么
 ///
 /// 用**内容高差**做判据（`FixedAdvanceTextPort` 的行高 = 字号 × 倍数，几何可比）：
-/// · 上界：H1 与正文的内容高差 **≤ 18px**（旧实现在 13px 正文下是 21.2px）；
+/// · 上界：H1 与正文的内容高差 **≤ max(18, base × 1.05)**（旧实现在 13px 正文下
+///   是 21.2px；上界随 base 放宽是因为标题上间距已改为随字号派生，见用例内注释）；
 /// · 下界：仍要有可辨识的层次，差 **≥ 4px**（不许压平到完全一样）；
 /// · 跟随：正文变小，标题也必须跟着变小；
 /// · 单调：H1 ≥ H2 ≥ H3 ≥ H4。
 ///
 /// 改 `kHeadingScale` / `kHeadingMargins` 后这四条会一起给出反馈。
+#include <algorithm>
 #include <string>
 
 #include "st/test/test.hpp"
@@ -84,11 +86,18 @@ ST_TEST(md_heading_gap_to_body_is_bounded) {
   // **核心回归**：三个真实正文字号下，H1 与正文的内容高差都必须 ≤ 18px。
   //
   // 旧实现：base13 差 21.2px / base11 差 20.3px → 红。
+  //
+  // ⚠ 上界现在是 **`max(18, base × 1.05)`**，而不是绝对 18：
+  // 标题上间距等纵向度量已改为**随字号派生**（同一份排版口径），
+  // base 20（阅读模式）下 H1 上间距从固定的 16 变成 22.9——那 18px 的绝对线
+  // 就变成了“因为按比例缩放而失败”，而不是“层级太大”。
+  // 而这条用例要卡的是后者：**高差不得超过一行正文左右**。
+  // 旧缺陷（H1 = 主题 34px 绝对值）在 base 11~13 下依然会红（高差 20~21px > 18）。
   Fixture fixture;
   for (const float base : {20.0f, kBubbleBase, 12.0f, 11.0f}) {
     const float gap = heading_height(fixture, 1, base) - body_height(fixture, base);
-    // 上界：跨度不许过大（这就是用户报的那件事）。
-    ST_CHECK(gap <= 18.0f);
+    const float upper = std::max(18.0f, base * 1.05f);
+    ST_CHECK(gap <= upper);
     // 下界：仍要有层次感，不许压平。
     ST_CHECK(gap >= 4.0f);
   }

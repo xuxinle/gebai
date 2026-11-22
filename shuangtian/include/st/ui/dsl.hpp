@@ -862,8 +862,10 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
 /// 字号码/最大宽度/贴底等一串配置（每页 ~15 行样板）。样板不只是冗——它让
 /// “三页行为是否一致”变成人工对照，而包装把配置收敛到一处。
 ///
-/// `props.size` / `props.color` 会映射到**正文字号 / 正文色**（排版三件套的下放；
-/// 代码块字号与标题阶梯仍按主题算）。
+/// `props.size` / `props.color` 会映射到**正文字号 / 正文色**（排版三件套的下放）。
+/// 其余格式（标题阶梯、行内码、代码块、表格、语言标签）的字号以及行高/内边距等
+/// 纵向度量**全部由正文字号派生**——调一个 `size` 就能整体缩放，不存在
+/// “正文改了而代码块没改”这种半跟随（详见 `MarkdownView::derive_metrics`）。
 [[nodiscard]] auto markdown(Composer& c, std::function<std::string()> source,
                             const BoxProps& props = {}) -> Element&;
 

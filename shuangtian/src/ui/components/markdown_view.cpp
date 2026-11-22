@@ -59,7 +59,8 @@ void markdown_append_flat_prefix(const std::string& flat, std::vector<float>& pr
   for (std::size_t i = 0; i < count; ++i) {
     const std::string_view one = st::utf8_slice(span.text, i, 1);
     // 与前缀累计同口径（逐码点）——整串测量含字距调整，会比逐字累加小。
-    x += port->measure_width(one, span.size);
+    // 角色也必须同口径：行内码按等宽量，否则选中文档位置会系统偏左。
+    x += port->measure_width(one, span.size, span.font_role());
     prefix.push_back(x);
   }
   // `flat` 在懒算路径下已由排版期拼好（零测量），这里只补前缀宽，不追加文本。
@@ -67,19 +68,26 @@ void markdown_append_flat_prefix(const std::string& flat, std::vector<float>& pr
 }
 
 // —— 版式常量（尺寸/间距；颜色一律来自主题 token，不在此出现）——
+//
+// 这些数值是**在 14px 正文下量定的**（`kMetricsAnchor`）。字号基准一变，
+// 它们全部按同一比例跟随（`MarkdownView::derive_metrics`）——否则“字号变大但
+// 行高/内边距不变”，结果是字挤成一片（探针 `字号 > 行盒高` 那条判据守这件事）。
+//
+// 不要在这里新增**不随字号**的尺寸：需要“绝对固定”的只有分隔线这类笔画量。
 
+constexpr float kMetricsAnchor{14.0f};         ///< 下面这些常量的标定字号
 constexpr float kBodyLineHeight{1.6f};        ///< 正文学行高倍数（DESIGN §5：Markdown 段落 1.6）
 constexpr float kHeadingLineHeight{1.3f};
 constexpr float kCodeLineHeight{1.55f};
-constexpr float kListIndentStep{20.0f};       ///< 列表每级缩进（px）
+constexpr float kListIndentStep{20.0f};       ///< 列表每级缩进（px @14）
 constexpr float kListMarkerColumn{18.0f};     ///< 无序列表符号列宽
+constexpr float kListMarkerGap{8.0f};         ///< 符号列与正文之间的间隙
 constexpr float kListItemGap{4.0f};           ///< 列表项之间的间距
 constexpr float kBulletSize{4.0f};            ///< 无序项圆点直径
 constexpr float kTaskBoxSize{14.0f};          ///< 任务项方框边长
 constexpr float kInlineCodePad{4.0f};         ///< 行内码内边距
 constexpr float kInlineCodeRadius{4.0f};      ///< 行内码圆角
 constexpr float kCodePad{12.0f};              ///< 代码块内边距
-constexpr float kLanguageLabelSize{11.0f};
 constexpr float kLanguageLabelHeight{16.0f};
 constexpr float kQuoteBarWidth{3.0f};         ///< 引用左侧竖条宽
 constexpr float kQuotePadX{12.0f};
@@ -135,6 +143,23 @@ inline constexpr std::array<float, 6> kHeadingScale{1.35f, 1.25f, 1.15f, 1.08f, 
 /// 这里的第一项（24）+ `kHeadingBottomGap`（8）+ H1/H2 的分隔线夹距（6）。
 /// 所以压紧阶梯时它必须同向收紧，否则光改字号仍然“跳”。
 constexpr std::array<float, 6> kHeadingMargins{16.0f, 14.0f, 12.0f, 10.0f, 8.0f, 8.0f};
+
+/// 非标题格式相对**正文基准**的倍数（H 阶见 `kHeadingScale`）。
+///
+/// 取值依据（`md_type_scale_probe` 跨 10~26px 实测，用户选定“保守”档）：
+///
+/// · 行内码 / 代码块 / 表格 **0.95**——同号下等宽字体的拉丁墨迹高度只有比例字体的
+///   **0.846**（探针实测；CJK 两侧 1.000），所以代码只需略小于正文，
+///   不必为“看上去一样大”而压到 0.8 以下；
+/// · 语言标签 **0.80**：它是注记而非内容，但也必须跟着正文走。
+///
+/// 为何全部用**倍数**而不是主题绝对档：主题那套（`font_sm=14`/`font_xs=12`）
+/// 是按文档阅读调的，搬到 10px 正文的工具卡里就成“代码比正文大 40%”，
+/// 搬到 26px 阅读模式又成“代码只有一半”——同一份文档两种相反层级。
+constexpr float kCodeScale{0.95f};
+constexpr float kTableScale{0.95f};
+constexpr float kInlineCodeScale{0.95f};
+constexpr float kLanguageScale{0.80f};
 
 
 // —— 形状填充辅助 ——
@@ -303,15 +328,9 @@ void append_inline_text(const std::vector<st::md::Inline>& inlines, std::string&
 // —— 构造与内容 ——
 
 MarkdownView::MarkdownView(std::string markdown) {
-  metrics_.base = 14.0f;
-  // 标题字号跟着基准字号 × 压紧阶梯（与 `apply_theme` 同一口径，
+  // 整套排版参数由一个入口派生（与 `apply_theme`/`set_base_font_size` 同一口径，
   // 否则“未接主题”与“接上主题”两种状态下的层级不一致）。
-  metrics_.heading_sizes = {metrics_.base * kHeadingScale[0], metrics_.base * kHeadingScale[1],
-                            metrics_.base * kHeadingScale[2], metrics_.base * kHeadingScale[3],
-                            metrics_.base * kHeadingScale[4], metrics_.base * kHeadingScale[5]};
-  metrics_.heading_margins = kHeadingMargins;
-  metrics_.code = 13.0f;
-  metrics_.table = 12.0f;
+  metrics_ = derive_metrics(kMetricsAnchor);
   // 内边距默认值只在这里给一次（`apply_theme` 不再覆盖它）：
   // 独立使用时（如 gallery 的「关于」页）需要一圈留白；而嵌进某栏里的调用方
   // 可以用 `style().padding` 改成自己的值，且**不会被下一帧盖回**。
@@ -391,15 +410,17 @@ void MarkdownView::set_base_font_size(float size) {
   const float next = size > 0.0f ? size : 0.0f;
   if (next == base_font_size_) return;
   base_font_size_ = next;
-  // **标题字号必须跟着重算**（不只改正文）。
+  // **整套派生参数必须跟着重算**（不只改正文）。
   //
   // 旧实现这里只改 `base_font_size_`，标题字号留在上一轮（或默认值）——
   // 于是“把正文改成 13px”之后，H1 仍是主题的 34px。
   // 而 `apply_theme` 只在挂树/换主题时跑，**不会因为正文改字号而重跑**，
-  // 所以标题一直停在旧字号：这正是“标题与正文层级差距过大”的来源。
+  // 所以标题一直停在旧字号：这正是“层级差距过大”的来源。
+  // 同一根因的另一半是行内码/代码/表格/语言标签（主题绝对档，根本不跟）——
+  // `sync_heading_sizes` 现在一并重算它们。
   //
   // `metrics_.base` 也在这里同步（与 `apply_theme` 同一取值口径），
-  // 否则本函数算出的标题字号会基于旧 base。
+  // 否则本函数算出的派生值会基于旧 base。
   metrics_.base = next > 0.0f ? next : metrics_.base;
   sync_heading_sizes();
   style_.font_size = metrics_.base;
@@ -407,18 +428,70 @@ void MarkdownView::set_base_font_size(float size) {
   mark_layout_dirty();
 }
 
-/// 按当前 `metrics_.base` 重算六档标题字号（`apply_theme` 与 `set_base_font_size` 共用）。
+/// 由正文基准推导整套排版参数。
+///
+/// `base` 是**唯一自由变量**：字号阶梯、行高、内边距、项目符号尺寸全部从它派生。
+/// 构造、`set_base_font_size`、`apply_theme` 三处都走这一个入口——
+/// 分开写就会漂（本组件曾因为“正文一处、标题一处、内码又是主题绝对档”三套口径，
+/// 导致行内码在 10px 正文下变成 1.4 倍、26px 下只剩 0.54 倍）。
+///
+/// 纵向度量按 `base / kMetricsAnchor` 缩放：那些常量都是在 14px 下量定的，
+/// 不跟着缩放时大字号会出现“字比行盒高”，小字号则是四周白边空洞。
+/// 夹一个下界（`0.7`）：小字号下过度缩水会让行距/圆角发番（视觉上“碎”）。
+auto MarkdownView::derive_metrics(float base) -> TextMetrics {
+  TextMetrics out;
+  out.base = base > 0.0f ? base : kMetricsAnchor;
+  const float ratio = std::max(out.base / kMetricsAnchor, 0.7f);
+  out.ratio = ratio;
+  for (std::size_t index = 0; index < out.heading_sizes.size(); ++index) {
+    out.heading_sizes[index] = out.base * kHeadingScale[index];
+    out.heading_margins[index] = kHeadingMargins[index] * ratio;
+  }
+  out.code = out.base * kCodeScale;
+  out.table = out.base * kTableScale;
+  out.inline_code = out.base * kInlineCodeScale;
+  out.language = out.base * kLanguageScale;
+  out.table_cell_pad_y = kTableCellPadY * ratio;
+  out.table_cell_pad = kTableCellPad * ratio;
+  out.table_line_height = std::max(kTableLineHeight * ratio, out.table * 1.25f);
+  // 表格最小行高 = 一行文字 + 上下内边距（不再固定 28）——否则大字号下
+  // “最小行高”反而比内容还矮，约束失效。
+  out.table_min_row_height = std::max(kTableRowHeight * ratio,
+                                      out.table_line_height + out.table_cell_pad_y * 2.0f);
+  out.code_pad = kCodePad * ratio;
+  out.language_label_height = kLanguageLabelHeight * ratio;
+  out.inline_code_pad = kInlineCodePad * ratio;
+  out.inline_code_radius = kInlineCodeRadius * ratio;
+  out.heading_bottom_gap = kHeadingBottomGap * ratio;
+  out.heading_rule_gap = kHeadingRuleGap * ratio;
+  out.block_gap = kBlockGap * ratio;
+  out.nested_gap = kNestedGap * ratio;
+  out.list_indent_step = kListIndentStep * ratio;
+  out.list_marker_column = kListMarkerColumn * ratio;
+  out.list_marker_gap = kListMarkerGap * ratio;
+  out.list_item_gap = kListItemGap * ratio;
+  out.bullet_size = kBulletSize * ratio;
+  out.task_box_size = kTaskBoxSize * ratio;
+  out.quote_bar_width = kQuoteBarWidth * ratio;
+  out.quote_pad_x = kQuotePadX * ratio;
+  out.quote_pad_y = kQuotePadY * ratio;
+  return out;
+}
+
+/// 按当前 `metrics_.base` 重算整套派生参数（`apply_theme` 与 `set_base_font_size` 共用）。
 void MarkdownView::sync_heading_sizes() {
-  const float base = metrics_.base > 0.0f ? metrics_.base : 14.0f;
-  metrics_.heading_sizes = {base * kHeadingScale[0], base * kHeadingScale[1],
-                            base * kHeadingScale[2], base * kHeadingScale[3],
-                            base * kHeadingScale[4], base * kHeadingScale[5]};
+  const float base = metrics_.base > 0.0f ? metrics_.base : kMetricsAnchor;
+  TextMetrics next = derive_metrics(base);
+  // `set_code_font_size` 的显式覆盖优先于派生值（仍只在它非 0 时生效）。
+  if (code_font_size_ > 0.0f) next.code = code_font_size_;
+  metrics_ = next;
 }
 
 void MarkdownView::set_code_font_size(float size) {
   const float next = size > 0.0f ? size : 0.0f;
   if (next == code_font_size_) return;
   code_font_size_ = next;
+  metrics_.code = code_font_size_ > 0.0f ? code_font_size_ : metrics_.base * kCodeScale;
   needs_layout_ = true;
   mark_layout_dirty();
 }
@@ -434,22 +507,16 @@ void MarkdownView::apply_theme(const Theme& theme) {
   next.base = text_size_override() > 0.0f ? text_size_override()
                                           : (base_font_size_ > 0.0f ? base_font_size_
                                                                     : metrics.font_base);
-  // 标题字号 = 正文基准 × 压紧的阶梯（见 `kHeadingScale` 的说明）。
-  //
-  // 不用主题的 `font_3xl..font_lg` 绝对值的两个理由（实测）：
-  // ① 那是按 `font_base=15` 的**文档阅读**调的，直接搬到聊天里层级跳太大；
-  // ② 它的绝对值不随调用方的正文基准变化——正文改成 12/13px 时，
-  //    H1 仍是 34px（2.6 倍），“标题与正文差距过大”由此而来。
-  //
-  // **先算好标题再整体赋值**（不调 `sync_heading_sizes()`）：后者读的是
-  // `metrics_.base`，而新 base 还在 `next` 里未赋值——就地算最直接。
-  const float heading_base = next.base > 0.0f ? next.base : 14.0f;
-  next.heading_sizes = {heading_base * kHeadingScale[0], heading_base * kHeadingScale[1],
-                        heading_base * kHeadingScale[2], heading_base * kHeadingScale[3],
-                        heading_base * kHeadingScale[4], heading_base * kHeadingScale[5]};
-  next.heading_margins = kHeadingMargins;
-  next.code = code_font_size_ > 0.0f ? code_font_size_ : metrics.font_sm;
-  next.table = metrics.font_xs;
+  // 其余排版参数（标题字号、行内码/代码/表格字号、纵向度量）全部由 `base` 派生：
+  // 调 `derive_metrics` 而不是逐个字段写——分开写必然漂（本组件的旧实现就是把
+  // 行内码/代码/表格固定为主题绝对档，结果 10px 正文下代码比正文大 40%，
+  // 26px 正文下只剩一半；探针 `md_type_scale_probe` 的能量化这件事）。
+  const float heading_base = next.base > 0.0f ? next.base : kMetricsAnchor;
+  TextMetrics derived = derive_metrics(heading_base);
+  derived.base = heading_base;
+  // `set_code_font_size` 的显式覆盖优先（老调用方的接口不变）。
+  if (code_font_size_ > 0.0f) derived.code = code_font_size_;
+  next = derived;
   if (!(next == metrics_)) {
     metrics_ = next;
     needs_layout_ = true;  // 字号变了才需要重排版；换配色不需要（颜色在绘制时解析）
@@ -543,6 +610,22 @@ auto MarkdownView::get_property(std::string_view name) const -> std::optional<st
   if (name == "viewport_height") return std::format("{:.2f}", view_height_);
   if (name == "base_font_size") return std::format("{:.2f}", metrics_.base);
   if (name == "code_font_size") return std::format("{:.2f}", metrics_.code);
+  // 派生字号的只读快照：让“各格式差多少”可被控制通道/自动化直接断言，
+  // 而不必去量像素（`md_type_scale_probe` 用的就是同一套字段，
+  // 但它靠字形绘制记录；属性面给了不依赖绘制路径的第二条证明）。
+  if (name == "type_scale") {
+    return std::format(
+        "h1={:.2f} h2={:.2f} h3={:.2f} h4={:.2f} h5={:.2f} h6={:.2f} inline_code={:.2f} "
+        "code={:.2f} table={:.2f} language={:.2f}",
+        static_cast<double>(metrics_.heading_sizes[0]),
+        static_cast<double>(metrics_.heading_sizes[1]),
+        static_cast<double>(metrics_.heading_sizes[2]),
+        static_cast<double>(metrics_.heading_sizes[3]),
+        static_cast<double>(metrics_.heading_sizes[4]),
+        static_cast<double>(metrics_.heading_sizes[5]),
+        static_cast<double>(metrics_.inline_code), static_cast<double>(metrics_.code),
+        static_cast<double>(metrics_.table), static_cast<double>(metrics_.language));
+  }
   if (name == "max_width") return std::format("{:.2f}", max_width_);
   // 只读诊断：**上次排版用的内容宽**（与 `content_height` 配对看）。
   // 为什么值得暴露：宽变而内容不重排时，“控件宽变了/排版结果没变”必须能分开看——
@@ -670,6 +753,14 @@ auto MarkdownView::property_names() const -> std::vector<std::string_view> {
           "painted_groups"});
 }
 
+auto MarkdownView::readonly_property_names() const -> std::vector<std::string_view> {
+  // `type_scale`：整套派生字号的快照（h1..h6/inline_code/code/table/language）。
+  // 它是**观测面**：让“各格式字号差多少”可被控制通道与自动化直接断言，
+  // 不必去量像素或搭测试判床（`md_type_scale_probe` 用绘制记录量同一件事，
+  // 两条路径各自独立，不会同一处错两遍）。
+  return Element::with_universal_readonly({"type_scale"});
+}
+
 auto MarkdownView::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "append") {
     append_chunk(argument);
@@ -746,12 +837,12 @@ void MarkdownView::rebuild_rows(const RenderContext& context, float width) {
 
 void MarkdownView::append_blocks(const std::vector<st::md::Block>& blocks,
                                  const RenderContext& context, const Frame& frame, float& y) {
-  const auto leading_gap = [&frame](const st::md::Block& node) -> float {
-    const float body_gap = frame.nested ? kNestedGap : kBlockGap;
+  const auto leading_gap = [this, &frame](const st::md::Block& node) -> float {
+    const float body_gap = frame.nested ? metrics_.nested_gap : metrics_.block_gap;
     switch (node.kind) {
       case st::md::BlockKind::Heading: {
         const std::uint32_t level = std::clamp(node.level, 1U, 6U);
-        const float margin = kHeadingMargins[static_cast<std::size_t>(level - 1U)];
+        const float margin = metrics_.heading_margins[static_cast<std::size_t>(level - 1U)];
         return frame.nested ? margin * 0.5f : margin;
       }
       case st::md::BlockKind::Paragraph:
@@ -809,7 +900,7 @@ void MarkdownView::append_blocks(const std::vector<st::md::Block>& blocks,
         break;
       case st::md::BlockKind::Divider:
         append_divider(frame, y);
-        pending_gap = frame.nested ? kNestedGap : kBlockGap;
+        pending_gap = frame.nested ? metrics_.nested_gap : metrics_.block_gap;
         break;
       case st::md::BlockKind::HtmlBlock:
         break;  // 按 md 层约定：HTML 块原样保留、不渲染
@@ -825,11 +916,11 @@ void MarkdownView::append_heading(const st::md::Block& block, const RenderContex
   append_paragraph(block.inlines, context, frame, y, size, size * kHeadingLineHeight, weight,
                    RowKind::Heading);
   if (level <= 2U) {
-    y += kHeadingRuleGap;
+    y += metrics_.heading_rule_gap;
     append_divider(frame, y);  // 标题下方细分隔线（仅 H1/H2；颜色 = colors.border）
-    y += kHeadingRuleGap;
+    y += metrics_.heading_rule_gap;
   }
-  y += kHeadingBottomGap;
+  y += metrics_.heading_bottom_gap;
 }
 
 void MarkdownView::append_paragraph(const std::vector<st::md::Inline>& inlines,
@@ -891,29 +982,48 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
            left.inline_code == right.inline_code && left.link == right.link;
   };
 
+  // 芯片占位：行内码绘制时两侧各撑出一截底色（`draw_spans` 里画 chip 并前移
+  // `width + 2×pad`），而**排版必须把这两份内边距算进折行**——否则排版认为
+  // “刚好装下”，绘制却已经越界，行尾就被 `ellipsize` 截成省略号。
+  //
+  // 实现上它跟“片段”而不是跟“词”走：绘制按 `row.spans` 逐片段画芯片，
+  // 所以**每个落在本行的片段**各占一份——同一段行内码折成两行时两行都有芯片。
+  const auto pad_of = [this](const Span& style) -> float {
+    return style.inline_code ? metrics_.inline_code_pad * 2.0f : 0.0f;
+  };
+
   // `text` 收 string_view（tokenize 已零拷贝）；同款续拼走 `+=`，新建 Span 才发生一次拷贝。
   // `width_hint >= 0` 时直接用（词宽在折行判断里已量过——旧实现这里对同一段文本
   // **再量一次**，纯浪费；2026-10-19 性能轮实测省掉后段落排版明显回落）。
-  const auto append_piece = [&port, &line, &line_x, &line_width, &same_style](
+  const auto append_piece = [&port, &line, &line_x, &line_width, &same_style, &pad_of](
                                 const Span& style, std::string_view text,
                                 float width_hint = -1.0f) {
     if (text.empty()) return;
-    const float text_width = width_hint >= 0.0f ? width_hint : port.measure_width(text, style.size);
+    const float text_width = width_hint >= 0.0f
+                                 ? width_hint
+                                 : port.measure_width(text, style.size, style.font_role());
     if (!line.empty() && same_style(line.back(), style)) {
       line.back().text += text;
       if (!line_x.empty()) line_x.back().second += text_width;
-    } else {
-      Span next = style;
-      next.text = std::string{text};
-      line.push_back(std::move(next));
-      // 新区间的起点 = 本行已累计的宽（与 `line_width` 同一坐标）。
-      line_x.emplace_back(line_width, line_width + text_width);
+      line_width += text_width;
+      return;
     }
-    line_width += text_width;
+    Span next = style;
+    next.text = std::string{text};
+    line.push_back(std::move(next));
+    // 新区间的起点 = 本行已累计的宽（与 `line_width` 同一坐标）。
+    line_x.emplace_back(line_width, line_width + text_width);
+    // 新片段额外占芯片两侧的内边距（与绘制同口径）。
+    line_width += text_width + pad_of(style);
   };
 
   for (const Span& span : spans) {
     if (span.text.empty()) continue;
+    // **量宽必须与绘制同角色**：绘制 `draw_spans` 用 `span.font_role()`（行内码/代码
+    // = Monospace），这里用默认 Proportional 就会系统性偏小——实测 `inline_code`
+    // 11 字符差 **8.12px**（比例 66.57 / 等宽 74.69）。折行判断偏小 ⇒ 排版认为
+    // “刚好装下”，绘制却越界 ⇒ 行尾被 `ellipsize` 截出省略号。
+    const text::FontRole role = span.font_role();
     for (const WordToken& word : tokenize(span.text)) {
       if (word.hard_break) {
         flush(false);  // 硬换行：显式另起一行（空行照留；不是自动折行）
@@ -924,16 +1034,19 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
         append_piece(span, word.text);
         continue;
       }
-      const float word_width = port.measure_width(word.text, span.size);
-      if (!line.empty() && line_width + word_width > width) flush(true);   // 自动折行
-      if (word_width > width) {
+      const float word_width = port.measure_width(word.text, span.size, role);
+      // 芯片的左右内边距也要算进折行（只在**新开一个片段**时出现，与绘制同口径）。
+      const float lead_pad =
+          (line.empty() || !same_style(line.back(), span)) ? pad_of(span) : 0.0f;
+      if (!line.empty() && line_width + lead_pad + word_width > width) flush(true);
+      if (word_width + lead_pad > width) {
         // 单词/URL 超宽：按码点硬拆，保证不越界也不丢内容
         std::string piece;
         float piece_width = 0.0f;  // 拆行累计宽（避免每码点重量大段 piece）
         const std::size_t codepoints = st::utf8_length(word.text);
         for (std::size_t index = 0; index < codepoints; ++index) {
           const std::string_view one = st::utf8_slice(word.text, index, 1);
-          const float one_width = port.measure_width(one, span.size);
+          const float one_width = port.measure_width(one, span.size, role);
           if (!piece.empty() && piece_width + one_width > width) {
             append_piece(span, piece, piece_width);
             flush(true);   // 超宽单词的码点硬拆也是自动折行
@@ -968,7 +1081,14 @@ auto MarkdownView::inline_spans(const std::vector<st::md::Inline>& inlines, Colo
       case st::md::InlineKind::Code:
         span.text = node.text;
         span.color = ColorRole::Text;
-        span.size = metrics_.code;
+        // **按所在块的字号派生**（不是全局常量）：
+        //
+        // 旧实现用 `metrics_.code`（全文档一个值），于是标题里的行内码取得的是
+        // **正文字号**——标题 1.35× 时里面那两个字只有 0.95×，屏幕上看起来
+        // 是“大字里嵌了一行小字”（`md_type_scale_probe` 实测：26px 正文下
+        // H1 内码/标题 = 0.40）。行内码字号的语义是“与周围文字同级但等宽”，
+        // 所以取本块 `size × kInlineCodeScale`。
+        span.size = size * kInlineCodeScale;
         span.weight = FontWeight::Regular;
         span.inline_code = true;
         span.code = true;  // 行内码也等宽
@@ -1016,11 +1136,11 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
   const float size = metrics_.code;
   const float line_height = size * kCodeLineHeight;
   const float box_width = std::max(frame.avail, kMinTextWidth);
-  const float text_x = frame.indent + kCodePad;
-  const float text_width = std::max(box_width - kCodePad * 2.0f, kMinTextWidth);
+  const float text_x = frame.indent + metrics_.code_pad;
+  const float text_width = std::max(box_width - metrics_.code_pad * 2.0f, kMinTextWidth);
   const bool labelled = !block.language.empty();
   const float top = y;
-  float inner_y = y + kCodePad + (labelled ? kLanguageLabelHeight + 4.0f : 0.0f);
+  float inner_y = y + metrics_.code_pad + (labelled ? metrics_.language_label_height + 4.0f : 0.0f);
   const std::size_t first_row = rows_.size();
 
   const auto push_line = [this, &block, &text_x, &text_width, &frame, &box_width, &line_height,
@@ -1050,7 +1170,10 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
       if (port_ptr != nullptr) {
         float line_width = 0.0f;
         for (const Span& span : row.spans) {
-          line_width += port_ptr->measure_width(span.text, span.size > 0.0f ? span.size : size);
+          // 角色同口径（代码行本来就是等宽，但显式传更抗“以后改 span.code”）。
+          line_width += port_ptr->measure_width(span.text,
+                                               span.size > 0.0f ? span.size : size,
+                                               span.font_role());
         }
         if (line_width > text_width + kShrinkEpsilon) row.wrapped = true;
       }
@@ -1074,7 +1197,7 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
     inner_y += line_height;
   }
 
-  const float bottom = inner_y + kCodePad;
+  const float bottom = inner_y + metrics_.code_pad;
   const math::Rect group{frame.indent, top, box_width, bottom - top};
   for (std::size_t index = first_row; index < rows_.size(); ++index) {
     rows_[index].group_rect = group;
@@ -1120,29 +1243,30 @@ auto MarkdownView::code_line_spans(std::string_view code, std::size_t begin, std
 void MarkdownView::append_list(const st::md::Block& block, const RenderContext& context,
                                const Frame& frame, float& y) {
   const TextPort& port = text_port_of(context);
-  const float level_indent = frame.indent + static_cast<float>(block.level) * kListIndentStep;
+  const float level_indent = frame.indent + static_cast<float>(block.level) * metrics_.list_indent_step;
   const float level_width =
-      std::max(frame.avail - static_cast<float>(block.level) * kListIndentStep, kMinTextWidth);
+      std::max(frame.avail - static_cast<float>(block.level) * metrics_.list_indent_step,
+               kMinTextWidth);
   const float line_height = metrics_.base * kBodyLineHeight;
 
   bool has_task = false;
   for (const st::md::Block& item : block.children) has_task = has_task || item.task_item;
-  float marker_column = kListMarkerColumn;
+  float marker_column = metrics_.list_marker_column;
   if (has_task) {
-    marker_column = kTaskBoxSize + 8.0f;
+    marker_column = metrics_.task_box_size + metrics_.list_marker_gap;
   } else if (block.ordered) {
     float widest = 0.0f;
     for (std::size_t index = 0; index < block.children.size(); ++index) {
       widest = std::max(widest, port.measure_width(std::format("{}.", index + 1U), metrics_.base));
     }
-    marker_column = std::max(widest + 8.0f, kListMarkerColumn);
+    marker_column = std::max(widest + metrics_.list_marker_gap, metrics_.list_marker_column);
   }
   const float text_x = level_indent + marker_column;
   const float text_width = std::max(level_width - marker_column, kMinTextWidth);
 
   for (std::size_t index = 0; index < block.children.size(); ++index) {
     const st::md::Block& item = block.children[index];
-    if (index > 0) y += kListItemGap;
+    if (index > 0) y += metrics_.list_item_gap;
     const std::size_t first_row = rows_.size();
     std::vector<Span> spans =
         inline_spans(item.inlines, frame.role, metrics_.base, FontWeight::Regular);
@@ -1165,14 +1289,15 @@ void MarkdownView::append_list(const st::md::Block& block, const RenderContext& 
       head->task = true;
       head->checked = item.checked;
       head->marker = math::Rect{level_indent,
-                                head->box.y + (line_height - kTaskBoxSize) * 0.5f,
-                                kTaskBoxSize, kTaskBoxSize};
+                                head->box.y + (line_height - metrics_.task_box_size) * 0.5f,
+                                metrics_.task_box_size, metrics_.task_box_size};
     } else if (block.ordered) {
       head->marker_text = std::format("{}.", index + 1U);
-      head->marker = math::Rect{level_indent, head->box.y, marker_column - 8.0f, line_height};
+      head->marker =
+          math::Rect{level_indent, head->box.y, marker_column - metrics_.list_marker_gap, line_height};
     } else {
       head->marker_dot = true;
-      head->marker = math::Rect{level_indent, head->box.y, kBulletSize, line_height};
+      head->marker = math::Rect{level_indent, head->box.y, metrics_.bullet_size, line_height};
     }
     if (!item.children.empty()) {
       Frame child{text_x, text_width, frame.role, true};
@@ -1184,14 +1309,14 @@ void MarkdownView::append_list(const st::md::Block& block, const RenderContext& 
 void MarkdownView::append_quote(const st::md::Block& block, const RenderContext& context,
                                 const Frame& frame, float& y) {
   const float top = y;
-  const float inner_x = frame.indent + kQuoteBarWidth + kQuotePadX;
-  const float inner_width =
-      std::max(frame.avail - kQuoteBarWidth - kQuotePadX * 2.0f, kMinTextWidth);
-  y += kQuotePadY;
+  const float inner_x = frame.indent + metrics_.quote_bar_width + metrics_.quote_pad_x;
+  const float inner_width = std::max(
+      frame.avail - metrics_.quote_bar_width - metrics_.quote_pad_x * 2.0f, kMinTextWidth);
+  y += metrics_.quote_pad_y;
   const std::size_t first_row = rows_.size();
   Frame inner{inner_x, inner_width, ColorRole::Muted, true};
   append_blocks(block.children, context, inner, y);
-  y += kQuotePadY;
+  y += metrics_.quote_pad_y;
   if (rows_.size() > first_row) {
     for (std::size_t index = first_row; index < rows_.size(); ++index) {
       rows_[index].group = GroupKind::Quote;
@@ -1211,7 +1336,7 @@ void MarkdownView::append_table(const st::md::Block& block, const RenderContext&
   const std::size_t columns = block.header.size();
   if (columns == 0) return;
   const float size = metrics_.table;
-  const float padding = kTableCellPad;
+  const float padding = metrics_.table_cell_pad;
 
   // —— 列宽分配（2026-10-13 重写，治「内容被砍成 Wind...」的硬伤）——
   //
@@ -1362,9 +1487,12 @@ void MarkdownView::append_table(const st::md::Block& block, const RenderContext&
       }
       max_lines = std::max(max_lines, cell_lines[column].size());
     }
-    const float row_height = std::max(kTableRowHeight,
-                                      static_cast<float>(max_lines) * kTableLineHeight +
-                                          kTableCellPadY * 2.0f);
+    // 单元格行高：派生值再夹一道**字号下界**——否则极端字号下会出现
+    // “字比行盒高”（字形溢出行带、相邻行粘连）。
+    const float line_height = std::max(metrics_.table_line_height, size * 1.25f);
+    const float row_height =
+        std::max(std::max(metrics_.table_min_row_height, line_height),
+                 static_cast<float>(max_lines) * line_height + metrics_.table_cell_pad_y * 2.0f);
     Row row;
     row.kind = RowKind::TableRow;
     row.box = math::Rect{frame.indent, y, total, row_height};
@@ -1494,8 +1622,12 @@ auto MarkdownView::layout_offscreen(const SlowLayoutSnapshot& input,
   worker.code_font_size_ = snapshot.code_size;
   worker.max_width_ = snapshot.max_width;
   worker.set_markdown(snapshot.source);
-  // 用快照的字号对齐 worker 的排版参数（apply_theme 会从主题取，这里盖回快照值）。
-  worker.metrics_.base = snapshot.base_size;
+  // 用快照的字号对齐 worker 的排版参数：**先按基准重新派生整套**（行高/内边距/
+  // 项目符号尺寸全部一致），再把快照里可能被显式覆盖的三项盖回去。
+  //
+  // 为何不能只盖字号：纵向度量在本次改动后也是派生值——只盖字号会让后台用
+  // “默认基准的 14px 行高”去排 26px 正文，行高/间距全错（探针 `字号 > 行盒高` 会红）。
+  worker.metrics_ = derive_metrics(snapshot.base_size);
   worker.metrics_.code = snapshot.code_size;
   worker.metrics_.table = snapshot.table_size;
   worker.metrics_.heading_sizes = snapshot.heading_sizes;
@@ -1879,7 +2011,11 @@ auto MarkdownView::intrinsic_content_width() const noexcept -> float {
     // 拿它去重排会把内容压成一细长条，而外层按旧高度定尺寸 ⇒ 末尾被裁。
     float x = row.text_x;
     for (const Span& span : row.spans) {
-      x += port->measure_width(span.text, span.size > 0.0f ? span.size : base_font_size_);
+      // 角色同口径（与绘制 / 折行同源）：行内码按等宽量，否则“自然宽”偏小，
+      // 收缩后的气泡会把行尾切掉。芯片内边距也算（绘制会向外撑）。
+      x += port->measure_width(span.text, span.size > 0.0f ? span.size : base_font_size_,
+                               span.font_role());
+      if (span.inline_code) x += metrics_.inline_code_pad * 2.0f;
     }
     // 代码/表格：底框本来铺满，但**文字**仍有自然宽。
     //
@@ -1888,7 +2024,7 @@ auto MarkdownView::intrinsic_content_width() const noexcept -> float {
     // 撑到整行宽（实测：23 字符的内容 → 1106px 宽）。
     // 现在只要**没有折行**就算得出自然宽。
     //
-    // 右侧补一份 `kCodePad`：`x` 已经是 `text_x + 文字宽`（左边距含在 `text_x` 里），
+          // 右侧补一份 `metrics_.code_pad`：`x` 已经是 `text_x + 文字宽`（左边距含在 `text_x` 里），
     // 底板右边还有同样大小的内边距。补少了就会**裁掉行尾**
     // （实测：`[exit 0]` 显示成 `[exit 0`）。
     if (row.kind == RowKind::CodeLine || row.kind == RowKind::TableRow) {
@@ -1902,7 +2038,7 @@ auto MarkdownView::intrinsic_content_width() const noexcept -> float {
           row.spans.empty() ? base_font_size_
                             : (row.spans.front().size > 0.0f ? row.spans.front().size
                                                             : base_font_size_);
-      x += kCodePad + port->measure_width("M", code_size);
+      x += metrics_.code_pad + port->measure_width("M", code_size);
     }
     // 单行已经顶到可用宽 ⇒ 它在折行边缘，不是“自然宽”（护栏，双保险）。
     if (x + kShrinkEpsilon >= layout_width_) return 0.0f;
@@ -2050,7 +2186,11 @@ void MarkdownView::draw_spans(const RenderContext& context, raster::Surface& can
   float x = start.x;
   for (const Span& span : spans) {
     if (span.text.empty()) continue;
-    const float remaining = max_right - x;
+    // 行内码芯片在两侧各撑出一截底色，所以可用宽要扣掉**这份余量**：
+    // 否则最后一个芯片的右边框会越过 `max_right`（排版已把 pad 算进折行，
+    // 这里同步扣一口才能保证“排版刚好装下”与“绘制刚好不越界”是同一件事）。
+    const float pad = span.inline_code ? metrics_.inline_code_pad : 0.0f;
+    const float remaining = max_right - x - pad;
     if (remaining < 2.0f) break;
     // 量宽与绘制**必须同一角色**：一个用等宽、一个用比例，代码块就会算错宽度。
     const text::FontRole role = span.font_role();
@@ -2067,10 +2207,11 @@ void MarkdownView::draw_spans(const RenderContext& context, raster::Surface& can
     if (span.inline_code) {
       const float chip_height = span.size * 1.35f;
       const float chip_y = start.y + std::max(0.0f, (line_height - chip_height) * 0.5f);
-      const math::Rect chip{x - kInlineCodePad, chip_y, width + kInlineCodePad * 2.0f, chip_height};
-      fill_rect_shape(canvas, chip, colors.code_bg, kInlineCodeRadius);
+      const float radius = metrics_.inline_code_radius;
+      const math::Rect chip{x - pad, chip_y, width + pad * 2.0f, chip_height};
+      fill_rect_shape(canvas, chip, colors.code_bg, radius);
       math::Path outline;
-      outline.add_rounded_rect(chip.inset(math::Insets::all(0.5f)), kInlineCodeRadius - 0.5f);
+      outline.add_rounded_rect(chip.inset(math::Insets::all(0.5f)), std::max(radius - 0.5f, 0.0f));
       canvas.stroke_path(outline, raster::Paint::solid(colors.code_border), 1.0f);
     }
     draw_text_weighted(port, canvas, text, math::Point{x, start.y}, span.size, color, span.weight,
@@ -2081,7 +2222,7 @@ void MarkdownView::draw_spans(const RenderContext& context, raster::Surface& can
     if (span.strike) {
       fill_line_shape(canvas, math::Rect{x, start.y + span.size * 0.62f, width, 1.0f}, color);
     }
-    x += width + (span.inline_code ? kInlineCodePad * 2.0f : 0.0f);
+    x += width + pad * 2.0f;
     if (truncated) break;
   }
 }
@@ -2100,15 +2241,17 @@ void MarkdownView::paint_group(const RenderContext& context, raster::Surface& ca
     canvas.stroke_path(outline, raster::Paint::solid(colors.code_border), metrics.border_width);
     if (!row.language.empty()) {
       const TextPort& port = text_port_of(context);
-      port.draw(canvas, row.language, math::Point{rect.x + kCodePad, rect.y + kCodePad},
-                kLanguageLabelSize, colors.text_faint, text::FontRole::Monospace);
+      port.draw(canvas, row.language,
+                math::Point{rect.x + metrics_.code_pad, rect.y + metrics_.code_pad},
+                metrics_.language, colors.text_faint, text::FontRole::Monospace);
     }
     return;
   }
   if (row.group == GroupKind::Quote) {
     fill_rect_shape(canvas, rect, colors.surface_alt, metrics.radius_sm);
-    fill_rect_shape(canvas, math::Rect{rect.x, rect.y, kQuoteBarWidth, rect.height}, colors.primary,
-                    kQuoteBarWidth * 0.5f);
+    fill_rect_shape(canvas,
+                    math::Rect{rect.x, rect.y, metrics_.quote_bar_width, rect.height},
+                    colors.primary, metrics_.quote_bar_width * 0.5f);
   }
 }
 
@@ -2118,34 +2261,41 @@ void MarkdownView::paint_marker(const RenderContext& context, raster::Surface& c
   const Palette& colors = context.theme.colors();
   const math::Rect marker = row.marker.offset(origin.x, origin.y);
   if (row.task) {
-    const math::Rect box{marker.x, marker.y, kTaskBoxSize, kTaskBoxSize};
+    const float box_size = metrics_.task_box_size;
+    const math::Rect box{marker.x, marker.y, box_size, box_size};
+    // 行符内部图形按方框尺寸比例画（不再固定像素偏移）：方框从 14px 变到 26px 时
+    // 勾仍居中——否则勾会卡在左上角。
+    const float scale = box_size / kTaskBoxSize;
     if (row.checked) {
-      fill_rect_shape(canvas, box, colors.primary, 4.0f);
+      fill_rect_shape(canvas, box, colors.primary, 4.0f * scale);
       math::Path check;
-      check.move_to(math::Point{box.x + 3.6f, box.y + 7.4f});
-      check.line_to(math::Point{box.x + 6.0f, box.y + 9.8f});
-      check.line_to(math::Point{box.x + 10.6f, box.y + 4.6f});
-      canvas.stroke_path(check, raster::Paint::solid(colors.on_primary), 1.8f);
+      check.move_to(math::Point{box.x + 3.6f * scale, box.y + 7.4f * scale});
+      check.line_to(math::Point{box.x + 6.0f * scale, box.y + 9.8f * scale});
+      check.line_to(math::Point{box.x + 10.6f * scale, box.y + 4.6f * scale});
+      canvas.stroke_path(check, raster::Paint::solid(colors.on_primary), 1.8f * scale);
     } else {
       math::Path outline;
-      outline.add_rounded_rect(box.inset(math::Insets::all(0.5f)), 3.5f);
-      canvas.stroke_path(outline, raster::Paint::solid(colors.border_strong), 1.4f);
+      outline.add_rounded_rect(box.inset(math::Insets::all(0.5f)), 3.5f * scale);
+      canvas.stroke_path(outline, raster::Paint::solid(colors.border_strong), 1.4f * scale);
     }
     return;
   }
   if (row.marker_dot) {
-    const float radius = kBulletSize * 0.5f;
+    const float radius = metrics_.bullet_size * 0.5f;
     fill_circle_shape(canvas, math::Point{marker.x + radius + 1.0f, marker.y + row.line_height * 0.5f},
                       radius, colors.text_muted);
     return;
   }
   if (!row.marker_text.empty()) {
+    // 序号字号 = **本行文字的字号**（不是正文基准）：列表嵌在引用/嵌套里时
+    // 两者可能不同，而序号必须与它标记的那行字同号（否则序号与内容差一级）。
     const TextPort& port = text_port_of(context);
-    const float line_height = port.line_height(metrics_.base);
-    const float width = port.measure_width(row.marker_text, metrics_.base);
+    const float size = row.spans.empty() ? metrics_.base : row.spans.front().size;
+    const float line_height = port.line_height(size);
+    const float width = port.measure_width(row.marker_text, size);
     port.draw(canvas, row.marker_text,
               math::Point{marker.right() - width, marker.y + (row.line_height - line_height) * 0.5f},
-              metrics_.base, colors.text_muted);
+              size, colors.text_muted);
   }
 }
 
@@ -2174,16 +2324,20 @@ void MarkdownView::paint_table_row(const RenderContext& context, raster::Surface
     // 多行单元格：逐行绘制，垂直居中（整块文本块居中）。
     const math::Color text_color =
         color_of(context.theme, row.table_header ? ColorRole::Muted : ColorRole::Text);
-    const float block_height = static_cast<float>(cell.lines.size()) * kTableLineHeight;
+    // 行高取**排版期用的那个值**（`metrics_.table_line_height`），不另算一份——
+    // 排版用派生值、绘制用旧常量时，多行单元格会偏上/偏下（本次修字号的直接后果）。
+    const float line_height = metrics_.table_line_height;
+    const float block_height = static_cast<float>(cell.lines.size()) * line_height;
     const float top = cell_box.y + std::max(0.0f, (cell_box.height - block_height) * 0.5f);
     float line_y = top;
     for (const std::string& line : cell.lines) {
       if (!line.empty()) {
         // 与全仓同一口径（按墨迹区居中）。
-        const float text_y = centered_line_top(port, line, size, line_y, kTableLineHeight);
-        port.draw(canvas, line, math::Point{cell_box.x + kTableCellPad, text_y}, size, text_color);
+        const float text_y = centered_line_top(port, line, size, line_y, line_height);
+        port.draw(canvas, line, math::Point{cell_box.x + metrics_.table_cell_pad, text_y}, size,
+                  text_color);
       }
-      line_y += kTableLineHeight;
+      line_y += line_height;
     }
   }
 }

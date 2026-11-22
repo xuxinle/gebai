@@ -23,6 +23,8 @@ auto w = std::make_unique<st::ui::MarkdownView>();
 
 **可读写**：`markdown` · `text` · `block_count` · `content_height` · `scroll` · `max_scroll` · `viewport_height` · `base_font_size` · `code_font_size` · `max_width` · `selectable` · `open_links` · `stick_to_bottom` · `pending` · `selection` · `layout_width` · `row_count` · `first_visible` · `last_visible` · `row_at_probe` · `draw_stats` · `painted_groups`
 
+**只读**（能 `get`，`set` 不生效）：`type_scale`
+
 > 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
 
 ## 动作面（控制通道 `invoke`）

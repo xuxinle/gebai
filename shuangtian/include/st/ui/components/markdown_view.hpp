@@ -8,6 +8,10 @@
 ///   y 相对内容顶），`paint_content` 只按 `scroll_offset_` 平移绘制——画不改布局、滚不重排版；
 /// - **流式**：内部用 `md::MdStream` 增量解析，块序列只增不改（前缀稳定 ⇒ 已渲染内容不跳变）；
 ///   `append_chunk` 可切在任意字节处（含 UTF-8 中间）；追加前若已贴底则追加后继续贴底；
+/// - **字号单一真值源**：正文基准是唯一自由变量，标题阶梯、行内码、代码块、表格、
+///   语言标签的字号以及行高/内边距/项目符号尺寸**全部由它派生**（`derive_metrics`），
+///   所以同一份文档在 10px 与 26px 正文下的**层级关系一致**（行内码恒为正文的 0.95×）。
+///   属性 `type_scale` 可读一整套实数值；
 /// - **配色取自主题**：标题/正文/行内码/代码块/列表/引用/表格的颜色与圆角全部来自 `Theme` token；
 ///   代码高亮的关键字/字符串/注释/数字由主题色 `mix` 派生（不硬编码色值）；
 /// - **无字体亦可布局**：文本一律经 `TextPort`（`RenderContext::text`），为空时退化为
@@ -149,8 +153,14 @@ class MarkdownView : public Element {
   void set_shrink_to_fit(bool enabled);
   [[nodiscard]] auto shrink_to_fit() const noexcept -> bool { return shrink_to_fit_; }
   /// 正文基准字号（`<= 0` 表示用主题 `font_base`）。
+  ///
+  /// 这是**唯一自由变量**：标题阶梯、行内码、代码块、表格、语言标签的字号以及
+  /// 行高/内边距/项目符号尺寸全部由它派生（`derive_metrics`），所以改它等于整体缩放。
   void set_base_font_size(float size);
-  /// 代码字号（`<= 0` 表示用主题 `font_sm`；端口无等宽能力，仅字号不同）。
+  /// 代码块字号**显式覆盖**（`<= 0` 表示恢复派生值 = 正文 × 0.95）。
+  ///
+  /// 保留它只为兼容老调用方；新代码不要用——单独改代码字号会破坏
+  /// “各格式与正文的比值恒定”这个不变量（见 `derive_metrics` 的说明）。
   void set_code_font_size(float size);
 
   // —— 语义 / 控制通道 ——
@@ -162,6 +172,12 @@ class MarkdownView : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 只读诊断属性：目前只有 `type_scale`（派生字号的快照）。
+  ///
+  /// 为何进只读表而不进可写表：可写表的契约是“`set` 必须生效”，而整套字号
+  /// 由正文基准派生（`derive_metrics`）——通过 `type_scale` 单独写某一档会让
+  /// “比值恒定”这个不变量立不住。要改就改 `base_font_size`/`code_font_size`。
+  [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
   [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument) -> bool override;
 
   // —— 元素接口 ——
@@ -396,15 +412,69 @@ class MarkdownView : public Element {
   };
 
   /// 已解析的排版参数（随主题刷新；仅当值变化才重排版——换主题配色不需要重排）。
+  ///
+  /// ## 为什么所有字段都是“派生值”而不是常量
+  ///
+  /// 本组件的字号曾是**两套口径**：正文与标题随 `base` 缩放，而行内码/代码块/表格/
+  /// 语言标签取主题的**绝对值**（`font_sm`/`font_xs`/字面量 11）。后果不是一个“稍大稍小”，
+  /// 而是**层级关系随字号整体反转**（`md_type_scale_probe` 实测）：
+  ///
+  /// | 正文基准 | 行内码/代码 | 表格 | 语言标签 |
+  /// |---|---|---|---|
+  /// | 10px | 1.40×（**比正文大**） | 1.20× | 1.10× |
+  /// | 15px | 0.93× | 0.80× | 0.73× |
+  /// | 26px | 0.54×（**只有一半**） | 0.46× | 0.42× |
+  ///
+  /// 同一份文档在小白气泡（13px）与阅读模式（20px）里呈现出**相反**的层级，
+  /// 用户看到的就是“各种格式的字号差距过大且飘”。
+  ///
+  /// 现在只有一个自由变量（`base`），其余全部由它乘系数得到；纵向度量（行高、内边距、
+  /// 项目符号尺寸…）也一并跟随，否则字号变大后会出现“字比行盒高”的挤压
+  /// （探针 `字号 > 行盒高` 判据守这一条）。
+  ///
+  /// 锚点：**14px**（这些纵向常量原本就是在 13~14px 正文下调定的），
+  /// 所以 `base == 14` 时全部派生值与旧观感逐像素一致。
   struct TextMetrics {
     std::array<float, 6> heading_sizes{};
     std::array<float, 6> heading_margins{};
     float base{14.0f};
-    float code{13.0f};
-    float table{12.0f};
+    /// 代码块字号（可由 `set_code_font_size` 显式覆盖）。
+    float code{13.3f};
+    /// 表格字号。
+    float table{13.3f};
+    /// 行内码字号（**跟随所在块**：标题里的行内码按标题字号派生）。
+    float inline_code{13.3f};
+    /// 代码块语言标签字号。
+    float language{11.2f};
+    /// 派生系数（`base / 14`）：纵向度量都用它缩放。
+    float ratio{1.0f};
+    float table_line_height{18.0f};
+    float table_cell_pad_y{5.0f};
+    float table_cell_pad{8.0f};
+    float table_min_row_height{28.0f};
+    float code_pad{12.0f};
+    float language_label_height{16.0f};
+    float inline_code_pad{4.0f};
+    float inline_code_radius{4.0f};
+    float heading_bottom_gap{6.0f};
+    float heading_rule_gap{2.0f};
+    float block_gap{12.0f};
+    float nested_gap{6.0f};
+    float list_indent_step{20.0f};
+    float list_marker_column{18.0f};
+    float list_marker_gap{8.0f};   ///< 项目符号与本行文字之间的间隙
+    float list_item_gap{4.0f};
+    float bullet_size{4.0f};
+    float task_box_size{14.0f};
+    float quote_bar_width{3.0f};
+    float quote_pad_x{12.0f};
+    float quote_pad_y{10.0f};
 
     auto operator==(const TextMetrics& other) const noexcept -> bool = default;
   };
+
+  /// 由正文基准推导整套排版参数（`base` 是唯一自由变量）。
+  static auto derive_metrics(float base) -> TextMetrics;
 
   // —— 内容与状态 ——
   st::md::MdStream stream_{};
@@ -498,11 +568,11 @@ class MarkdownView : public Element {
   void rebuild_rows(const RenderContext& context, float width);
   /// 按**给定控件宽**重排内容（`measure` 与 `arrange` 共用唯一入口）。
   void set_layout_width(const RenderContext& context, float width);
-  /// 按当前 `metrics_.base` 重算六档标题字号。
+  /// 按当前 `metrics_.base` 重算**整套**派生排版参数（不只是标题）。
   ///
   /// `apply_theme` 与 `set_base_font_size` **共用这个口径**：
-  /// 只改正文而不重算标题，标题就会停在旧字号上——
-  /// 那正是“标题与正文层级差距过大”的根因。
+  /// 只改正文而不重算其余格式，代码/表格/行内码就会停在旧字号上——
+  /// 那正是“各格式字号差距过大且飘”的根因。
   void sync_heading_sizes();
   /// 当前排好的行里，内容实际用到的最右 x（`shrink_to_fit` 用）。
   [[nodiscard]] auto intrinsic_content_width() const noexcept -> float;

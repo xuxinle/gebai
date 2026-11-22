@@ -678,6 +678,36 @@
         "src/pkg/*"
       ]
     },
+    "md_type_scale_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/md_type_scale_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "Markdown 各格式字号量尺：每类结构的绘制字号 + 与正文的比值 + 跨基准漂移（判据见源文件头部）"
+    },
+    "md_type_scale_render": {
+      "kind": "executable",
+      "sources": [
+        "tools/md_type_scale_render.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "Markdown 多格式样张渲染成 PNG：字号量尺只能报数，观感必须出图看（文件名带 base，免互相覆盖）"
+    },
+    "md_wrap_overflow_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/md_wrap_overflow_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "折行溢出量尺：排版算的行宽 vs 绘制真实宽度（角色不同/芯片内边距漏算会让行尾凭空出省略号）"
+    },
     "menu_clip_probe": {
       "kind": "executable",
       "sources": [
