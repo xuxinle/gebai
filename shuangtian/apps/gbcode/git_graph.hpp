@@ -25,10 +25,25 @@
 ///   就是**跨道边**（曲线）。
 ///
 /// 这样“边”是**显式的 (fromLane, toLane)**，绘制端不需要再理解字符。
+///
+/// ## 与日志**共用一次子进程**（2026-11-22，性能）
+///
+/// 历史实现是两条命令：`git log`（取展示字段）与 `git rev-list --parents`
+/// （取拓扑）——同一次刷新里对同一段历史跑两遍，实测各 77~99 ms。
+/// 现在 `build_commit_graph` 只吃**已解析的 (hash, parents) 序列**，
+/// 而那份序列由 `read_log_and_graph` 从**一条** `git log --pretty=…%P` 里同时拿到
+/// （`%P` 就是父提交列表，与 `rev-list --parents` 的第二列同源）。
+///
+/// 为什么可以合并（不是“看起来一样就用”）：`git log --topo-order` 与
+/// `git rev-list --parents --topo-order` 在**同一范围**上的提交顺序是同一套
+/// 拓扑遍历的输出——实测本仓 200 条逐条比对，hash 序与父列表**完全一致**
+/// （`tests/git_graph_test.cpp` 的 `git_graph_merged_log_matches_rev_list` 钉住这条）。
+/// 泳道分配的前提是“子一定在父之前出现”，两者都满足。
 
 #pragma once
 
 #include <cstddef>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -63,10 +78,29 @@ struct CommitGraph {
   }
 };
 
+/// 一笔提交的**拓扑信息**（泳道分配的唯一输入）。
+///
+/// 放在头里是因为它同时是 `git log --pretty=…%P` 与 `rev-list --parents`
+/// 两条来源的**公共中间形态**：谁取到的都长这样，`build_commit_graph` 不关心来源。
+struct CommitRev {
+  std::string hash{};
+  std::vector<std::string> parents{};   ///< 第一个父 = 主时间线（继承同道）
+};
+
+/// 从**已解析**的 (hash, parents) 序列算泳道与边（纯函数，不碰子进程）。
+///
+/// 前提：`revs` 按**拓扑序**排（子一定在父之前）。这条不满足时泳道会错，
+/// 但不会崩——所以来源必须是 `--topo-order` 的遍历结果。
+[[nodiscard]] auto build_commit_graph(std::span<const CommitRev> revs) -> CommitGraph;
+
 /// 读提交图（`limit` 个提交；从 `ref`/全部引用起）。
 ///
 /// 只依赖 `rev-list --parents --topo-order`——**不读 `--graph` 的字符画**。
 /// 拓扑序保证“子一定在父之前出现”，这正是逐行分配泳道所需的前提。
+///
+/// ⚠ 需要日志与拓扑**同时**要时不要分别调它与 `read_log`：那会把同一段历史
+/// 读两遍。用 `read_log_and_graph`（一条命令同时给出两者），
+/// 或自己解析后调 `build_commit_graph`。
 [[nodiscard]] auto read_commit_graph(const std::string& cwd, std::size_t limit,
                                      const std::string& ref = {}) -> CommitGraph;
 

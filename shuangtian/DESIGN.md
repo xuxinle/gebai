@@ -274,6 +274,84 @@ include/st/search/search.hpp      src/search/search.cpp      # 枚举 / 路径�
 静默改的症状是"`get` 读回来是新的、宿主驱动的视图不动"。C++ API
 （`set_text`/`set_active`）保留"程序化写入不冒充用户编辑"的旧语义。
 
+#### 3.2.1 读面的性能与并发（2026-11-22，参照 VS Code/IDEA 的 SCM 分频与合批）
+
+设计借蜀自两家编辑器，但**落到具体的进程数与线程数上**：
+
+| 参照 | 它的做法 | 本仓的对应做法 |
+|---|---|---|
+| VS Code `git status` 单命令 + 去抖 | 一次 `status -z` 拿全量，事件驱动而非轮询 | 已如此（`--no-optional-locks` + `-z`），但**刷新频率不变**——这里不改成 watch，因为 git 的 index 不是文件事件能可靠覆盖的 |
+| IDEA `Changelist`（快照内分组） | 变更按属主分组存在快照里，列表读分组是 O(1) | `RepoSnapshot::group_index`：解析时一次算好四组下标，界面读 `indices_in` 零拷贝 |
+| IDEA/VSCode 的“先列表后详情” | 列表只拿身份字段，正文按需拉 | 已如此（`LogEntry.message`/`files` 只在 `read_commit_detail` 填） |
+| 编辑器的“单次命令族” | 一个 API 可能发多条子命令，但**同族一条命令给全** | 见下表的合并 |
+
+**子进程数（实测本仓 2051 文件、200 条日志）**：
+
+| 读面 | 旧 | 新 | 机理 |
+|---|---|---|---|
+| 日志 + 拓扑图 | 2（`log` + `rev-list --parents`，同一段历史两遍） | **1** | `%P` 就是父列表，`build_commit_graph` 吃已解析的 `(hash, parents)` |
+| 分支 / 标签 / 引用 | 3（`branch --all` + 两条 `for-each-ref`） | **1** | 一条 `for-each-ref refs/{heads,remotes,tags}` 带全部字段 |
+| 远程 | 1 + 2×N（`remote` + 每个远程两条 `get-url`） | **1** | `config -z --get-regexp '^remote\..*\.(url\|pushurl)$'` |
+| 上游 | 1（`rev-parse @{upstream}`） | **0** | 分支条目里的 `%(upstream:short)` 已经是它 |
+| 多步操作态 | 0（探 `.git` 文件） | **0** | 不变，但改成先问 `.git` 在哪（见下） |
+| 审计 | 1（`rev-parse --git-dir`） + 读文件 | **0** | 与操作态共用一条 `rev-parse --show-toplevel --absolute-git-dir` |
+| 提交详情 | 3（`--format=%B` / `--numstat` / patch） | **1** | `show --numstat -p --format=%B%x00` 一次给齐，按 NUL + 行首 `diff --git` 分段 |
+| **整批（`read_log_snapshot`）** | **12 条串行** | **5 条、3 路并发** | 日志族 / 引用族 / 操作态+审计三路互不依赖 |
+
+**实测（同机同仓，`tools/git_service_bench.cpp`，best-of-7）**：
+
+- `read_log_snapshot`：**819 ms → 199 ms**（4.1×，其中“条数减少”占 408 ms、“并发”占剩下的）
+- 日志+拓扑（旧 210 ms 两条 / 新 115 ms 一条）
+- `read_commit_detail`：**337 ms → 162 ms**（2.1×）
+- 泳道分配（纯算法，`tools/git_graph_ab_probe.cpp`）：40 道 **18.4 → 8.1 ms**；
+  200 道 **342 → 39.8 ms**（8.6×，且两者输出逐条一致）
+
+**并发边界（写在这里防误用）**：
+
+· 数据层用 `std::async` + **显式 `std::launch::async`**（默认策略允许 `deferred`，会退化成串行）。
+  不用应用层的 `st::app::Tasks`：`git_service` 既要能被后台线程调、也要能被无 Application
+  上下文的测试直调。
+· 并发宽度**只取“真正无依赖的路数”**（现在 3），不是“有多少条命令就开多少线程”：
+  每条命令已经是一个子进程，再拆没有粒度；而多开线程只会放大 git 自己的 `index.lock`
+  竞争（`--no-optional-locks` 只挡了 `status` 的写）。
+· **单读入口不能跑全族**（这一条是实测回归）：`read_branches` 一度也改成跑
+  `read_ref_snapshot`，结果 50 → 152 ms。修法是 `RefPart` 位图——两条路共用
+  同一份解析代码，各自只付自己需要的成本。
+
+**两个顺手修掉的正确性问题**（都是“探错位置”类，与性能同源）：
+
+1. **工作区是仓库子目录时探不到多步操作态**。旧 `read_operation_state` 探
+   `<cwd>/.git/MERGE_HEAD`，而 `.git` 只在仓库根下。实测场景：工作区
+   `gebai/shuangtian`、仓库根 `gebai`——用户在子目录里 merge 撞冲突，界面**不给**
+   「继续 / 跳过 / 中止」入口。现在先 `rev-parse --show-toplevel --absolute-git-dir`
+   问清两个位置（一条命令两个答案），`.git` 位置才是探针根。
+   判据：`tests/git_service_test.cpp` 的 `git_service_operation_state_from_subdirectory`。
+2. **`status` 不带 `-z` 时路径会被引号 + 转义**——旧实现靠 `find(" -> ")` 拆重命名、
+   再剥首尾引号，遇到“路径本身含 ` -> `”会拆错。`-z` 把重命名变成**两条 NUL 记录**
+   （新名 + 原名），解析不再需要 unquote。判据：`git_service_status_z_parses_rename_pairs`。
+
+**等价性守则（每一条同义改写都配一条对着独立真值的用例）**：
+
+| 改写 | 用例 | 真值取法 |
+|---|---|---|
+| 日志与拓扑共用一条命令 | `git_graph_merged_log_matches_rev_list` | 对着 `read_log` + `read_commit_graph` 两条逐字段比 |
+| 引用五路合一条 | `git_service_ref_snapshot_matches_individual_reads` | 对着 `read_branches`/`read_tags`/… 单读版比 |
+| 详情三合一 | `git_service_commit_detail_single_command_segments` | 三段的边界（NUL / 行首 `diff --git`）与内容各自断言 |
+| `-z` 重命名 | `git_service_status_z_parses_rename_pairs` | 真仓库造含空格的重命名，原路径来自下一条记录 |
+| 预分组下标 | `git_service_group_index_matches_predicates` | 对着四个谓词现场过滤的旧口径比 |
+| blame `--porcelain` | `git_service_blame_porcelain_reuses_commit_meta` | 同 commit 多行**逐行**都要有作者/日期 |
+| 审计读尾部 | `git_service_audit_tail_reads_last_lines` | 105 KB 文件上要给出准确的最旧 20 条、且无半条 |
+| 泳道分配 O(N+E) | `git_graph_wide_topology_stays_linear` + `tools/git_graph_ab_probe.cpp` | 合成 40 道宽图：限 100 ms；A/B 探针另验新旧结果逐条一致 |
+
+**界面侧的同源优化（与数据层对称）**：
+
+· `changes_in(group)` 返回**拷贝**、`indices_in(group)` 返回**下标视图**；界面逐行遍历
+  一律用后者（侧栏每帧四个组 = 旧实现 8 次全量拷贝、2000 变更时近百万字节/帧）。
+· `filtered_log()` 改成 `filtered_log_indices()`：过滤产出的是 `size_t`，不产 `LogEntry` 拷贝
+  （表格一帧要调它两次：建行 + e2e 断言面）。
+· 日志表的“图行号 → 表行号”映射：同序时用**平面数组直填**，只有真的对不上
+  （`ref` 变了/图被裁）才退回 `unordered_map`；旧写法每帧建一次 `std::map<std::string, size_t>`。
+
 ## 4. 关键接口
 
 ### 4.1 core

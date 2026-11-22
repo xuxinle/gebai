@@ -34,8 +34,10 @@
 /// **写**（add/checkout/commit…）不在这里跑——调用方把它交给终端作业通道
 /// （输出实时回流、可中止；同步阻塞会把界面卡住几十秒，`run_task` 时代实测过）。
 
+#include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -119,10 +121,29 @@ struct RepoSnapshot {
   std::string error{};       ///< 非空 = 本次读取失败（面板显示可重试的故障态）
   bool is_repo{false};       ///< false = 目录不是 git 仓库（与 error 分开：不是故障）
 
-  /// 按组取条目（同一条 change 可能出现在已暂存与未暂存两组，见文件头注释）。
+  /// **预分组的下标**（`read_snapshot` 解析时就填好；键是 `ChangeGroup` 的枚举值）。
+  ///
+  /// ## 为何要预分组（性能，与 IDEA 的 Changelist 同一思路）
+  ///
+  /// 旧实现里 `changes_in(group)` 每次都**拷贝一份 `GitChange` 向量**——
+  /// 而它被侧栏每帧调 4 次（四个分组）+ `count_in` 又各调一次（又是 4 次全量拷贝）。
+  /// 实测 2000 个变更的仓库、60 fps 下这是每帧 8 × 2000 次字符串拷贝 = **近百万字节/帧**，
+  /// 全部只为“把列表画出来”。分组是**快照的属性**（数据不变分组就不变），
+  /// 应该算一次。现在只存下标（`uint32_t`），读时零拷贝。
+  ///
+  /// ⚠ 一条变更可能同时出现在两个组（既暂存又改：暂存版 + 未暂存版），
+  /// 所以这里是**四个独立的下标表**，不是“每条归一类”。
+  std::array<std::vector<std::uint32_t>, 4> group_index{};
+
+  /// 按组取条目（**拷贝一份**；只在“要自己持有这批条目”时用）。
   [[nodiscard]] auto changes_in(ChangeGroup group) const -> std::vector<GitChange>;
-  /// 组内条数。
+  /// 按组取下标（**零拷贝**；界面逐行遍历用这个）。
+  [[nodiscard]] auto indices_in(ChangeGroup group) const -> std::span<const std::uint32_t>;
+  /// 组内条数（O(1)——不拷贝、不遍历）。
   [[nodiscard]] auto count_in(ChangeGroup group) const -> std::size_t;
+
+  /// 重建分组下标（`changes` 被外部改过之后必须调；`read_snapshot` 已自动调）。
+  void regroup();
 };
 
 /// 读一份状态快照（同步、毫秒级）。`cwd` 是工作区目录。
@@ -160,19 +181,47 @@ struct LogEntry {
 ///
 /// 只返回**提交**（不包含任何“行”概念）——供“按提交维度”做的逻辑（详情/选中）用。
 /// 泳道与边由 `git_graph.*` 的 `read_commit_graph` 单独提供。
+///
+/// ⚠ **日志与拓扑同时要时用 `read_log_and_graph`**：它一条命令就给出两者，
+/// 而分别调本函数与 `read_commit_graph` 会让同一段历史会被读两遍
+/// （实测本仓 200 条：一条 97 ms / 两条 174 ms，纯浪费）。
 [[nodiscard]] auto read_log(const std::string& cwd, std::size_t limit,
                            const std::string& ref = {}) -> std::vector<LogEntry>;
 
-/// 读一个提交的详情（变更文件 + numstat；写入 `entry.files` 并返回 diff 文本）。
+/// 日志 + 拓扑图的**一次读**（日志表与泳道图共用一条子进程）。
+///
+/// ## 为何能合（不是“看着一样就用”）
+///
+/// `git log --topo-order --pretty=…%P` 与 `git rev-list --parents --topo-order`
+/// 在**同一范围**上的输出是同一套拓扑遍历：提交顺序一致，`%P` 与 rev-list 的
+/// 第二列同源（都是父提交的完整 hash）。实测本仓 200 条逐条比对，hash 序与
+/// 父列表**完全一致**。
+///
+/// 这条等价性由 `tests/git_graph_test.cpp` 的
+/// `git_graph_merged_log_matches_rev_list` 钉住——将来 git 若改了 `%P`
+/// 或 `--topo-order` 的语义，那条用例会立刻变红。
+struct LogAndGraph {
+  std::vector<LogEntry> log{};
+  CommitGraph graph{};
+};
+[[nodiscard]] auto read_log_and_graph(const std::string& cwd, std::size_t limit,
+                                      const std::string& ref = {}) -> LogAndGraph;
+
+/// 读一个提交的详情（变更文件 + numstat；写入 `entry.files` 与 `entry.message`，返回 patch 文本）。
+///
+/// 只起**一条**子进程（`show --numstat -p --format=%B%x00`）：提交信息、逐文件计数、
+/// patch 正文三者一次拿齐（详见实现里的分段解析注释）。旧实现是三条。
 [[nodiscard]] auto read_commit_detail(const std::string& cwd, LogEntry& entry) -> std::string;
 
-/// 读分支列表（本地 + 远程；含当前标记与上游跟踪）。
+/// 读分支列表（本地 + 远程；含当前标记与上游跟踪）——**单读版本的便捷入口**；
+/// 同时要标签/暂存/远程时用 `read_ref_snapshot`（一条命令族就给出全部）。
 struct BranchInfo {
   std::string name{};         ///< 完整名（`origin/main` 含远程前缀）
   bool is_remote{false};
   bool is_current{false};
   std::string upstream_short{};   ///< 跟踪的远程分支短名（本地分支才有）
 };
+
 [[nodiscard]] auto read_branches(const std::string& cwd) -> std::vector<BranchInfo>;
 
 /// 远程分支所属的 remote 名（`origin/feature/x` → `origin`；本地分支 → 空串）。
@@ -342,6 +391,20 @@ struct ContentAt {
 /// 非仓库 / git 不可用时返回空串（调用方退回传入目录——那是唯一能给的最佳猜测）。
 [[nodiscard]] auto read_repo_root(const std::string& cwd) -> std::string;
 
+/// 仓库的两个地址（仓库根 + `.git` 目录位置）——**一条 `rev-parse` 同时给出**。
+///
+/// ## 为何两者要分开
+///
+/// 用户打开的工作区可以是仓库的**子目录**（`gebai/shuangtian` 之于仓库 `gebai`），
+/// 而 `.git` 只在仓库根下。旧 `read_operation_state` 直接探 `<cwd>/.git/…`——
+/// 工作区是子目录时就**永远探不到**（merge 中也不会显示“继续/中止”入口，
+/// 而那是冲突时的唯一出路）。顺带也少一条子进程（批量路径原本要两条 `rev-parse`）。
+struct GitDirs {
+  std::string root{};      ///< 仓库根（`--show-toplevel`）
+  std::string git_dir{};   ///< `.git` 真实位置（worktree/submodule 下是文件）
+};
+[[nodiscard]] auto read_git_dirs(const std::string& cwd) -> GitDirs;
+
 /// **冲突文件的三份内容**（`merge`/`rebase` 撞冲突后的“我方 / 共同祖先 / 他方”）。
 ///
 /// 三份都在**暂存区**里，靠序号区分（这也是 `git show :N:path` 里 `N` 的含义）：
@@ -410,6 +473,60 @@ struct RefInfo {
 };
 [[nodiscard]] auto read_refs(const std::string& cwd) -> std::vector<RefInfo>;
 
+/// 读**全部引用**（分支 / 标签 / 暂存 / 远程）的**一次读**（一条命令族）。
+///
+/// ## 为何合成一条（性能，2026-11-22）
+///
+/// 旧实现是“每个视图各一条命令”：`branch --all`（实测本仓 50 ms）、
+/// `for-each-ref refs/tags`（63 ms）、`for-each-ref refs/{heads,remotes}`（65 ms），
+/// 加 `git remote` + 每个远程两条 `get-url` + `stash list`：五个视图共 9 条。
+/// 而它们读的是**同一批 ref**——`for-each-ref` 一个命令就能把三者需要的字段一并给出
+/// （`%(HEAD)` / `%(upstream:short)` / `%(symref)` / `%(objecttype)` /
+/// `%(objectname:short)` / `%(contents:subject)` / `%(creatordate:unix)`），
+/// 远程 URL 在配置里（`config --get-regexp`，一条拿全部）。
+///
+/// ⚠ 三个视图的**分类判据不变**（那是正确性问题，不是性能问题），只是数据源合一：
+///   · 分支：丢 `%(symref)` 非空的（remote 的 HEAD 别名）；远程看 `refs/remotes/` 前缀；
+///   · 标签：`%(objecttype)` 为 `tag` 的是注解标签，其 `objectname` 是标签对象
+///     而非提交——短 hash 仍用它（与旧实现同口径）；结果按 `creatordate` 倒序；
+///   · 引用清单：本地 / 远程（丢 `<remote>/HEAD` 别名）/ 标签三类。
+///
+/// 上游（`upstream`）**不在这里取**：它得看当前分支，而 `RepoSnapshot` 那条
+/// `status -b` 已经给了（`## main...origin/main`）；而分支条目里的
+/// `upstream_short` 就是当前分支的上游————需要单独取时用 `read_upstream`。
+struct RefSnapshot {
+  std::vector<BranchInfo> branches{};
+  std::vector<TagInfo> tags{};
+  std::vector<RefInfo> refs{};
+  std::vector<StashEntry> stashes{};
+  std::vector<RemoteInfo> remotes{};
+  std::string error{};   ///< 非空 = 引用族读取失败（各视图一起退化成空，而不是各行其是）
+};
+
+/// `read_ref_parts` 要哪几路（位图）。
+///
+/// ## 为何要它（实测回归）
+///
+/// `read_ref_snapshot` 是**全族**读；而 `read_branches`/`read_tags`/… 这些
+/// **单读入口**只想要其中一路。若单读也跑全族，它们会从“一条命令”（50 ms）
+/// 变成“三条”（152 ms）——这个回归确实发生过（`tools/git_service_bench.cpp` 量到
+/// `read_branches` 50 → 152 ms）。位图让两条路**共用同一份解析代码**，
+/// 而各自只付自己需要的成本。
+enum class RefPart : unsigned {
+  Refs = 1U << 0,      ///< `for-each-ref`（分支 / 标签 / 引用清单三者的共同数据源）
+  Stashes = 1U << 1,
+  Remotes = 1U << 2,
+};
+
+/// 位图拼合（`RefPart::Refs | RefPart::Remotes`）。
+[[nodiscard]] constexpr auto operator|(RefPart left, RefPart right) -> RefPart {
+  return static_cast<RefPart>(static_cast<unsigned>(left) | static_cast<unsigned>(right));
+}
+
+[[nodiscard]] auto read_ref_snapshot(const std::string& cwd) -> RefSnapshot;
+/// 只读指定的那几路（单读入口用它；`read_ref_snapshot` = 全部三路）。
+[[nodiscard]] auto read_ref_parts(const std::string& cwd, RefPart parts) -> RefSnapshot;
+
 /// 单文件历史（`--follow`，跨重命名）。
 [[nodiscard]] auto read_file_history(const std::string& cwd, const std::string& path,
                                      std::size_t limit = 100) -> std::vector<LogEntry>;
@@ -438,6 +555,14 @@ struct OperationState {
   [[nodiscard]] auto active() const noexcept -> bool { return !kind.empty(); }
 };
 [[nodiscard]] auto read_operation_state(const std::string& cwd) -> OperationState;
+
+/// 同上，但**直接给 `.git` 位置**（批量路径已取过 `read_git_dirs` 时用）。
+///
+/// 为何需要它：这个函数的全部判据都是 `<git_dir>/<状态文件>` 的**存在性**
+/// （文件系统调用，µs 级），与仓库根无关——把 `.git` 位置作为参数就能零子进程，
+/// 而批量路径已经拿到那份值了。
+[[nodiscard]] auto read_operation_state_at(const std::string& git_dir, const std::string& cwd)
+    -> OperationState;
 
 /// 当前分支的上游（`origin/main`；无上游返回空）——推送/拉取按钮据此决定参数。
 [[nodiscard]] auto read_upstream(const std::string& cwd) -> std::string;
@@ -561,15 +686,32 @@ enum class Danger : std::uint8_t {
     -> bool;
 
 /// 读审计尾部（最多 `limit` 条，最旧在前）——界面「操作历史」用。
+///
+/// 实现**只读文件尾部**（审计只追加，而界面只要最后 N 条）：旧实现整读 + 全文扫。
 [[nodiscard]] auto read_audit(const std::string& cwd, std::size_t limit = 100)
+    -> std::vector<std::string>;
+
+/// 同上，但**直接给 `.git` 位置**（批量路径已取过 `read_git_dirs` 时用，省一条 `rev-parse`）。
+[[nodiscard]] auto read_audit_at(const std::string& git_dir, std::size_t limit)
     -> std::vector<std::string>;
 
 /// 一批「回顾面」数据的快照（日志/分支/标签/远程/暂存/引用/上游/操作态/审计）。
 ///
-/// 为何要一个结构：这批读取共 9 条 git 子进程，实测在真实仓库上要 **~3.3 秒**。
+/// 为何要一个结构：旧实现是 9 条 git 子进程串行，实测在真实仓库上要 **~3.3 秒**。
 /// 放在主线程同步做会让界面“出来了但点不动”。拆成「后台算数据 → 主线程落地」时，
 /// 后台不能直接写页面的成员与 `State`（重组单线程，并发写是数据竞争），
 /// 所以用这份纯数据整包过手。
+///
+/// ## 条数（2026-11-22 优化后的契约）
+///
+/// 现在整批只起 **5 条子进程**（旧 12 条），且互不依赖的几条**并发**跑：
+///   · `log_and_graph`：`git log --pretty=…%P`（同时给出日志与拓扑）
+///   · `ref_snapshot`：`for-each-ref refs/heads refs/remotes refs/tags` +
+///     `stash list` + `config --get-regexp remote.*`（其中前两条并发）
+///   · `operation`：`.git` 下状态文件探测（只在不处于多步操作时零子进程）
+///   · `audit`：`rev-parse --absolute-git-dir` + 读文件
+/// 并发宽度取 4（它跑在应用的后台线程里，而那条线程本来就是一个任务；
+/// 再宽会把 git 自己的 index 锁竞争放大，实测没有收益）。
 struct LogSnapshot {
   std::vector<LogEntry> log;
   /// **拓扑图**（节点 + 边，从 `rev-list --parents` 自算）——列表绘制的唯一真值源。
@@ -586,5 +728,4 @@ struct LogSnapshot {
 
 /// 一次读完以上全部（同步、阻塞；调用方负责别在主线程调）。
 [[nodiscard]] auto read_log_snapshot(const std::string& cwd) -> LogSnapshot;
-
 }  // namespace gbcode

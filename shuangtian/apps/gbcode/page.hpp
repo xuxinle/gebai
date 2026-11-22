@@ -1214,8 +1214,14 @@ auto open_recent(const std::string& path) -> void;
 
 
 
-    /// 过滤后的日志（提交信息/作者/路径三个条件都作用在同一条上）。
-  auto filtered_log() const -> std::vector<gbcode::LogEntry>;
+    /// 过滤后的日志（提交信息 / 作者 / 日期 / 分支四个条件都作用在同一条上）。
+  ///
+  /// 返回的是 `git_log_` 里的**下标**而不是拷贝：这个函数在重组时每帧要调两次
+  /// （表格一次 + e2e 断言面一次），而 200 条日志的 `LogEntry` 带 hash/标题/作者/
+  /// 日期/refs 五个字符串——拷贝一份就是上千次分配。而调用方要的只是
+  /// “这一行是哪笔提交”。返回下标就退化成一串 `size_t`（与 IDEA 的
+  /// `VcsLogFilterCollection` → `List<CommitId>` 同一思路：过滤产出引用，不产值）。
+  auto filtered_log_indices() const -> std::vector<std::size_t>;
 
 
   /// 右栏：**选中提交的内容**（元信息 + 汇总 + 文件清单；点文件开并列差异）。

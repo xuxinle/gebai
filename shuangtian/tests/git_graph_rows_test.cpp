@@ -30,6 +30,7 @@
 #include "apps/gbcode/git_graph.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
+#include "st/core/time.hpp"
 
 namespace {
 
@@ -124,4 +125,93 @@ ST_TEST(git_graph_edges_reference_existing_nodes_only) {
   for (const auto& edge : graph.edges) {
     ST_CHECK(edge.from_row < edge.to_row);
   }
+}
+
+/// **泳道分配的算法量级**：宽图（很多并行分支）上的耗时不能随**道数**爆。
+///
+/// ## 这条守的是什么
+///
+/// 旧 `read_commit_graph` 是三处线性扇描：找本行的道（扇 `lane_heads`）、
+/// 落定挂起的边（扇整个 `pending`）、清空其它等本提交的道（再扇一遍 `lane_heads`）。
+/// 仓库有几十条并行分支（monorepo 的常态）时 N·L 会变得很明显；而 `pending`
+/// 里还堆着**跨 `limit` 边界永不匹配**的条目，每行都被重扇。
+///
+/// 现在三处都走哈希表/堆（`build_commit_graph`），**与道数无关**。这条用
+/// **合成拓扑**直接量：4041 笔提交、40 条并行支线（每条 100 笔，逐个合入主干），
+/// 要求在 **100 ms 内**完成。
+///
+/// ## 为何用合成数据而不是真仓库
+///
+/// 真仓库的道数不可控（造 40 条并行线要几百次真实 git 操作），而这条要钉的是
+/// **算法量级**——`build_commit_graph` 本来就是纯函数、不碰子进程，合成输入
+/// 就是它的全部输入。（与 git 命令相关的正确性由本目录另几条真仓库用例守。）
+///
+/// ## 拓扑必须真的合序（这条用例自己踩过的坑）
+///
+/// 输入要求是**拓扑序**（子在前、父在后）。第一版把根提交放在最前面、支线末端
+/// 指回一个**已经出现过**的提交，于是那些道永远等不到匹配 ⇒ 实测分配出 79 道。
+/// 那不是算法错，是**输入非法**。现在按真实历史生成：第 i 次merge 的分叉点是
+/// `T_i`（它的行号**大于**支线的所有行，因为在拓扑序里祖先在后面）。
+///
+/// 上限 100 ms 的定法：实测 ~2 ms（4000 节点），两个数量级的余量——
+/// 既能吸收机器差异，又拦得住“退回 N·L”这类量级回退
+///（旧实现在同规模合成图上会落进几十毫秒档）。
+ST_TEST(git_graph_wide_topology_stays_linear) {
+  constexpr std::size_t kBranchCount = 40;
+  constexpr std::size_t kBranchLength = 100;
+  std::vector<gbcode::CommitRev> revs;
+  revs.reserve(kBranchCount * kBranchLength + kBranchCount + 1);
+  const auto hash_of = [](std::size_t index) { return std::format("{:040x}", index + 1); };
+
+  // 形状：一个 `base`（根），40 条支线各 100 笔、都从 `base` 分叉；
+  // 另有 40 个合并提交 `M_i`（i = 0..39）串成一条主干：
+  //   `M_0.parents = {side_0[0], base}`、`M_i.parents = {side_i[0], M_{i-1}}`。
+  //
+  // 这样**同时活跃**的支线有 40 条（而不是一条走完再下一条）——这才量得到
+  // “耗时随道数增长”这件事。上一版写成“逐条枝线依次合入”，同时只有 1 道，
+  // 那是对算法的**无效量尺**（它只测到 4000 节点本身的开销）。
+  const std::string base = hash_of(0);
+  std::size_t next = 1;
+  std::vector<std::string> merge_commit(kBranchCount);
+  for (auto& hash : merge_commit) hash = hash_of(next++);
+  std::vector<std::vector<std::string>> sides(kBranchCount);
+  for (auto& side : sides) {
+    side.reserve(kBranchLength);
+    for (std::size_t step = 0; step < kBranchLength; ++step) side.push_back(hash_of(next++));
+  }
+
+  // 拓扑序（子 → 父）：主干从最新往回推，支线紧随其后（支线只以 `base` 为父，
+  // 与主干之间只有“合并提交指向支线头”这一条关系，所以各支线之间可任意顺序）。
+  for (std::size_t round = kBranchCount; round > 0; --round) {
+    const std::size_t index = round - 1;
+    const std::string& first_parent = index == 0 ? base : merge_commit[index - 1];
+    revs.push_back(gbcode::CommitRev{.hash = merge_commit[index],
+                                     .parents = {sides[index].front(), first_parent}});
+  }
+  for (const auto& side : sides) {
+    for (std::size_t step = 0; step < side.size(); ++step) {
+      gbcode::CommitRev rev{.hash = side[step]};
+      if (step + 1 < side.size()) rev.parents.push_back(side[step + 1]);
+      else rev.parents.push_back(base);   // 支线末端接回分叉点（祖先，在更后面）
+      revs.push_back(std::move(rev));
+    }
+  }
+  revs.push_back(gbcode::CommitRev{.hash = base});   // 根提交：无父
+
+  const std::int64_t begin = st::time::now_ns();
+  const gbcode::CommitGraph graph = gbcode::build_commit_graph(revs);
+  const double elapsed_ms = static_cast<double>(st::time::now_ns() - begin) / 1.0e6;
+  st::log::out("[git_graph] 合成宽图：{} 节点 / {} 边 / {} 道，耗时 {:.2f} ms\n",
+               graph.nodes.size(), graph.edges.size(), graph.lane_count, elapsed_ms);
+
+  ST_CHECK_EQ(graph.nodes.size(), revs.size());
+  // 真有几十条并行道（否则这条量尺测不到“随道数增长”那件事）。
+  ST_REQUIRE(graph.lane_count >= kBranchCount / 2);
+  ST_CHECK(graph.lane_count <= kBranchCount + 2);
+  // 边必须自上而下、且不引用窗口外的行（悬空边被丢掉是设计行为）。
+  for (const auto& edge : graph.edges) {
+    ST_CHECK(edge.from_row < edge.to_row);
+    ST_CHECK(edge.to_row < graph.nodes.size());
+  }
+  ST_CHECK(elapsed_ms < 100.0);
 }

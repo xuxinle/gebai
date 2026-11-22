@@ -761,7 +761,10 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
               gbcode::ChangeGroup::Conflicted, gbcode::ChangeGroup::Staged,
               gbcode::ChangeGroup::Unstaged, gbcode::ChangeGroup::Untracked};
           for (const auto group : kGroups) {
-            const auto items = git_.changes_in(group);
+            // ⚠ 拿**下标**而不是 `changes_in`：后者每次拷贝一整份 `GitChange` 向量，
+            // 而这里每帧四个组都要走一遍（2000 个变更的大仓就是每帧上千次字符串拷贝）。
+            // 分组是快照的属性（`read_snapshot` 已经算好），读时只拿 `uint32` 下标。
+            const auto items = git_.indices_in(group);
             if (items.empty()) continue;
             const std::string group_name(gbcode::change_group_name(group));
             const auto collapsed_list = git_collapsed_groups_.value();
@@ -816,7 +819,8 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
             // 为何回到单行（用户 2026-11-05 明确要求）：两段式在这种窄侧栏里
             // 行高翻倍、可用行数减半，而列表的主任务是“快速扫一堆文件名”——
             // 单行能一眼看更多条。
-            for (const auto& change : items) {
+            for (const std::uint32_t change_index : items) {
+              const gbcode::GitChange& change = git_.changes[change_index];
               // 悬停判定挂在 **整行容器** 上，而不是行内那个文件名按钮。
               //
               // 为何必须如此（实测故障）：`UiRoot` 的 hover 链是**逐元素直达**

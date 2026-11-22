@@ -830,6 +830,36 @@
         "src/pkg/*"
       ]
     },
+    "git_service_bench": {
+      "//note": "Git 读面的性能量尺（不是测试）：逐条打出 read_snapshot / read_log_snapshot 等入口的墙钟耗时与条数。优化前后各跑一次，数字进 DESIGN.md。它直传 git_service.cpp 与 git_graph.cpp（两者都只依赖 st_core），与 gbcode 目标互不干扰。",
+      "kind": "executable",
+      "sources": [
+        "tools/git_service_bench.cpp",
+        "apps/gbcode/git_service.cpp",
+        "apps/gbcode/git_graph.cpp",
+        "apps/gbcode/git_refs.cpp"
+      ],
+      "extra_include_dirs": [
+        "."
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
+    "git_graph_ab_probe": {
+      "//note": "泳道分配的 A/B 量尺（不是测试）：同一合成拓扑分别喂给旧实现（三处线性扇描，逐行内嵌在本文件里）与新实现，验证结果一致并量耗时。用途是把「改了算法」与「变快了」拆成两件可独立核对的事。",
+      "kind": "executable",
+      "sources": [
+        "tools/git_graph_ab_probe.cpp",
+        "apps/gbcode/git_graph.cpp"
+      ],
+      "extra_include_dirs": [
+        "."
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ]
+    },
     "port_isolation_probe": {
       "kind": "executable",
       "sources": [

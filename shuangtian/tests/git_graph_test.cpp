@@ -217,3 +217,4 @@ ST_TEST(git_graph_lane_count_within_git_art_width) {
   // 自算道数不得明显超出（超出 = 泳道分配在泄漏，同一分支开了多条道）。
   ST_CHECK(graph.lane_count <= bound + 1U);
 }
+

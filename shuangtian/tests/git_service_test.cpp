@@ -726,6 +726,60 @@ ST_TEST(git_service_operation_state_detects_merge_conflict) {
   ST_CHECK(!gbcode::read_operation_state(repo.path()).active());
 }
 
+/// **工作区是仓库子目录时，多步操作态仍然要能探到**（2026-11-22 修）。
+///
+/// ## 缺陷现场
+///
+/// 旧 `read_operation_state` 直接探 `<cwd>/.git/MERGE_HEAD`。而 gbcode 的“工作区”
+/// 可以是仓库的**子目录**（实测：工作区 `gebai/shuangtian`、仓库根 `gebai`）——
+/// 那种情况下 `.git` 只在仓库根下，于是**永远探不到**：用户在子目录里开 gbcode
+/// 做 merge、撞了冲突，界面不会给「继续 / 跳过 / 中止」入口（而那是冲突时
+/// 唯一的出路，不给就只能去命令行擦屁股）。
+///
+/// 修法是“先问 git `.git` 在哪”（`read_git_dirs`，顺带一并拿仓库根）。
+/// 这条用真仓库 + 真子目录把它钉住。
+ST_TEST(git_service_operation_state_from_subdirectory) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  // 仓库里造一个子目录，并在里面放一个文件（子目录自己要有内容才像“真工作区”）。
+  repo.write("sub/inner.txt", "inner\n");
+  repo.run({"add", "."});
+  repo.run({"commit", "-m", "add sub"});
+  const std::string sub = repo.path() + "/sub";
+
+  // 干净时：子目录出发也不能报“在多步操作中”。
+  ST_CHECK(!gbcode::read_operation_state(sub).active());
+  // 仓库根与 git 目录都要能拿到（两者不同！）。
+  const auto dirs = gbcode::read_git_dirs(sub);
+  ST_CHECK(!dirs.root.empty());
+  ST_CHECK(!dirs.git_dir.empty());
+  ST_CHECK(dirs.root != dirs.git_dir);
+
+  // 造 merge 冲突（在子目录里 merge 同样会在 `.git` 写 MERGE_HEAD）。
+  repo.run({"checkout", "-b", "side"});
+  repo.write("a.txt", "side\n");
+  repo.run({"commit", "-am", "side"});
+  repo.run({"checkout", "main"});
+  repo.write("a.txt", "main\n");
+  repo.run({"commit", "-am", "main"});
+  repo.run({"merge", "side"});
+
+  // ⚠ 从**子目录**出发也要看到 merge 态（旧实现在这里绿？不，它会红）。
+  const auto from_sub = gbcode::read_operation_state(sub);
+  ST_CHECK(from_sub.active());
+  ST_CHECK_EQ(from_sub.kind, std::string("merge"));
+  // 从仓库根出发同样能探到（两条路必须同源）。
+  const auto from_root = gbcode::read_operation_state(repo.path());
+  ST_CHECK(from_root.active());
+  ST_CHECK_EQ(from_root.kind, from_sub.kind);
+  repo.run({"merge", "--abort"});
+  ST_CHECK(!gbcode::read_operation_state(sub).active());
+}
+
 ST_TEST(git_service_upstream_reports_tracking_branch) {
   if (!git_available()) {
     std::cout << "[git] git 未安装，跳过" << '\n';
@@ -996,3 +1050,427 @@ ST_TEST(git_service_root_commit_normalizes_to_empty_tree) {
   }
 }
 
+// ————————————————————————————————————————————————————————————————————————————
+// 2026-11-22 性能重构的**等价性守则**
+// ————————————————————————————————————————————————————————————————————————————
+//
+// 这一轮把读面从“12 条子进程、各视图各读一遍”合成了“5 条、能并发的就并发”：
+//
+// | 旧 | 新 |
+// |---|---|
+// | `log` + `rev-list --parents`（同一段历史两遍） | 一条 `log --pretty=…%P` |
+// | `branch --all` + `for-each-ref refs/tags` + `refs/{heads,remotes}` | 一条 `for-each-ref` |
+// | `git remote` + 每个远程两条 `get-url` | 一条 `config --get-regexp` |
+// | `show --format=%B` + `show --numstat` + `show`（三条） | 一条 `show --numstat -p --format=%B%x00` |
+// | `status --porcelain`（非 `-z`） | `status --porcelain -z` |
+// | 界面每帧 `changes_in()` 全量拷贝 | 快照内预分组的下标 |
+//
+// 这些都是**同义改写**，而合并不等于等价——每一条都可能在边界上出错：
+// 字段顺序变了、`-z` 的重命名变成两条记录、`--porcelain` 的元信息只给一次……
+// 所以每一条都要有一条“对着**独立真值**”的用例。真值取法是**直接调另一条 git
+// 命令**（不拿被测实现自己跟自己比），而重命名/中文/空格这类边界必须用
+// **真仓库**造出来（喂假数据测不出 `-z` 的记录结构）。
+//
+// ## 为何这些用例住在本文件（而不是新开一个 TU）
+//
+// 断言要调 `read_snapshot`/`read_commit_detail`/`read_ref_snapshot` 等
+// **实现在 `git_service.cpp` 里**的函数，而本 TU 用 `#include "…/git_service.cpp"`
+// 把它编进来（见文件头）。另开一个 TU 就与 gbcode 目标重复符号
+// （`st.pkg` 的 `//tests_git_graph` 记着这条约束）。
+
+/// `status -z` 的重命名解析：`R  new\0old\0` 是**两条记录**，不能拆 ` -> `。
+///
+/// ## 这条守的是什么缺陷
+///
+/// 旧实现用非 `-z` 的 porcelain：重命名是**一行** `R  old -> new`，靠 `find(" -> ")`
+/// 拆。两个后果：
+/// ① 路径本身含 ` -> ` 时（真能出现）拆错位置；
+/// ② git 对含空格的路径**加引号**，旧实现只剥“首尾都是引号”的那种，
+///    `R  "old name.txt" -> "新 name.txt"` 剥完还剩内层引号。
+/// `-z` 把重命名拆成两条 NUL 记录（新名 + 原名），这两类问题都不存在——
+/// 而代价是解析逻辑全变了，所以要有这条用例钉住“拆对了”。
+ST_TEST(git_service_status_z_parses_rename_pairs) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  // 造一个**含空格的重命名**并提交（这样工作区里它是“已改名且不再有改动”）。
+  repo.run({"mv", "a.txt", "旧 名字.txt"});
+  repo.run({"commit", "-m", "rename with space"});
+  // 再改一次名（这次是**已暂存的 R**：工作区跟着走）。
+  repo.run({"mv", "旧 名字.txt", "新 名字.txt"});
+
+  const auto snapshot = gbcode::read_snapshot(repo.path());
+  ST_CHECK(snapshot.is_repo);
+  bool saw_rename = false;
+  for (const auto& change : snapshot.changes) {
+    // `-z` 的路径是**原样**的：不带引号、不带转义。
+    ST_CHECK(change.path.find('"') == std::string::npos);
+    if (change.path != "新 名字.txt") continue;
+    saw_rename = true;
+    ST_CHECK_EQ(change.display_code(), 'R');
+    // 原路径来自**下一条 NUL 记录**（含空格的原名，原样）。
+    ST_CHECK_EQ(change.orig_path, std::string("旧 名字.txt"));
+  }
+  ST_CHECK(saw_rename);
+
+  // 中文 + 空格的未跟踪文件也必须原样读出（`-z`：既不引号也不八进制转义）。
+  repo.write("中文 文件.md", "# 标题\n");
+  bool saw_chinese = false;
+  for (const auto& change : gbcode::read_snapshot(repo.path()).changes) {
+    if (change.path == "中文 文件.md") saw_chinese = true;
+  }
+  ST_CHECK(saw_chinese);
+}
+
+/// **预分组下标与“现场过滤”逐条一致**（`group_index` 是快照属性，不能算错）。
+///
+/// 这条对照的是 `GitChange` 上的四个谓词（`is_conflicted` / `has_staged_side`
+/// / `has_unstaged_side` / `is_untracked`）——它们是**语义定义**，而 `group_index`
+/// 是它的缓存。两者若漂移，界面会把文件分到错的组里（而计数还是对的，更难发现）。
+ST_TEST(git_service_group_index_matches_predicates) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  // 四种状态各一份：未跟踪、已暂存、只改工作区、既暂存又改。
+  repo.write("new.txt", "n\n");
+  repo.write("a.txt", "line1\nSTAGED\n");
+  repo.run({"add", "a.txt"});
+  repo.write("b.txt", "bee2\n");
+  repo.write("c.txt", "staged\n");
+  repo.run({"add", "c.txt"});
+  repo.write("c.txt", "staged\nmore\n");
+
+  const auto snapshot = gbcode::read_snapshot(repo.path());
+  ST_CHECK(snapshot.is_repo);
+  ST_REQUIRE(!snapshot.changes.empty());
+
+  for (const gbcode::ChangeGroup group :
+       {gbcode::ChangeGroup::Conflicted, gbcode::ChangeGroup::Staged,
+        gbcode::ChangeGroup::Unstaged, gbcode::ChangeGroup::Untracked}) {
+    // 真值：现场按谓词过滤（旧实现的做法）。
+    std::vector<std::string> expected;
+    for (const auto& change : snapshot.changes) {
+      bool hit = false;
+      switch (group) {
+        case gbcode::ChangeGroup::Conflicted: hit = change.is_conflicted(); break;
+        case gbcode::ChangeGroup::Staged: hit = change.has_staged_side(); break;
+        case gbcode::ChangeGroup::Unstaged:
+          hit = change.has_unstaged_side() && !change.is_conflicted();
+          break;
+        case gbcode::ChangeGroup::Untracked: hit = change.is_untracked(); break;
+      }
+      if (hit) expected.push_back(change.path);
+    }
+    // 被测：预分组下标 → 路径。
+    std::vector<std::string> actual;
+    for (const std::uint32_t index : snapshot.indices_in(group)) {
+      actual.push_back(snapshot.changes[index].path);
+    }
+    std::cout << "[git] " << gbcode::change_group_name(group) << "：预期 " << expected.size()
+              << " 条 / 预分组 " << actual.size() << " 条" << '\n';
+    ST_CHECK(expected == actual);
+    // 计数必须走 O(1) 那条路（不是“调 changes_in 再 size”）。
+    ST_CHECK_EQ(snapshot.count_in(group), expected.size());
+    // 拷贝版（`changes_in`）也必须与下标版一致（两套出口不能分叉）。
+    ST_CHECK_EQ(snapshot.changes_in(group).size(), expected.size());
+  }
+
+  // 「既暂存又改」必须**同时在两组**（XY 矩阵的核心语义，见 git_service.hpp）。
+  bool c_in_both = false;
+  for (const std::uint32_t staged : snapshot.indices_in(gbcode::ChangeGroup::Staged)) {
+    if (snapshot.changes[staged].path != "c.txt") continue;
+    for (const std::uint32_t unstaged : snapshot.indices_in(gbcode::ChangeGroup::Unstaged)) {
+      if (unstaged == staged) c_in_both = true;
+    }
+  }
+  ST_CHECK(c_in_both);
+}
+
+/// `read_commit_detail` 一条命令给出三者：**提交信息 / numstat / patch** 都在，
+/// 且边界切对了（`%B` 到 NUL、numstat 到第一个行首 `diff --git`）。
+///
+/// ## 这条守的是什么
+///
+/// 旧实现三条命令各取一份。合成一条最容易错的是**分段边界**：
+///   · `%B` 不以 NUL 结尾时会把正文与 numstat 粘在一起；
+///   · 按空行切会在“提交正文自带空行”时切错（正文本来就多段）；
+///   · `diff --git` 出现在别处时按 `find` 切会切在中间。
+/// 这条造一个**多段正文 + 多行改动**的提交，把这三处都覆盖到。
+ST_TEST(git_service_commit_detail_single_command_segments) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  repo.write("a.txt", "line1\nline2\nline3\nline4\n");
+  repo.run({"add", "."});
+  repo.run({"commit", "-m", "标题行\n\n第一段正文。\n\n第二段正文（前面还有空行）。"});
+
+  auto entries = gbcode::read_log(repo.path(), 1);
+  ST_REQUIRE(!entries.empty());
+  auto entry = entries.front();
+  const std::string patch = gbcode::read_commit_detail(repo.path(), entry);
+
+  // ① 提交信息：全部三段都在（不是只剩标题）。
+  ST_CHECK(entry.message.find("标题行") != std::string::npos);
+  ST_CHECK(entry.message.find("第一段正文") != std::string::npos);
+  ST_CHECK(entry.message.find("第二段正文") != std::string::npos);
+  // 尾部空行被剥掉（否则详情栏多一块空白）。
+  ST_CHECK(!entry.message.empty() && entry.message.back() != '\n');
+  // numstat 的制表符不能漏进提交信息（分段边界的直接判据）。
+  ST_CHECK(entry.message.find('\t') == std::string::npos);
+
+  // ② numstat：那条改动在（计数是数字、路径不带制表符）。
+  ST_REQUIRE(!entry.files.empty());
+  bool saw_a = false;
+  for (const auto& [path, added, removed] : entry.files) {
+    ST_CHECK(!path.empty());
+    ST_CHECK(path.find('\t') == std::string::npos);   // 没把下一段切进来
+    if (path == "a.txt") {
+      saw_a = true;
+      ST_CHECK(added > 0);
+    }
+    std::cout << "[git] detail file: " << path << " +" << added << " -" << removed << '\n';
+  }
+  ST_CHECK(saw_a);
+
+  // ③ patch：是**真 patch**（从行首 `diff --git ` 起，含增行），
+  //    而且不能把 numstat 段又吐一遍（否则会出现 `<数字>\t<数字>\t`）。
+  ST_CHECK(patch.starts_with("diff --git "));
+  ST_CHECK(patch.find("+line4") != std::string::npos);
+  ST_CHECK(patch.find("\t1\t") == std::string::npos);
+}
+
+/// `read_ref_snapshot` 的多路输出与**各自单读**逐条一致（一条命令族替代五组命令）。
+///
+/// 把“合并”与“正确”分开守：分类判据（symref 别名、`refs/remotes/` 前缀、
+/// 注解标签、pushurl 回退）全在合并后的那条解析里，而它们各自都有过**实测缺陷**
+/// （见 `tests/gbcode_branches_test.cpp` 的现场记录）。这里对着真仓库逐一验。
+ST_TEST(git_service_ref_snapshot_matches_individual_reads) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  // 名字含 `/` 的本地分支（远程判据的照妖镜）。
+  repo.run({"branch", "feature/x"});
+  // 两个标签（一轻一注解）。
+  repo.run({"tag", "light"});
+  repo.run({"tag", "-a", "annotated", "-m", "注解消息"});
+  // 一个真远程 + `<remote>/HEAD` 别名（symref 的照妖镜）。
+  const std::string remote = repo.path() + "/remote.git";
+  repo.run({"init", "-q", "--bare", "--template=", remote});
+  repo.run({"remote", "add", "origin", remote});
+  repo.run({"push", "-q", "origin", "HEAD:refs/heads/main"});
+  repo.run({"fetch", "-q", "origin"});
+  (void)repo.run({"remote", "set-head", "origin", "--auto"});
+  // ⚠ `%(upstream:short)` 不靠“有没有 origin/main 这个 ref”，而靠**分支的上游配置**
+  // （`branch.main.remote` + `branch.main.merge`）。`git push` 首推**不会**自动写它
+  // （只有 `push -u` 才写）——而这条用例要验的正是“上游短名能读出来”。
+  repo.run({"config", "branch.main.remote", "origin"});
+  repo.run({"config", "branch.main.merge", "refs/heads/main"});
+  // 带 pushurl 的第二个远程（pushurl 回退逻辑的照妖镜）。
+  repo.run({"remote", "add", "beta", "https://beta.example/repo.git"});
+  repo.run({"config", "remote.beta.pushurl", "https://beta.example/push.git"});
+  // 一条 stash。
+  repo.write("a.txt", "line1\nstashed\n");
+  repo.run({"stash", "push", "-m", "工作中的改动"});
+
+  const auto snapshot = gbcode::read_ref_snapshot(repo.path());
+
+  // —— 分支：与 `read_branches`（同一条路的便捷入口）逐条一致 ——
+  const auto branches = gbcode::read_branches(repo.path());
+  ST_REQUIRE(!branches.empty());
+  ST_CHECK_EQ(snapshot.branches.size(), branches.size());
+  for (std::size_t index = 0; index < std::min(snapshot.branches.size(), branches.size());
+       ++index) {
+    ST_CHECK_EQ(snapshot.branches[index].name, branches[index].name);
+    ST_CHECK_EQ(snapshot.branches[index].is_remote, branches[index].is_remote);
+    ST_CHECK_EQ(snapshot.branches[index].is_current, branches[index].is_current);
+  }
+  // `origin`（remote 的 HEAD 别名）不得出现在任何分支里。
+  for (const auto& branch : snapshot.branches) ST_CHECK(branch.name != "origin");
+  // 名字含 `/` 的本地分支必须留在本地组。
+  const auto feature =
+      std::find_if(snapshot.branches.begin(), snapshot.branches.end(),
+                   [](const gbcode::BranchInfo& branch) { return branch.name == "feature/x"; });
+  ST_REQUIRE(feature != snapshot.branches.end());
+  ST_CHECK(!feature->is_remote);
+  // 当前分支恰好一条，且带上游短名（`origin/main`）。
+  std::size_t current = 0;
+  for (const auto& branch : snapshot.branches) {
+    if (!branch.is_current) continue;
+    ++current;
+    ST_CHECK(!branch.is_remote);
+    ST_CHECK_EQ(branch.upstream_short, std::string("origin/main"));
+  }
+  ST_CHECK_EQ(current, std::size_t{1});
+
+  // —— 标签：两个都在，注解/轻量分得清 ——
+  ST_CHECK_EQ(snapshot.tags.size(), std::size_t{2});
+  bool saw_annotated = false;
+  bool saw_light = false;
+  for (const auto& tag : snapshot.tags) {
+    if (tag.name == "annotated") {
+      saw_annotated = true;
+      ST_CHECK(tag.annotated);
+      ST_CHECK_EQ(tag.subject, std::string("注解消息"));
+    }
+    if (tag.name == "light") {
+      saw_light = true;
+      ST_CHECK(!tag.annotated);
+    }
+  }
+  ST_CHECK(saw_annotated);
+  ST_CHECK(saw_light);
+  // 单读版（`read_tags`）与合并版一致（含排序）。
+  const auto tags_again = gbcode::read_tags(repo.path());
+  ST_CHECK_EQ(tags_again.size(), snapshot.tags.size());
+  for (std::size_t index = 0; index < std::min(tags_again.size(), snapshot.tags.size()); ++index) {
+    ST_CHECK_EQ(tags_again[index].name, snapshot.tags[index].name);
+  }
+
+  // —— 远程：两个都在；未配 pushurl 的回退到拉取 URL ——
+  ST_CHECK_EQ(snapshot.remotes.size(), std::size_t{2});
+  for (const auto& info : snapshot.remotes) {
+    ST_CHECK(!info.fetch_url.empty());
+    ST_CHECK(!info.push_url.empty());   // 回退逻辑：不许空
+    if (info.name == "beta") {
+      ST_CHECK_EQ(info.push_url, std::string("https://beta.example/push.git"));
+    }
+  }
+  const auto remotes = gbcode::read_remotes(repo.path());
+  ST_CHECK_EQ(remotes.size(), snapshot.remotes.size());
+  for (std::size_t index = 0; index < std::min(remotes.size(), snapshot.remotes.size());
+       ++index) {
+    ST_CHECK_EQ(remotes[index].name, snapshot.remotes[index].name);
+    ST_CHECK_EQ(remotes[index].fetch_url, snapshot.remotes[index].fetch_url);
+    ST_CHECK_EQ(remotes[index].push_url, snapshot.remotes[index].push_url);
+  }
+
+  // —— stash：一条，消息读得出 ——
+  ST_REQUIRE(snapshot.stashes.size() == 1);
+  ST_CHECK_EQ(snapshot.stashes.front().index, std::string("stash@{0}"));
+  ST_CHECK(snapshot.stashes.front().message.find("工作中的改动") != std::string::npos);
+
+  // —— 引用清单：本地/远程/标签三类都有，且不含 `<remote>/HEAD` ——
+  bool saw_local = false;
+  bool saw_remote = false;
+  bool saw_tag = false;
+  for (const auto& ref : snapshot.refs) {
+    if (ref.kind == "local" && ref.name == "main") saw_local = true;
+    if (ref.kind == "remote" && ref.name == "origin/main") saw_remote = true;
+    if (ref.kind == "tag" && ref.name == "light") saw_tag = true;
+    ST_CHECK(!ref.name.ends_with("/HEAD"));
+  }
+  ST_CHECK(saw_local);
+  ST_CHECK(saw_remote);
+  ST_CHECK(saw_tag);
+  ST_CHECK_EQ(gbcode::read_refs(repo.path()).size(), snapshot.refs.size());
+}
+
+/// `read_blame` 用 `--porcelain`（同 commit 元信息只出现一次）**不能丢作者/日期**。
+///
+/// ## 这条守的是什么
+///
+/// `--line-porcelain` 每行都重发一整套元信息，`--porcelain` **只在某个 commit
+/// 第一次出现时**发（实测同一文件 549 KB → 109 KB）。省下来的体积换来一个真实风险：
+/// 后续同 commit 的行如果按“块首行 → 立刻读元信息”的朴素写法解析，就会拿到
+/// 上一块的空/错误值。这条造“一个提交写 8 行”，此时大部分行共用同一 commit，
+/// 正是那条路径。
+ST_TEST(git_service_blame_porcelain_reuses_commit_meta) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  std::string text;
+  for (int line = 1; line <= 8; ++line) text += std::format("line {}\n", line);
+  repo.write("blame.txt", text);
+  repo.run({"add", "blame.txt"});
+  repo.run({"commit", "-m", "eight lines"});
+
+  const auto lines = gbcode::read_blame(repo.path(), "", "blame.txt", 1, 0);
+  ST_REQUIRE(lines.size() == 8);
+  for (std::size_t index = 0; index < lines.size(); ++index) {
+    // 行号连号（`-L` 不生效时这里会先红）。
+    ST_CHECK_EQ(lines[index].line, index + 1);
+    // **每一行**都有作者与日期（不是只有第一行有：那是 `--porcelain` 的坑）。
+    ST_CHECK_EQ(lines[index].author, std::string("Tester"));
+    ST_CHECK_EQ(lines[index].date.size(), std::size_t{10});
+    ST_CHECK(!lines[index].hash.empty());
+    ST_CHECK_EQ(lines[index].content, std::format("line {}", index + 1));
+  }
+  // 限定区间：只取第 3 行起 2 行。
+  const auto slice = gbcode::read_blame(repo.path(), "", "blame.txt", 3, 2);
+  ST_REQUIRE(slice.size() == 2);
+  ST_CHECK_EQ(slice.front().line, std::size_t{3});
+  ST_CHECK_EQ(slice.front().content, std::string("line 3"));
+  ST_CHECK_EQ(slice.back().content, std::string("line 4"));
+  // 区间首行的作者也不能空（区间从中间开始时，那个 commit 的元信息**在这段输出里**
+  // 仍是第一次出现，所以能读到）。
+  ST_CHECK_EQ(slice.front().author, std::string("Tester"));
+}
+
+/// `read_audit` 的尾部读取：**超过 64 KB 时只读尾部**，且结果与整读一致。
+///
+/// ## 这条守的是什么
+///
+/// 审计文件只追加（每次写操作一条），而界面只要最后 N 条。改成“读文件尾部
+/// 64 KB”后有两个边界：
+/// ① 窗口首部会**切断一条记录**——必须丢掉那半条（否则上层拿到非法 JSON 行）；
+/// ② 截断后仍要给出**准确的最旧在前 N 条**（不是“窗口里的全部”）。
+ST_TEST(git_service_audit_tail_reads_last_lines) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  const auto git_dir = st::process::run("git", {"rev-parse", "--absolute-git-dir"},
+                                       st::process::Options{.cwd = repo.path()});
+  ST_REQUIRE(git_dir.has_value());
+  const std::string dir = std::string(st::trim(git_dir->stdout_text));
+  ST_REQUIRE(!dir.empty());
+  const std::string path = st::fs::join(dir, "st-audit.jsonl");
+
+  // 直接灌 800 条（`append_audit` 一次一条；文件格式是公开契约）——每条约 130 字节，
+  // 合计 ~105 KB，**超过 64 KB 的尾部窗口**（这正是要测的边界）。
+  std::string bulk;
+  bulk.reserve(160 * 800);
+  for (int index = 0; index < 800; ++index) {
+    bulk += std::format(
+        "{{\"time\":\"2026-01-01T00:00:00Z\",\"action\":\"op-{:04d}\","
+        "\"command\":\"git status --porcelain\",\"result\":\"ok\"}}\n",
+        index);
+  }
+  ST_REQUIRE(st::fs::write_text(path, bulk).has_value());
+  std::cout << "[git] 审计文件 " << bulk.size() << " 字节（超过尾部窗口 64 KB）" << '\n';
+  ST_REQUIRE(bulk.size() > 64 * 1024);
+
+  const auto tail = gbcode::read_audit(repo.path(), 20);
+  ST_REQUIRE(tail.size() == 20);
+  // 最旧在前：最后 20 条 = op-0780 .. op-0799。
+  ST_CHECK(tail.front().find("op-0780") != std::string::npos);
+  ST_CHECK(tail.back().find("op-0799") != std::string::npos);
+  // 每一条都是**完整** JSON 行（截断的那半条被丢掉了，不是坏了还在）。
+  for (const std::string& line : tail) {
+    ST_CHECK(line.starts_with("{\"time\""));
+    ST_CHECK(line.ends_with("}"));
+  }
+  // 小文件路径（窗口未触发时应给出全部）：写一份两条的。
+  ST_REQUIRE(st::fs::write_text(path, "{\"a\":1}\n{\"b\":2}\n").has_value());
+  const auto small = gbcode::read_audit(repo.path(), 20);
+  ST_REQUIRE(small.size() == 2);
+  ST_CHECK_EQ(small.front(), std::string("{\"a\":1}"));
+  ST_CHECK_EQ(small.back(), std::string("{\"b\":2}"));
+}

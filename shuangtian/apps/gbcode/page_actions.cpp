@@ -1864,9 +1864,16 @@ void CodeEditorPage::load_active_text() {
   /// 而这一层的真实需求是“这一组我全要/全不要”——把它做成一次命令，
   /// 用户在终端里看到的也是一条完整命令（而不是一串）。
   void CodeEditorPage::stage_group(gbcode::ChangeGroup group, bool stage) {
-    for (const auto& change : git_.changes_in(group)) {
-      git_stage(change.path, stage);
+    // 同样用下标（不拷贝整组 `GitChange`）：这个函数在“全部暂存/全部取消暂存”
+    // 上两条组各调一次，500 个变更时就是 1000 次字符串拷贝——而它只需要路径。
+    // ⚠ `git_stage` 会把 `git_refresh_pending_` 置真、可能触发重组，
+    // 所以**先把路径收完再逐条发**（不能边遍历 `git_.changes` 边等它被重建）。
+    std::vector<std::string> paths;
+    paths.reserve(git_.changes.size());
+    for (const std::uint32_t index : git_.indices_in(group)) {
+      paths.push_back(git_.changes[index].path);
     }
+    for (const std::string& path : paths) git_stage(path, stage);
   }
 
 

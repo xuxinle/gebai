@@ -850,8 +850,8 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     //
     // 泳道列由**节点-边图**（`Table::set_graph`）表示，不走文本列。
     //
-    // 数据层只有一份提交列表（`filtered_log`）+ 一份拓扑图（`commit_graph`），
-    // 没有任何“行”概念——字符网格通道已彻底移除。
+      // 数据层只有一份提交列表（`git_log_`，过滤结果是它的下标）+ 一份拓扑图
+  //（`commit_graph`），没有任何“行”概念——字符网格通道已彻底移除。
     (void)custom<Table>(c, [this](Table& table) {
       table.set_id("git-log-table");
       // **不要表头**：这四列的含意自明（提交信息/作者/日期/哈希），扫日志时
@@ -860,30 +860,44 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       table.set_show_header(false);
       // 行 = 提交（过滤后的）。过滤会把某些提交去掉，所以行号要**重新算**：
       // 拓扑图里的 `row` 是“未过滤拓扑序里的下标”，不能直接当表行号用。
-      // 下面按 hash 建一次映射（O(n)），同时维护“保留提交在拓扑图里的原下标”
-      // 供边重映射使用。
-      const auto rows = filtered_log();
+      // `rows` 拿到的是 `git_log_` 的**下标**（不拷贝提交本体，见 `filtered_log_indices`）。
+      const auto rows = filtered_log_indices();
       table.clear_rows();   // 每次重组重建：日志量与过滤条件都会变
       // 泳道带宽：默认值（28）只够画一条线，而“圆点+线”与首字之间还需要一档空白。
       table.set_lane_column_width(34.0f);
-      const auto graph = commit_graph();
+      const auto& graph = commit_graph();
       std::vector<Table::GraphNodeSpec> nodes;
       std::vector<Table::GraphEdgeSpec> edges;
       // 行号对齐：拓扑图的 `node.row` 是“**未过滤**拓扑序里的下标”，
       // 而过滤/仅当前分支会去掉一些提交——直接拿来当表行号会整体错位。
-      // 按 hash 建一次映射（O(n)，每帧一次不心疼），并把被去掉的行映射到
-      // `rows.size()`（哨兵值，下面跳过引用它的边）。
+      //
+      // 映射是**平面数组**（`graph_row → table_row`）而不是 hash→行的 `std::map`：
+      // 两边同序时按下标直填（零哈希、零分配），只有对不上时才退回建表。
+      // （旧写法每帧建一次 `std::map<std::string, size_t>`：200 条就是 200 次
+      // 字符串拷贝 + 树插入，而它唯一的用途是把图的行号换算成表行号。）
       if (!graph.nodes.empty()) {
-        std::map<std::string, std::size_t> row_of_hash;
-        for (std::size_t index = 0; index < rows.size(); ++index) {
-          row_of_hash.emplace(rows[index].hash, index);
-        }
         std::vector<std::size_t> table_row_of_graph(graph.nodes.size(), rows.size());
+        const bool aligned = graph.nodes.size() == git_log_.size();
+        if (aligned) {
+          // 同序：`rows` 里的值就是日志的全局下标，也是图的行号。
+          for (std::size_t index = 0; index < rows.size(); ++index) {
+            table_row_of_graph[rows[index]] = index;
+          }
+        } else {
+          std::unordered_map<std::string_view, std::size_t> row_of_hash;
+          row_of_hash.reserve(rows.size());
+          for (std::size_t index = 0; index < rows.size(); ++index) {
+            row_of_hash.emplace(git_log_[rows[index]].hash, index);
+          }
+          for (std::size_t index = 0; index < graph.nodes.size(); ++index) {
+            const auto found = row_of_hash.find(graph.nodes[index].hash);
+            if (found != row_of_hash.end()) table_row_of_graph[index] = found->second;
+          }
+        }
+        nodes.reserve(rows.size());
         for (std::size_t index = 0; index < graph.nodes.size(); ++index) {
-          const auto found = row_of_hash.find(graph.nodes[index].hash);
-          if (found == row_of_hash.end()) continue;
-          table_row_of_graph[index] = found->second;
-          nodes.push_back(Table::GraphNodeSpec{.row = found->second,
+          if (table_row_of_graph[index] >= rows.size()) continue;
+          nodes.push_back(Table::GraphNodeSpec{.row = table_row_of_graph[index],
                                                .lane = graph.nodes[index].lane});
         }
         for (const auto& edge : graph.edges) {
@@ -958,7 +972,8 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       // 线被撞了一下（实测截图：曲线几乎看不见，只剩一个凸起）。28px 给了曲线
       // 上下各半行的缓冲，仍能 4 屏看到 ~20 条提交（原来约 23 条）。
       table.set_row_height(28.0f);
-      for (const auto& entry : rows) {
+      for (const std::size_t row_index : rows) {
+        const gbcode::LogEntry& entry = git_log_[row_index];
         // refs（分支/标签胶囊）拼在提交信息尾部：它是**这条提交的身份装饰**，
         // 单独开一列会在窄视图里把真正的内容挤没。
         std::string subject = entry.subject;
@@ -967,7 +982,7 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
           for (const auto& ref : entry.refs) refs += " [" + ref + "]";
           subject += refs;
         }
-        std::vector<std::string> cells{subject};
+        std::vector<std::string> cells{std::move(subject)};
         if (log_show_author_.value()) cells.push_back(entry.author);
         if (log_show_date_.value()) cells.push_back(entry.date);
         if (log_show_hash_.value()) cells.push_back(entry.short_hash);
@@ -976,7 +991,7 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       // 选中行与左栏的“当前提交”同源（同一条高亮，不是两个独立状态）。
       if (!git_selected_hash_.empty()) {
         for (std::size_t index = 0; index < rows.size(); ++index) {
-          if (rows[index].short_hash == git_selected_hash_) {
+          if (git_log_[rows[index]].short_hash == git_selected_hash_) {
             table.set_selected_row(index);
             break;
           }
@@ -984,12 +999,12 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
       }
       // 点行 = 看这条提交的详情。行下标就是 `rows` 下标（行 = 提交，无偏移）。
       table.set_on_row_click([this, rows](std::size_t row) {
-        if (row < rows.size()) show_commit(rows[row]);
+        if (row < rows.size()) show_commit(git_log_[rows[row]]);
       });
     }, {.grow = true, .id = "git-log-host"});
     // 给 e2e 用的断言面：当前可见行区间（“表格真的在显示数据”而非空壳）。
     (void)text(c, [this] {
-      const std::size_t total = filtered_log().size();
+      const std::size_t total = filtered_log_indices().size();
       return total == 0U ? std::string("（没有提交，或读取失败）")
                          : std::string{};
     }, {.id = "git-log-empty"});
@@ -1034,7 +1049,7 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     }
     return false;
   }
-  auto CodeEditorPage::filtered_log() const -> std::vector<gbcode::LogEntry> {
+  auto CodeEditorPage::filtered_log_indices() const -> std::vector<std::size_t> {
     const std::string needle = std::string(st::trim(log_filter_text_.value()));
     const bool current_only = log_filter_current_branch_.value();
     // 作者 / 日期两个筛选（IDEA 工具栏同形）。
@@ -1083,26 +1098,53 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     // 正确的集合是 `git rev-list <ref>`。
     const std::string& branch_ref = log_filter_branch_.value();
     const bool by_branch = !branch_ref.empty() && !log_filter_branch_commits_.empty();
-    std::set<std::string> branch_set;
+    // 分支集合用**视图**建一次（不拷贝 200 个 40 位 hash 字符串——
+    // 旧实现是 `std::set<std::string>`：200 次分配 + 树查找）。
+    std::vector<std::string_view> branch_hashes;
     if (by_branch) {
-      branch_set.insert(log_filter_branch_commits_.begin(), log_filter_branch_commits_.end());
+      branch_hashes.reserve(log_filter_branch_commits_.size());
+      for (const std::string& hash : log_filter_branch_commits_) branch_hashes.emplace_back(hash);
+      std::ranges::sort(branch_hashes);
     }
     // “仅当前分支”的判据：**拓扑图里道号 0**。
     //
     // 道 0 的定义就是“从 HEAD 一路走第一个父提交的那条线”（见 `git_graph.cpp`），
     // 也就是当前分支本身，所以它天然是“当前分支上的提交”这个集合。
     // 道号要从未过滤的图里查（过滤后的行号已经重排过）。
-    std::map<std::string, std::size_t> lane_of_hash;
+    //
+    // 用**平面数组**而不是 hash→lane 的 `std::map`：`LogEntry` 的 hash 是 40 位定长，
+    // 而 `git_log_` 与 `git_graph_.nodes` 在正常路径下**同序同长**（两者都是
+    // `--all --topo-order` 的同一份输出）。先试按下标直取，只有真的对不上
+    // （`ref` 变了、图被裁过）才退回建表。
+    std::unordered_map<std::string_view, std::size_t> lane_of_hash;
     if (current_only) {
-      for (const auto& node : git_graph_.nodes) lane_of_hash.emplace(node.hash, node.lane);
+      bool aligned = git_graph_.nodes.size() == git_log_.size();
+      for (std::size_t index = 0; aligned && index < git_log_.size(); ++index) {
+        if (git_graph_.nodes[index].hash != git_log_[index].hash) aligned = false;
+      }
+      if (!aligned) {
+        lane_of_hash.reserve(git_graph_.nodes.size());
+        for (const auto& node : git_graph_.nodes) lane_of_hash.emplace(node.hash, node.lane);
+      }
     }
-    std::vector<gbcode::LogEntry> out;
+    std::vector<std::size_t> out;
     out.reserve(git_log_.size());
-    for (const auto& entry : git_log_) {
-      if (by_branch && !branch_set.contains(entry.hash)) continue;
+    for (std::size_t index = 0; index < git_log_.size(); ++index) {
+      const gbcode::LogEntry& entry = git_log_[index];
+      if (by_branch &&
+          !std::ranges::binary_search(branch_hashes, std::string_view(entry.hash))) {
+        continue;
+      }
       if (current_only) {
-        const auto found = lane_of_hash.find(entry.hash);
-        if (found == lane_of_hash.end() || found->second != 0) continue;
+        std::size_t lane = 0;
+        if (lane_of_hash.empty()) {
+          lane = index < git_graph_.nodes.size() ? git_graph_.nodes[index].lane : 1U;
+        } else {
+          const auto found = lane_of_hash.find(entry.hash);
+          if (found == lane_of_hash.end()) continue;
+          lane = found->second;
+        }
+        if (lane != 0) continue;
       }
       if (!needle.empty()) {
         const bool hit = entry.subject.find(needle) != std::string::npos ||
@@ -1116,7 +1158,7 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
           entry.date.compare(0, 10, earliest_date) < 0) {
         continue;
       }
-      out.push_back(entry);
+      out.push_back(index);
     }
     return out;
   }
@@ -1567,19 +1609,23 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
   /// 按分支筛日志（**不检出**，见头文件里的取舍说明）。
   void CodeEditorPage::filter_log_by_branch(const gbcode::BranchInfo& branch) {
     const std::string ref = branch.name;
-    // 再点同一条 = 取消（筛选开关的常见词形，与侧栏视图按钮一致）。
-    if (log_filter_branch_.value() == ref) {
-      clear_log_branch_filter();
-      // 回到“全部提交”的范围：**同步**重读（与筛选时同一做法）。
-      //
-      // 为何不用 `git_log_loaded_ = false` 走异步泵：那会留下一帧“筛选已取消、
-      // 但列表还是旧数据”的中间态（实测：标题写 master、第一行却是别的分支的提交）。
-      // 同步读 200 条实测 ~10ms，代价可以接受。
-      git_log_ = gbcode::read_log(workspace_, 200);
-      git_graph_ = gbcode::read_commit_graph(workspace_, 200);
-      status_.set("日志：已取消分支筛选");
-      return;
-    }
+          // 再点同一条 = 取消（筛选开关的常见词形，与侧栏视图按钮一致）。
+      if (log_filter_branch_.value() == ref) {
+        clear_log_branch_filter();
+        // 回到“全部提交”的范围：**同步**重读（与筛选时同一做法）。
+        //
+        // 为何不用 `git_log_loaded_ = false` 走异步泵：那会留下一帧“筛选已取消、
+        // 但列表还是旧数据”的中间态（实测：标题写 master、第一行却是别的分支的提交）。
+        // 同步读 200 条实测 ~100 ms，代价可以接受。
+        //
+        // 日志与拓扑**一条命令拿齐**（`read_log_and_graph`）：分别调
+        // `read_log` 与 `read_commit_graph` 会把同一段历史读两遍。
+        auto both = gbcode::read_log_and_graph(workspace_, 200);
+        git_log_ = std::move(both.log);
+        git_graph_ = std::move(both.graph);
+        status_.set("日志：已取消分支筛选");
+        return;
+      }
     const std::vector<std::string> commits =
         gbcode::read_branch_commits(workspace_, ref, git_log_.size() + 200U);
     if (commits.empty()) {
@@ -1597,8 +1643,9 @@ b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
     // 实测：点 `origin/dev-finops`（它的提交全在 200 条之外）→ 本地集合里一个
     // 都不命中 → 日志表空、而状态栏说“252 条提交”。用户看到的是“这条分支没提交”。
     // `read_log` 支持 `ref` 参数，直接按该分支重取就是正确范围。
-    git_log_ = gbcode::read_log(workspace_, 200, ref);
-    git_graph_ = gbcode::read_commit_graph(workspace_, 200, ref);
+    auto both = gbcode::read_log_and_graph(workspace_, 200, ref);
+    git_log_ = std::move(both.log);
+    git_graph_ = std::move(both.graph);
     status_.set(std::format("日志：只看 {}（{} 条提交）",
                             gbcode::short_branch_name(branch), git_log_.size()));
   }
