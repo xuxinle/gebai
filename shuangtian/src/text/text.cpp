@@ -38,6 +38,24 @@ inline constexpr float kUnbounded = 1.0e9f;
          codepoint == U'\u3000';
 }
 
+/// **排版上零宽的码点**（不该占一个前进宽度）。
+///
+/// 为什么需要（2026-11-22 实测）：`seguiemj.ttf` 给 `U+FE0F`（emoji 变体选择符）
+/// 的 advance 是 **2812 字体单位**（= 1 em，与 emoji 本身同宽）——因为规范上
+/// "emoji 表现"该由 **GSUB 合字**把它吃掉。而本引擎不跑 GSUB，于是
+/// `❤️`（heart + VS16）被排成**两个 emoji 宽**，中间多出一大段空白
+/// （实测 width@32 = 87.88，而不带 VS16 的 = 43.94）。
+///
+/// 口径：这些码点在排版上“零宽”，但**仍保留 run 与字形**——变体选择符与
+/// 零宽连接符的意义是修饰邻字，把它们静默丢掉会让"后面能不能加合字"失去信息。
+[[nodiscard]] auto is_zero_width_mark(char32_t codepoint) noexcept -> bool {
+  // VS1..VS16（U+FE00..FE0F）与 VS17..VS256（U+E0100..E01EF）：变体选择符。
+  // ZWJ（U+200D）/ ZWNJ（U+200C）：连接符，本身永远不占宽。
+  return (codepoint >= 0xFE00U && codepoint <= 0xFE0FU) ||
+         (codepoint >= 0xE0100U && codepoint <= 0xE01EFU) || codepoint == 0x200DU ||
+         codepoint == 0x200CU;
+}
+
 /// 系统字体候选（按回退优先级：拉丁 → CJK → 通用）。
 struct FontCandidate {
   std::string path;
@@ -558,6 +576,11 @@ TextRenderer::TextRenderer(const FontStack& stack, float supersample)
   if (const auto value = fs::read_env("ST_TEXT_LCD_FILTER"); value.has_value()) {
     subpixel_filter_ = !(*value == "0" || *value == "off" || *value == "false");
   }
+  // 彩色 emoji 同样留一个对照开关（`ST_TEXT_COLOR_EMOJI=0`）：彩色与单色是
+  // 两种产品取向（单色跟主题色、彩色信息更丰富），得能一次切换对比。
+  if (const auto value = fs::read_env("ST_TEXT_COLOR_EMOJI"); value.has_value()) {
+    color_emoji_ = !(*value == "0" || *value == "off" || *value == "false");
+  }
 }
 
 TextRenderer::~TextRenderer() = default;
@@ -818,29 +841,106 @@ auto TextRenderer::shape_uncached(std::string_view utf8, float size, FontRole ro
     shaped.ascent = ascent(size);
     return shaped;
   }
+  // —— 先逐码点解出（face, 字形）候选 ——
+  //
+  // 拆成两趟是合字要求的：GSUB 的合字匹配看的是**字形序列**，而逐码点渲染
+  // 只能看到当前一个。先解完再合，才能把 `👍` + 肤色 变成单个字形。
+  struct Item {
+    const FontFace* face{nullptr};
+    GlyphId glyph{0};
+    char32_t codepoint{0};
+    bool no_face{false};  ///< 字体栈里没有覆盖该码点（按空格宽度占位）
+    bool no_glyph{false}; ///< 覆盖但取不到字形
+  };
+  std::vector<Item> items{};
+  {
+    std::size_t index = 0;
+    while (index < utf8.size()) {
+      const Codepoint codepoint = decode_utf8(utf8, index);
+      if (codepoint.bytes == 0) break;
+      Item item{};
+      item.codepoint = codepoint.value;
+      item.face = stack_->find_face(codepoint.value, role, bold);
+      if (item.face == nullptr) {
+        item.no_face = true;
+        items.push_back(item);
+        continue;
+      }
+      const auto glyph = item.face->glyph_for(codepoint.value);
+      if (!glyph) {
+        item.no_glyph = true;
+        items.push_back(item);
+        continue;
+      }
+      item.glyph = glyph->id;
+      items.push_back(item);
+    }
+  }
+  // —— `ccmp` 单字替换（如 `uni2764` → 彩色基础字形）——
+  for (Item& item : items) {
+    if (item.no_face || item.no_glyph) continue;
+    if (const auto composed = item.face->compose_single(item.glyph); composed.has_value()) {
+      item.glyph = *composed;
+    }
+  }
+  // —— `ccmp` 合字（emoji 序列靠它变成一个字形）——
+  //
+  // 只在**同一字体面**内合字（合字规则是按字体给的，跨面混排没有语义）。
+  std::vector<Item> merged{};
+  merged.reserve(items.size());
+  for (std::size_t i = 0; i < items.size();) {
+    const Item& head = items[i];
+    if (head.no_face || head.no_glyph || !head.face->has_ligature(head.glyph)) {
+      merged.push_back(head);
+      ++i;
+      continue;
+    }
+    // 收集同一 face 的连续候选字形（最多 32 个——足够所有已知 emoji 序列）。
+    std::array<GlyphId, 32> candidates{};
+    std::size_t available = 0;
+    while (i + available < items.size() && available < candidates.size()) {
+      const Item& next = items[i + available];
+      if (next.face != head.face || next.no_face || next.no_glyph) break;
+      candidates[available] = next.glyph;
+      ++available;
+    }
+    const auto ligature = head.face->compose_ligature(
+        std::span<const GlyphId>(candidates.data(), available));
+    if (!ligature.has_value()) {
+      merged.push_back(head);
+      ++i;
+      continue;
+    }
+    // 合成后的字形继承**首码点**（排版与字形类都看它；后面的码点只是修饰）。
+    Item composed = head;
+    composed.glyph = ligature->first;
+    merged.push_back(composed);
+    i += ligature->second;
+  }
+  items = std::move(merged);
+
   const FontFace* previous_face = nullptr;
   GlyphId previous_glyph = 0;
   float pen = 0.0f;
   float max_ascent = 0.0f;
   float max_descent = 0.0f;
-
-  std::size_t index = 0;
-  while (index < utf8.size()) {
-    const Codepoint codepoint = decode_utf8(utf8, index);
-    if (codepoint.bytes == 0) break;
-    const FontFace* face = stack_->find_face(codepoint.value, role, bold);
+  for (const Item& item : items) {
+    const FontFace* face = item.face;
     if (face == nullptr) {
       // 无字体覆盖：按空格宽度占位（保证排版不塌陷）
       pen += size * 0.5f;
       previous_face = nullptr;
       continue;
     }
-    auto glyph = face->glyph_for(codepoint.value);
+    const auto glyph = face->glyph(item.glyph);
     if (!glyph) {
       pen += size * 0.5f;
       previous_face = nullptr;
       continue;
     }
+    // **变体选择符/连接符不占前进宽度**（见 `is_zero_width_mark`）：
+    // 它们修饰邻字，字体却给了 1 em 的 advance；不拦的话 `❤️` 会被排成两个 emoji 宽。
+    const float advance_scale = is_zero_width_mark(item.codepoint) ? 0.0f : 1.0f;
     const FontMetrics& metrics = face->metrics();
     const float units = metrics.units_per_em > 0.0f ? metrics.units_per_em : 1000.0f;
     float kerning = 0.0f;
@@ -851,10 +951,10 @@ auto TextRenderer::shape_uncached(std::string_view utf8, float size, FontRole ro
     TextRun run;
     run.face = face;
     run.glyph = glyph->id;
-    run.codepoint = codepoint.value;
-    run.glyph_class = glyph_class_of(static_cast<char32_t>(codepoint.value));
+    run.codepoint = item.codepoint;
+    run.glyph_class = glyph_class_of(item.codepoint);
     run.x = pen;
-    run.advance = glyph->advance / units * size;
+    run.advance = advance_scale * glyph->advance / units * size;
     pen += run.advance;
     max_ascent = std::max(max_ascent, metrics.ascender / units * size);
     max_descent = std::max(max_descent, -metrics.descender / units * size);
@@ -1704,6 +1804,35 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   return bitmap;
 }
 
+auto TextRenderer::color_layers_of(char32_t codepoint, float pixel_size, FontRole role,
+                                    int embolden_steps, bool bold) const
+    -> std::vector<ColorGlyphLayer> {
+  std::vector<ColorGlyphLayer> layers{};
+  // **必须跟随 `color_emoji` 开关**：这是诊断/量尺入口，它若无视开关，就会出现
+  // “API 报告有彩色层、画面却是单色”——那种不一致会让人去查渲染而不是查开关。
+  // （实测踩到：`ST_TEXT_COLOR_EMOJI=0` 时探针仍报 `drawn_layers=6`。）
+  if (!color_emoji_) return layers;
+  const FontFace* face = stack_->find_face(codepoint, role, bold);
+  if (face == nullptr) return layers;
+  const auto id = face->glyph_index(codepoint);
+  if (!id.has_value()) return layers;
+  const auto& sources = face->color_layers(*id);
+  if (sources.empty()) return layers;
+  layers.reserve(sources.size());
+  // 层的字形类一律取外层码点的类：它们不是独立排版的字符，而是同一字形的一部分
+  // （若逐层按层字形号推类，同一个 emoji 在“有汉字类覆盖”时会分层变色）。
+  const GlyphClass glyph_class = glyph_class_of(codepoint);
+  for (const ColorLayer& source : sources) {
+    ColorGlyphLayer layer{};
+    layer.color = source.color;
+    layer.use_text_color = source.use_text_color;
+    layer.bitmap = glyph_bitmap(*face, source.glyph, pixel_size, embolden_steps, glyph_class);
+    if (layer.bitmap == nullptr || layer.bitmap->coverage.empty()) continue;
+    layers.push_back(std::move(layer));
+  }
+  return layers;
+}
+
 auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::Point origin,
                         float size, math::Color color, FontRole role, float embolden,
                         bool bold) const
@@ -1746,7 +1875,49 @@ auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::P
   // （缓存键含步数，不会与 Regular 的位图混用）。
   for (const auto& run : shaped.runs) {
     if (run.face == nullptr) continue;
+    // **变体选择符/连接符不画**：它们不是可见字形，而是修饰邻字的控制码。
+    //
+    // 实测（2026-11-22）：`seguiemj.ttf` 的 `uni200D`（ZWJ）advance = 0 但**带轮廓**，
+    // 把这串 `👨‍👩‍👧` 直接画出来就成了"人脸 + 叉号 + 人脸…"。它们应当被
+    // GSUB 合字吃掉；在合字未实现前，至少不能当可见字形画。
+    if (is_zero_width_mark(static_cast<char32_t>(run.codepoint))) continue;
     const float pixel_size = size * device_scale;
+    // —— 彩色字形（COLR/CPAL 分层）——
+    //
+    // 为什么在**这里**分支而不是在 `glyph_bitmap` 里：一个彩色字形不是一个位图，
+    // 而是“若干层位图 + 各自的颜色”。`glyph_bitmap` 的契约是“一个字形一个覆盖率”，
+    // 把多层塞回去会让所有调用方（含诊断入口与 GPU 图集）都误以为它是一个字形。
+    //
+    // 逐层走 **同一个** `blend_coverage_bitmap`：软件与 GPU 两条腿因此自动一致
+    // （GPU 把每层当一张覆盖率纹理 + 一个纯色画笔），不需要新的 Surface 原语。
+    if (color_emoji_ && run.face->has_color_layers()) {
+      const auto& sources = run.face->color_layers(run.glyph);
+      if (!sources.empty()) {
+        const GlyphClass glyph_class = run.glyph_class;
+        for (const ColorLayer& source : sources) {
+          const std::shared_ptr<const GlyphBitmap> layer_bitmap =
+              glyph_bitmap(*run.face, source.glyph, pixel_size, embolden_steps, glyph_class);
+          if (layer_bitmap == nullptr || layer_bitmap->coverage.empty()) continue;
+          profile_pixels += static_cast<std::uint64_t>(layer_bitmap->width) *
+                            static_cast<std::uint64_t>(layer_bitmap->height);
+          const auto layer_x =
+              static_cast<int>(std::lround((origin.x + run.x) * device_scale)) +
+              layer_bitmap->offset_x;
+          const auto layer_y = static_cast<int>(std::lround(baseline)) + layer_bitmap->offset_y;
+          // `paletteIndex == 0xFFFF`（单色图标层）用**文字色**：那些层本来就是
+          // “随主题变色的字形”，固定成白/黑会在浅暗两套主题里各错一半。
+          const raster::Paint layer_paint =
+              source.use_text_color ? paint : raster::Paint::solid(source.color);
+          surface.blend_coverage_bitmap(layer_x, layer_y, layer_bitmap->coverage,
+                                        layer_bitmap->width, layer_bitmap->height, layer_paint,
+                                        opacity, raster::BlendMode::SrcOver,
+                                        layer_bitmap->cache_key, layer_bitmap->format);
+        }
+        // 有彩色层时**不再画基础字形的轮廓**：它的轮廓要么为空（emoji），
+        // 要么是与层重叠的占位形状（图标字体）——叠上去会把颜色盖掉。
+        continue;
+      }
+    }
     // **绘制路径也必须按字形类取位图**（见 `set_class_gamma`）：漏传就会让
     // "类 γ 覆盖"只在 `glyph_bitmap_of`（诊断/探针）里生效、**实际绘制却仍用默认档**
     // ——实测症状是"改了类 γ 看不出任何变化"（量尺全绿、画面不动）。

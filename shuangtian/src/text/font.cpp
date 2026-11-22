@@ -214,6 +214,73 @@ struct DictOp {
   std::vector<double> args{};
 };
 
+/// `COLR` v0（分层彩色字形）+ `CPAL`（调色板）。
+///
+/// 只解 v0 的「基础字形 → 层记录」映射：那是**几何分层**模型（每层是另一个字形 + 一个
+/// 调色板项），与框架现有的“字形轮廓 → 覆盖率 → 着色”链路天然同构，两个渲染后端
+/// 不需要任何新原语就能画出彩色字形。
+///
+/// `COLR` v1 的画笔图（PaintGlyph/PaintTransform/渐变画笔…）是另一套向量绘图模型，
+/// 未解析——v1 字体若同时带有 v0 兼容记录（主流字体都有），仍按 v0 出彩色。
+struct ColrTable {
+  struct BaseRecord {
+    std::uint16_t glyph{0};
+    std::uint16_t first_layer{0};
+    std::uint16_t layer_count{0};
+  };
+  /// 基础字形记录（按 `glyph` **升序**，可直接二分）。
+  std::vector<BaseRecord> bases{};
+  /// 层记录（与 `bases` 的 `first_layer`/`layer_count` 配合索引）。
+  std::vector<std::uint16_t> layer_glyphs{};
+  std::vector<std::uint16_t> layer_palette{};
+  /// `CPAL` 第 0 号调色板的颜色（BGRA 已转成 `math::Color`）。
+  std::vector<math::Color> palette{};
+
+  [[nodiscard]] auto usable() const noexcept -> bool {
+    return !bases.empty() && !palette.empty();
+  }
+  [[nodiscard]] auto find(GlyphId id) const noexcept -> const BaseRecord* {
+    const auto it = std::lower_bound(bases.begin(), bases.end(), id,
+                                     [](const BaseRecord& record, GlyphId value) noexcept {
+                                       return record.glyph < value;
+                                     });
+    if (it == bases.end() || it->glyph != id) return nullptr;
+    return &(*it);
+  }
+};
+
+/// `GSUB` 的合字规则（只解 `ccmp` 特性下的 Type 1 / Type 4）。
+///
+/// ## 为什么必须有它才能画对 emoji
+///
+/// emoji 的“一个图标”在文本里常常是**多个码点**：`👍🏽`（手势 + 肤色）、
+/// `👨‍👩‍👧`（家庭成员 + ZWJ）、`1️⃣`（数字 + VS16 + 键帽）。它们靠字体的
+/// **GSUB 合字**变成一个字形——不做合字就会画成“手势 + 一个肤色方块”。
+///
+/// ## 为什么只解 `ccmp`
+///
+/// `ccmp`（Glyph Composition/Decomposition）的语义就是“字符组合的规范写法”，
+/// 与语言无关，且**不是可选排版特性**（`liga`/`dlig` 可以关、`ccmp` 不能）。
+/// 而 `liga`（连字）属于排版风格：关掉它是合法选择（代码里就不该连字），
+/// 所以本引擎只取 `ccmp`，避免把编程字体的连字偷偷打开。
+struct GsubTable {
+  /// 单字替换：`ccmp` 里的 Type 1（如 `uni2764` → 彩色基础字形）。
+  std::unordered_map<std::uint32_t, std::uint32_t> singles{};
+  /// 多字合字：键 = (首字形, 后续字形序列) 序列化后的字符串，值 = 合成后的字形。
+  ///
+  /// 用字符串做键：一个字体里的 `ccmp` 合字量级是几千条（实测 `seguiemj.ttf` 2087 条），
+  /// 而每次整形只查“当前位置开头的 1~4 个字形”——序列化成定长字节串再查哈希表，
+  /// 比嵌套 map 少一层指针追逐。
+  std::unordered_map<std::string, std::uint32_t> ligatures{};
+  /// 首字形 → 该首字形的最长合字长度（0/缺席 = 无合字）。
+  ///
+  /// 存在的理由：整形循环在每个位置都要试“能不能合字”，而绝大多数字形
+  /// （汉字、字母）不可能开头。有这张表就能一次查表跳过。
+  std::unordered_map<std::uint32_t, std::uint8_t> max_length{};
+
+  [[nodiscard]] auto empty() const noexcept -> bool { return singles.empty() && ligatures.empty(); }
+};
+
 /// 字体解析结果与缓存（`FontFace::Data` 的实体；仅本 TU 可见）。
 ///
 /// **文件字节的两种形态**（2026-10-14 内存评估 P0）：
@@ -239,11 +306,15 @@ struct FontData {
   GlyfTable glyf{};
   CffTable cff{};
   std::unordered_map<std::uint32_t, std::int16_t> kern{};
+  GsubTable gsub{};
+  ColrTable colr{};
   std::mutex cff_mutex{};
   std::mutex outline_mutex{};
   std::unordered_map<GlyphId, std::shared_ptr<const math::Path>> outlines{};
   std::mutex hints_mutex{};
   std::unordered_map<GlyphId, std::vector<StemHint>> hints{};
+  std::mutex color_mutex{};
+  std::unordered_map<GlyphId, std::vector<ColorLayer>> color_layers{};
 
   /// 是否用的内存映射（诊断/回归用：能直接断言"没走整读"）。
   [[nodiscard]] auto uses_mapping() const noexcept -> bool { return mapped.valid(); }
@@ -973,6 +1044,223 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
       }
     }
     cursor += length;
+  }
+  return ok();
+}
+
+/// 解析 `GSUB` 的 `ccmp` 特性（Type 1 单字 + Type 4 合字）。
+///
+/// 只走 `ccmp`：它是“字符组合的规范写法”，不是可选排版风格（见 `GsubTable` 的说明）。
+/// 查特特性走 `LangSys` 的默认表（不区语言标签）：emoji 合字与语言无关。
+[[nodiscard]] auto parse_gsub(FontData& data) -> Status {
+  const auto bytes = data.span();
+  const TableRecord* record = data.table(tag_of('G', 'S', 'U', 'B'));
+  if (record == nullptr || record->length < 10) return ok();  // 无 GSUB：不是错误
+  const std::size_t base = record->offset;
+  const std::size_t limit = base + record->length;
+  const auto in_table = [&](std::size_t at, std::size_t size) {
+    return at <= limit && size <= limit - at && in_range(bytes, at, size);
+  };
+  const std::size_t script_list = read_u16(bytes, base + 4);
+  const std::size_t feature_list = read_u16(bytes, base + 6);
+  const std::size_t lookup_list = read_u16(bytes, base + 8);
+  if (script_list == 0 || feature_list == 0 || lookup_list == 0) return ok();
+
+  // —— 1. 找 `ccmp` 特性的**偏移**（FeatureList 内部的相对偏移）——
+  std::vector<std::uint16_t> feature_offsets{};
+  const std::size_t feature_count = read_u16(bytes, base + feature_list);
+  if (!in_table(base + feature_list + 2, static_cast<std::size_t>(feature_count) * 6U)) {
+    return ok();
+  }
+  for (std::size_t i = 0; i < feature_count; ++i) {
+    const std::size_t at = base + feature_list + 2 + i * 6U;
+    if (read_u32(bytes, at) == tag_of('c', 'c', 'm', 'p')) {
+      // ⚠ 这里是**偏移**而不是特性下标（该值是相对 FeatureList 的字节偏移）：
+      // 当成下标去乘 6 会读到半截记录，结果是“看着都解了、一条合字也没进表”。
+      feature_offsets.push_back(read_u16(bytes, at + 4));
+    }
+  }
+  if (feature_offsets.empty()) return ok();
+
+  // —— 2. 收 `ccmp` 引用的 lookup 下标 ——
+  std::vector<std::uint16_t> lookup_indices{};
+  for (const std::uint16_t offset : feature_offsets) {
+    const std::size_t table = base + feature_list + offset;
+    if (!in_table(table, 4)) continue;
+    const std::size_t count = read_u16(bytes, table + 2);
+    if (!in_table(table + 4, count * 2U)) continue;
+    for (std::size_t k = 0; k < count; ++k) {
+      lookup_indices.push_back(read_u16(bytes, table + 4 + k * 2U));
+    }
+  }
+
+  // —— 3. 解 Type 1（单字替换）与 Type 4（合字）——
+  const std::size_t lookup_count = read_u16(bytes, base + lookup_list);
+  if (!in_table(base + lookup_list + 2, static_cast<std::size_t>(lookup_count) * 2U)) {
+    return ok();
+  }
+  for (const std::uint16_t index : lookup_indices) {
+    if (index >= lookup_count) continue;
+    const std::size_t at = base + lookup_list + 2 + static_cast<std::size_t>(index) * 2U;
+    const std::size_t lookup = base + lookup_list + read_u16(bytes, at);
+    if (!in_table(lookup, 6)) continue;
+    const std::uint16_t type = read_u16(bytes, lookup);
+    const std::size_t sub_count = read_u16(bytes, lookup + 4);
+    if (!in_table(lookup + 6, static_cast<std::size_t>(sub_count) * 2U)) continue;
+    for (std::size_t s = 0; s < sub_count; ++s) {
+      const std::size_t sub = lookup + read_u16(bytes, lookup + 6 + s * 2U);
+      if (!in_table(sub, 6)) continue;
+      const std::uint16_t format = read_u16(bytes, sub);
+      const std::size_t coverage = sub + read_u16(bytes, sub + 2);
+      if (type == 1 && format == 1) {
+        // 单字替换 Format 1：`deltaGlyphID`。
+        if (!in_table(sub, 6)) continue;
+        const std::int16_t delta = read_i16(bytes, sub + 4);
+        if (!in_table(coverage, 4)) continue;
+        const std::uint16_t cover_format = read_u16(bytes, coverage);
+        if (cover_format == 1) {
+          const std::size_t count = read_u16(bytes, coverage + 2);
+          if (!in_table(coverage + 4, count * 2U)) continue;
+          for (std::size_t i = 0; i < count; ++i) {
+            const std::uint32_t glyph = read_u16(bytes, coverage + 4 + i * 2U);
+            data.gsub.singles.insert_or_assign(
+                glyph, static_cast<std::uint32_t>((static_cast<std::int32_t>(glyph) + delta) &
+                                                  0xFFFF));
+          }
+        }
+      } else if (type == 1 && format == 2) {
+        // 单字替换 Format 2：`substituteGlyphIDs` 逐项替换。
+        const std::size_t count = read_u16(bytes, sub + 4);
+        if (!in_table(sub + 6, count * 2U) || !in_table(coverage, 4)) continue;
+        if (read_u16(bytes, coverage) != 1) continue;
+        const std::size_t cover_count = read_u16(bytes, coverage + 2);
+        if (!in_table(coverage + 4, cover_count * 2U)) continue;
+        for (std::size_t i = 0; i < count && i < cover_count; ++i) {
+          const std::uint32_t glyph = read_u16(bytes, coverage + 4 + i * 2U);
+          data.gsub.singles.insert_or_assign(glyph, read_u16(bytes, sub + 6 + i * 2U));
+        }
+      } else if (type == 4 && format == 1) {
+        // 合字：`coverage` 给出首字形集合，`LigatureSet` 逐项给后续序列。
+        const std::size_t set_count = read_u16(bytes, sub + 4);
+        if (!in_table(sub + 6, set_count * 2U)) continue;
+        for (std::size_t k = 0; k < set_count; ++k) {
+          const std::size_t set = sub + read_u16(bytes, sub + 6 + k * 2U);
+          if (!in_table(set, 2)) continue;
+          const std::size_t ligature_count = read_u16(bytes, set);
+          if (!in_table(set + 2, ligature_count * 2U)) continue;
+          for (std::size_t l = 0; l < ligature_count; ++l) {
+            const std::size_t lig = set + read_u16(bytes, set + 2 + l * 2U);
+            if (!in_table(lig, 4)) continue;
+            const std::uint32_t composed = read_u16(bytes, lig);
+            const std::size_t component_count = read_u16(bytes, lig + 2);
+            if (component_count == 0) continue;
+            if (!in_table(lig + 4, (component_count - 1U) * 2U)) continue;
+            // 首字形：按 `k` 回查覆盖表下标 → 覆盖表里的第 k 个字形。
+            // 覆盖表与 `LigatureSet` 的关系是**同序**的（规范要求），所以按 k 取。
+            if (!in_table(coverage, 4) || read_u16(bytes, coverage) != 1) continue;
+            const std::size_t cover_count = read_u16(bytes, coverage + 2);
+            if (!in_table(coverage + 4, cover_count * 2U) || k >= cover_count) continue;
+            const std::uint32_t first = read_u16(bytes, coverage + 4 + k * 2U);
+            std::string key{};
+            key.resize(2U * component_count);
+            const auto put = [&key](std::size_t slot, std::uint32_t glyph) {
+              key[slot * 2] = static_cast<char>((glyph >> 8U) & 0xFFU);
+              key[slot * 2 + 1] = static_cast<char>(glyph & 0xFFU);
+            };
+            put(0, first);
+            for (std::size_t c = 1; c < component_count; ++c) {
+              put(c, read_u16(bytes, lig + 4 + (c - 1U) * 2U));
+            }
+            const auto length = static_cast<std::uint8_t>(std::min<std::size_t>(component_count, 255U));
+            data.gsub.max_length[first] =
+                std::max<std::uint8_t>(data.gsub.max_length[first], length);
+            data.gsub.ligatures.insert_or_assign(std::move(key), composed);
+          }
+        }
+      }
+    }
+  }
+  return ok();
+}
+
+// —— COLR / CPAL：分层彩色字形 ——
+/// 解析 `CPAL`（读取第 0 号调色板，`numPaletteEntries` 项）。
+///
+/// 只读第 0 号调色板：`COLR` v0 的层记录没有调色板选择字段（那是 v1 的 `PaintSolid` 才有的），
+/// 规范规定的语义就是"第 0 号调色板"。
+[[nodiscard]] auto parse_cpal(FontData& data) -> Status {
+  const auto bytes = data.span();
+  const TableRecord* record = data.table(tag_of('C', 'P', 'A', 'L'));
+  if (record == nullptr || record->length < 12) return ok();  // 无 CPAL：不是错误
+  const std::size_t base = record->offset;
+  const std::size_t limit = base + record->length;
+  const std::size_t entries = read_u16(bytes, base + 2);
+  const std::size_t color_records = read_u16(bytes, base + 6);
+  const std::size_t color_offset = read_u32(bytes, base + 8);
+  if (entries == 0 || color_records == 0) return ok();
+  const std::size_t at = base + color_offset;
+  if (!in_range(bytes, at, color_records * 4U)) {
+    return unexpected(ErrorCode::Parse, "CPAL 颜色记录越界");
+  }
+  if (entries > color_records || at + entries * 4U > limit) {
+    return unexpected(ErrorCode::Parse, "CPAL 调色板项数越界");
+  }
+  data.colr.palette.reserve(entries);
+  for (std::size_t i = 0; i < entries; ++i) {
+    const std::size_t o = at + i * 4U;
+    // 存储序为 B,G,R,A。
+    data.colr.palette.push_back(math::Color{read_u8(bytes, o + 2), read_u8(bytes, o + 1),
+                                            read_u8(bytes, o), read_u8(bytes, o + 3)});
+  }
+  return ok();
+}
+
+/// 解析 `COLR` v0 基础字形记录与层记录。
+///
+/// 只支持 v0 记录（`baseGlyphRecords`/`layerRecords`）：v1 字体通常同时保留这两张表
+/// （是为向后兼容并存的），所以“新版字体也能出彩色”不需要解画笔图。
+[[nodiscard]] auto parse_colr(FontData& data) -> Status {
+  const auto bytes = data.span();
+  const TableRecord* record = data.table(tag_of('C', 'O', 'L', 'R'));
+  if (record == nullptr || record->length < 14) return ok();  // 无 COLR：不是错误
+  const std::size_t base = record->offset;
+  const std::size_t limit = base + record->length;
+  const std::size_t bases = read_u16(bytes, base + 2);
+  const std::size_t base_offset = read_u32(bytes, base + 4);
+  const std::size_t layer_offset = read_u32(bytes, base + 8);
+  const std::size_t layer_count = read_u16(bytes, base + 12);
+  if (bases == 0 || layer_count == 0) return ok();
+  const std::size_t base_at = base + base_offset;
+  const std::size_t layer_at = base + layer_offset;
+  if (!in_range(bytes, base_at, bases * 6U) || !in_range(bytes, layer_at, layer_count * 4U)) {
+    return unexpected(ErrorCode::Parse, "COLR 记录越界");
+  }
+  if (base_at + bases * 6U > limit || layer_at + layer_count * 4U > limit) {
+    return unexpected(ErrorCode::Parse, "COLR 记录越过表边界");
+  }
+  data.colr.bases.reserve(bases);
+  std::uint32_t previous = 0;
+  for (std::size_t i = 0; i < bases; ++i) {
+    const std::size_t o = base_at + i * 6U;
+    ColrTable::BaseRecord entry{};
+    entry.glyph = read_u16(bytes, o);
+    entry.first_layer = read_u16(bytes, o + 2);
+    entry.layer_count = read_u16(bytes, o + 4);
+    // 规范要求按 glyph 升序（二分查找的前提）。损坏字体按“截断到已排序前缀”处理——
+    // 继续收下去会让 `find()` 静默错位（查到别人的层）。
+    if (i > 0 && entry.glyph <= previous) break;
+    previous = entry.glyph;
+    // 层下标越界/零层的记录直接丢弃（不报错：一个坏记录不该让整个字体不可用）。
+    if (entry.layer_count == 0) continue;
+    if (static_cast<std::size_t>(entry.first_layer) + entry.layer_count > layer_count) continue;
+    data.colr.bases.push_back(entry);
+  }
+  data.colr.layer_glyphs.resize(layer_count);
+  data.colr.layer_palette.resize(layer_count);
+  for (std::size_t i = 0; i < layer_count; ++i) {
+    const std::size_t o = layer_at + i * 4U;
+    data.colr.layer_glyphs[i] = read_u16(bytes, o);
+    data.colr.layer_palette[i] = read_u16(bytes, o + 2);
   }
   return ok();
 }
@@ -2041,6 +2329,12 @@ auto FontFace::load(std::string_view path, int face_index) -> Result<FontFace> {
   if (!status) return st::forward_error(status.error());
   status = parse_kern(data);
   if (!status) return st::forward_error(status.error());
+  status = parse_gsub(data);
+  if (!status) return st::forward_error(status.error());
+  status = parse_cpal(data);
+  if (!status) return st::forward_error(status.error());
+  status = parse_colr(data);
+  if (!status) return st::forward_error(status.error());
 
   FontFace face{};
   face.data_ = std::move(holder);
@@ -2160,6 +2454,84 @@ auto FontFace::stem_hints(GlyphId id) const -> const std::vector<StemHint>& {
   }
   const std::scoped_lock lock(data.hints_mutex);
   return data.hints.emplace(id, std::move(collected)).first->second;
+}
+
+auto FontFace::compose_single(GlyphId id) const -> std::optional<GlyphId> {
+  if (data_ == nullptr) return std::nullopt;
+  const auto& singles = data_->value.gsub.singles;
+  if (singles.empty()) return std::nullopt;
+  const auto it = singles.find(id);
+  if (it == singles.end()) return std::nullopt;
+  return it->second;
+}
+
+auto FontFace::has_ligature(GlyphId id) const noexcept -> bool {
+  if (data_ == nullptr) return false;
+  return data_->value.gsub.max_length.contains(id);
+}
+
+auto FontFace::compose_ligature(std::span<const GlyphId> glyphs) const
+    -> std::optional<std::pair<GlyphId, std::size_t>> {
+  if (data_ == nullptr || glyphs.empty()) return std::nullopt;
+  const GsubTable& gsub = data_->value.gsub;
+  if (gsub.ligatures.empty()) return std::nullopt;
+  const auto found = gsub.max_length.find(glyphs.front());
+  if (found == gsub.max_length.end()) return std::nullopt;
+  // **长的优先**：合字可能前缀重叠（`A` vs `A B`），按规范要从长到短试。
+  const std::size_t longest = std::min<std::size_t>(found->second, glyphs.size());
+  std::string key{};
+  for (std::size_t length = longest; length >= 2; --length) {
+    key.resize(length * 2U);
+    for (std::size_t i = 0; i < length; ++i) {
+      key[i * 2U] = static_cast<char>((glyphs[i] >> 8U) & 0xFFU);
+      key[i * 2U + 1U] = static_cast<char>(glyphs[i] & 0xFFU);
+    }
+    const auto it = gsub.ligatures.find(key);
+    if (it != gsub.ligatures.end()) return std::make_pair(it->second, length);
+  }
+  return std::nullopt;
+}
+
+auto FontFace::has_color_layers() const noexcept -> bool {
+  if (data_ == nullptr) return false;
+  return data_->value.colr.usable();
+}
+
+auto FontFace::color_layers(GlyphId id) const -> const std::vector<ColorLayer>& {
+  static const std::vector<ColorLayer> kEmpty{};
+  if (data_ == nullptr) return kEmpty;
+  FontData& data = data_->value;
+  if (!data.colr.usable()) return kEmpty;
+  {
+    const std::scoped_lock lock(data.color_mutex);
+    const auto it = data.color_layers.find(id);
+    if (it != data.color_layers.end()) return it->second;
+  }
+  std::vector<ColorLayer> collected{};
+  if (const ColrTable::BaseRecord* record = data.colr.find(id); record != nullptr) {
+    const ColrTable& colr = data.colr;
+    collected.reserve(record->layer_count);
+    for (std::size_t i = 0; i < record->layer_count; ++i) {
+      const std::size_t at = static_cast<std::size_t>(record->first_layer) + i;
+      if (at >= colr.layer_glyphs.size()) break;
+      ColorLayer layer{};
+      layer.glyph = colr.layer_glyphs[at];
+      const std::uint16_t palette_index = colr.layer_palette[at];
+      // `0xFFFF` 是规范约定的“用文字前景色”（单色图标字体里常见）。
+      if (palette_index == 0xFFFFU) {
+        layer.use_text_color = true;
+      } else if (palette_index < colr.palette.size()) {
+        layer.color = colr.palette[palette_index];
+      } else {
+        // 调色板下标越界（损坏字体）：该层不画，而不是静默用黑——
+        // 黑色在暗色主题下会变成“看不出错了”的黑块。
+        continue;
+      }
+      collected.push_back(layer);
+    }
+  }
+  const std::scoped_lock lock(data.color_mutex);
+  return data.color_layers.emplace(id, std::move(collected)).first->second;
 }
 
 }  // namespace st::text

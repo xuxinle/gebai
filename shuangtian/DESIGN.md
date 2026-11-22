@@ -2608,12 +2608,51 @@ class TextRenderer {                               // 字形 → 位图缓存（
   emoji 码点，但它给的是**符号化的单色轮廓**——📁 渲染成实心方块、✅ 退化成 ✓、
   🇨🇳 退化成 “CN” 两个字母、🎉 形似乱码。那不是“字体缺失”（有字形、能画出来），
   所以肉眼极易读成“渲染坏了”而不是“选错字体”。
-  换成 emoji 字体后字形正确但**仍是单色**：框架的光栅器只填单色轮廓，
-  `seguiemj.ttf` 的 `COLR`/`CPAL` 彩色层尚未解析（见 `docs/BACKLOG.md`）。
+  换成 emoji 字体后字形正确，且**彩色字形已支持**（见本节末尾「彩色 emoji（COLR/CPAL 分层）」）。
   逐位同序的约束在这里有个**隐蔽来源**：某档在一侧杏如（黑体无粗体版）时，
   它后面每一档都会整体前移一位，表现为“只在粗体里错”的选字。
   回归：`tests/text_font_default_test.cpp` 的
   `font_default_emoji_prefer_emoji_face_over_symbol_face`。
+
+  ### 彩色 emoji（`COLR`/`CPAL` 分层）
+
+  **模型**：彩色字形在字体里不是“一张彩色图片”，而是**分层绘制**——一个基础字形
+  对应若干层，每层是字体里的**另一个字形**（轮廓）+ 一个调色板颜色。所以它不需要
+  新的渲染原语：每层按普通字形的覆盖率位图走同一条 `blend_coverage_bitmap`，
+  只是每层换一个纯色画笔。软件与 GPU 两条腿因此**自动一致**。
+
+  | 组件 | 职责 |
+  |---|---|
+  | `FontFace::color_layers(id)` | `COLR` v0 基础字形记录 + `CPAL` 第 0 号调色板 → 层序列 |
+  | `TextRenderer::color_layers_of()` | 逐层取**覆盖率位图**（与普通字形同一套缓存） |
+  | `TextRenderer::draw()` | 逐层提交；有彩色层时**不再画基础字形轮廓** |
+
+  **`paletteIndex == 0xFFFF`** 表示“用文字前景色”（单色图标字体的约定）：
+  这些层跟文字色走，固定成黑/白会在浅暗两套主题里各错一半。
+
+  **范围**：只解 `COLR` **v0 记录**。v1 的画笔图（`PaintGlyph`/`PaintTransform`/
+  渐变画笔/合成模式）是另一套向量绘图模型，未实现；v1 字体通常**同时保留 v0
+  兼容记录**（实测 `seguiemj.ttf`：`COLR` version=1、3487 个 v0 基础字形、18833 条
+  v0 层记录），所以主流字体仍出彩色。CBDT/CBLC/sbix 位图 emoji（Linux 的
+  `NotoColorEmoji.ttf`）与自由形式的 SVG 层（`COLR` v1 的 `PaintGlyph` 于 SVG 表）
+  仍在 `docs/BACKLOG.md` 里。
+
+  **emoji 序列**（`👍🏽` 肤色 / `1️⃣` 键帽）靠 `GSUB` 的 **`ccmp`** 特性变成
+  单个字形，本引擎已实现（只解 `ccmp`，不解 `liga`——连字是可选排版风格，
+  代码里就不该连字）。`ZWJ` 家族序列（`👨‍👩‍👧`）还需要 `GSUB` Type 6 上下文替换，
+  未实现；当前结果是**三个独立人脸并排**，与 Windows 自身的渲染一致。
+
+  **变体选择符**（`U+FE0F`）在排版上**不占宽**：`seguiemj.ttf` 给它的 advance
+  是 1 em（与 emoji 同宽，因为规范上该由合字吃掉它），不拦的话 `❤️` 被排成
+  两倍宽、中间一大段空白。
+
+  **开关**：`TextRenderer::set_color_emoji` / `ST_TEXT_COLOR_EMOJI=0`。
+  彩色与单色是两种产品取向（单色跟主题色协调、彩色信息更丰富），
+  得能一次切换对比而不是改代码重编。
+
+  回归：`tests/text_color_emoji_test.cpp`（七条，分三组：字体层解析 / `ccmp` 合字 /
+  排版与接线）；量尺探针 `tools/color_emoji_probe.cpp`（出 PNG + 报
+  `chroma_ratio`，单色轮廓恒为 0）。
 
 **主题（`ThemeMode`）是真值源，不在页面里存影子状态**
 

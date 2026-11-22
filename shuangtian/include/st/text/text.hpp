@@ -632,17 +632,47 @@ class TextRenderer {
     float fit_worst_rejected_shift{0.0f};
   };
 
+  /// 彩色字形（`COLR` v0 分层）开关；默认**开**。
+  ///
+  /// 关掉 = 回到“单色轮廓”的旧行为（`ST_TEXT_COLOR_EMOJI=0`）。
+  /// 保留这个旋钮是因为彩色与单色是**两种产品取向**（单色 emoji 跟主题色走，
+  /// 与周围文字协调；彩色 emoji 信息更丰富但会跳出主题色板），
+  /// 而观感取舍需要能一次切换对比，而不是改代码重编。
+  void set_color_emoji(bool enabled) noexcept { color_emoji_ = enabled; }
+  [[nodiscard]] auto color_emoji() const noexcept -> bool { return color_emoji_; }
+
   /// 取某个**码点**的字形位图（公开的诊断入口）。
   ///
-  /// 用途：验证"字形没有被裁切"——位图四周必须留白（生成时 padding=1），
+  /// 用途：验证“字形没有被裁切”——位图四周必须留白（生成时 padding=1），
   /// 墨迹一旦贴边就说明包围盒算小了（曲线极值被切掉），
-  /// 而**字宽不变**（advance 不受影响）→ 现象就是"排版完好、字却变了样"。
+  /// 而**字宽不变**（advance 不受影响）→ 现象就是“排版完好、字却变了样”。
   /// 返回 `nullptr` 表示该码点在字体栈里没有对应字形。
     /// `bold=true` 时**用真粗体字体面**（见 `FontStack::find_face(…, bold)`）。
     [[nodiscard]] auto glyph_bitmap_of(char32_t codepoint, float pixel_size,
                                        FontRole role = FontRole::Proportional,
                                        int embolden_steps = 0, bool bold = false) const
       -> std::shared_ptr<const GlyphBitmap>;
+
+  /// 彩色字形的一层（`COLR` v0 的层 + `CPAL` 颜色），带**已栅格化的覆盖率位图**。
+  struct ColorGlyphLayer {
+    std::shared_ptr<const GlyphBitmap> bitmap{};  ///< 该层的覆盖率（每层是字体里的另一个字形）
+    math::Color color{0, 0, 0, 255};
+    /// 该层用**文字色**而不是调色板色（`paletteIndex == 0xFFFF`）。
+    bool use_text_color{false};
+  };
+
+  /// 取某个码点的**彩色分层**（带覆盖率位图；空表 = 该字形不是彩色字形）。
+  ///
+  /// 与 `glyph_bitmap_of` 的分工：那个只能回答“单色覆盖率长什么样”，
+  /// 而彩色字形的覆盖面由**多层**叠成——只看单层会把“颜色不对”变成只能靠截图判的事。
+  /// 返回顺序即绘制顺序（先画的在前）。
+  ///
+  /// 每层位图走**同一套**字形位图缓存（层本身就是字体里的另一个字形），
+  /// 所以重复取同一字形是常数时间。
+  [[nodiscard]] auto color_layers_of(char32_t codepoint, float pixel_size,
+                                     FontRole role = FontRole::Proportional,
+                                     int embolden_steps = 0, bool bold = false) const
+      -> std::vector<ColorGlyphLayer>;
 
  private:
   /// 取字形覆盖率位图（按 face/字形/物理尺寸/超采样 缓存）。
@@ -709,6 +739,8 @@ class TextRenderer {
   /// 拟合墨量补偿开关（见 `set_ink_compensation`）。
   bool ink_compensation_{false};
   bool stem_darkening_{false};
+  /// 彩色 emoji（`COLR` 分层）开关，见 `set_color_emoji`。
+  bool color_emoji_{true};
   struct Cache;
   std::unique_ptr<Cache> cache_{};
 };

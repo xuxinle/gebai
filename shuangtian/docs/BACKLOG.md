@@ -7202,23 +7202,40 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   成本降 4~16 倍）；③ 只模糊**背景图层**并缓存（内容层不动时复用结果）。
   三者可叠加。目标是把全窗档压进 2ms 内（约 25 倍降幅），侧栏档压到 1ms 内。
 
-- [ ] **彩色 emoji（COLR/CPAL）未实现：emoji 能画对但只有单色**
-  （2026-11-12 修好 emoji 字体归属后发现）：emoji 字体已接入回退链（见
-  `src/core/font_platform.cpp` 的 `emoji_faces`），字形因而变正确，但输出是
-  **单色轮廓**。
-  实测数据（Windows，`C:/Windows/Fonts/seguiemj.ttf`）：有 `COLR`（v0，2786 个
-  基础字形 / 18833 条层记录）与 `CPAL`（每板 175 色 / 2 个板），**无** CBDT/CBLC/
-  sbix/SVG。📁 的真实配色是 4 层（`#000000` 轮廓 + `#3a96dd` 蓝 + `#eba300` 橙 +
-  `#ffd679` 浅黄），😀 是 5 层（轮廓 + 黄脸 + 五官 + 红口）。
-  **为何现在会成实心块**：`📁` 的 `glyf` 轮廓只有 3 条 **且同向**
-  （−++、面积 −3096252 / +1624546 / +338965），非零环绕规则不抵消——
-  它们本就是各彩色层的分量，合并后当然是一整块。同理 👨‍👩‍👧 渲染成三个独立
-  小人：**GSUB 未实现**，序列没有被合字成单个字形。
-  方向：`FontFace` 增 `color_layers(GlyphId)`（COLR v0 的 base→layer 映射 + CPAL
-  取色），`TextRenderer::draw` 遇多图层字形时逐层栅格化并按层色着色；
-  同时接入 GSUB 的 `ccmp`/`rlig`/`liga`（emoji 合字序列靠它）。
-  **不要**拿彩色 emoji 去当硬指标——单色对绝大多数界面文本是正确的取舍
-  （与主题色一致），先把“选对字体”与 GSUB 做了再说。
+- [x] **彩色 emoji（`COLR`/`CPAL` 分层）——已实现（2026-11-22）**：`FontFace::color_layers`
+  + `TextRenderer::color_layers_of` + `draw()` 逐层提交；`GSUB` 的 `ccmp`（Type 1/4）
+  同步实现，`👍🏽`/`1️⃣` 类序列已合字。详见 `DESIGN.md` §4.3「彩色 emoji」与
+  `tests/text_color_emoji_test.cpp`。
+  实测（`seguiemj.ttf`）：`COLR` version=**1**，但带 3487 个 **v0 基础字形**与
+  18833 条 v0 层记录——所以“v1 字体也能出彩色”不需要解画笔图。
+- [ ] **`COLR` v1 画笔图未实现**：v1 的 `PaintGlyph`/`PaintTransform`/渐变画笔/
+  `PaintComposite` 是一套向量绘图模型，当前只用 v0 兼容记录。
+  实测（`seguiemj.ttf` 全量扫 3487 个基础字形）：`PaintGlyph` 225545 次、
+  `PaintTransform` 221489 次、`PaintRadialGradient` 133725 次、
+  `PaintLinearGradient` 57211 次、`PaintSolid` 34789 次、`PaintColrLayers` 11611 次、
+  `PaintScale` 7878 次、`PaintComposite` 180 次（其中 `SrcIn` 180 次，
+  背景恒为 `Solid(black, α<1)`——等价于“源整体乘一个 alpha”，不需要离屏合成）。
+  **两者画面差异**：v0 层是**纯色平面**，v1 才是渐变；实测 😀 的 v0 输出
+  人脸为纯 `#F5A623`，而 Windows 自身渲染是径向渐变。（当前 v0 结果“看着对”，
+  因为层色本身已接近视觉主色，但 `🍦` 这类多层渐变件会明显失真。）
+  方向：先在 `font.cpp` 建画笔树的**扁化器**（变换累乘 + 渐变几何变换），
+  再把它转成“层 + 渐变画笔”给渲染层；渲染层需要能按覆盖率逐像素采样渐变——
+  软件 `blend_coverage_row` 已支持渐变画笔（`paint.sample`），
+  GPU 侧走 `rasterize_path_gradient` 的同一套 ramp 纹理。
+  优先级：**中**（v0 已经能把 emoji 画成正确配色的可识别图标；v1 的收益是渐变平滑度）。
+- [ ] **`GSUB` 只实现了 `ccmp`，`ZWJ` 家族序列仍不合字**：`👨‍👩‍👧` 需要 Type 6
+  上下文替换（17 个 subtable，全部 Format 3）。当前输出**三个独立人脸并排**——
+  这与 **Windows 自身渲染（PIL/`embedded_color` 实测）完全一致**，因为
+  `seguiemj.ttf` 的 Type 6 规则只做“中间字形替换”而不减少字形数。
+  方向：如果以后要支持别的字体的真 ZWJ 合字（如 Noto Color Emoji 的
+  `rlig` 链），需要补 `rlig` 特性 + Type 6，并处理“替换不减少字形数”的情形。
+  优先级：**低**（当前结果与系统参考一致，不是缺陷）。
+- [ ] **区域指示符国旗（`🇨🇳`）无彩色、宽度也只半格**：`seguiemj.ttf` 根本没有
+  `u1F1E6..u1F1FF` 的 `COLR` 记录（全字体 0 条以区域指示符开头的合字），
+  每个字母字形 advance = 946（约半格）。所以 `🇨🇳` 现在是两个窄单色方块。
+  这是**字体本身不含国旗 emoji**（Windows 长期不在系统 emoji 字体里放国旗），
+  不是引擎缺陷。方向：换字体（Noto Color Emoji）+ CBDT 位图 emoji 支持。
+  优先级：**低**（仅影响国旗；需先做 CBDT/sbix 整条位图字形路径）。
 - [ ] **`Table` 的压缩目前只按“固定列声明宽”算，不看单元格实际内容宽**：
   窄栏里日期列即使被压到 96px 仍是直接 `ellipsize`（`2026-11-06 ...`），而它的
   实际内容是固定宽度的日期串——正确做法应该是“按内容测算最小可读宽”（如按

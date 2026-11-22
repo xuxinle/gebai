@@ -1677,6 +1677,16 @@
       ],
       "//note": "图元总览：22 个图元各渲一格拼成 PNG，并逐个导出 .glb（能被 Blender/引擎打开）"
     },
+    "color_emoji_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/color_emoji_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "彩色 emoji：用真实 TextRenderer 画一批 emoji 出 PNG，并给出分层数/彩色像素占比两项可复算判据（单色轮廓的 chroma_ratio 恒为 0）"
+    },
     "scene3d_blender_probe": {
       "kind": "executable",
       "sources": [

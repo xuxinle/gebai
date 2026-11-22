@@ -14,10 +14,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "st/core/error.hpp"
+#include "st/math/color.hpp"
 #include "st/math/path.hpp"
 
 namespace st::text {
@@ -64,6 +68,21 @@ struct Glyph {
   /// 字母通常为 0（坐在基线上），`g`/`，` 这类下探字形为负。
   float ink_bottom{0.0f};
   bool empty{true};
+};
+
+/// 彩色字形的一层（`COLR` v0 的 `LayerRecord` + `CPAL` 取色）。
+///
+/// 彩色 emoji 在字体里的表达是**分层绘制**：一个基础字形不是一段轮廓，而是
+/// 「若干层，每层是另一个字形 + 一个颜色」。按层顺序逐层填充即得彩色字形——
+/// 这不需要位图、不需要着色器，与普通字形走同一条覆盖率渲染路径。
+struct ColorLayer {
+  GlyphId glyph{0};
+  /// 该层的颜色（`CPAL` 第 0 号调色板；alpha 已按字体给的 alpha 复合到 `a`）。
+  /// `use_text_color` 为真时本字段无意义。
+  math::Color color{0, 0, 0, 255};
+  /// `paletteIndex == 0xFFFF`：该层用**文字色**而不是调色板色（`COLR` 规范的
+  /// "text foreground color" 约定）。等宽图标字体里的单色层就是这种。
+  bool use_text_color{false};
 };
 
 /// 单个字体文件（或集合字体的单个 face）。
@@ -120,6 +139,38 @@ class FontFace {
   /// `kern` 表（格式 0）字距调整，**字体单位**；无该对返回 0（`noexcept`，不报错）。
   [[nodiscard]] auto kerning(GlyphId left, GlyphId right) const noexcept -> float;
 
+  /// `ccmp` 的单字替换（字形 → 字形）；未命中返回 `nullopt`。
+  ///
+  /// 用途：`uni2764`（文本表现的心形）在 emoji 字体里先被 `ccmp` 换成彩色基础字形，
+  /// 不做这一步就只能画出一个单色轮廓。
+  [[nodiscard]] auto compose_single(GlyphId id) const -> std::optional<GlyphId>;
+
+  /// `ccmp` 的多字合字：给定**候选序列**（已逐个字形号），返回合成后的字形与
+  /// 被吃掉的字形数。未命中返回 `nullopt`。
+  ///
+  /// `glyphs` 至少要看 1 个元素（首字形）；长度不够匹配最长规则时按已有前缀试。
+  /// 返回的 pair 为 `{合成字形, 参与合字的字形数}`。
+  [[nodiscard]] auto compose_ligature(std::span<const GlyphId> glyphs) const
+      -> std::optional<std::pair<GlyphId, std::size_t>>;
+
+  /// 该字形**能不能开头合字**（整形循环的快路径判据；不能就不必展开候选）。
+  [[nodiscard]] auto has_ligature(GlyphId id) const noexcept -> bool;
+
+  /// 该字形的**彩色分层**（`COLR` v0 基础字形记录 + `CPAL` 第 0 号调色板）。  ///
+  /// 返回**层序**（先画的在前）。空表有两种含义，调用方都按"按单色轮廓画"处理：
+  /// ① 该字形不是彩色字形（普通文字、以及 `COLR` v1 画笔图但与 v0 记录不重叠的字形）；
+  /// ② 字体没有 `COLR`/`CPAL` 表。
+  ///
+  /// 结果按字形缓存（与轮廓缓存同一生命周期），返回的是缓存内的引用。
+  [[nodiscard]] auto color_layers(GlyphId id) const -> const std::vector<ColorLayer>&;
+
+  /// 字体是否带彩色分层表（`COLR` 有 v0 基础字形记录且 `CPAL` 有颜色记录）。
+  ///
+  /// 与 `color_layers(id).empty()` 的分工：本函数回答"这个字体有没有彩色能力"，
+  /// 它决定调用方要不要为彩色路径预先付代价（缓存、分支）；单字形层面仍以
+  /// `color_layers` 是否为空为准。
+  [[nodiscard]] auto has_color_layers() const noexcept -> bool;
+
   /// 该字形**字体自带**的笔画提示（字体单位；顺序即 charstring 里的出现顺序）。
   ///
   /// 仅 CFF（OTF）字体有；`glyf` 轮廓或解释失败时返回空表（调用方回退到几何拟合）。
@@ -132,6 +183,8 @@ class FontFace {
 };
 
 /// 该字体文件包含的 face 数量（非集合字体为 1）。
+///
+/// （彩色分层见 `FontFace::color_layers`；`COLR` v1 的画笔图尚未解释，见 `docs/BACKLOG.md`。）
 ///
 /// **存在的理由：不要把「猜下标」当探测**（2026-10-08 量化）：`FontStack` 要在集合字体
 /// （`.ttc`/`.otc`）里挑简体 face，原本的做法是 `index = 0..11` 逐个 `load` 到失败为止。
