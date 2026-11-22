@@ -5,6 +5,11 @@ import { attaching, client, getCurrentSession, runs, setConn } from "./state"
 import { consumeTaskStream, discardRunBubble } from "./stream"
 import { actionForNetEvent, bindNetworkEvents, type NetEvent } from "./net-status"
 
+/** 「刚起步不算失效」的宽限窗口（毫秒）：与 SDK 的任务受理宽限同口径（`acceptSettleMs` 默认 15s）——
+ *  同一份证据（prompt 已受理、引擎尚未登记运行态）在前端自检这里也必须被排除，否则刚发送的
+ *  任务会被判 stale 中止。 */
+export const ACCEPT_SETTLE_MS = 15_000
+
 /** 附加运行中会话（DESIGN「运行中会话恢复」，loadMessages 尾部钩子调用）：
  *  页面刷新/切换进入运行中会话时——快照（在途流 + 待决交互）→ 待决卡片重建（审批/选择/填值/
  *  画图/捕获的事件已推送过、本页收不到，不重建则任务干等到超时）→ consumeTaskStream 接管
@@ -113,14 +118,21 @@ export async function verifyConnection(): Promise<void> {
     // snapshotHandlers，main.ts 的 onSnapshot 已在那个回调里调 setRuntimeInfo——
     // 自检因此天然把最新的 runtime 带到会话列表角标，不额外多一次往返。
     // 运行态以服务端为准收敛：本页在等但服务端已没在跑的会话，逐个收尾并补齐正文
-    const stale = [...runs.keys()].filter((id) => !r.running.includes(id))
+    // 刚起步的本地任务不算：prompt 已受理、引擎尚未登记运行态（落盘/附件上传与诊断窗口）之间有一个
+    // 短暂窗口——此时快照看不到该会话，直接判 stale 会中止刚起跑的流、丢掉在途气泡，
+    // 并重读一份「用户消息还没落盘」的历史（现象：消息与回答一起消失且无任何提示）。
+    // 宽限窗口取与 SDK 受理窗口同口径的 ACCEPT_SETTLE_MS（默认 15s）。
+    const stale = [...runs.entries()].filter(([id, run]) => !r.running.includes(id) && Date.now() - run.startedAt > ACCEPT_SETTLE_MS).map(([id]) => id)
     for (const sid of stale) {
       // 收尾顺序有讲究：先把本轮中止、清掉在途气泡，再重读历史——
       // 反了（先重读后中止）会留下两个气泡：历史渲染的完整回答 + 旧的半截流式气泡。
       runs.get(sid)?.abort.abort()
       // 中止后本轮气泡不再由流逻辑接管，直接移除（服务端已结束，它永远不会再被填充）
       discardRunBubble(sid)
-      await loadMessages(sid).catch(() => {})
+      // 只为当前会话重读消息：loadMessages 首行会 activatePane，对后台会话调用会把用户的当前视图
+      // 抢到那个会话上去。后台会话只需收敛运行态标记，正文由其容器（已渲染的历史/在途流）或
+      // 下次进入时的加载兜底。
+      if (getCurrentSession()?.id === sid) await loadMessages(sid).catch(() => {})
       markSessionRunning(sid, false)
     }
     // 服务端在跑而本页没接管：附加恢复（内部有 runs/attaching 去重，已接管则 no-op）

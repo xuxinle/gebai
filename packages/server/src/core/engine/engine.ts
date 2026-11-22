@@ -1273,13 +1273,25 @@ private activeSchemas(sessionId: string) {
       // 超长用户输入落盘（DESIGN「上下文保护」预防策略）：全文写入会话 tmp/user_inputs/（原文不丢），
       // 消息正文保留头尾 + 文件引用，避免大段粘贴撑爆上下文；未超阈值原样不变
       const userContent = await spillLongUserInput(prompt, this.opts.store.getTmpDir(sessionId, user))
+      const userCreatedAt = Date.now()
       await this.opts.store.appendMessage(sessionId, {
         id: messageId,
         role: "user",
         content: userContent.content,
         attachments: attachmentRefs,
-        createdAt: Date.now(),
+        createdAt: userCreatedAt,
       }, user)
+      // 用户消息实时事件（回显通道）：本条已落盘，向所有连接广播——发起页乐观上屏的那条按
+      // messageId 判重，其余来源（其他标签页/飞书桥接/定时任务/`session` 工具注入/重启续跑/
+      // 排队项在他处派发后回到前台）由此回显。此前用户消息没有任何实时事件，非本页发起的
+      // 输入只能靠刷新重读历史才可见——用户看到的是「回答出现了，我的提问却不在」。
+      this.publish(sessionId, "event.user.message", {
+        sessionId,
+        messageId,
+        text: userContent.content,
+        ...(attachmentRefs?.length ? { attachments: attachmentRefs } : {}),
+        createdAt: userCreatedAt,
+      })
       // 任务开始事件（DESIGN「运行中会话恢复」）：任务并非总由本页发起——重启续跑/飞书桥接/定时任务/
       // 其他标签页都会在页面空闲时开始运行。无此事件时前端只能在本页发起或进入会话那一刻探测到
       // 运行态，之后开始的任务（典型：重启后页面已刷新、续跑才启动）会一直显示为空闲（无信号灯/

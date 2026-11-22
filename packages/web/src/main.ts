@@ -35,7 +35,7 @@ import { initFileDisplay } from "./file-display"
 import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, enterSessionView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
-import { appendMsg, bindMessagesSessions, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
+import { appendMsg, appendServerUserMessage, bindMessagesSessions, noteUserMessageEcho, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
 import { createSessionWithDraftModel, initModelPicker } from "./model-picker"
 import { createSubmitQueue } from "./submit-queue"
 import { sendPending } from "./attachments"
@@ -128,8 +128,10 @@ const submitOnce = createSubmitQueue(async () => {
   let userMsgEl: HTMLElement | null = null
   // 运行中：本条不进消息流，交服务端队列排队（排队条呈现）——当前任务结束后服务端自动按序执行；
   // Ctrl+Enter（interrupt）插队首并取消当前循环，其收尾后立即执行。附件仍在此刻上传（入队时
-  // 就落会话 tmp/，执行时直用引用）
-  if (runs.has(sessionId)) {
+  // 就落会话 tmp/，执行时直用引用）。
+  // 除本地 runs 外还要看服务端快照 running：本页未接管的并行任务（其他标签页/飞书桥接/定时任务）
+  // 在跑时，直发会拿到 already_running → 刚上屏的幻影消息被撕掉、内容退回输入框（“消息闪一下就没了”）。
+  if (runs.has(sessionId) || client.getSnapshot().running.includes(sessionId)) {
     const attachments = await sendPending(sessionId)
     // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
     const prompt = text || (attachments.length ? DEFAULT_ATTACH_PROMPT : "")
@@ -149,13 +151,30 @@ const submitOnce = createSubmitQueue(async () => {
     return
   }
   // 用户消息立刻上屏（含本地上传前的附件原文件预览）：等上传结果回流再渲染会让附图消息“先发后消失”，
-  // 纯附件消息则完全不可见（历史回填只在刷新/切回时发生）。上传完成后原地换成服务端会话内引用
+  // 纯附件消息则完全不可见（历史回填只在刷新/切回时发生）。上传完成后原地换成服务端会话内引用。
+  // 上屏包 try/catch：输入区已清空，此处抛错（渲染/附件预览异常）会让调用方（void submitOnce）
+  // 变成未处理拒绝——输入没了、消息没发出去、界面无任何痕迹。
   const localFiles = pendingFiles.map((f) => ({ name: f.name, mime: f.mime, size: f.size, blob: f.blob }))
   // 纯附件消息的正文与服务端落盘一致（同一默认提示词），否则刷新前后同一条消息两种正文
   const shownText = text || (localFiles.length ? DEFAULT_ATTACH_PROMPT : "")
   if (shownText || localFiles.length) {
-    userMsgEl = appendMsg({ id: msgId, role: "user", content: shownText, createdAt: Date.now() })
-    if (localFiles.length) renderMsgAttachments(userMsgEl, sessionId, localFiles)
+    try {
+      userMsgEl = appendMsg({ id: msgId, role: "user", content: shownText, createdAt: Date.now() })
+      if (localFiles.length) renderMsgAttachments(userMsgEl, sessionId, localFiles)
+      // 进回显缓冲：上屏后、落盘前若发生一次历史重载（切会话/自检收尾/断线重同步），
+      // 容器被重置而快照里还没有这条——靠缓冲补回，否则这条就从界面上消失
+      noteUserMessageEcho(sessionId, { id: msgId, content: shownText, createdAt: Date.now() })
+    } catch (err) {
+      // 上屏失败不得静默丢输入：内容放回输入框（用户可重试），并如实告警
+      userMsgEl = null
+      if (!input.value.trim()) {
+        input.value = text
+        autosize()
+        syncSendButton()
+      }
+      toast(`消息上屏失败：${(err as Error).message}（内容已放回输入框）`, "error")
+      return
+    }
   }
   if (text) recordInput(sessionId, text)
   // 用户消息上屏后再落底一次：发送即滚动到底立即可见（不依赖观察器 rAF 时序；此前滚走阅读历史时同样恢复跟随）
@@ -344,6 +363,7 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
         count: Number(ev.payload.count ?? 0),
         summary: String(ev.payload.summary ?? ""),
         degraded: ev.payload.degraded === undefined ? undefined : String(ev.payload.degraded),
+        userMessages: ev.payload.userMessages === undefined ? undefined : Number(ev.payload.userMessages),
       })
     } else if (ev.type === "event.session.ctx") {
       // 运行中上下文大小实时更新（会话列表 k 显示）；缓存命中（接口返回时）随同更新（圆环悬浮展示）
@@ -424,21 +444,39 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     } else if (ev.type === "event.queue.update") {
       // 排队输入变化（入队/出队/编辑/撤回/置顶）：服务端权威，本页只重渲染排队条
       applyQueuedUpdate(ev.sessionId, (ev.payload.items as QueuedPrompt[]) ?? [])
-    } else if (ev.type === "event.queue.dequeued") {
-      // 排队项开始执行：用户消息上屏（与直接发送同形态，含附件引用）——执行时点而非入队时点，
-      // 与任务流的先后一致；未连页面由历史回放兜底
+    } else if (ev.type === "event.user.message") {
+      // 用户消息回显（服务端落盘后广播）：本页乐观上屏的那条同 messageId 会被判重跳过，
+      // 其余来源（其他标签页/飞书桥接/定时任务/`session` 工具注入/重启续跑/排队项在他处派发）
+      // 由此首次可见——此前它们只能靠刷新重读历史才出现（“回答出现了，我的提问却不在”）。
       recordInput(ev.sessionId, String(ev.payload.text ?? ""))
-      if (getCurrentSession()?.id !== ev.sessionId) return
-      lockToBottom()
-      appendMsg({
-        id: String(ev.payload.messageId ?? uuid()),
-        role: "user",
+      const rendered = appendServerUserMessage(ev.sessionId, {
+        id: String(ev.payload.messageId ?? ""),
         content: String(ev.payload.text ?? ""),
         attachments: (ev.payload.attachments as Array<{ path: string; mime: string; name: string; size: number }>) ?? undefined,
         createdAt: Number(ev.payload.createdAt ?? Date.now()),
       })
-      lockToBottom()
-      refreshJumpBottom()
+      // 未上屏（会话已切走且无容器，或已有同 id 节点）同样要进回显缓冲：切回时的重载靠它补回
+      if (rendered && getCurrentSession()?.id === ev.sessionId) {
+        scrollIfSticky()
+        refreshJumpBottom()
+      }
+    } else if (ev.type === "event.queue.dequeued") {
+      // 排队项开始执行：用户消息上屏（与直接发送同形态，含附件引用）——执行时点而非入队时点，
+      // 与任务流的先后一致；未连页面由历史回放兜底
+      recordInput(ev.sessionId, String(ev.payload.text ?? ""))
+      // 落点三态与 event.user.message 同口径：该会话有容器就渲进它自己的（后台会话同样可见），
+      // 已切走且无容器则不渲染（切回由 loadMessages 从历史重建）——但无论哪一种都进回显缓冲，
+      // 切回时那次重载靠它补回（重载会清空容器）
+      const rendered = appendServerUserMessage(ev.sessionId, {
+        id: String(ev.payload.messageId ?? uuid()),
+        content: String(ev.payload.text ?? ""),
+        attachments: (ev.payload.attachments as Array<{ path: string; mime: string; name: string; size: number }>) ?? undefined,
+        createdAt: Number(ev.payload.createdAt ?? Date.now()),
+      })
+      if (rendered && getCurrentSession()?.id === ev.sessionId) {
+        lockToBottom()
+        refreshJumpBottom()
+      }
     }
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流

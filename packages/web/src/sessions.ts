@@ -36,7 +36,7 @@ import {
 } from "./state"
 import { markdownBlock } from "./markdown"
 import { batchExportFileName, buildExportFile, detailToImportData, downloadJson, parseImportText, singleExportFileName } from "./session-io"
-import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, isEngineNoteMsg, reasoningBlock, subSessionEntry, takeMsgBatch } from "./messages"
+import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, isEngineNoteMsg, reasoningBlock, replayUserMessageEcho, subSessionEntry, takeMsgBatch } from "./messages"
 import { clearUnread, isFollowing, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
 import { applyApprovalVisibility } from "./approvals"
@@ -205,6 +205,10 @@ export async function loadMessages(sessionId: string) {
   buildMsgNav(visible)
   if (visible.length === 0) showEmptyState()
   else hideEmptyState()
+  // 回显缓冲补挂：重置清空了容器，而本次读到的快照可能早于「重载进行中刚回显的那条消息」落盘
+  // （服务端落盘后方才广播，而本请求可能已发在路上）——不补则这条被清掉后再无入口，
+  // 用户看到的就是「消息发了、转一圈就没了」。补挂只针对本次历史里确实没有的 id。
+  replayUserMessageEcho(sessionId, new Set((session.messages ?? []).map((m) => m.id).filter(Boolean) as string[]))
   // 恢复后台运行中的流式消息（切回时会话仍在作答）
   if (run) {
     if (!run.acc.trim()) {

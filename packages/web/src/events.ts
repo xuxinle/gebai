@@ -209,13 +209,14 @@ function renderToolResult(ev: { sessionId: string; toolCallId: string; name: str
   appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, area)
   if (area) scrollSessionSticky(area)
 }
-export function onMessageCompact(ev: { sessionId: string; count: number; summary: string; degraded?: string }) {
+export function onMessageCompact(ev: { sessionId: string; count: number; summary: string; degraded?: string; userMessages?: number }) {
   // 上下文压缩 / 溢出护栏降级通知（自动/主动压缩与护栏降级共用本事件；degraded 标识护栏降级类型）
   const cur = getCurrentSession()
   if (ev.sessionId !== cur?.id) return
   noteIncoming()
   const count = Number.isFinite(Number(ev.count)) ? Number(ev.count) : 0
-  appendCompactNotice(compactNoticeTitle(count, ev.degraded), String(ev.summary ?? ""))
+  // 压缩通知：userMessages 写明本次有多少条「你的输入」被摘要替换（回查时旧提问不再以原文存在）
+  appendCompactNotice(compactNoticeTitle(count, ev.degraded, Number(ev.userMessages ?? 0) || undefined), String(ev.summary ?? ""))
 }
 
 /** 单个流式 chunk 的渲染处理（直接发送与排队输入自动执行共用的流式渲染管道）。 */

@@ -57,18 +57,28 @@ describe("手机后台半死连接：回前台/定时自检必需接线", () => 
 
   test("自检按服务端 running 与本地 runs 双向收敛（已结束要收尾、在跑要附加）", () => {
     const s = attachSrc()
-    // 本地在等但服务端已没在跑：收尾并补齐正文
-    expect(s).toContain("runs.keys()].filter((id) => !r.running.includes(id))")
+    // 本地在等但服务端已没在跑：收尾并补齐正文（刚起跑的不算：受理与引擎登记运行态之间有窗口）
+    expect(s).toContain("runs.entries()].filter(([id, run]) => !r.running.includes(id) && Date.now() - run.startedAt > ACCEPT_SETTLE_MS)")
     // 顺序有讲究：先中止 + 丢弃旧气泡，再重读历史——反了会留下半截气泡（历史一份完整 + 旧流式一份）
-    const fn = s.slice(s.indexOf("const stale ="), s.indexOf("const stale =") + 700)
+    const fn = s.slice(s.indexOf("const stale ="), s.indexOf("const stale =") + 900)
     const abortAt = fn.indexOf("abort.abort()")
     const discardAt = fn.indexOf("discardRunBubble(sid)")
     const reloadAt = fn.indexOf("await loadMessages(sid)")
     expect(abortAt).toBeGreaterThan(-1)
     expect(discardAt).toBeGreaterThan(abortAt)
     expect(reloadAt).toBeGreaterThan(discardAt)
+    // 重读只针对当前会话：loadMessages 首行 activatePane，对后台会话调用会抢走用户当前视图
+    expect(fn).toContain('if (getCurrentSession()?.id === sid) await loadMessages(sid)')
     // 服务端在跑而本页没接管：附加恢复
     expect(s).toContain("attachRunningIfNeeded(sid)")
+  })
+
+  test("stale 判据带「刚起步不算失效」宽限（受理到引擎登记运行态之间有一个窗口）", () => {
+    const s = attachSrc()
+    // 宽限口径与 SDK 的任务受理宽限同值：直接按快照判 stale 会中止刚起跑的流、
+    // 重读一份「用户消息还没落盘」的历史——现象是消息与回答一起消失且无任何提示。
+    expect(s).toContain("export const ACCEPT_SETTLE_MS = 15_000")
+    expect(s).toContain("Date.now() - run.startedAt > ACCEPT_SETTLE_MS")
   })
 
   test("不可见时不自检（省电省流量）", () => {

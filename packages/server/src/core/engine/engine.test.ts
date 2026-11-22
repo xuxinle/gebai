@@ -544,6 +544,41 @@ describe("AgentEngine", () => {
     cleanup(home)
   })
 
+  test("用户消息落盘后广播 event.user.message（回显通道：非发起页也能看到提问）", async () => {
+    const { home, engine, store, events } = await setup("text")
+    const seen: Array<{ type: string; sessionId: string; payload: Record<string, unknown> }> = []
+    events.subscribe((e) => seen.push(e as unknown as { type: string; sessionId: string; payload: Record<string, unknown> }))
+    const session = await store.createSession("default", "t")
+    const clientId = "c0ffee00-1111-4222-8333-444455556666"
+    await engine.run(session.id, "default", "你好", { messageId: clientId })
+    const hits = seen.filter((e) => e.type === "event.user.message" && e.sessionId === session.id)
+    expect(hits.length).toBe(1)
+    // 载荷：客户端 messageId 原样回传（发起页据此判重）、正文与落盘一致、时间戳就位
+    expect(hits[0].payload.messageId).toBe(clientId)
+    expect(hits[0].payload.text).toBe("你好")
+    expect(typeof hits[0].payload.createdAt).toBe("number")
+    // 先落盘再广播：事件到达时存储里已有这条（前端据此可以只靠事件渲染，不需等重读）
+    const loaded = await store.load(session.id)
+    expect(loaded!.messages.some((m) => m.id === clientId)).toBe(true)
+    cleanup(home)
+  })
+
+  test("超长输入瘦身后，回显载荷为落盘后的正文（与服务端记录同一句）", async () => {
+    const { home, engine, store, events } = await setup("text")
+    const seen: Array<{ type: string; sessionId: string; payload: Record<string, unknown> }> = []
+    events.subscribe((e) => seen.push(e as unknown as { type: string; sessionId: string; payload: Record<string, unknown> }))
+    const session = await store.createSession("default", "t")
+    const full = "开头内容" + "甲".repeat(20000) + "结尾请求：请分析这段内容"
+    await engine.run(session.id, "default", full)
+    const loaded = await store.load(session.id)
+    const stored = loaded!.messages.find((m) => m.role === "user")!
+    const hit = seen.find((e) => e.type === "event.user.message" && e.sessionId === session.id)
+    expect(hit).toBeTruthy()
+    // 回显正文 = 落盘正文（不把未瘦身的原文回显成与历史不一致的第二份，否则刷新前后两种内容）
+    expect(hit!.payload.text).toBe(stored.content)
+    cleanup(home)
+  })
+
   test("assistant 消息落盘携带 model（provider capabilities.model → 用户反馈关联数据源）", async () => {
     const { home, engine, store, provider } = await setup("text")
     provider.model = "test-model-x"
@@ -4576,8 +4611,10 @@ describe("会话级子Agent 装载持久化与恢复", () => {
       if (e.type === "event.task.start") startedAt = e.payload.startedAt
     })
     await engine.run(session.id, "default", "hi")
-    // 开始事件先于结束事件，携带任务开始时刻（前端单轮计时起点用）
-    expect(types[0]).toBe("event.task.start")
+    // 消息回显事件先于任务开始（提问先上屏、再进运行态），开始事件先于结束事件，携带任务开始时刻
+    // （前端单轮计时起点用）
+    expect(types[0]).toBe("event.user.message")
+    expect(types[1]).toBe("event.task.start")
     expect(types).toContain("event.task.done")
     expect(types.indexOf("event.task.start")).toBeLessThan(types.indexOf("event.task.done"))
     expect(typeof startedAt).toBe("number")

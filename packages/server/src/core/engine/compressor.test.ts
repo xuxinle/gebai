@@ -412,6 +412,24 @@ describe("compressSession 摘要放置与规划", () => {
     s.cleanup()
   })
 
+  test("压缩事件带 userMessages（本次被摘要替换的用户输入条数）：UI 据此写明「你的输入」" , async () => {
+    const { provider } = mockProvider()
+    const s = await setup({ provider, messages: dialogue(10, 50) })
+    await s.compressor.compactSession(s.session.id, "default")
+    const ev = s.events.filter((e) => e.type === "event.message.compact").at(-1)
+    expect(ev).toBeTruthy()
+    const count = Number(ev!.payload.count)
+    const userMessages = Number(ev!.payload.userMessages)
+    // 区间内用户输入全部随摘要移除：条数落在 (0, count]，且与「对话轮数」一致（dialogue 每轮一 user）
+    expect(userMessages).toBeGreaterThan(0)
+    expect(userMessages).toBeLessThanOrEqual(count)
+    const loaded = (await s.store.load(s.session.id))!.messages
+    const keptUsers = loaded.filter((m) => m.role === "user" && !m.compacted && !m.engineNote).length
+    // 原始用户输入条数（10 条问题）− 保留的近期输入 = 被摘要替换的条数
+    expect(10 - keptUsers).toBe(userMessages)
+    s.cleanup()
+  })
+
   test("系统提示词不压缩：区间夹带的 system 消息原位保留", async () => {
     const { provider } = mockProvider()
     const s = await setup({ provider, messages: dialogue(10, 50) })

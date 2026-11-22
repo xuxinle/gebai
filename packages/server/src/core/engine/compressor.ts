@@ -443,7 +443,10 @@ export class ContextCompressor {
     const cached = await this.cachedPrefix(llm, sessionId, user, to, opts.cachePrefix, priorSummaryBefore)
     const summary = await this.summarize(removable, llm, this.deps.taskSignal(sessionId), priorSummaries, cached)
     await this.deps.store.compactMessages(sessionId, user, { from, to, summary })
-    this.deps.publish(sessionId, "event.message.compact", { from, to, count: removed, summary, sessionId })
+    // userMessages：本次被摘要替换掉的历史用户输入条数——UI 标题据此写明「含 N 条你的输入」，
+    // 否则压缩后回看会话会发现自己的提问不见了（除系统提示词外，区间内的用户输入随摘要替换一并移除）。
+    const userMessages = removable.filter((m) => m.role === "user").length
+    this.deps.publish(sessionId, "event.message.compact", { from, to, count: removed, userMessages, summary, sessionId })
     return { compacted: removed, summary }
   }
 

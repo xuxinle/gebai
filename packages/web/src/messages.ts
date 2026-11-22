@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ContentBlock, Message } from "@gebai/sdk"
+import type { AttachmentRef, ContentBlock, Message } from "@gebai/sdk"
 import {
   ROLE_NAME,
   client,
@@ -26,7 +26,7 @@ import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
 import { lockToBottom, scrollIfSticky } from "./jump-bottom"
 import { createStickyFollow, type StickyFollowHandle } from "./sticky-follow"
-import { activePane, type MsgPane } from "./msg-panes"
+import { activePane, paneOf, type MsgPane } from "./msg-panes"
 import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
 import { speak } from "./voice"
@@ -523,9 +523,126 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement, pa
  *  "trim" = 消息条数上限截断（丢弃最早的几条历史）、其余值 = 溢出护栏降级（历史图片降级为路径说明 /
  *  最旧用户消息裁剪为占位）；两者对用户是不同事件（「上下文变短了」vs「历史被动了」），标题按语义区分；
  *  具体后果由服务端 summary 承载，不复刻到标题（单源去重）。 */
-export function compactNoticeTitle(count: number, degraded?: string): string {
+export function compactNoticeTitle(count: number, degraded?: string, userMessages?: number): string {
   if (degraded === "trim") return "历史消息条数超限裁剪"
-  return degraded ? "上下文溢出护栏" : `已压缩 ${count} 条历史消息`
+  if (degraded) return "上下文溢出护栏"
+  // 用户输入被摘要替换是「我的提问怎么不见了」的直接解释：条数已知时写进标题，不留悬念
+  return userMessages && userMessages > 0 ? `已压缩 ${count} 条历史消息（含 ${userMessages} 条你的输入）` : `已压缩 ${count} 条历史消息`
+}
+
+/**
+ * 用户消息回显（`event.user.message`）：把一条**已落盘**的用户消息渲染进该会话自己的消息流。
+ *
+ * 为何必须有本入口：用户消息没有 delta/正文事件，本页输入框发送时靠乐观上屏，其余来源
+ * （其他标签页、飞书桥接、定时任务、`session` 工具注入、重启续跑、排队项在他处派发）没有任何
+ * 回显通道——回答在流、提问却不存在，刷新才出现。
+ *
+ * 幂等：本页乐观上屏的那条已带 `data-msg-id`（= 同一 messageId），命中即跳过；
+ * 落点是该会话自己的容器（后台会话照常渲染，不侵当前视图）。
+ */
+export function appendServerUserMessage(
+  sessionId: string,
+  msg: { id: string; content: string; attachments?: MsgAttachment[]; createdAt: number },
+): HTMLElement | null {
+  // 回显缓冲：上屏之前就记上——loadMessages 重置容器时靠它把「刚上屏但本次快照里还没有」的
+  // 用户消息补回来（否则那次重载就是它从界面上消失的唯一时机）
+  noteUserMessageEcho(sessionId, msg)
+  return renderUserMessage(sessionId, msg)
+}
+
+/** 渲染一条用户消息到该会话自己的消息流（不碰回显缓冲；幂等判重）。 */
+function renderUserMessage(
+  sessionId: string,
+  msg: { id: string; content: string; attachments?: MsgAttachment[]; createdAt: number },
+): HTMLElement | null {
+  // 落点三态（与 events.ts 的 paneForRender 同口径）：有容器 → 它自己；当前会话无容器 → 默认路径；
+  // 其余（已切走且无容器）→ 不渲染（切回时由 loadMessages 从历史重建，不得往当前视图里写）
+  const own = paneOf(sessionId)
+  const target = own ?? (getCurrentSession()?.id === sessionId ? null : undefined)
+  if (target === undefined) return null
+  // 幂等：该会话容器已挂载同 id 消息（乐观上屏的那条 / dequeued 已渲染的那条）即跳过
+  if (own && hasMsgNode(own.container, msg.id)) return null
+  return withPane(target, () =>
+    appendMsg(
+      { id: msg.id, role: "user", content: msg.content, attachments: toAttachmentRefs(msg.attachments), createdAt: msg.createdAt },
+      false,
+      undefined,
+      target,
+    ),
+  )
+}
+
+/** 回显载荷（事件/缓冲）的附件 → 消息渲染所需的服务端引用（无 path 的本地预览不进历史消息）。 */
+function toAttachmentRefs(list?: MsgAttachment[]): AttachmentRef[] | undefined {
+  const refs = (list ?? []).filter((a): a is MsgAttachment & { path: string } => !!a.path).map((a) => ({ path: a.path, name: a.name, mime: a.mime ?? "application/octet-stream", size: a.size ?? 0 }))
+  return refs.length ? refs : undefined
+}
+
+/** 容器内是否已有该消息节点（按 `data-msg-id` 递归比对）：不依赖 `querySelector`
+ *  （测试替身下选择器为不聚合的桩，按子节点树走两边都成立）。 */
+function hasMsgNode(root: Element | null | undefined, id: string): boolean {
+  if (!root || !id) return false
+  const walk = (node: Element): boolean => {
+    const ds = (node as unknown as { dataset?: Record<string, string> }).dataset
+    if (ds?.msgId === id) return true
+    for (const child of Array.from(node.children ?? [])) if (walk(child)) return true
+    return false
+  }
+  return walk(root)
+}
+
+/** 回显缓冲有效期（毫秒）：仅覆盖「历史重载进行中」这一小段窗口，过期即丢。 */
+const USER_ECHO_TTL_MS = 60_000
+/** 每会话缓冲上限（条）：只为补回重载窗口内的消息，无需长期保存。 */
+const USER_ECHO_MAX = 20
+
+/** 刚回显的用户消息（sessionId → 待补回消息，新→旧）。 */
+const userEchoBuffer = new Map<string, Array<{ id: string; content: string; attachments?: MsgAttachment[]; createdAt: number; at: number }>>()
+
+/** 记录一条已回显的用户消息（loadMessages 重置容器后据此补回）。 */
+export function noteUserMessageEcho(
+  sessionId: string,
+  msg: { id: string; content: string; attachments?: MsgAttachment[]; createdAt: number },
+): void {
+  if (!msg.id) return
+  const list = (userEchoBuffer.get(sessionId) ?? []).filter((x) => x.id !== msg.id)
+  list.unshift({ ...msg, at: Date.now() })
+  userEchoBuffer.set(sessionId, list.slice(0, USER_ECHO_MAX))
+  pruneEchoBuffer()
+}
+
+/** 缓冲回收：会话数超限时扫一遗过期条目（缓冲区只为覆盖重载窗口，长期驻留无意义）。 */
+function pruneEchoBuffer(): void {
+  if (userEchoBuffer.size <= 32) return
+  const now = Date.now()
+  for (const [sid, list] of userEchoBuffer) {
+    if (!list.some((m) => now - m.at <= USER_ECHO_TTL_MS)) userEchoBuffer.delete(sid)
+  }
+}
+
+/**
+ * 重载后补回回显缓冲里尚未进历史的消息（`present` = 本次读到的消息 id 集）。
+ *
+ * 为何需要：`loadMessages` 会重置容器（`msgWindow.reset` → `replaceChildren`），而它读到的快照
+ * 可能早于「重载进行中刚回显的那条消息」落盘——不补则这条被清掉后再无入口（它已不在缓冲区之外的
+ * 任何地方），用户能观察到的就是「消息发了、转一圈就没了」。
+ */
+export function replayUserMessageEcho(sessionId: string, present: Set<string>): void {
+  const list = userEchoBuffer.get(sessionId)
+  if (!list?.length) return
+  const now = Date.now()
+  // 已进历史（本次快照读到了）与已过期的条目都从缓冲中移除：它们的补回职责已终止，
+  // 留着只会在后续重载时反复重挂
+  const pending = list.filter((m) => now - m.at <= USER_ECHO_TTL_MS && !present.has(m.id))
+  if (!pending.length) {
+    userEchoBuffer.delete(sessionId)
+    return
+  }
+  userEchoBuffer.set(sessionId, pending)
+  // 按 createdAt 升序补挂（反序遍历：缓冲是新→旧，补挂必须从旧到新）
+  for (const m of [...pending].reverse()) {
+    renderUserMessage(sessionId, { id: m.id, content: m.content, attachments: m.attachments, createdAt: m.createdAt })
+  }
 }
 
 /** 实时压缩通知气泡（event.message.compact 推送时渲染，不持久化）。 */

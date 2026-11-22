@@ -213,10 +213,64 @@ describe("附图消息发送即上屏（不等上传回流）", () => {
     const s = src("main.ts")
     const at = s.indexOf('ev.type === "event.queue.dequeued"')
     expect(at).toBeGreaterThan(-1)
-    const branch = s.slice(at, at + 900)
+    const branch = s.slice(at, at + 1200)
     // 执行即上屏：排队项真正开始执行时与直接发送同一形态渲染（含附件引用）
     expect(branch).toContain("attachments: (ev.payload.attachments")
     expect(branch).toContain("recordInput(")
+    // 落点按会话归属（后台会话同样上屏；已切走无容器才交给历史重建）——不再只认当前会话
+    expect(branch).toContain("appendServerUserMessage(ev.sessionId")
+    expect(branch).not.toContain('if (getCurrentSession()?.id !== ev.sessionId) return')
+  })
+})
+
+describe("用户消息回显（event.user.message）接线", () => {
+  test("main.ts 处理该事件：幂等入口渲染 + 记输入历史", () => {
+    const s = src("main.ts")
+    const at = s.indexOf('ev.type === "event.user.message"')
+    expect(at).toBeGreaterThan(-1)
+    const branch = s.slice(at, at + 900)
+    expect(branch).toContain("appendServerUserMessage(ev.sessionId")
+    expect(branch).toContain("recordInput(")
+    // 载荷字段：messageId（判重键）/ text / attachments / createdAt
+    expect(branch).toContain("String(ev.payload.messageId ?? \"\")")
+    expect(branch).toContain("ev.payload.attachments")
+  })
+
+  test("loadMessages 重置容器后补挂回显缓冲（重载窗口内的消息不被抹掉）", () => {
+    const s = src("sessions.ts")
+    const at = s.indexOf("msgWindow.reset(chunkSeeds(bounds))")
+    expect(at).toBeGreaterThan(-1)
+    const after = s.slice(at, at + 900)
+    // 补挂必须在重置之后、且以本次历史 id 集为判据（已进历史的不重复挂）
+    expect(after).toContain("replayUserMessageEcho(")
+    expect(after).toContain("new Set(")
+  })
+
+  test("发送即上屏的那条也进回显缓冲（否则重载就是它消失的唯一时机）", () => {
+    const s = src("main.ts")
+    expect(s).toContain("noteUserMessageEcho(")
+    // 上屏在 try 块内、记录紧随其后（异常时走回填输入框分支）
+    const at = s.indexOf("userMsgEl = appendMsg(")
+    expect(at).toBeGreaterThan(-1)
+    expect(s.slice(at, at + 600)).toContain("noteUserMessageEcho(")
+  })
+
+  test("上屏抛错不得静默丢输入（回填输入框 + toast）", () => {
+    const s = src("main.ts")
+    const at = s.indexOf("userMsgEl = appendMsg(")
+    const branch = s.slice(at, at + 900)
+    expect(branch).toContain("catch")
+    expect(branch).toContain("input.value = text")
+    expect(branch).toContain("toast(")
+  })
+
+  test("直发前也看服务端快照 running（避免 already_running 撕掉幻影消息）", () => {
+    const s = src("main.ts")
+    expect(s).toContain("client.getSnapshot().running.includes(sessionId)")
+    const at = s.indexOf("if (runs.has(sessionId) || client.getSnapshot().running.includes(sessionId))")
+    expect(at).toBeGreaterThan(-1)
+    // 该判据必须先于乐观上屏（否则消息闪一下就没了）
+    expect(at).toBeLessThan(s.indexOf("userMsgEl = appendMsg("))
   })
 })
 
