@@ -34,6 +34,7 @@ void StatusDot::set_state(State state) {
   // `Busy` 自动呼吸（「正在进行」需要动感）；切走时关掉（避免残留的常驻续帧）。
   pulse_ = state_value_ == State::Busy;
   mark_layout_dirty();
+  request_theme_refresh();   // 状态色由 `apply_theme` 从 `state_value_` 解析
 }
 
 void StatusDot::set_label(std::string label) {

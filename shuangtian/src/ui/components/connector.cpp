@@ -428,6 +428,8 @@ void Connector::set_tone(Tone tone) {
   tone_ = tone;
   explicit_color_.reset();
   mark_dirty();
+  // `apply_theme` 在 `explicit_color_` 为空时按 `tone_` 取色。
+  request_theme_refresh();
 }
 
 auto Connector::set_color_hex(std::string_view hex) -> bool {
@@ -435,12 +437,15 @@ auto Connector::set_color_hex(std::string_view hex) -> bool {
   if (trimmed.empty()) {
     explicit_color_.reset();
     mark_dirty();
+    // 清掉显式色 ⇒ 颜色回到 `tone_` 解析，必须让 `apply_theme` 重算一次。
+    request_theme_refresh();
     return true;
   }
   const auto parsed = svg::parse_color(trimmed);
   if (!parsed.has_value()) return false;   // 非法色值如实拒绝（不假装改了）
   explicit_color_ = *parsed;
   mark_dirty();
+  request_theme_refresh();
   return true;
 }
 

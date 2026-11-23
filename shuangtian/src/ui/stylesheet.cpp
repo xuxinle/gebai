@@ -387,8 +387,9 @@ auto apply_declaration(Element& element, Style& style, const Declaration& decl, 
     } else if (key == "tint") {
       if (auto v = num()) {
         style.backdrop_tint = *v;
-        // 打标记：否则 `apply_theme_glass` 每帧写回主题值（实测改 0.22→0.9 画面不变）。
-        element.mark_glass_tint_declared();
+        // 声明“这个 tint 是调用方要的”：`apply_theme_glass` 在下次主题变更时
+        // 不得把它改回主题缺省值（否则 `set glass=…tint:0.9` 会被静默抹掉）。
+        element.set_backdrop_tint_declared();
         return true;
       }
     } else if (key == "refraction" || key == "refract") {
@@ -412,7 +413,7 @@ auto apply_declaration(Element& element, Style& style, const Declaration& decl, 
         style.top_highlight = math::Color{v->r, v->g, v->b, style.top_highlight.a};
         element.set_top_highlight_override(style.top_highlight);
         // 显式给色后主题不再覆盖（与 tint 同一条契约）。
-        element.mark_top_highlight_color_declared();
+        element.set_top_highlight_color_declared();
         return true;
       }
     } else if (key == "ring" || key == "highlight_width") {

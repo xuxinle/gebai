@@ -357,6 +357,10 @@ void Table::set_row_height(float height) {
   row_height_ = clamped;
   row_offsets_valid_ = false;   // 行高变了，前缀和失效
   mark_layout_dirty();
+  // `apply_theme` 也写 `row_height_`（字号变化时跟随）。两者共用同一个字段，
+  // 所以显式设过之后仍要让主题重算跑一次：它才会看到 `explicit_row_height_`
+  // 并停止改写（否则“设了行高”要等下一次换肤才生效）。
+  request_theme_refresh();
 }
 
 auto Table::max_scroll() const noexcept -> float {

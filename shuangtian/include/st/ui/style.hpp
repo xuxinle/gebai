@@ -176,6 +176,16 @@ struct Style {
   /// 看上去是一块“发辉的灰纸”。所以底色与 tint 都要随主题换档。
   bool theme_glass{false};
 
+  /// 调用方**显式声明过** `backdrop_tint`（样式串的 `tint:` / 控制通道 `set glass`）。
+  ///
+  /// 只在 `theme_glass` 为真时有意义：那时 `apply_theme_glass` 会在主题变更时
+  /// 把 tint 写回主题缺省值，而显式声明必须盖过它。
+  ///
+  /// 为何放在 `Style` 而不是 `RenderExtras`（2026-11-23）：它与 `backdrop_tint`
+  /// 是同一件事的两个面（“这个值是谁写的”），跟 `theme_glass` 放一处才不会漂；
+  /// 而且 `RenderExtras` 是**惰性分配**的，一个 bool 去那边要付一次堆分配。
+  bool backdrop_tint_declared{false};
+
   /// **纯色底的唯一写入口**：写 `background` 的同一步清掉渐变。
   ///
   /// 为何必须是唯一入口（2026-11-10，相期「全部忽略」蓝底）：

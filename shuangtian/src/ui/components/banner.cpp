@@ -52,6 +52,9 @@ void Banner::set_tone(Tone tone) {
   if (tone_ == tone) return;
   tone_ = tone;
   mark_dirty();
+  // `apply_theme` 从 `tone_` 解析语气色。2026-11-23 起 `apply_theme` 不再每帧跑，
+  // 所以“改成员 + 标脏”不再能隐式触发重算 —— 必须显式声明样式输入变了。
+  request_theme_refresh();
 }
 
 void Banner::set_icon(std::string icon_name) {

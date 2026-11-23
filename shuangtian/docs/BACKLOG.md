@@ -1112,6 +1112,30 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
 
 ## P1
 
+- [ ] **`Element` 的 `dirty_`（绘制脏）在生产路径里**从不清零**——两个脏位语义重叠**
+
+  **现象**（2026-11-23 做主题重构时量到）：`Element::clear_dirty()` 把 `dirty_` 与
+  `layout_dirty_` 一起清零，但它**只被测试调用**（`src/` 里零调用点）；生产路径只在
+  `Element::arrange` 里单独清 `layout_dirty_ = false`。于是 `dirty_` 一旦置上就永久为真。
+
+  **为何值得做**：这两个位名字相近但语义不同（绘制脏 vs 布局脏），而前者事实上是个
+  “永远脏”的死标志。直接后果：不能用 `dirty_` 当任何“需要重做某事”的判据——
+  本次本想用“元素脏就重算主题”来消掉 31 个 setter 的显式钩子，就因为这一点做不到
+  （合并等于永久重算 = 退回原缺陷）。同理还有 18 个 setter 只调 `mark_dirty()`
+  不调 `mark_layout_dirty()`，它们的“需要重绘”信号也永远消费不掉。
+
+  **方向**：要么给 `dirty_` 一个真正的消费者（帧末按子树清），要么把它降级成局部标志
+  并入 `RenderExtras::damage_*`（那才是真正在用的绘制脏机制）。做之前先量“清它会不会
+  打破某些依赖 `dirty()` 的断言”（`ui_timeline_view_test` / `ui_damage_test` 里有几处）。
+
+- [ ] **主题重算的三个触发位里，第三个（setter 声明）仍是约定型**
+
+  `request_theme_refresh()` 靠 setter 自己调，只能**发现漏写**（
+  `theme_style_input_setters_declare_refresh` 源码扫描），不能让它** невозможно漏**。
+  真结构性修法：让 `apply_theme` 读的成员只能通过一个“改了就必须声明”的包装写
+ （如 `StyleInput<T>`）。代价是 31 处 setter 改写 + 编译器要能忍住
+  （接收者类型一变，`-Wconversion -Wshadow` 全套门槛都要重跑）。
+
 - [ ] **`ToneMap::Agx` 整体偏亮（低值区抬得过高）**
 
   **现象**（2026-11-06 量到，工具 `tools/tone_map_probe`）：

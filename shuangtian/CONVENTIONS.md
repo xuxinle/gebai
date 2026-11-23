@@ -331,6 +331,23 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 | 测试 | `tests/<层>_<模块>_test.cpp`，入口 `int main()` 用自研 `st::test` | `tests/ext_json_test.cpp` |
 | 枚举 | `enum class Name`，成员 `PascalCase` 或全小写蛇形（同一枚举内一致） | `enum class BlendMode { SrcOver }` |
 
+### 5.1 “请求 → 查询 → 消费”三阶段的统一词形
+
+同一件事的三个阶段**必须用同一套词形**（照着 `request_animation` 抄）：
+
+| 阶段 | 词形 | 例 |
+|---|---|---|
+| 声明需求 | `request_xxx()` | `request_animation()` / `request_wake_at(t)` / `request_theme_refresh()` |
+| 只读查询 | `xxx_requested()` / `xxx_at()` | `animation_requested()` / `wake_at()` / `theme_refresh_requested()` |
+| 消费（清零） | `clear_xxx_request()` | `clear_animation_request()` / `clear_wake_request()` / `clear_theme_refresh_request()` |
+
+⚠ **`take_` 只给“转移所有权”**（`take_content` / `take_changed_ids`）。只是消费一个标志/计数
+不用 `take_`——那会让“搜 `take_` 找所有权移交”失效。
+
+⚠ **`mark_` 只给“标脏”**（`mark_dirty` / `mark_layout_dirty`）。声明一个布尔**状态位**
+（“这个值是谁写的”）用 `set_xxx_declared()`：`Style::backdrop_tint_declared`、
+`PaintDeclarations::top_highlight_color_declared`。否则“搜 `mark_` 找全部标脏点”失效。
+
 ## 6. 头文件纪律
 
 1. 每个头文件自包含（单独 include 即可编译），`#pragma once`。
@@ -361,6 +378,25 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 
 不做这一步就会交付一个“恒绿的测试”——它看起像回归护栏，实际什么也拦不住。
 这不是假设：修 `SplitView` 分隔线偏移时，第一版回归测试在**回退修复后依然是绿的**。
+
+#### 7.1.1 观测必须落在**修复真正改变的东西**上（2026-11-23 新踩）
+
+做主题重构时，我写了一版“声明活过多帧”的回归：`set top_highlight` 后读 `get`。
+它 PASS——但把 `apply_declared_paint`（声明回放，被验证的核心机制）**整个删掉**，
+它**依旧 PASS**。原因：`set` 本身就写进了 `Style`，而 `get` 读的就是 `Style`——
+**观测路径绕过了被测机制**。
+
+换判据的次序如下（都应记住）：
+
+| 观测 | 是否能抓住“声明回放缺失” | 为何 |
+|---|---|---|
+| `get` 回读同一字段 | ❌ 假绿 | `set` 与 `get` 走同一份 `Style`，回放被绕过 |
+| 连跑 N 帧再 `get` | ❌ 假绿 | 主题未重算，声明本来就不会被盖 |
+| **切一次主题**后看**像素** | ✅ 真红 | 切主题会让 `apply_theme` 真的重算并抹掉声明 |
+
+**结论：断言要挂在“修复前后行为真的不同”的那条路径上。** 对本次而言那一定是
+“**主题变更** + **像素**”，而不是“多帧 + 属性回读”。
+实测对照（`tools/verify_theme_runtime.py`）：删回放后，橙色高光像素从 **248 → 0**。
 
 两个具体的假绿成因（已经踩过，写测试时先自查）：
 

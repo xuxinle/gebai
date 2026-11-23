@@ -84,6 +84,7 @@ void Sparkline::set_tone(Tone tone) {
   if (tone_ == tone) return;
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();
 }
 
 void Sparkline::set_baseline(bool baseline) {

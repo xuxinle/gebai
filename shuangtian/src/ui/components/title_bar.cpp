@@ -543,6 +543,7 @@ void TitleBar::set_surface_color(std::optional<math::Color> color) {
   }
   surface_color_ = color;
   mark_dirty();
+  request_theme_refresh();
 }
 
 void TitleBar::apply_theme(const Theme& theme) {

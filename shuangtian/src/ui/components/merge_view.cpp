@@ -175,6 +175,7 @@ void MergeView::set_font_size(float size) {
   if (font_size_ == size) return;
   font_size_ = size;
   mark_layout_dirty();
+  request_theme_refresh();
 }
 
 void MergeView::apply_theme(const Theme& theme) {

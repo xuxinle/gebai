@@ -83,6 +83,7 @@ void ProgressRing::set_tone(Tone tone) {
   if (tone_ == tone) return;
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();
 }
 
 auto ProgressRing::percent() const noexcept -> int {

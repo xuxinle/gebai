@@ -106,6 +106,7 @@ void HtmlView::set_base_font_size(float size) {
   base_font_size_ = size;
   layout_valid_ = false;
   mark_layout_dirty();
+  request_theme_refresh();
 }
 
 void HtmlView::set_padding(float padding) {

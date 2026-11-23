@@ -167,12 +167,14 @@ void Spinner::set_diameter(float diameter) {
   if (diameter_ == clamped) return;
   diameter_ = clamped;
   mark_layout_dirty();
+  request_theme_refresh();
 }
 
 void Spinner::set_tone(Tone tone) {
   if (tone_ == tone) return;
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();
 }
 
 auto Spinner::phase_degrees(double time_seconds) const noexcept -> float {
@@ -273,6 +275,7 @@ void Badge::set_tone(Tone tone) {
   if (tone_ == tone) return;
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();
 }
 
 void Badge::apply_theme(const Theme& theme) {
@@ -365,6 +368,7 @@ void Chip::set_tone(Tone tone) {
   if (tone_ == tone) return;
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();
 }
 
 auto Chip::close_area() const noexcept -> math::Rect {

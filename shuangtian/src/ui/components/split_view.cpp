@@ -124,8 +124,10 @@ void SplitView::set_gap(float gap) {
 void SplitView::set_gap_fill(std::optional<Surface> surface) {
   if (gap_fill_ == surface) return;
   gap_fill_ = surface;
-  // 只影响绘制，不动布局。颜色在下一次 `apply_theme` 重算。
+  // 只影响绘制，不动布局。颜色在 `apply_theme` 里解析——
+  // 2026-11-23 起那次重算不再自动发生，所以必须显式请求。
   mark_dirty();
+  request_theme_refresh();
 }
 
 void SplitView::set_second_hidden(bool hidden) {

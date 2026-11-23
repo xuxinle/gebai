@@ -33,9 +33,30 @@ class UiRoot : public Element::HostFocus {
   /// 注：取出的元素**保留**其 id 与子树（不会被 assign_ids 重写）。
   [[nodiscard]] auto take_content() -> std::unique_ptr<Element>;
 
+  /// 非 const 访问器。
+  ///
+  /// ⚠ **不要用它改主题内容**：改了不会 bump `theme_version_`，于是元素不会重算样式——
+  /// 症状是“改了 token 但界面不变”（而且只有部分元素看着旧，因为各自 `applied_theme_version_`
+  /// 不同）。改主题走 `set_theme()`。
+  ///
+  /// 为何不删除：它是已发布的 API，可能有外部集成在用；标成 deprecated 会制造
+  /// 构建噪声而收益不明确。当前仓内所有调用点都只读（`theme().mode()` / `theme().name()`）。
   [[nodiscard]] auto theme() noexcept -> Theme& { return theme_; }
   [[nodiscard]] auto theme() const noexcept -> const Theme& { return theme_; }
   void set_theme(Theme theme);
+
+  // —— 主题版本号 ——
+  //
+  // 用途：让 `Element::refresh_theme` 只在**主题内容真的变了**时跑，而不是每帧跑。
+  // 为什么不用 `Theme::operator==`：见 `Element::applied_theme_version` 的说明
+  //（30+ 字段逐比比重算还慢，且漏一个字段 = 换肤静默失效）。
+  //
+  // 为何**不复用** `version_`：那是树版本（供控制通道 `events` / `wait for=stable` 用），
+  // 任何状态变更都会 bump 它（见 `note_changed`）。两者语义不同，合在一起会让
+  // “改了一个标签 → 全树重算主题”。
+
+  /// 当前主题内容的版本号（单调递增，从 `1` 起——`0` 留给元素侧“从未应用过”）。
+  [[nodiscard]] auto theme_version() const noexcept -> std::uint64_t { return theme_version_; }
 
   /// 文本绘制端口（非拥有；为空时使用 `NullTextPort`）。
   void set_text_port(const TextPort* port);
@@ -810,6 +831,11 @@ class UiRoot : public Element::HostFocus {
   static constexpr std::size_t kMaxChangedIds = 64;
   std::vector<ElementId> changed_ids_{};   ///< 累积的变更元素 id（见 note_changed）
   std::uint64_t version_{1};
+  /// 主题内容版本（与 `version_` 无关：后者是树版本，任何状态变更都 bump）。
+  /// 只在 `set_theme` 里递增——所有主题写入路径都收敛到那里
+  ///（`Application::set_theme_mode` / `set_theme_name` / `apply_theme_overrides`
+  /// 均调 `root_.set_theme(...)`）。从 `1` 起：`0` 是元素侧“从未应用过”的保留值。
+  std::uint64_t theme_version_{1};
   /// 需要重新布局（mark_dirty_all 置位；布局跑过后清）。
   bool dirty_{true};
   std::uint64_t painted_elements_{0};

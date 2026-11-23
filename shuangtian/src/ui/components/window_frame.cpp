@@ -69,6 +69,7 @@ void WindowFrame::set_frame_color(std::optional<math::Color> color) {
   // 标题栏仍是另一色，视觉上还是两张皮）。
   if (bar_ != nullptr) bar_->set_surface_color(color);
   mark_dirty();
+  request_theme_refresh();
 }
 
 auto WindowFrame::resolve_control() const -> WindowControl* { return control_; }

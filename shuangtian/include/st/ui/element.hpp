@@ -675,7 +675,26 @@ class Element {
   void set_hint(std::string hint) { hint_ = std::move(hint); }
   [[nodiscard]] auto hint() const noexcept -> const std::string& { return hint_; }
   [[nodiscard]] auto enabled() const noexcept -> bool { return enabled_; }
-  void set_enabled(bool enabled) noexcept { enabled_ = enabled; }
+  /// 启用/禁用（禁用后不可交互、且多数控件会转发**降调色**）。
+  ///
+  /// ## 为何要请求主题重算（不只标脏）
+  ///
+  /// 禁用态是**视觉状态**，而它的落点分散在各组件的 `apply_theme` 里
+  ///（`Button` 走 `inactive` 分支降调、`Select`/`Slider`/`Tabs`/`TitleBar`/`SplitView`
+  /// 用 `enabled_ ? colors.text : colors.text_faint`）。共 6 个组件读这个字段。
+  ///
+  /// 2026-11-23 之前每帧都重算主题，所以这个函数连 `mark_dirty()` 都不用写——
+  /// 下一帧的主题下发自动把新颜色落下去。取消每帧重算后，这条隐式通道断了：
+  /// 不请求重算就会“设了 `enabled=false`、`enabled()` 读回 false、看着却仍是可用态”。
+  ///
+  /// 仍保留 `mark_dirty()`：另有组件在 `paint_content` 里读 `enabled_` 现算颜色
+  ///（如 `EmptyState` 的主按钮），它们不需要主题重算、只需要重绘。
+  void set_enabled(bool enabled) noexcept {
+    if (enabled_ == enabled) return;
+    enabled_ = enabled;
+    mark_dirty();
+    request_theme_refresh();
+  }
   [[nodiscard]] auto focusable() const noexcept -> bool { return focusable_; }
   void set_focusable(bool value) noexcept { focusable_ = value; }
   /// 这个点是否命中本元素（用于事件派发；覆写即改变“能不能被点到”的语义）。
@@ -959,21 +978,17 @@ class Element {
   // —— 布局与绘制 ——
   [[nodiscard]] auto bounds() const noexcept -> math::Rect { return bounds_; }
   [[nodiscard]] auto measured_size() const noexcept -> math::Size { return measured_; }
-  /// 主题刷新入口（**UiRoot 每帧整树调用这一个**）：先虚派发组件样式，
-  /// 再统一回放框架级声明。
+  /// 主题刷新入口（**不每帧调了**，只在主题变更/新元素上树/样式输入变了时调）：
+  /// 先虚派发组件样式，再统一回放框架级声明。
   ///
-  /// 为何需要两层而不是一个虚函数：72 个组件覆写 `apply_theme`，其中**只有 7 个
-  /// 转调基类**——基类里那三层统一处理（`surface` / `apply_appearance` 回放 /
-  /// `apply_text_overrides`）在其余 65 个上就是**死代码**。实测：
-  /// `<Button surface="alt"/>` 报“应用成功”、`surface()` 读回也对，
-  /// 但 `style().background` 仍是变体色——静默失效，报告干净，最难查的一类。
+  /// 为何两层而不是一个虚函数：72 个组件覆写 `apply_theme`，其中**只有 7 个**
+  /// 转调基类——基类那三层统一处理（`surface` / `apply_appearance` / 文本覆盖）
+  /// 在其余 65 个上就是**死代码**。实测：`<Button surface="alt"/>` 报“应用成功”、
+  /// `surface()` 读回也对，但 `style().background` 仍是变体色——静默失效。
   ///
-  /// 为什么不“让 72 个组件都记得转调基类”：那是靠**约定**保护的不变式，
-  /// 新人加组件时必漏。把顺序改成结构性保证（调度点拆成两步，第二步只在本处），
-  /// 就不存在“忘了”这件事。
-  ///
-  /// 优先级也因此变得确定：**显式声明 > 组件默认**。组件先写自己的变体色，
-  /// 显式 `surface` / `appearance` / 文本覆盖最后落——盖过组件默认。
+  /// 不“让 72 个组件都记得转调”：那是靠**约定**保护的不变式，新人必漏；
+  /// 拆成两步（第二步只在本处）才是结构性保证。优先级也因此确定：
+  /// **显式声明 > 组件默认**。
   void refresh_theme(const Theme& theme) {
     apply_theme(theme);
     apply_declared_overrides(theme);
@@ -981,29 +996,19 @@ class Element {
 
   /// 从主题刷新 `style_`（组件据此把 token 落到具体样式）。
   ///
-  /// ⚠ 覆写时**必须把显式覆盖放回去**（见 `apply_text_overrides`）：
-  /// `apply_theme` 是每帧从主题重算颜色/字号/字重的地方，而 DSL 的
-  /// `BoxProps::color/hex_color/size/weight` 是“盖过主题”的显式意图——
-  /// 不调本函数就是一个“设了颜色，首帧对、下一帧被主题盖回”的隐形 bug。
+  /// ⚠ 覆写时**必须把显式覆盖放回去**（见 `apply_declared_overrides`），否则
+  /// DSL 的 `BoxProps::color/hex_color/size/weight` 会在下一次主题变更时被盖回。
   ///
   /// 基类实现统一处理**语义表面档位**（`set_surface`）：容器（`Panel`）不覆写
-  /// `apply_theme`，所以“背景色跟着主题走”这件事只能在这里做——否则应用侧
-  /// 要么硬编码颜色（主题一切换就错）、要么自己读色板（依赖方向反了）。
-  ///
-  /// **独立使用时**（不接 `UiRoot`、直接调它）本函数自己就把统一层跑完了；
-  /// 上树后统一层由 `refresh_theme` 最后再跑一遍——显式声明必须盖过组件默认。
+  /// `apply_theme`，所以“背景色跟着主题走”只能在这里做。
+  /// **独立使用时**本函数自己就把统一层跑完了；上树后由 `refresh_theme` 再跑一遍——
   /// 两处都是幂等赋值，重复跑无副作用。
   virtual void apply_theme(const Theme& theme) { apply_declared_overrides(theme); }
 
   /// 读回已声明的外观规则（未声明则为 nullopt）。
   ///
-  /// 为什么需要读回：`apply_appearance` 是**整体存档**（声明的语义就是“一组规则”），
-  /// 于是“只改其中一个字段”必须拿旧值补齐其余字段。没有读回口的话，
-  /// 调用方只能每次重建一份完整 `Appearance`——协议/XML/脚本各自要记得自己缓存，
-  /// 那又是四份会漂移的状态。
-  ///
-  /// 按值返回（`Appearance` 是几个 `optional<enum>`，拷贝成本可忽略）：
-  /// 引用返回要在“未声明”时造一个 static 空值，没必要。
+  /// 为何需要读回：`apply_appearance` 是**整体存档**，“只改其中一个字段”必须拿
+  /// 旧值补齐其余字段——否则协议/XML/脚本各自要缓存，就是四份会漂移的状态。
   [[nodiscard]] auto appearance() const -> std::optional<Appearance> {
     return extras_ != nullptr ? extras_->appearance : std::nullopt;
   }
@@ -1056,274 +1061,203 @@ class Element {
 
   /// 设**显式填充色**（`BoxProps::fill` 的入口）。
   ///
-  /// 与 `set_surface` 的分工：`surface` 是“从主题取哪一档底”，
-  /// 本函是“就要这个色”（半透明玻璃、遮罩、提示条那种主题里没有的色）。
-  /// 两者都给时**本函优先**（在 `apply_declared_overrides` 里回放更晚）。
-  /// 透明度照常参与合成：`a == 0` 表示不干预（与 `BoxProps::fill` 同口径）。
+  /// 与 `set_surface` 的分工：`surface` 是“从主题取哪一档底”，本函是“就要这个色”
+  ///（半透明玻璃、遮罩那种主题里没有的色）。两者都给时**本函优先**。
+  /// `a == 0` 表示不干预（与 `BoxProps::fill` 同口径）。
   void set_fill_override(math::Color color) noexcept {
     if (color.a == 0U) return;
-    extras().fill_override = color;
+    extras().declared_paint.fill = color;
   }
-
-    /// 设**显式顶部高光色**（`BoxProps::top_highlight` / `glass` 字符串的 `highlight:`）。
+    /// 设**显式顶部高光色**（`BoxProps::top_highlight` / `glass` 的 `highlight:`）。
   ///
-  /// 为何需要存成声明（实测 2026-11-19，用户报“边缘立体感不够”）：
-  /// `Card::apply_theme` 会根据 `elevated_ / shadow_level_` **无条件重写**
-  /// `style_.top_highlight`。而玻璃卡片为了关投影会写 `.elevation = Flat`
-  /// （⇒ `shadow_level_ == 0`）——于是它把高光强制设为**透明**，
-  /// 调用方的 `highlight:0.35` 静默失效（回读恒为 0.000）。
-  /// 存声明后由 `apply_declared_paint` 在组件之后回放，优先级与 `fill` 一致。
+  /// 为何存成声明（2026-11-19 实测，用户报“边缘立体感不够”）：`Card::apply_theme`
+  /// 会按 `elevated_ / shadow_level_` **无条件重写** `style_.top_highlight`，而玻璃卡片
+  /// 为了关投影写 `.elevation = Flat`（⇒ `shadow_level_ == 0`）——高光被强制设为**透明**，
+  /// `highlight:0.35` 静默失效（回读恒为 0.000）。
   ///
-  /// ⚠ **r/g/b 全 0（黑）时用白色占位**：调用方常常只关心**强度**（`highlight:0.85`），
-  /// 颜色交给主题合成。若把“全 0 + 非零 alpha”存进存档，任何在主题合成之前
-  /// 回放的路径（实测：启动首帧就是）都会画出一道**黑边**。
-  /// 白色占位只是“未合成前的安全值”——一旦 `apply_theme_glass` 跑过就会换成主题色。
+  /// ⚠ **r/g/b 全 0（黑）时用白色占位**：调用方常只关心**强度**（`highlight:0.85`），
+  /// 颜色交给主题合成。存“全 0 + 非零 alpha”会在主题合成之前回放出**一道黑边**。
   void set_top_highlight_override(math::Color color) noexcept {
     if (color.a == 0U) return;
     if (color.r == 0U && color.g == 0U && color.b == 0U) {
       color = math::Color{255, 255, 255, color.a};
     }
-    extras().top_highlight_override = color;
-    // 记下**原始强度**：主题合成每次要从它重新乘倍率，
-    // 若拿合成后的值再乘，就会逐帧衰减到 0。
-    extras().top_highlight_base_alpha = color.a;
+    extras().declared_paint.top_highlight = color;
   }
   [[nodiscard]] auto top_highlight_override() const noexcept -> std::optional<math::Color> {
-    return extras_ != nullptr ? extras_->top_highlight_override : std::nullopt;
+    if (extras_ == nullptr) return std::nullopt;
+    return extras_->declared_paint.top_highlight;
   }
 
   /// 设**显式描边宽度**（`0` = 不要描边）。
-  ///
-  /// 为何不能“不写就是不要”：`Card::apply_theme` 每帧会把 `border_width`
-  /// 重置为主题值（1px），而**描边画在 `top_highlight` 之后**——
-  /// 玻璃卡片的亮边就会被一道灰线盖掉（实测：`highlight:0.75` 完全看不见）。
+  /// 为何不能“不写就是不要”：`Card::apply_theme` 会把 `border_width` 重置为主题值（1px），
+  /// 而**描边画在 `top_highlight` 之后**——玻璃卡片的亮边就会被一道灰线盖掉。
   void set_border_width_override(float width) noexcept {
-    extras().border_width_override = width;
+    extras().declared_paint.border_width = width;
   }
 
-  /// 标记**调用方显式给了高光颜色**。声明后 `apply_theme_glass` 不再用主题色覆盖。
-  void mark_top_highlight_color_declared() noexcept {
-    extras().top_highlight_color_declared = true;
-  }
-
-  /// 标记**调用方显式声明了 `backdrop_tint`**（`glass` 字符串的 `tint:`）。
-  /// 声明后 `apply_theme_glass` 不再每帧把 `tint` 写回主题值。
-  void mark_glass_tint_declared() noexcept { extras().glass_tint_declared = true; }
-
-  /// 设**显式阴影**（含内阴影）——组件 `apply_theme` 之后回放，不会被抬升档位清掉。
-  void set_shadow_override(Shadow shadow) noexcept { extras().shadow_override = shadow; }
-  /// 同上，但标记来源为**调用方显式声明**（而不是主题缺省档）。
+  /// 声明**调用方显式给了高光颜色**（`glass` 的 `highlight_color:`）——
+  /// 声明后 `apply_theme_glass` 不再拿主题色覆盖（“这块玻璃就要这个光”）。
   ///
-  /// 为何需要这个区分：`theme_glass` 每帧会用主题底色写 `fill_override`，
-  /// 若它与显式 `fill` 共用“已存在”这个判据，第二帧就分不清谁写的——
-  /// 要么显式 `fill` 被主题盖掉，要么主题档永远不再更新（换肤后不跟）。
-  void set_declared_fill_override(math::Color color) noexcept {
-    if (color.a == 0U) return;
-    extras().fill_override = color;
-    extras().fill_override_from_declaration = true;
+  /// 命名与 `Style::backdrop_tint_declared` 同形态（`*_declared` 是**状态位**，不是瞬时动作）。
+  /// 不用 `mark_*`：本类 `mark_` 前缀专给**标脏**，混用会让“搜 `mark_` 找标脏点”失效。
+  void set_top_highlight_color_declared() noexcept {
+    extras().declared_paint.top_highlight_color_declared = true;
   }
+
+  /// 声明**调用方显式给了 `backdrop_tint`**（`glass` 的 `tint:`）——
+  /// 声明后 `apply_theme_glass` 不再把 `tint` 写回主题缺省值。
+  void set_backdrop_tint_declared() noexcept { style_.backdrop_tint_declared = true; }
+
+  /// 设**显式阴影**（含内阴影）——在组件 `apply_theme` 之后回放，不会被抬升档位清掉。
+  void set_shadow_override(Shadow shadow) noexcept {
+    extras().declared_paint.shadow = shadow;
+  }
+  /// 设填充色并标记来源为调用方显式声明。
+  /// 2026-11-23 起与 `set_fill_override` 完全同义（`theme_glass` 不再写这个存档），
+  /// 保留是因为 DSL / 样式串 / 控制通道三个调用方都用它。
+  void set_declared_fill_override(math::Color color) noexcept { set_fill_override(color); }
   [[nodiscard]] auto fill_override() const noexcept -> std::optional<math::Color> {
-    return extras_ != nullptr ? extras_->fill_override : std::nullopt;
+    if (extras_ == nullptr) return std::nullopt;
+    return extras_->declared_paint.fill;
   }
 
   /// 设**显式描边色**（`BoxProps::border_color` 的入口）。
   ///
   /// 为何需要存档：组件（`Card`）会在 `apply_theme` 里按主题 `border` 令牌重算描边，
-  /// 不存档就会被下一帧盖掉——玻璃的白色高光边会变成一道淡灰。
+  /// 不存档就会被下次主题变更盖掉——玻璃的白色高光边会变成一道淡灰。
   void set_border_color_override(math::Color color) noexcept {
     if (color.a == 0U) return;
-    extras().border_color_override = color;
+    extras().declared_paint.border_color = color;
   }
   [[nodiscard]] auto border_color_override() const noexcept -> std::optional<math::Color> {
-    return extras_ != nullptr ? extras_->border_color_override : std::nullopt;
+    if (extras_ == nullptr) return std::nullopt;
+    return extras_->declared_paint.border_color;
   }
 
  protected:
-  /// **框架级统一层**：先虚派发组件自己的主题样式，再回放所有**显式声明**。
+  /// **框架级统一层**：先虚派发组件自己的主题样式，再回放**显式声明**。
   ///
-  /// 顺序是这里唯一的语义，且必须固定：
-  /// 1. 组件自己的 `apply_theme` —— 写变体色/默认尺寸（Button 的主色、Card 的描边…）
-  /// 2. `surface` —— 显式要求的底，盖组件默认
-  /// 3. `appearance` 规则回放 —— CSS 级声明，再盖一层
-  ///    （`elevation` / `variant` 这类**档位**也走这条，会重置 `background`/`shadow`）
-  /// 4. **显式 `fill` / `border_color`** —— 比档位更直接，必须最后落
-  /// 5. 文本覆盖最后 —— 任何路径写进去的颜色都不该盖过用户直接设的，
-  ///    包括 `appearance` 里带 `text` 的情形
-  ///
-  /// 第 4 步为何不能在第 3 步之前：`elevation = Flat` 也会经 `apply_appearance`
-  /// 把 `background` 重置成 `elevation_surface()`（= 主题 `Base` #FEFEFF = 254,254,255）。
-  /// 若 `fill` 先落，声明的纯白就被替掉，而 **alpha 恰好也是 255**——
-  /// 只查 alpha 的断言完全看不出问题（实测：`fill=白` + `elevation=Flat` 读回 254,254,255）。
-  ///
-  /// 为何做成**非虚的单一入口**：见 `refresh_theme` 的注释（72 组件里 65 个
-  /// 不转调基类，统一层在它们上就是死代码）。
+  /// 优先级从低到高固定为：① 组件 `apply_theme` ② `surface` ③ `appearance` 规则
+  /// ④ `fill`/`border_color`/`shadow`/`border_width` ⑤ 文本覆盖。
+  /// ④ 必须在 ③ 之后：`elevation = Flat` 会经 `apply_appearance` 把 `background` 重置成
+  /// `elevation_surface()`（#FEFEFF），而 alpha 恰好也是 255——实测 `fill=白` +
+  /// `elevation=Flat` 读回 254,254,255，只查 alpha 的断言看不出来。
+  /// 非虚单一入口的理由见 `refresh_theme`（72 组件里 65 个不转调基类）。
   void apply_declared_overrides(const Theme& theme) {
-    // **页面底渐变最先回放**：它是“我比默认更靠后”的底，后面的
-    // `surface` / `fill` / `background` 声明一旦出现就应当盖过它
-    //（那些是“这块就是某色”，比“随主题的页面底”更直接）。
+    // 页面底渐变最先（它是“我比默认更靠后”的底，后面的 `surface`/`fill` 应当盖过它）。
     apply_theme_backdrop(theme);
-    // 玻璃缺省档（底色 + tint）紧跟在后面：它是“主题给的底”，
-    // 而下面的 `fill`/`surface` 是“调用方直接要求的”，后者优先。
-    apply_theme_glass(theme);
     apply_surface(theme);
     apply_text_overrides();
-    // 外观规则回放（声明过 `apply_appearance` 的元素在此跟随主题：
-    // Tokens 从新主题现解析——换肤一致性只在 `apply_appearance` 一处发生）。
+    // 外观规则回放：Tokens 从新主题现解析——换肤一致性只在 `apply_appearance` 一处发生。
     if (extras_ != nullptr && extras_->appearance.has_value()) {
       const Tokens tokens(theme);
       (void)ui::apply_appearance(*this, tokens, *extras_->appearance);
     }
-    // **显式填充/描边必须排在 `appearance` 之后**（它盖过档位解析的底）。
-    //
-    // 为何：`elevation` / `variant` 这类档位走的也是 `apply_appearance`，
-    // 而它会用 `elevation_surface()` 把 `background` 重置成主题实色
-    //（`Elevation::Flat` → `Base` = #FEFEFF = 254,254,255）。
-    // 若 `fill` 先落，声明的纯白就被这层档位色替掉——而 alpha 恰好也是 255，
-    // 于是“背景是不是我的色”这类断言只查 alpha 会完全看不出问题。
-    // 实测：`fill=白` + `elevation=Flat` 读回 `254,254,255`；
-    // 去掉 `elevation` 则 `255,255,255`。语义上 `fill` 是更直接的要求，
-    // 与 `surface` 的口径一致（“两者都给时它优先”），所以它必须最后落。
+    // 显式填充/描边**必须排在 `appearance` 之后**：`elevation`/`variant` 档位走的也是
+    // `apply_appearance`，它会把 `background` 重置成 `elevation_surface()`。
     apply_declared_paint(theme);
+    // **玻璃缺省档排在声明回放之后**（2026-11-23 调顺序）：旧顺序是玻璃在前，
+    // 那时 `apply_theme_glass` 会把主题底色**写进存档**，于是需要
+    // `fill_override_from_declaration` 去区分“谁写的”。现在玻璃**只写 `style_`、
+    // 不碰存档**，于是存档恒等于“调用方声明了什么”（单一事实源），那个区分字段
+    // 与 `top_highlight_base_alpha`（因回写存档而需另存原始强度）都随之消失。
+    // 前提是它必须排在声明之后：显式 `fill` 已落，玻璃看一眼存档就知道该不该让位。
+    apply_theme_glass(theme);
     apply_text_overrides();   // 文本显式覆盖最后回放（盖过 appearance 的 text）
   }
 
   /// 把“随主题的页面底渐变”落到 `style_`（`Style::use_theme_backdrop` 为真时）。
   ///
-  /// 为何单独一个回放入口：渐变颜色属于主题，而 `build()` 拿不到“新主题”
-  /// （它只在结构变化时跑，换肤时不会重跑）。只有在下发主题这一步同步，
-  /// 亮/暗切换才会跟着变。
+  /// 为何单独一个回放入口：渐变颜色属于主题，而 `build()` 拿不到“新主题”（换肤不重跑）；
+  /// 只有在下发主题这一步同步，亮/暗切换才会跟着变。
   void apply_theme_backdrop(const Theme& theme) {
     if (!style_.use_theme_backdrop) return;
     if (const auto& gradient = theme.backdrop_gradient()) {
       style_.set_gradient_background(*gradient, theme.colors().bg);
     } else {
-      // 主题没定渐变：退回纯色底（而不是留旧渐变，那会在换肤后错色）。
-      style_.set_solid_background(theme.colors().bg);
+      style_.set_solid_background(theme.colors().bg);   // 无渐变则退回纯色
     }
   }
 
   /// 把“随主题的玻璃缺省档”落到 `style_`（`Style::theme_glass` 为真时）。
   ///
-  /// 只覆盖**底色与 tint**：`blur`/`refraction` 由调用方决定（它们与主题无关，
-  /// 是“玻璃有多厚/多弯”而不是“亮不亮”——后者才需要随亮暗换档）。
-  ///
-  /// 为何要单独一个回放入口：玻璃底色必须在下发主题这一步同步，`build()` 拿不到
-  /// 新主题（换肤时它不重跑）。
+  /// 只覆盖**底色与 tint**：`blur`/`refraction` 与主题无关（是“玻璃多厚/多弯”而不是
+  /// “亮不亮”）。本函数必须在下发主题这一步同步：`build()` 拿不到新主题（换肤不重跑）。
   void apply_theme_glass(const Theme& theme) {
     if (!style_.theme_glass) return;
-    // **只在调用方没显式要求底色时**才用主题档。
-    //
-    // 为何要这个判断：`theme_glass` 是“缺省值”，而 `fill` 是“这块就是某色”。
-    // 无条件盖底会把显式的 `fill` 吃掉——那正是“声明了却不生效”的老毛病。
-    //
-    // 为何不能直接查 `fill_override.has_value()`：本函数自己就会写入它，
-    // 第二帧就变成“已经有 override 了”→ 永远不再更新，换肤后底色停在上一个主题。
-    // 所以用 `fill_override_from_declaration_` 区分“谁写的”。
-    if (extras_ == nullptr || !extras_->fill_override_from_declaration) {
-      set_fill_override(theme.metrics().glass_fill);
+    // **只在调用方没显式要求底色时**才用主题档：`theme_glass` 是“缺省值”，
+    // 而 `fill` 是“这块就是某色”；无条件盖底会把显式的 `fill` 吃掉。
+    // 判据直接查存档：本函数**不再写入** `fill`（旧实现会写，于是必须用
+    // `fill_override_from_declaration` 再区分“谁写的”）。现在存档只由声明写入。
+    if (extras_ == nullptr || !extras_->declared_paint.fill.has_value()) {
+      style_.set_solid_background(theme.metrics().glass_fill);
     }
-    // `tint` 同理：**显式声明优先**。
-    //
-    // 为何需要这个判断（实测 2026-11-19）：本函数每帧跑，无条件写 `tint`
-    // 会把运行时 `set glass=…tint:0.9` 立即盖回主题值（0.22）——
-    // 现象是“`set glass` 回读成功、画面完全不变”（实测 tint 从 0.22 改到 0.9，
-    // 内部亮度恒为 242）。
-    if (extras_ == nullptr || !extras_->glass_tint_declared) {
+    // `tint` 同理：**显式声明优先**（实测 2026-11-19：无条件写 tint 会把运行时
+    // `set glass=…tint:0.9` 盖回 0.22——现象是“回读成功、画面完全不变”）。
+    if (!style_.backdrop_tint_declared) {
       style_.backdrop_tint = theme.metrics().glass_tint;
     }
-    // **高光颜色随主题**（实测 2026-11-19，用户：“高光亮度和颜色要随主题背景”）。
+    // **高光颜色随主题**（2026-11-19 用户：“高光亮度和颜色要随主题背景”）：
+    // 只在调用方**没显式给颜色**时取主题值，强度保持调用方给的比例、按主题的
+    // `glass_highlight_strength` 再乘一道亮度（暗底白线对比远高于亮底，不降会“白得发假”）。
     //
-    // 只在调用方**没有显式给颜色**时取主题值（`highlight_color:#RRGGBB` 优先）。
-    // 强度保持调用方给的比例（`highlight:0.85` 的 `a`），只换**色相**、并按主题
-    // 的 `glass_highlight_strength` 再乘一道亮度——暗底上的白线对比远高于亮底，
-    // 不降就会“白得发假”。
-    //
-    // ⚠ **强度必须从存档读，不能从 `style_.top_highlight.a` 读**（实测 2026-11-19，
-    // 用户：“高光颜色要先切暗色再切亮色才显示，启动时是黑边”）：
-    //
-    // 首帧的顺序是 `dsl 声明 → set_top_highlight_override(存档) → refresh_theme`，
-    // 而 `dsl` **只写存档、不写 `style_`**（那正是为了不被组件盖掉）。
-    // 于是本函数首次执行时 `style_.top_highlight.a` 还是 0，条件为假 → 跳过合成；
-    // 紧接着 `apply_declared_paint` 回放存档，拿到的 `top_highlight` 的 r/g/b
-    // 仍是构造时的全 0（黑）——画出来就是**一道黑边**。
-    // 切一次主题会重跑本函数，那时 `style_` 里已有上一次的值，非零→合成成功，
-    // 所以“切暗色再切亮色才正常”。根因就在“读的是回放前的值”。
-    if (extras_ != nullptr && extras_->top_highlight_override.has_value() &&
-        !extras_->top_highlight_color_declared) {
+    // 旧实现还要 `top_highlight_base_alpha`（另存“原始强度”）与 `top_highlight_color_declared`，
+    // 因为那时本函数**每帧**跑且会把合成结果**回写存档**——存档里的 `a` 已乘过 `strength`，
+    // 下帧再乘就逐帧衰减到 0；且首帧 `style_.top_highlight.a` 还是 0 → 跳过合成 → 黑边。
+    // 现在只在主题变更时跑、且**不回写存档**，两个前提都没了，两个字段随之消失。
+    if (extras_ != nullptr && extras_->declared_paint.top_highlight.has_value() &&
+        !extras_->declared_paint.top_highlight_color_declared) {
       const math::Color tint = theme.metrics().glass_highlight;
       const float strength = theme.metrics().glass_highlight_strength;
-      // **用原始强度重新合成**（不是拿存档里上一次的合成结果再乘）：
-      // 存档经本函数改写后 `a` 已经乘过 `strength`，若下一帧再乘一次
-      // 会逐帧衰减到 0（每隔一帧就变淡一阶，看不出来但会慢慢消失）。
-      if (!extras_->top_highlight_base_alpha.has_value()) {
-        extras_->top_highlight_base_alpha = extras_->top_highlight_override->a;
-      }
-      const std::uint8_t base_alpha = *extras_->top_highlight_base_alpha;
+      const std::uint8_t base_alpha = extras_->declared_paint.top_highlight->a;
       if (base_alpha != 0U) {
         const auto scaled = static_cast<std::uint8_t>(std::clamp(
             static_cast<float>(base_alpha) * strength, 0.0f, 255.0f));
         style_.top_highlight = math::Color{tint.r, tint.g, tint.b, scaled};
-        // 同时更新存档：否则下一帧 `apply_declared_paint` 会把旧值回放回来。
-        extras_->top_highlight_override = style_.top_highlight;
       }
     }
   }
 
-  /// 把**显式底/描边**落到 `style_`（由 `apply_declared_overrides` 调，在组件
-  /// 自己的 `apply_theme` **之后**）。
+  /// 把**显式底/描边/阴影/高光**落到 `style_`（在组件自己的 `apply_theme` **之后**）。
   ///
-  /// 为何必须是“声明回放”而不是“设一次”（实测缺陷）：组件的 `apply_theme`
-  /// 每次主题下发都会重算颜色——`Card` 把 `background` 重置为 `colors().surface`、
-  /// 把 `border_color` 重置为 `border` 令牌。只在 `apply_box` 里写一次的话，
-  /// 第二帧就被盖回去了（玻璃卡片又从半透明变回实心白）。
+  /// 为何必须“声明回放”而不是“设一次”：组件 `apply_theme` 每次主题下发都会重算颜色
+  ///（`Card` 把 `background` 重置为 `colors().surface`、`border_color` 重置为 `border`），
+  /// 只写一次的话下次主题变更就被盖回去（玻璃卡片从半透明变回实心白）。
   void apply_declared_paint(const Theme& theme) {
     (void)theme;
     if (extras_ == nullptr) return;
-    // 填充色优先于表面档位：`fill` 是更直接的要求（与 `BoxProps` 的文档口径一致：
-    // “与 `surface` 并行，两者都给时它优先”）。
-    if (extras_->fill_override.has_value()) {
-      // 走 `set_solid_background`：它会清掉组件可能铺的渐变，
+    const PaintDeclarations& paint = extras_->declared_paint;
+    if (!paint.any()) return;   // 无声明：整个回放空转，直接跳过
+    // 逐项回放。顺序内只有一条拘束：`fill` 与 `surface` 都给时它优先（与
+    // `BoxProps` 文档口径一致）；其余四项彼此正交。
+    if (paint.fill.has_value()) {
+      // 走 `set_solid_background`：它清掉组件可能铺的渐变，
       // 否则渐变残影会盖住显式要求的纯色（与 `apply_surface` 同一条义务）。
-      style_.set_solid_background(*extras_->fill_override);
+      style_.set_solid_background(*paint.fill);
     }
-    if (extras_->border_color_override.has_value()) {
-      style_.border_color = *extras_->border_color_override;
-    }
-    // **显式“无描边”**（`BoxProps::border_width == 0` 且调用方确实写了这个字段）：
-    // 组件 `Card::apply_theme` 每帧会把 `border_width` 重置为主题值（1px），
-    // 而**描边画在高光之后**——于是它会盖掉高光（实测：`highlight:0.75` 完全看不见，
-    // 边缘只剩一道灰线）。玻璃卡片要的正是“由高光勾边”，描边必须能被关掉。
-    if (extras_->top_highlight_override.has_value()) {
-      style_.top_highlight = *extras_->top_highlight_override;
-    }
-    // 显式阴影（含**内阴影**）最后落：`Card::apply_theme` 会在抬升档位为 0 时
-    // 把 `shadow` 清为 `Shadow{}`——玻璃卡片必然是 `elevation = Flat`，
-    // 于是声明的内阴影被抹掉。
-    if (extras_ != nullptr && extras_->shadow_override.has_value()) {
-      style_.shadow = *extras_->shadow_override;
-    }
-    // 显式顶部高光最后落：`Card::apply_theme` 会按抬升档位重写它，
-    // 而那正好会把玻璃卡片的 `highlight:` 抹成透明（见 set_top_highlight_override）。
-    if (extras_ != nullptr && extras_->border_width_override.has_value()) {
-      style_.border_width = *extras_->border_width_override;
-    }
+    if (paint.border_color.has_value()) style_.border_color = *paint.border_color;
+    // 显式高光：`Card::apply_theme` 按抬升档位重写它，而 `elevation = Flat`
+    //（青璃卡片必需）会把 `highlight:0.75` 抹成透明。
+    if (paint.top_highlight.has_value()) style_.top_highlight = *paint.top_highlight;
+    // 显式阴影（含**内阴影**）：`Card::apply_theme` 在抬升档位 0 时清空 `shadow`。
+    if (paint.shadow.has_value()) style_.shadow = *paint.shadow;
+    // 显式描边宽度最后落（描边画在高光之后，所以它得能看到高光的最终值）。
+    if (paint.border_width.has_value()) style_.border_width = *paint.border_width;
   }
 
-  /// 把表面档位落到 `style_.background`（由 `apply_declared_overrides` 调，
-  /// **不在** 组件要记得转调的路径上）。
+  /// 把表面档位落到 `style_.background`。
   void apply_surface(const Theme& theme) {
     if (extras_ == nullptr || extras_->surface == Surface::None) return;
     const Palette& colors = theme.colors();
     switch (extras_->surface) {
       case Surface::None: return;
-      // 逐档都走 `set_solid_background`：`surface` 声明的语义是“我要**这个纯色底**”，
-      // 而组件可能已经铺了渐变（Button 的 Primary）。只写 `background` 会让
-      // 渐变残影盖住它——与 `apply_appearance` 同一条义务（见 Style::set_solid_background）。
+      // 逐档都走 `set_solid_background`：`surface` 的语义是“我要**这个纯色底**”，
+      // 而组件可能已经铺了渐变（Button 的 Primary）——只写 `background` 会让渐变残影盖住它。
       case Surface::Base: style_.set_solid_background(colors.surface); return;
       case Surface::Alt: style_.set_solid_background(colors.surface_alt); return;
       case Surface::Sunken: style_.set_solid_background(colors.surface_sunken); return;
-      // 内容区：两个模式取**不同的层**（理由见枚举处注释）——
-      // 这正是“只用一个 `Sunken` 做不到”的那件事。
+      // 内容区：两个模式取**不同的层**（理由见枚举处注释）。
       case Surface::Content:
         style_.set_solid_background(theme.mode() == ThemeMode::Dark ? colors.surface_sunken
                                                                     : colors.surface_raised);
@@ -1724,6 +1658,71 @@ class Element {
   [[nodiscard]] auto layout_dirty() const noexcept -> bool { return layout_dirty_; }
   void clear_dirty() noexcept;
 
+  // —— 主题传播：版本号契约 ——
+  //
+  // 2026-11-23 之前 `UiRoot::layout()` **每帧对每个元素**调 `refresh_theme`（主题传播
+  // 被放在早退检查之前）。后果是一条正反馈：每帧重算 → 组件 `apply_theme` 把 `style_`
+  // 重置成主题值 → 显式声明被吃掉 → 只好存存档回放 → 存档又被重算改写 → 再存原始值。
+  // 实测代价：2026-11-19 一天内 `RenderExtras` 涨了 8 个 `_override`/`_declared` 字段。
+  //
+  // 修法：两个**单调版本号**，不等才重算。不用 `Theme::operator==`——30+ 颜色 +
+  // 30+ 尺度 + 字符串 + 可选渐变，逐字段比直接重算还慢，且**漏一个字段就等于换肤静默失效**。
+  //
+  //   · `applied_theme_version_ == 0` ⇒ 从未应用过（新上树 / 刚从树上摘下）→ 必算
+  //   · `applied_theme_version_ != UiRoot::theme_version()` ⇒ 主题换过 → 必算
+
+  /// 本元素已按哪个主题版本应用过样式（`0` = 从未；保留值，所以 `UiRoot` 从 1 起）。
+  [[nodiscard]] auto applied_theme_version() const noexcept -> std::uint64_t {
+    return applied_theme_version_;
+  }
+  /// 记录“我按 `version` 应用过了”（由 `UiRoot` 的主题传播统一写）。
+  void set_applied_theme_version(std::uint64_t version) noexcept {
+    applied_theme_version_ = version;
+  }
+
+  /// 把本子树（含自身）的 `applied_theme_version_` 清回 `0`。
+  ///
+  /// **摘子树必须清**：版本号只记数字、不知道属于哪棵树，而所有 `UiRoot` 都从 `1` 起——
+  /// 子树从树 A 挂到树 B 时 B 的版本号常恰好等于 A 的 ⇒ 漏算（症状：换 Dock /
+  /// `ui.create` 包一层 / 跨窗口搬家后配色停在旧主题，且不挑必现）。
+  /// 实测搬家路径：`control/server.cpp` 的 `ui.create`、`st_desktop` 换 Dock、`set_content`。
+  /// 代价是一次低频操作让子树重算一次主题，比“每元素多存宿主指针（+8 字节）”划算。
+  void reset_applied_theme_version() noexcept {
+    applied_theme_version_ = 0;
+    for (const auto& child : children_) {
+      if (child != nullptr) child->reset_applied_theme_version();
+    }
+  }
+
+  /// **声明“我的样式输入变了，请重新下发主题给我”**。
+  ///
+  /// ## 为什么 setter 必须显式调它
+  ///
+  /// 旧模型下 `apply_theme` 每帧跑，于是有一条**隐式的第二条通道**：setter 只改成员
+  ///（`shadow_level_` / `size_` / `tone_` / `row_height_` …）再标脏，下一帧
+  /// `apply_theme` 自动把成员翻译成 `style_`。全仓有 31 处这么写的 setter。
+  /// 改成“只在主题变更时重算”后那条通道断了，而这些 setter 的调用方不会自己调
+  /// `refresh_theme`——结果是**比原来更糟的静默失效**：“设了参数、`get` 回读对
+  ///（读的是成员）、画面不变（样式没重算）”。
+  ///
+  /// 涉漏靠 `theme_style_input_setters_declare_refresh`（源码扫描）机械拦住，
+  /// 不靠“改代码时记得”——那种约定本框架已经杀过一次（见 `refresh_theme` 的注释）。
+  ///
+  /// ## 为什么**不冒泡**（与 `mark_layout_dirty` 的差别）
+  ///
+  /// 主题重算是**逐元素**的（每元素自带 `applied_theme_version_`）；冒泡只会让祖先全被
+  /// 重算，而祖先的样式输入压根没变。保持 O(1)，也让“谁请求了重算”留在它自己身上。
+  void request_theme_refresh() noexcept { theme_refresh_requested_ = true; }
+  /// 消费请求标记（`UiRoot` 主题传播时调）。三件套命名与本类既有约定一致：
+  /// `request_animation()` / `animation_requested()` / `clear_animation_request()`，
+  /// `request_wake_at()` / `wake_at()` / `clear_wake_request()`。
+  /// 不用 `take_*`：全仓 `take_` 前缀专给“转移所有权”（`take_content` / `take_damage`）。
+  void clear_theme_refresh_request() noexcept { theme_refresh_requested_ = false; }
+  /// 是否有未消费的重算请求（只读不清零；诊断与测试用）。
+  [[nodiscard]] auto theme_refresh_requested() const noexcept -> bool {
+    return theme_refresh_requested_;
+  }
+
   // —— 增量重绘：元素级损坏区上报 ——
   //
   // 元素没有 UiRoot 反指，只能把"我变了"沿 parent 链**累积到所在树的根元素**上
@@ -1819,14 +1818,44 @@ class Element {
   std::function<void(bool)> on_hover_{};
   /// 行为注入回调（`set_event_handler`；组件实现之后、冒泡之前调用）。
   std::function<bool(Event&)> event_handler_{};
+  /// **显式绘制声明**（`fill` / `border_width` / `border_color` / `shadow` / `top_highlight`）。
+  ///
+  /// 五项存在的原因**完全一样**：组件自己的 `apply_theme` 会把它们重算成主题值
+  ///（`Card` 把 background 重置为 `colors().surface`、border_color 重置为 `border`、档位 0
+  /// 时清空 shadow），而显式声明必须盖过它。所以这不是“每帧覆盖的补救”，
+  /// 而是**优先级合成的意图记录**（`fill` 这类值在主题里没有，不记就无处回放）。
+  /// 收成一个聚合（2026-11-23）：原先五个 `_override` 平铺在 `RenderExtras` 里，
+  /// 每加一项笔刷/描边/高光特性就多一个字段（2026-11-19 一天涨了 8 个）。
+  struct PaintDeclarations {
+    /// 显式填充色（DSL `BoxProps::fill`）。`nullopt` = 未声明。
+    std::optional<math::Color> fill{};
+    /// 显式描边宽度（含 `0` = 不要描边）。
+    std::optional<float> border_width{};
+    /// 显式描边色（`BoxProps::border_color`）。
+    std::optional<math::Color> border_color{};
+    /// 显式阴影（含内阴影）。
+    std::optional<Shadow> shadow{};
+    /// 显式顶部高光色（`glass` 的 `highlight:`）。
+    std::optional<math::Color> top_highlight{};
+    /// 调用方显式给了高光**颜色**（`highlight_color:`）——声明后 `apply_theme_glass`
+    /// 不再拿主题色覆盖。与 `top_highlight.has_value()` 的区别：后者只表示“要这个**强度**”
+    ///（颜色可以交给主题合成）。
+    bool top_highlight_color_declared{false};
+
+    /// 有任何一项被声明？（诊断/测试用；也用于跳过无意义的回放）
+    [[nodiscard]] auto any() const noexcept -> bool {
+      return fill.has_value() || border_width.has_value() || border_color.has_value() ||
+             shadow.has_value() || top_highlight.has_value();
+    }
+  };
+
   /// 悬浮过渡状态（mutable：绘制是 const 方法，与 `Switch::toggle_time_` 同一套做法）。
   ///
-  /// **惰性分配**（结构评审 A2）：这组字段是“悬浮过渡在飞”时的瞬时状态，
-  /// 而绝大多数元素从未启动过过渡（子项无 hover 效果、静态界面、离屏渲染）。
-  /// 但它们与 `damage_ * / paint_margin_hint_ / text_*_override_` 一共占了
-  /// `sizeof(Element)` 中约 **80 字节**（实测 432 → 352），而后几项的使用率甚至更低：
-  /// `damage_*` 只写在**根元素**上（`record_damage` 把损坏区记到所在树的根），
-  /// `text_*_override_` 只有接了 DSL 排版覆盖的元素才有。
+  /// **惰性分配**（结构评审 A2）：这组字段是“悬浮过渡在飞”时的瞬时状态，而绝大多数
+  /// 元素从未启动过渡（子项无 hover 效果、静态界面、离屏渲染）。它们与
+  /// `damage_* / paint_margin_hint_ / text_*_override_` 一共占了 `sizeof(Element)` 中
+  /// 约 **80 字节**（实测 432 → 352），而后几项使用率更低：`damage_*` 只写在**根元素**上，
+  /// `text_*_override_` 只有接了 DSL 排版覆盖的元素才有。存成指针后，“未用到”只付 8 字节。
   /// 存成指针后，"未用到"只付 8 字节，"用到"才付一份堆分配。
   struct RenderExtras {
     float hover_t{0.0f};
@@ -1850,46 +1879,11 @@ class Element {
     std::optional<FontWeight> text_weight_override{};
     /// 语义表面档位（`Element::Surface`；`None` = 不画底色，与构造默认一致）。
     Surface surface{Surface::None};
-    /// **显式填充色**（DSL `BoxProps::fill` 的存档）。
-    ///
-    /// 为何必须存一份（2026-11-19，实测缺陷）：`BoxProps::fill` 原来只在 `apply_box` 里
-    /// 写一次 `style_.set_solid_background`，而组件的 `apply_theme`（如 `Card`
-    /// 把 background 重置为 `colors().surface`）**每帧重算時会把它盖掉**。
-    /// 于是“设了 fill”变成首帧对、之后又回到主题色——玻璃卡片的半透明白
-    /// 变成实心白，`backdrop_tint` 怎么调都不生效（因为底不透明）。
-    /// 存进 `RenderExtras` 后，由 `apply_declared_overrides` 与 `surface` 同层回放。
-    std::optional<math::Color> fill_override{};
-    /// **显式顶部高光**（`glass` 字符串的 `highlight:` 存档）——见 `set_top_highlight_override`。
-    std::optional<math::Color> top_highlight_override{};
-    /// **显式描边宽度**（含 `0` = 不要描边）；`nullopt` = 没声明、用组件默认。
-    /// 为何需要它：`Card::apply_theme` 每帧把 `border_width` 重置为主题值，
-    /// 而描边画在高光**之后**——玻璃卡片就会被一道灰线盖掉高光。
-    std::optional<float> border_width_override{};
-    /// **显式 `backdrop_tint` 声明**（`glass` 字符串的 `tint:`）。
-    /// 为何需要：`apply_theme_glass` 每帧把 `tint` 写回主题值，
-    /// 会把运行时的 `set glass=…tint:…` 立即盖掉（实测：改 0.22→0.9 画面不变）。
-    bool glass_tint_declared{false};
-    /// **显式给了高光颜色**（`glass` 字符串的 `highlight_color:`）。
-    /// 声明后 `apply_theme_glass` 不再拿主题色覆盖——那才是“这块玻璃就要这个光”。
-    bool top_highlight_color_declared{false};
-    /// **高光的原始强度**（首次设值时记下，不被主题合成改写）。
-    /// 为何需要：`apply_theme_glass` 会把 `*_override->a` 乘主题倍率后存回去，
-    /// 若每次都拿存档值乘一次，就会**逐帧衰减**（存档是上次的输出）。
-    std::optional<std::uint8_t> top_highlight_base_alpha{};
-    /// **显式阴影**（含内阴影）。`Card::apply_theme` 在档位为 0 时会清空 `shadow`，
-    /// 玻璃卡片的 `elevation = Flat` 正好命中——声明的内阴影会静默消失。
-    std::optional<Shadow> shadow_override{};
-    /// 该 `fill_override` 是否来自**调用方显式声明**（`BoxProps::fill`）。
-    ///
-    /// `theme_glass` 每帧会用主题底色写同一个字段，两者必须能区分：
-    /// 分不清就会出现“显式 `fill` 被主题盖掉”或“换肤后底色不跟”二选一。
-    bool fill_override_from_declaration{false};
-    /// **显式描边色**（DSL `BoxProps::border_color` 的存档）——与 `fill` 同一原因。
-    /// 组件（`Card`）会在 `apply_theme` 里按 `border` 令牌重算描边，
-    /// 不存档一样会被盖掉。
-    std::optional<math::Color> border_color_override{};
-    /// 鼠标指针形态（`set_cursor` 声明的“这类控件整体用哪种”）。
-    MouseCursor cursor{MouseCursor::Arrow};
+    /// **显式绘制声明**（fill / 描边 / 阴影 / 高光）——见上方 `PaintDeclarations`。
+    /// 收成一个聚合而不是五个散字段：新增同类属性不再让本结构变长。
+    PaintDeclarations declared_paint{};
+  /// 鼠标指针形态（`set_cursor` 声明的“这类控件整体用哪种”）。
+  MouseCursor cursor{MouseCursor::Arrow};
     /// 外观规则（`apply_appearance` 的意图存档；`apply_theme` 每帧回放——
     /// 主题切换后所有联动自动跟随，这是「CSS 控制元素样式」的落点）。
     /// `has_value()` 为假 = 未声明外观（组件自己的 apply_theme 说了算）。
@@ -1964,6 +1958,11 @@ class Element {
   FocusRingPolicy focus_ring_policy_{FocusRingPolicy::Auto};
   bool dirty_{true};
   bool layout_dirty_{true};
+  /// 已按哪个主题版本应用过样式（`0` = 从未；见 `applied_theme_version` 的说明）。
+  std::uint64_t applied_theme_version_{0};
+  /// “我的样式输入变了，请重新下发主题”（由 setter 声明，`UiRoot` 消费）。
+  /// 不冒泡：主题重算是逐元素的，见 `request_theme_refresh` 的说明。
+  bool theme_refresh_requested_{false};
   /// 宿主（`UiRoot`），由 UiRoot 在挂载/摘除时维护；未上树为 nullptr。
   /// 宿主焦点契约（未上树时为 `nullptr`）。**类型化**——见上方 `HostFocus` 的说明。
   HostFocus* host_{nullptr};
@@ -1985,8 +1984,7 @@ class Spacer : public Element {
  public:
   explicit Spacer(float size = 0.0f);
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Spacer"; }
-  /// 副轴尺寸夹到非负（见实现处说明：容器比占位块矮时会得到负高度矩形）。
-  void arrange(const RenderContext& context, math::Rect rect) override;
+  void arrange(const RenderContext& context, math::Rect rect) override;   // 副轴尺寸夹到非负
 };
 
 }  // namespace st::ui

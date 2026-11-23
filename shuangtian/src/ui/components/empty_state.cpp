@@ -71,6 +71,7 @@ void EmptyState::set_size(Size size) {
   if (size_ == size) return;
   size_ = size;
   mark_layout_dirty();
+  request_theme_refresh();
 }
 
 auto EmptyState::icon_size() const noexcept -> float {

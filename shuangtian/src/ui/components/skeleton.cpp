@@ -57,6 +57,7 @@ void Skeleton::set_radius(float radius) {
   if (radius_ == clamped) return;
   radius_ = clamped;
   mark_dirty();
+  request_theme_refresh();
 }
 
 auto Skeleton::pulse_factor(double time_seconds) const noexcept -> float {

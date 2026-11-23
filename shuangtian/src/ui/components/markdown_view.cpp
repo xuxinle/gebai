@@ -494,6 +494,9 @@ void MarkdownView::set_code_font_size(float size) {
   metrics_.code = code_font_size_ > 0.0f ? code_font_size_ : metrics_.base * kCodeScale;
   needs_layout_ = true;
   mark_layout_dirty();
+  // `apply_theme` 在 `code_font_size_ > 0` 时用它盖掉派生值——不请求重算就会
+  // 在下一次换肤时被派生值改回去（“设了代码字号，换主题后又变回”）。
+  request_theme_refresh();
 }
 
 // —— 主题 ——

@@ -268,6 +268,9 @@ auto Element::remove_child(Element* child) -> std::unique_ptr<Element> {
       std::unique_ptr<Element> detached = std::move(*iterator);
       detached->parent_ = nullptr;
       children_.erase(iterator);
+      // **清主题版本**：摘下的子树可能挂到另一棵树，而那棵树的版本号
+      // 可能恰好等于本树的——不清就漏算（见 `reset_applied_theme_version`）。
+      detached->reset_applied_theme_version();
       mark_layout_dirty();
       // 必须在**返回前**上报：调用方常把返回值当场释放，那之后子树已销毁，
       // 宿主再想按指针找回“指针现在在哪”就不可能了。
@@ -280,7 +283,12 @@ auto Element::remove_child(Element* child) -> std::unique_ptr<Element> {
 
 void Element::clear_children() {
   if (children_.empty()) return;
-  for (auto& child : children_) child->parent_ = nullptr;
+  for (auto& child : children_) {
+    child->parent_ = nullptr;
+    // 同 `remove_child`：这些子元素可能被调用方接走再挂到别处。
+    // 即使它们随后被销毁，这只是一次树遍历（与 `children_.clear()` 同一量级）。
+    child->reset_applied_theme_version();
+  }
   children_.clear();
   mark_layout_dirty();
   notify_structure_changed(true);
@@ -627,7 +635,7 @@ auto Element::set_property(std::string_view name, std::string_view value) -> boo
       if (name == "top_highlight" || name == "glass_highlight_color" ||
           name == "glass_highlight") {
         set_top_highlight_override(style_.top_highlight);
-        if (name != "glass_highlight") mark_top_highlight_color_declared();
+        if (name != "glass_highlight") set_top_highlight_color_declared();
       }
       return true;
     }

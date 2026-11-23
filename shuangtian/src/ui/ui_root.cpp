@@ -112,11 +112,27 @@ void UiRoot::set_content(std::unique_ptr<Element> content) {
 auto UiRoot::take_content() -> std::unique_ptr<Element> {
   // 取出根内容：不清焦点/不标脏（调用方会立即重新 set_content，避免中间态闪烁）。
   // 注意：不动 `assign_ids`（元素 id 保持——重新挂回时 setId 已非空，不会被重写）。
+  //
+  // **必须清主题版本**：取出的子树常常被“包一层”再放回来（`ui.create` 协议这样做），
+  // 也可能挂到另一棵树（桌面壳换 Dock）。不清就会因版本号撞号而漏算主题
+  //（见 `Element::reset_applied_theme_version`）。
+  if (content_ != nullptr) content_->reset_applied_theme_version();
   return std::move(content_);
 }
 
 void UiRoot::set_theme(Theme theme) {
   theme_ = std::move(theme);
+  // **主题内容变了 → bump 版本号**，这是 `layout()` 里那次全树重算的唯一开关。
+  //
+  // 为何不在这里直接重算全树：`set_theme` 可能在帧外被调（控制通道 `theme.set`、
+  // 启动时套主题），而重算需要视口/文本端口就绪。只做 O(1) 的版本递增，
+  // 真正的下发留给下一帧的 `layout()`（那里本来就要遍历树）。
+  //
+  // ⚠ 这是**所有主题写入路径的唯一收敛点**（`Application::set_theme_mode` /
+  // `set_theme_name` / `apply_theme_overrides` 都调它）。若将来新增旁路写入，
+  // 必须同步递增 `theme_version_`，否则换肤会静默不生效——`theme()` 非 const
+  // 访问器就是这个敷口（见那边的警告注释）。
+  ++theme_version_;
   mark_dirty_all();
 }
 
@@ -180,29 +196,57 @@ void UiRoot::layout(bool force) {
   if (content_ == nullptr) return;
   // **主题传播放在早退之前**（2026-10-18）。
   //
-  // 为何与重排解耦：`apply_theme_tree` 原本在 `dirty_/tree_layout_dirty()`
-  // 守卫**之内**，于是“主题下发”变成了“重排的副作用”——只要这一帧没人要求重排，
-  // 主题就不往下走。声明显式界面会**新建元素**（命令面板/对话框都是条件声明），
-  // 新元素本该在“上树后的第一次 layout”里拿到当前主题；它能不能拿到，
-  // 取决于当帧恰好有没有别的东西也在要求重排。这是隐式耦合，早晚出问题。
+  // 为何与重排解耦：主题下发原本在 `dirty_/tree_layout_dirty()` 守卫**之内**，
+  // 于是“主题下发”变成了“重排的副作用”——只要这一帧没人要求重排，主题就不往下走。
+  // 声明显式界面会**新建元素**（命令面板/对话框都是条件声明），新元素本该在
+  // “上树后的第一次 layout”里拿到当前主题；它能不能拿到，取决于当帧恰好有没有
+  // 别的东西也在要求重排。这是隐式耦合，早晚出问题。
   //
-  // ⚠ 诚实记录（反向验证的结果）：排查“命令面板配色不对”时我先怀疑这里，
-  // 但改完它并不足以修好那个缺陷，回退后实测面板颜色依旧正确——真正的原因是
-  // `CommandPalette::apply_theme` **没把色写回 style**（见那边注释）。
-  // 保留本修改的理由不是“它修了那个 bug”，而是它把一条隐式耦合改成了显式契约：
-  // 代价是每个元素一次颜色赋值 + `mark_dirty`（实测 90 节点树为微秒级），
-  // 换来的是“上树就一定拿到当前主题”不依赖 luck。
-  const auto apply_theme_tree = [](auto&& self, Element& element, const Theme& theme) -> void {
+  // ## 2026-11-23：从“每帧整树重算”改成“版本变更才重算 + 新元素补算”
+  //
+  // 旧实现（上面那条注释的版本）**无条件**对每个元素调 `refresh_theme`，而
+  // `paint()` 第一行就是 `layout()` ⇒ **每帧×每个元素都在重算主题**。
+  //
+  // 由此链出一条正反馈：组件 `apply_theme` 每帧把 `style_` 重置成主题值
+  // → 调用方的显式声明被吃掉 → 只好在 `RenderExtras` 存一份存档回放
+  // → 存档又被每帧重算改写 → 再存一份原始值（`top_highlight_base_alpha`
+  // 就是“补偿的二次方”）。实测：2026-11-19 一天之内涨了 8 个这样的字段。
+  //
+  // 现在按两个条件逐元素判定是否重算：
+  //   ① `applied_theme_version_ != 当前版本`（主题换过，或从未应用过——值为 0）
+  //   ② `theme_refresh_requested()`（该元素自己的样式输入变了；setter 声明）
+  // 两个都不成立就**什么都不做**——那是绝大多数元素的绝大多数帧。
+  //
+  // 为何不能只留 ①：旧模型里 setter 只改成员、标脏，靠下一帧的 `apply_theme`
+  // 把成员翻译成 `style_`（全仓 36 处）。只留 ① 会把“声明被覆盖”换成
+  // “setter 静默失效”，比原问题更难查——所以 setter 改为显式调
+  // `request_theme_refresh()`（见 `Element` 里那个函数的说明）。
+  //
+  // 为何判定不冒泡到子树：版本号是**逐元素**存的，子元素自己会判自己的。
+  // 所以这一趟遍历仍然是 O(节点数) 的指针/整数比较，但重算次数从
+  // “节点数×帧数”降到“只在需要时”。遍历本身不能省：新上树的元素必须被发现。
+  const std::uint64_t want_version = theme_version_;
+  const auto apply_theme_tree = [want_version, this](auto&& self, Element& element) -> void {
     // `refresh_theme`（非虚）而不是 `apply_theme`（虚）：它先派发组件自己的样式，
     // 再统一回放**显式声明**。用虚函数就会把“统一层要不要跑”变成组件的自觉——
     // 实测代价：72 个覆写里 65 个忘了转调基类，`surface` 在它们上静默失效。
-    element.refresh_theme(theme);
+    //
+    // 两个条件有先后：先消费“请求”（无条件清零，避免标记滞留到下一帧
+    // 导致重复重算），再与版本一起决定要不要真的跑。
+    const bool requested = element.theme_refresh_requested();
+    element.clear_theme_refresh_request();
+    if (requested || element.applied_theme_version() != want_version) {
+      element.refresh_theme(theme_);
+      element.set_applied_theme_version(want_version);
+      // 声明式宿主的子树是**上一帧新建**的：它们的 `applied_theme_version_`
+      // 都是 0，会各自命中条件 ①。不需要从父往下传播。
+    }
     for (std::size_t index = 0; index < element.children().size(); ++index) {
-      self(self, *element.child_at(index), theme);
+      self(self, *element.child_at(index));
     }
   };
-  apply_theme_tree(apply_theme_tree, *content_, theme_);
-  for (auto& overlay : overlays_) apply_theme_tree(apply_theme_tree, *overlay, theme_);
+  apply_theme_tree(apply_theme_tree, *content_);
+  for (auto& overlay : overlays_) apply_theme_tree(apply_theme_tree, *overlay);
 
   if (!force && !dirty_ && !tree_layout_dirty()) return;
   const RenderContext context = render_context();
@@ -1988,6 +2032,9 @@ void UiRoot::remove_overlay(Element* overlay) {
       // 上 `dispatching_` 为假，曾经就是**立即 delete**，而它的 `paint` 栈帧
       // 还在用 `this`（ASan 现场见 `paint_overlays` 的注释）。现在只要处于
       // "正在绘制叠加层"或"正在派发事件"，就一律进墓场延后释放。
+      // **清主题版本**：浮层摘除后可能被重新 `add_overlay` 挂回来（也可能挂到
+      // 另一个 `UiRoot`）；版本号撞号会漏算主题。与 `Element::remove_child` 同一条契约。
+      if (overlay != nullptr) overlay->reset_applied_theme_version();
       if (dispatching_ || painting_overlays_) {
         graveyard_.push_back(std::move(*iterator));
       }
@@ -2014,6 +2061,10 @@ void UiRoot::reap_overlays() {
 }
 
 void UiRoot::clear_overlays() {
+  // 先清主题版本再清容器：被接走的浮层可能挂到别处（同 `remove_overlay`）。
+  for (const auto& overlay : overlays_) {
+    if (overlay != nullptr) overlay->reset_applied_theme_version();
+  }
   overlays_.clear();
   overlay_layouts_.clear();
   // 链上可能挂着浮层元素（面板内悬浮时）：对象即将销毁，不发 HoverOut，

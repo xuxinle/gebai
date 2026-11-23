@@ -51,6 +51,9 @@ void AvatarGroup::set_avatar_size(float size) {
   if (avatar_size_ == clamped) return;
   avatar_size_ = clamped;
   mark_layout_dirty();
+  // `apply_theme` 从 `avatar_size_` 算直径与字号。2026-11-23 起 `apply_theme`
+  // 不再每帧跑，所以“改成员 + 标脏”不再能隐式触发重算——必须显式声明。
+  request_theme_refresh();
 }
 
 auto AvatarGroup::initials_of(std::string_view name) -> std::string {

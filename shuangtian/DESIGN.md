@@ -752,12 +752,41 @@ ANSI 色是**协议固定语义**（`31` 永远是红、`93` 永远是亮黄，�
 这类值，而 `pow(负数, 非整数次)` 是 NaN，NaN 混进布局会变成"元素凭空消失"）；
 `power <= 0` **退化成线性**而不是返回 0（后者会让动画卡在起点不动）。
 
-### 4.2.6 主题切换会重跑 `apply_theme`
+### 4.2.6 主题何时重跑：只三处，不再每帧
 
-`UiRoot::set_theme` 只标脏、不重跑样式；因此**组件必须在 `measure`/`paint_content` 里
-用 `context.theme` 重新取色**（`Tabs`/`Button`/`Input` 均如此）。依赖 `apply_theme` 一次性写入的
-字段（如 `Card` 的 `style_.shadow`）在切主题后会保留旧值——排查这种问题的唯一手段是
-**把像素剖出来看**（本次就是靠“越靠近卡片蓝色通道越高”定位到颜色字面量误读）。
+**2026-11-23 起重构：`apply_theme` 不再每帧对每个元素跑。** 旧实现在 `UiRoot::layout()`
+里**无条件整树**调 `refresh_theme`，而 `paint()` 第一行就是 `layout()` ⇒ 每帧×每元素重算。
+
+由此链出一条**补偿的正反馈**（本次切断的就是这个）：
+
+```
+每帧重算 → 组件 apply_theme 把 style_ 重置成主题值 → 调用方的显式声明被吃掉
+         → 只好在 RenderExtras 里存存档回放 → 存档又被重算改写 → 再存原始值
+```
+
+实测代价：2026-11-19 一天之内 `RenderExtras` 涨了 8 个 `_override`/`_declared` 字段；
+其中 `top_highlight_base_alpha` 是“补偿的二次方”（存档被自己改写 ⇒ 再存一份原始强度）。
+
+**现在的语义（三选一即重算一个元素）**：
+
+| 触发条件 | 机制 |
+|---|---|
+| 主题内容变了（换肤 / `theme.set` / 字号缩放） | `UiRoot::set_theme` 递增 `theme_version_`；元素 `applied_theme_version_ != theme_version_` |
+| 元素首次上树 / 从别的树搬来 | `applied_theme_version_ == 0`（摘除时由 `reset_applied_theme_version()` 清回 0） |
+| 元素自己的**样式输入**变了 | setter 调 `request_theme_refresh()`；`UiRoot` 遍历时消费 |
+
+不用 `Theme::operator==` 判“内容变了”：`Theme` 有 30+ 颜色 + 30+ 尺度 + 字符串 + 可选渐变，
+逐字段比一遍比直接重算还慢，且**漏一个字段 = 换肤静默不生效**——那正是本次要消灭的缺陷。
+
+**第三条是本次最容易被漏掉的**：全仓有 31 处 setter 只改成员（`shadow_level_`/`size_`/`tone_`）
+再标脏，靠下一帧的 `apply_theme` 把成员翻译成 `style_`。取消每帧重算后这条隐式通道断了，
+不补 `request_theme_refresh()` 就会“设了参数、`get` 回读对、画面不变”——
+**比原问题更难查**。所以它不靠“改代码时记得”，而由
+`tests/ui_theme_input_setter_contract_test.cpp`（源码扫描）机械拦住。
+
+**组件侧纪律不变，但理由变了**：`measure`/`paint_content` 仍必须用 `context.theme` 现取色
+（`Tabs`/`Button`/`Input` 均如此）——那是**每帧都跑**的路径，不能依赖 `apply_theme` 的产物。
+依赖 `apply_theme` 一次性写入的字段（如 `Card` 的 `style_.shadow`）现在只在上述三处更新。
 
 ### 4.2.7 换行布局（`Style::wrap`）与“宽度何时确定”
 
@@ -2098,17 +2127,27 @@ void refresh_theme(const Theme& theme) {      // 非虚：唯一调度入口
 气泡内亮度 **73.7** vs 背景 **23.0**（亮 50）——看上去是一块“发辉的灰纸”。
 换档后降到 **40.0 vs 23.0**（亮 17），而亮色档不受影响（保持 +3.3）。
 
-**优先级**：`theme_glass` 只填**缺省值**，显式 `fill` 仍然盖过它
-（用 `RenderExtras::fill_override_from_declaration` 区分“谁写的”——
-不分就会出现“显式 fill 被主题盖掉”或“换肤后底色不跟”二选一）。
+**优先级**：`theme_glass` 只填**缺省值**，显式 `fill` 仍然盖过它。判据直接查存档
+（`PaintDeclarations::fill.has_value()`）——**不需要**再用 `fill_override_from_declaration`
+区分“谁写的”：2026-11-23 起 `apply_theme_glass` **不再写入存档**（只写 `style_`），
+存档恒等于“调用方声明了什么”，单一事实源。
+
+同一轮因此删掉的两个字段（都是“每帧重算 + 回写存档”的产物）：
+
+| 字段 | 它原来防什么 | 为何不再需要 |
+|---|---|---|
+| `fill_override_from_declaration` | 玻璃档与显式 `fill` 共用 `fill_override`，第二帧分不清谁写的 | 玻璃不再写存档 |
+| `top_highlight_base_alpha` | 高光合成会回写存档（`a` 已乘 `strength`），下帧再乘就逐帧衰减到 0 | 不再回写 ⇒ 强度恒为原始值 |
+
+**顺序也变了**：`apply_theme_glass` 从“声明回放之前”移到**之后**——它必须让步于显式声明。
 
 **玻璃配置的字符串形式**：`glass="blur:8,tint:0.22,refraction:20"`（XML / 控制通道 /
 `BoxProps::glass` 三处共用 `apply_glass_shorthand` 一个解析器）。为何不逐字段：
 漏写一个就静默半开（只给 blur 忘了 tint → “模糊但实心”），而一条声明天然原子。
 
 `apply_theme` 仍自己做一遍统一层（单测/不上树的元素直接调它时行为不变）；
-两处都是幂等赋值，重复跑无副作用。`UiRoot::layout` 的 `apply_theme_tree` 调
-`refresh_theme`（不是 `apply_theme`）——这一行就是全部缺陷的分界。
+两处都是幂等赋值，重复跑无副作用。`UiRoot::layout` 调 `refresh_theme`（不是
+`apply_theme`）——这一行就是全部缺陷的分界。**何时调**见 §4.2.6（只三处）。
 
 **回归**：`tests/xml_ui_test.cpp` 的 `surface_lands_on_components_that_own_their_background`
 必须**走 `UiRoot::layout()` 真实链路**。直接调 `refresh_theme` 会绕过调度点，

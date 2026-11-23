@@ -121,17 +121,22 @@ void Text::set_max_lines(std::size_t lines) {
 void Text::set_tone(Tone tone) {
   tone_ = tone;
   mark_dirty();
+  // `apply_theme` 用 `tone_color(theme, tone_)` 算正文色（除非有 text_tone 覆盖）。
+  request_theme_refresh();
 }
 
 void Text::set_font_size(float size) {
   font_size_override_ = size;
   mark_layout_dirty();
+  // 字号是 `apply_theme` 的三段式判据之一（显式像素 > 语义档位 > 主题正文）。
+  request_theme_refresh();
 }
 
 void Text::set_scale(Scale scale) {
   if (scale_ == scale) return;
   scale_ = scale;
   mark_layout_dirty();
+  request_theme_refresh();   // 语义档位 → 字号由 `apply_theme` 查 `Metrics`
 }
 
 auto Text::font_size_for_scale(const Metrics& metrics, Scale scale) -> float {
@@ -150,6 +155,7 @@ auto Text::font_size_for_scale(const Metrics& metrics, Scale scale) -> float {
 void Text::set_weight(FontWeight weight) {
   weight_ = weight;
   mark_dirty();
+  request_theme_refresh();
 }
 
 void Text::apply_theme(const Theme& theme) {
@@ -641,6 +647,7 @@ Heading::Heading(std::string content, std::uint32_t level) : Text(std::move(cont
 void Heading::set_level(std::uint32_t level) {
   level_ = level < 1 ? 1 : (level > 6 ? 6 : level);
   mark_layout_dirty();
+  request_theme_refresh();   // 标题字号/字重由 `apply_theme` 按 `level_` 查 token
 }
 
 void Heading::apply_theme(const Theme& theme) {
@@ -677,6 +684,7 @@ void IconView::set_size(float size) {
 void IconView::set_tone(Tone tone) {
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();   // 图标色由 `apply_theme` 从 `tone_` 解析
 }
 
 void IconView::apply_theme(const Theme& theme) {
@@ -807,11 +815,14 @@ void Button::set_variant(Variant variant) {
 void Button::set_size(Size size) {
   size_ = size;
   mark_layout_dirty();
+  // 字号/图标盒径/内边距三档全部由 `apply_theme` 按 `size_` 查 `Metrics`。
+  request_theme_refresh();
 }
 
 void Button::set_tone(Tone tone) {
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();
 }
 
 void Button::apply_theme(const Theme& theme) {
@@ -849,11 +860,15 @@ void Button::apply_theme(const Theme& theme) {
   // 那里在同向提亮/压暗的幅度上做，且**保持色相**（主按钮仍看得出是蓝的）。
   // 本函数只管"**静态语气**"：每个变体的常态色。
   //
-  // 为什么不在这里按 `hovered_`/`pressed_` 分支：`apply_theme` **只在 layout 时跑**
-  // （见 `DESIGN.md` §4.2.6 与 `UiRoot::layout` 的早退条件），而悬停/按下只标
-  // 重绘、不触发布局——于是那些分支算出来的色**永远停在旧状态上**，真实应用里
-  // 按下态根本不生效（实测：按下与悬停像素完全一样）。
+  // 为什么不在这里按 `hovered_`/`pressed_` 分支：本函数**不在每帧路径上**
+  //（2026-11-23 起重构后更硬：只在主题变更 / 新元素上树 / 样式输入声明了变化时跑，
+  // 见 `DESIGN.md` §4.2.6），而悬停/按下只标重绘——于是那些分支算出来的色
+  // **永远停在旧状态上**，真实应用里按下态根本不生效（实测：按下与悬停像素完全一样）。
   // 两处同时做还会**叠乘**（组件一层 + 通用层）——Soft 变体因此被洗成中性灰。
+  //
+  // 与 `inactive` 的区别：`enabled_` 是**样式输入**（变化时 `set_enabled` 会
+  // `request_theme_refresh()`），而 `hovered_`/`pressed_` 是**瞬时绘制状态**
+  // （由 `paint_box` 每帧现算）。两者搁在一起看正好是这条纪律的分界线。
   const bool inactive = !enabled_;
   // **先清渐变，再按变体写底**。
   //
@@ -1246,16 +1261,20 @@ void Card::set_padding(float padding) {
 void Card::set_radius(float radius) {
   radius_override_ = radius;
   mark_dirty();
+  request_theme_refresh();   // `apply_theme` 读 `radius_override_` 覆盖主题圆角
 }
 
 void Card::set_shadow_level(std::uint8_t level) {
   shadow_level_ = level;
   mark_dirty();
+  // 阴影与顶部高光都由 `apply_theme` 按 `shadow_level_` 重算（`0` 档清空 shadow）。
+  request_theme_refresh();
 }
 
 void Card::set_elevated(bool elevated) {
   elevated_ = elevated;
   mark_dirty();
+  request_theme_refresh();
 }
 
 void Card::apply_theme(const Theme& theme) {

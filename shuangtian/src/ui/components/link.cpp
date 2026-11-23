@@ -62,6 +62,7 @@ void Link::set_tone(Tone tone) {
   if (tone_ == tone) return;
   tone_ = tone;
   mark_dirty();
+  request_theme_refresh();
 }
 
 void Link::set_underline(bool underline) {
