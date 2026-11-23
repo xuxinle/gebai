@@ -492,6 +492,38 @@ auto run_all(std::string_view filter) -> int {
   }
 
   const std::uint64_t checks = registry.check_count() - checks_before;
+  // **过滤未命中任何用例 → 大声报错**（而不是静默的 “0 passed, 0 failed”）。
+  //
+  // 为何必须报：`st test <名字>` 是**逐字子串匹配**，拼错一个字母、或用例名
+  // 与文件名前缀不一致（比如文件叫 `pkg_xxx_test.cpp`、用例却写成 `xxx_*`），
+  // 就会一个都不匹配。此时退出码仍是 0、汇总行仍是 “0 passed, 0 failed”，
+  // 看上去像“全部通过”——**这是假阴性最强的形态**：
+  // 改完断言随手 `st test <名字>` 看到 0 failed 就以为绿了，实际一行都没跑。
+  // （实测踩过：新加的 6 个用例全 PASS，但 `st test pkg_pch_creating_flags`
+  // 报 0 passed 0 failed；差点当成“测试没生效”。）
+  //
+  // 分片下不报：单片本来就可能分到 0 个候选用例，那是正常调度，不是写错名字。
+  //
+  // ⚠ **必须把 `skipped_env` 算作“匹配到了”**：有一条哨兵用例
+  // （`skip_visibility_test`）会递归调自身、只跑一个**必定 SKIP** 的用例来验证
+  // “跳过在汇总里可见”。那种运行里 `passed_cases` 与 `failed_cases`
+  // 都是 0，但过滤**确实命中了**——只看前两个计数会把它误判成“名字写错”，
+  // 连带把退出码从 0 变成 2，直接弄红那条哨兵用例（实测踩过）。
+  const bool matched_nothing =
+      passed_cases == 0 && failed_cases == 0 && skipped_env == 0 && !filter.empty() &&
+      g_shard_count <= 1;
+  if (matched_nothing) {
+    st::log::out("\n  \x1b[31m没匹配到任何用例\x1b[0m：过滤词 \"{}\" 与已注册用例名无一匹配。\n", filter);
+    st::log::out("  用例名是**子串匹配**（区分大小写）；用 `st test --list {}` 查真实名字。\n",
+                 filter);
+    st::log::out("  （退出码 126：过滤未命中不是“通过”）\n");
+    // 为何用 126 而不是 1/2：分片进程的退出码**就是该片的失败用例数**（0 = 全绿），
+    // 所以 1、2 已经分别表示“1 个/2 个用例失败”。拿它们当“过滤未命中”会把
+    // **写错名字误报成测试失败**（而失败数还得归 0，看起来像“没有用例却报错”）。
+    // 126 与 125（链接/构建失败）、127（命令未找到）同属 POSIX “命令无法执行”段，
+    // 不会与任何失败用例数碰撞。
+    return 126;
+  }
   // **失败汇总**：跑了几百条时，失败散布在输出里（尤其分片并行时各片交错），
   // 结尾集中列一遍，省得往上翻。
   if (!failed_names.empty()) {

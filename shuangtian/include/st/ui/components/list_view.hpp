@@ -13,6 +13,12 @@
 #include <vector>
 #include "st/ui/component_registry.hpp"
 #include "st/ui/element.hpp"
+// `ListItem` 是 `add_item` 返回类型的前置声明对象（`-> ListItem*`），
+// 必须直接包含它的定义头——**不能靠调用方先 include**：
+// 否则本头不自包含，任何单独包含它的 TU 都报 `'ListItem' does not name a type`
+// （实测：dsl_convenience.cpp 改用精头时被这一条卡住）。
+// 与 `CONVENTIONS §6` 的“每个头自包含”同一条纪律。
+#include "st/ui/components/list_item.hpp"
 
 namespace st::ui {
 

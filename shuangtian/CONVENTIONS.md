@@ -1051,22 +1051,88 @@ clang 必须保留为**可选门禁**：它拓出过多处 GCC 看不到的自�
 这几条都是 2026-11-22 量的，每条都曾推翻一个“看起来对”的直觉。写在这是因为
 它们决定了“该不该做某项优化”，而重测一遍要花几小时。
 
-#### ① PCH 是**净损失**，故默认关（`--pch` 开）
+#### ① PCH：**原结论已推翻**（当时量到的是“被 GCC 丢弃的 PCH”），现**默认开**
 
-用的是 GCC 的 `-include` 预编译头，产物 **108 MB**：
+> ⚠ **2026-11-23 复核结论：本节旧数据全部作废。**
+> 原表格（“+1,669 ms 固定成本”、“无 PCH 快 19.4%”）建立在一个无效实验上：
+> 那批测量用的标志集合**与 `.gch` 生成时的标志不一致**，GCC 因此**静默丢弃**了 PCH——
+> 但丢弃前仍要先读完那个 108 MB 文件，于是量到的是“白读一遍再扔掉”的代价，
+> 而不是 PCH 的收益/损失。
+>
+> **判据（下次别再量错）：`-Winvalid-pch`**。编译器会直接把原因说出来：
+>
+> ```
+> cc1plus: warning: prefix.hpp.gch: not used because 'NTDDI_VERSION' not defined [-Winvalid-pch]
+> ```
+>
+> 也可用 `-H` 看标记：`! prefix.hpp.gch` = **采纳**，`x prefix.hpp.gch` = **丢弃**。
+> 只要出现 `not used because …`，这份数据就不能用来判断 PCH 的优劣。
 
-| 场景 | 无 PCH | 有 PCH |
+**用真实构建标志复测（2026-11-23，每种 2~3 轮取最优）**——PCH 是**净收益**：
+
+| 单元 | 无 PCH | 有 PCH（真采纳） | 收益 |
+|---|---:|---:|---:|
+| `src/math/color.cpp` | 1,613 ms | 889 ms | **+44.9%** |
+| `src/core/json.cpp` | 1,705 ms | 995 ms | **+41.7%** |
+| `src/raster/canvas.cpp` | 2,606 ms | 1,616 ms | **+38.0%** |
+| `src/text/text.cpp` | 3,010 ms | 1,987 ms | **+34.0%** |
+| `src/control/server.cpp` | 3,712 ms | 2,752 ms | **+25.9%** |
+| `src/app/app.cpp` | 4,046 ms | 3,148 ms | **+22.2%** |
+| `src/ui/dsl.cpp` | 3,982 ms | 3,378 ms | +15.2% |
+| 空 TU（纯固定成本） | 254 ms | 846 ms | **−592 ms**（唯一为负的一项） |
+
+**为何曾经默认关**（理由已换，不是“它更慢”）：
+
+1. **受益面极窄**。PCH 只服务“非框架、非第三方”的 C++ 单元，而本仓自建时所有
+   `src/` 都被标成框架单元（`framework_sources.insert(library_sources…)`）——
+   实测 `st build gallery` 的 756 条编译命令里，**只有 4 条**真吃到 PCH。
+   固定成本要按“消费它的单元数”摊销，4 个单元摊不回 592 ms。
+2. 框架单元跳过 PCH 是**缓存正确性**要求（理由见 `build.cpp` 的 `framework_unit` 段）：
+   让它们吃 PCH 会把工程路径带进缓存键，缓存就再也不会跨工程命中。
+3. 全量构建实测（378 单元强制重建）：无 PCH 2m26s / 有 PCH 2m20s——差 4%，
+   在噪声内。
+
+#### ①-b 已落地：框架单元也吃 PCH（2026-11-23，**现默认开**）
+
+上面第 1、2 条前提都已被拿掉，于是 233/234 个单元全部受益：
+
+| 障碍 | 解法 |
+|---|---|
+| PCH 路径带工程目录 → 缓存键跨工程不稳 | `.gch` 搬到**全局缓存** `~/.shuangtian/cache/pch/<档位+编译器+三元组哈希>/`，与工程无关 |
+| 能力宏（`ST_NO_WEBVIEW`/`ST_NO_SCRIPT`/`ST_NO_THREE`）逐目标不同 → PCH 被判无效 | 创建 PCH 时**剔掉这些宏**（`pch_creating_flags`），消费端保留完整标志 |
+
+**实测（同机同轮，364 单元全部强制重编）**：
+
+| | 编译段 | 总耗时 |
 |---|---:|---:|
-| 极小空单元 | 78 ms | **1,748 ms（+1,669 ms 固定成本）** |
-| `color.cpp`（100 行） | 2,776 ms | 3,401 ms（**+22.5%**） |
-| `build.cpp`（4,243 行） | 10,865 ms | 11,108 ms（+2.2%） |
+| PCH 开 | **1m48s** | 1m53s |
+| PCH 关 | 2m10s | 2m14s |
 
-**固定批 260 单元 × 28 路 × 3 轮取最优：无 PCH 64.7s 对 有 PCH 77.3s（快 19.4%）**。
-单元越小越吃亏——正是固定成本的特征。缩小 PCH 内容救不了（成本随 `.gch` 体积不随内容）。
+**省 22 秒（−16.9%）**。单单元层面 6 个代表单元合计 −25.6%。
 
-> ⚠ **不要用全量构建的墙钟做这类 A/B**。实测四次全量构建：10m21s / 11m42s /
-> 12m08s / 15m05s——噪声（±30%）远大于真实差异（~10%），且混着链接、自举、索引分析。
-> 其中一次还因“检测到构建工具源码有更新 → 自动重建”把自举时间算进了编译段。
+**验证 PCH 真的被采纳**（而不是静默丢弃）——这是整节最要紧的一条：
+
+```bash
+# 在真实构建命令后加这两个开关：
+-Winvalid-pch   # 输出 “not used because 'X' not defined” 就是没采纳
+-H              # ! prefix.hpp.gch = 采纳；x prefix.hpp.gch = 丢弃
+```
+
+实测框架单元（`markdown_view.cpp`）命令行指向
+`C:/Users/<user>/.shuangtian/cache/pch/df4c33a7504067ed/pch/prefix.hpp`，
+`-H` 报 `!`、`-Winvalid-pch` 无告警 —— 确实生效。
+
+**剔宏规则不可随意改**：`pch_creating_flags` 只剔那三个能力宏。
+**不能剔** `-std=` / `-O*` / `-g*` / `-f*` / `-W*` / `-I` / `-D_WIN32_WINNT`——
+它们影响 PCH 里头的语义（`_WIN32_WINNT` 决定 `<windows.h>` 可见哪些 API）。
+也不能用 `ST_` 前缀去猜：那会误剔 `ST_VERSION` / `ST_ENABLE_LINT` 这类全局宏。
+回归：`tests/pkg_pch_creating_flags_test.cpp`。
+
+> ⚠ **仍然成立的一条：不要用全量构建的墙钟做这类 A/B**。实测四次全量构建：
+> 10m21s / 11m42s / 12m08s / 15m05s——噪声（±30%）远大于真实差异（~10%），
+> 且混着链接、自举、索引分析。
+> 上表之所以可信，是因为它比的是**同一轮固定批次**（各 364 单元全强制重编）的编译段，
+> 不是“随手跑一次 `build all`”。
 
 #### ② 拆大函数**不会**让 `-O1` 变快，反而更慢
 
@@ -1111,6 +1177,70 @@ PCH 把一批头传递进每个单元，于是 `#include <filesystem>` 写不写
 所以 §10.3 第 6 条那条纪律（每个 cpp 自包含）不是洁癖——PCH 只是把缺失
 **延迟到首次自举/换工具链那一刻**。自查：不带 `-include` 跑
 `g++ -fsyntax-only`，或直接 `st build --force`（现在默认就是无 PCH）。
+
+#### ⑤ 按需编译：包级依赖图（2026-11-23 新增）
+
+「没被 import 的包不编」——这是 Go 让人体感编译快的根本原因。霜天现在也有了：
+`st::pkg::PackageGraph` 从 `#include` 关系重建**包级依赖图**，构建时按目标源
+算包闭包，闭包外的框架 `.cpp` 不进编译队列。默认开，`--no-auto-prune` 关。
+
+**收益实测**（每个应用可剔除 11~14% 的框架单元；`gallery` 从 378 → 363 单元）。
+
+四条规则是**踩坑后定下的**，改它们之前先读完理由：
+
+| 规则 | 为何（实测反例） |
+|---|---|
+| 单元→包的归属**同名头优先**，且**以单元自己 include 的同名头为最强判据** | `src/geom/animation.cpp` 实现的是 `st/raster/animation.hpp`，而仓里**同时有** `st/ui/animation.hpp`——只按路径推断会归到 `st/geom`，于是该单元被当“不需要”裁掉，链接报 `undefined symbol: st::raster::sample_clip`（jianmu 实测） |
+| 包图**头文件与实现两侧的 include 都算**（严口径） | 只看头会漏“实现依赖但头不暴露”的边（`platform_*` 那类），后果同样是误裁 |
+| 循环依赖**按强连通分量收缩**，不要求零环 | 实测存在 `st/ui` ↔ `st/ui/components`（`ui_root.cpp` 要用组件，组件要用 `theme`/`icon`）。要求零环等于重排数十个文件；收缩成一点同样得到 DAG |
+| 目标的**自己的 `.hpp` 也算 include 起点** | 应用常把框架头收敛在自己的头里（`apps/gbcode/page.hpp` include 了 `st/search/search.hpp`），`.cpp` 只 include 自己的 `page.hpp`。只扫 `.cpp` 会漏 ⇒ `st/search` 被裁 ⇒ `undefined symbol: st::search::enumerate`（gbcode 实测） |
+
+**三道安全阀**（裁错时靠它们兵不血刃地退回去）：
+
+1. 目标写了 `include_sources`（声明式白名单）→ 完全跳过推导，以清单为准；
+2. 目标源读不出 / 没有任何 `st/` include / 头文件全表拿不到 → **不裁**（宁可多编）；
+3. `st build --no-auto-prune` 一键闸。
+
+判错方向的失败模式是**链接期 `undefined symbol`**（可见、可定位到符号），
+不是静默错误——这正是选在黑名单方向裁剪的理由。诊断时加 `--verbose` 可看到
+逐个被裁单元的清单。
+
+**自注册是一类推不出的隐式依赖**：58 个单元靠静态初始化自注册
+（`ST_UI_COMPONENT_IMPL` → `component_registry::add`），它们不进 include 图——
+声明式按名创建组件时，代码里既无 include 也无符号引用。实测这 58 个**全部**落在
+`st/ui` / `st/ui/components`，同属一个强连通分量且是任何 UI 应用的必经依赖，
+所以按需裁剪不会误伤。**将来若在可裁位置新增自注册包，症状会是“运行期按名创建
+失败”而不是编译错误**——`tests/pkg_graph_test.cpp` 钉住了这条。
+
+#### ⑥ 减 include 的优先级：先量“include 占比”，再动手
+
+**不要凭“文件大”去优化**。实测全库 234 个框架单元串行合计 **526 s**，
+前十名里有一半根本没优化空间——它们的耗时在**系统头**上，减工程头无效：
+
+| 单元 | 耗时 | include 占比 | 可优化？ |
+|---|---:|---:|---|
+| `src/ui/dsl_convenience.cpp` | 5,148 ms | **95.8%** | ✓ 已做（−30%）|
+| `src/ui/dsl_component_imports.cpp` | 4,555 ms | 99.4% | ✗ 设计上就需全量组件 |
+| `src/shell/platform_win32.cpp` | 5,164 ms | — | ✗ 874 个头**全是系统头** |
+| `src/raster/platform_d3d11.cpp` | 5,134 ms | — | ✗ 同上 |
+
+**方法**：造一个“只 include、无实现”的空 TU 测固定开销，占比 >90% 且含大量工程头才值得减。
+工具：`python tools/compile_eff.py --unit <源>`（输出三档分解）。
+
+**本轮已做的优化（2026-11-23）**：`dsl_convenience.cpp` 从 `components/all.hpp`
+（**88 个组件头**）改成实际 `dynamic_cast` 用到的 **17 个精头**：
+**5,197 → 3,644 ms（−1,553 ms / −29.9%）**。判据是 `dynamic_cast<X*>` 的目标类型
+——它对 18 个类型做转换，归到 17 个头（`ContextMenu`/`MenuBar`/`MenuPanel`
+同在 `menu.hpp`）。
+
+> ⚠ 减 include 会**暴露隐式依赖**：去掉 `all.hpp` 后 `Json` 与 `geometry` 的类型
+> 一度变成未定义（之前是搭 `all.hpp` 的传递包含）。这不是副作用而是收益——
+> 它把“本该自己 include 的头”变成硬依赖，正是 §6 要求的自包含。
+>
+> ⚠ 同样暴露的还有一个头缺陷：`list_view.hpp` 用到 `ListItem` 却未 include
+> `list_item.hpp`（靠调用方先 include 才编得过），已修。
+> **自查工具式判据**：单独 include 每一个组件头必须能编过——
+> 88 个里当时只有这 1 个不过。
 
 ### 10.2 语言层面的行为差异（比平台 API 更阴魂）
 

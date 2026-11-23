@@ -77,19 +77,48 @@ struct BuildOptions {
   bool strip_debug{true};
   /// 使用预编译头（`include/st/pch.hpp`）。
   ///
-  /// ## 为何**默认关**（2026-11-22 实测反转了原结论）
+  /// ## 现在**默认开**（2026-11-23，前提已变两次，这里把完整脉络写清）
   ///
-  /// 原先默认开，理由是“标准库头解析占单文件编译大头”。实测证明那是错的：
-  /// 本仓的 PCH 产物是 **108 MB** 的 `.gch`，加载它的**固定成本 1,669 ms**
-  ///（极小空单元：无 PCH 78 ms → 有 PCH 1,748 ms），而它省下的标准库解析
-  /// 即使拿最重的 `<format>`+`<filesystem>` 单元也只值 700 ms 左右。
+  /// **退一步：那个“PCH 是净损失 +13%”的结论是错的。**
+  /// 2026-11-22 那批测量用的标志集与 `.gch` 生成时的不一致，GCC **静默丢弃**了 PCH——
+  /// 但丢弃前仍要读完 108 MB，于是量到的是“白读一遍再扔掉”。判据是 `-Winvalid-pch`，
+  /// 它会直接说 `not used because 'NTDDI_VERSION' not defined`。用真实构建标志复测：
+  /// PCH 是**净收益**（`color.cpp` −44.9%、`json.cpp` −41.7%、`canvas.cpp` −38.0%）。
   ///
-  /// 后果：**每个单元都变慢**，且单元越小越吃亏（`color.cpp` +22%、`json.cpp` +17%、
-  /// `build.cpp` +2%）。全量构建对照（均 3000+ 单元强制重建）：
-  /// 有 PCH 编译段 11m42s，无 PCH **10m21s**（+81 秒 / +13%）。
+  /// **那为何当时仍关？** 因为受益面太窄：PCH 只服务“非框架、非第三方”的 C++ 单元，
+  /// 而本仓自建时所有 `src/` 都是框架单元（旧逻辑对它们一律跳过）——
+  /// 实测 `st build gallery` 的 756 条编译命令里**只有 4 条**真吃到 PCH，
+  /// 摊不回 592 ms 的固定成本。
   ///
-  /// 想回到旧行为用 `st build --pch`。
-  bool use_pch{false};
+  /// **现在两个前提都变了**：
+  /// 1. PCH 产物搬到**全局缓存**（`~/.shuangtian/cache/pch/<档位+编译器+三元组哈希>`），
+  ///    不再带工程路径 → 框架单元的编译命令重新变成“与引用方工程无关”，
+  ///    缓存跨工程命中不受影响；
+  /// 2. 创建 PCH 时**剔掉逐目标宏**（`ST_NO_WEBVIEW`/`ST_NO_SCRIPT`/`ST_NO_THREE` 与
+  ///    `--define`），于是同一份 `.gch` 能被所有目标采纳（实测三种宏组合均报 `!` 采纳）。
+  ///
+  /// 于是 233/234 个框架单元全部受益：6 个代表单元实测合计 **−25.6%**。
+  ///
+  /// 想关掉用 `st build --no-pch`（排查“PCH 与某编译器不兼容”时用）。
+  ///
+  /// ⚠ **验证 PCH 是否真的生效，必须用 `-Winvalid-pch`**（或 `-H` 看 `!` / `x` 标记）。
+  /// 只看“构建变快了”或“没报错”是不够的：标志不匹配时 GCC **静默忽略**，
+  /// 不告警也不失败，现象就是“PCH 开了但一点用没有”。这条已踩过一次（即上文那个错误结论）。
+  bool use_pch{true};
+  /// **按需编译**（基于包级依赖图自动裁剪框架单元）。默认开，`--no-auto-prune` 关。
+  ///
+  /// 对应 Go 的“没被 import 的包不编译”：从目标自己的源出发算包闭包，
+  /// 把闭包外、且不是目标自己的框架 `.cpp` 从编译集合里剔除。
+  ///
+  /// 为何默认开：全量编译 + 链接期裁剪的旧口径下，编译成本与应用用量无关——
+  /// 不碰 3D/LSP/打包器的应用也要先把那些源编一遍（实测每个应用可剔除
+  /// 11~14% 的框架单元）。
+  ///
+  /// 三道安全阀（缺一不可，详见 `auto_prune_units`）：
+  /// - 目标写了 `include_sources`（声明式白名单）→ 完全跳过推导，以清单为准；
+  /// - 目标源读不出 / 没有任何 `st/` include / 头文件全表拿不到 → 不裁（宁可多编）；
+  /// - 裁错的失败模式是**链接期 undefined reference**（可见可定位），不是静默错。
+  bool auto_prune{true};
   std::vector<std::string> extra_include_dirs{};
   std::vector<std::string> extra_flags{};
   /// **命令行宏**（`st build --define NAME=VALUE`）：裸名，不加 `-D`。
@@ -188,6 +217,34 @@ struct BuildStats {
 /// 增量构建、共享对象缓存、测试二进制过期判定共用这一套：任何地方按时间戳或长度
 /// 判定，“`git checkout`/`touch` 白重编”与“等长改写漏报”两个错就会在别处重现。
 [[nodiscard]] auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> bool;
+
+/// 从一组编译标志里剔掉**随目标变化的宏**，得到“PCH 创建标志”。
+///
+/// ## 为何必须剔
+///
+/// GCC 对 PCH 的匹配是**严格**的：创建与消费的标志集不一致就**静默丢弃**
+/// （`not used because 'ST_NO_THREE' not defined [-Winvalid-pch]`）。
+/// 而本仓有一批宏**逐目标不同**：
+///
+/// - **能力拆链宏** `ST_NO_WEBVIEW` / `ST_NO_SCRIPT` / `ST_NO_THREE`：
+///   由 `target_uses_*()` 根据“这个应用用不用”算出，同一个框架单元
+///   在 gallery 与 xiangqi 下拿到不同的宏值；
+/// - **命令行宏** `--define NAME=VALUE`：显式只作用于本次构建。
+///
+/// PCH 的内容（`include/st/pch.hpp`）**只用标准库头与 `st/core/cxx.hpp`**，
+/// 它在任何宏组合下都产生同一份声明——所以剔掉这些宏**不损失正确性**，
+/// 却让它能被所有目标复用。
+///
+/// 实测（2026-11-23）：不带能力宏创建的 `.gch`，在被 `ST_NO_WEBVIEW`+`ST_NO_THREE`、
+/// 单宏、无宏三种消费端下均报 `✓ 采纳`（`-H` 标记为 `!`）。
+///
+/// ⚠ **不能剔的**：`-std=` / `-O*` / `-g*` / `-f*` / `-W*` / `-I` / `-D_WIN32_WINNT` 这类
+/// 与平台/语言模式相关的项——它们会改变 PCH 里头的**语义**（比如 `_WIN32_WINNT`
+/// 影响 `<windows.h>` 的可见 APIs），剔了就会产生错误的 PCH。
+///
+/// 导出供回归测试直接断言（`pkg_pch_creating_flags_test`）：这是“PCH 能否跨目标复用”
+/// 的单一判据处，改错了的症状是“PCH 开了但完全不生效”（静默，见上面的静默丢弃）。
+[[nodiscard]] auto pch_creating_flags(const std::vector<std::string>& flags) -> std::vector<std::string>;
 
 /// 文件内容的 fnv1a64（读不到 → `nullopt`）。
 ///

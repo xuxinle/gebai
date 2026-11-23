@@ -28,11 +28,47 @@
 
 #include "st/ui/dsl.hpp"
 
-#include "st/core/json.hpp"
-#include "st/math/geometry.hpp"
-#include "st/ui/components/all.hpp"
+// ## 为何只 include 实际用到的 17 个组件头，而不是 `components/all.hpp`
+//
+// `all.hpp` 拉进 **88 个组件头**；而本文件对具体组件的依赖只有一类——
+// 便利函数里的 `dynamic_cast<X*>`。实测 `dynamic_cast` 涉及 18 个类型，
+// 归到 17 个头（`ContextMenu`、`MenuBar`、`MenuPanel` 同在 `menu.hpp`）。
+//
+// 实测（2026-11-23，每种 2 轮取最优）：
+//   all.hpp     5,197 ms
+//   17 个精头   3,620 ms（**−1,577 ms / −30.3%**）
+//
+// 这是全库 include 占比最高的单元（只 include、无实现就要 5,028 ms，占完整编译 95.8%），
+// 所以减 include 在这里回报最大。
+//
+// ⚠ 增删便利函数时**必须同步这里**：用到新组件就补它的头。漏了会报
+// “incomplete type / 未声明标识符”而不是静默错——`dynamic_cast` 需要完整类型。
+// 自查：`st build --force` 编过即对。
+#include "st/ui/components/badge.hpp"
+#include "st/ui/components/button.hpp"
+#include "st/ui/components/checkbox.hpp"
+#include "st/ui/components/heading.hpp"
+#include "st/ui/components/icon_view.hpp"
+#include "st/ui/components/input_box.hpp"
+#include "st/ui/components/list_view.hpp"
+#include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/menu.hpp"
+#include "st/ui/components/progress_bar.hpp"
+#include "st/ui/components/select_box.hpp"
+#include "st/ui/components/slider.hpp"
+#include "st/ui/components/switch.hpp"
+#include "st/ui/components/table.hpp"
+#include "st/ui/components/tabs.hpp"
+#include "st/ui/components/text.hpp"
+#include "st/ui/components/tree.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/svg.hpp"
+// 下面两个头原本紧跟在 `all.hpp` 后面，去掉 `all.hpp` 时**不能一并去掉**：
+// `Json` 的完整定义（`Json::object()`）与 `geometry` 的类型都被本文件直接使用，
+// 之前是搭 `all.hpp` 的传递包含过来的。去掉 `all.hpp` 后它们变成硬依赖——
+// 这正好也是“每个 cpp 自包含”该有的样子。
+#include "st/core/json.hpp"
+#include "st/math/geometry.hpp"
 
 namespace st::ui::dsl {
 

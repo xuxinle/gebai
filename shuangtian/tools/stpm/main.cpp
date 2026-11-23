@@ -94,7 +94,8 @@ constexpr const char* kStpmVersion = "0.1.0";
 [[nodiscard]] auto is_boolean_option(std::string_view name) -> bool {
   static constexpr std::string_view kBooleanOptions[] = {
       "san", "list", "slow", "verbose", "v", "force", "all", "help", "rules",
-      "pch", "no-strip", "offline", "locked", "quiet", "release", "no-build",
+      "pch", "no-pch", "no-strip", "offline", "locked", "quiet", "release", "no-build",
+      "no-auto-prune", "no-tests",
   };
   return std::ranges::find(kBooleanOptions, name) != std::end(kBooleanOptions);
 }
@@ -194,12 +195,15 @@ void print_usage() {
                         不含 ~140 个一次性探针）。新增应用时把它加进 `all` 的 libraries。
                                                   --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
   产物本体可小 ~94%；gdb 会自动找分离符号）
-  --pch             启用预编译头（默认**关**：实测 108MB .gch 的加载固定成本
-  1.67s，全量构建反而慢 13%；详见 st::pkg::BuildOptions::use_pch 注释）
+  --no-pch          关闭预编译头（默认**开**：`.gch` 放全局缓存，233/234 个框架单元
+  全部受益，6 个代表单元实测 −25.6%；排查 PCH 与编译器不兼容时用它）
   --define NAME=VALUE 追加编译宏（可重复；只作用于本次构建，不改 st.pkg）
   用途：打包“配置已预置”的产物而不把部署参数提交进仓库。
   例：st build xiaobai --define 'XIAOBAI_MODEL=\"deepseek-v4.1-flash\"'
   同名宏会覆盖清单里的（命令行写在清单宏之后）。
+  --no-auto-prune   关闭**按需编译**（默认开）：默认根据包级依赖图，
+  只编目标真正用到的框架单元（实测每个应用省 11~14% 单元）。
+  排查“链接报 undefined reference 而源码里确实用了”时先加它验证推断。
                         --no-tests 不刷新过期的测试二进制（默认会**只构建不运行**地
                         同步一次，避免「改了断言→st build→直跑 st_tests→验旧代码」）
                         并发默认按**内存预算**推导（读 cgroup 上限，不再默认吃满核数）；
@@ -366,10 +370,18 @@ auto command_build(const Arguments& arguments) -> int {
   options.jobs_large = jobs_large > 0.0 ? static_cast<std::size_t>(jobs_large) : 0;
   const auto max_memory = arguments.number("max-memory", 0.0);
   options.max_memory_mb = max_memory > 0.0 ? static_cast<std::uint64_t>(max_memory) : 0;
-  // PCH 默认**关**（`--pch` 开）。实测它的 108 MB `.gch` 加载固定成本 1,669 ms，
-  // 而省下的标准库解析补不上：全量构建对照 有 PCH 11m42s 对 无 PCH 10m21s。
-  // 详见 `st::pkg::BuildOptions::use_pch` 的注释（含逐单元数据）。
-  options.use_pch = arguments.has("pch");
+  // PCH 默认**开**（`--no-pch` 关）。
+  //
+  // 历史提醒（别再走回头路）：2026-11-22 曾因“PCH 净损失 13%”把它默认关掉——
+  // 那批测量里 GCC **静默丢弃**了 PCH（标志不匹配），量到的是“白读 108MB 再扔掉”。
+  // 真实情况下 PCH 是净收益；且现在它已搬到全局缓存 + 创建时剔逐目标宏，
+  // 233/234 个框架单元全部受益（6 个代表单元实测 −25.6%）。
+  // 详见 `st::pkg::BuildOptions::use_pch` 的长注释。
+  options.use_pch = !arguments.has("no-pch");
+  // 按需编译默认**开**（`--no-auto-prune` 关）：从目标源算包包闭包，
+  // 闭包外的框架单元不参与编译。实测每个应用可剔除 11~14% 的框架单元。
+  // 详见 `st::pkg::BuildOptions::auto_prune` 与 `auto_prune_units`（含三道安全阀）。
+  options.auto_prune = !arguments.has("no-auto-prune");
   // 调试信息分离默认开（`--no-strip` 关）：不分离的代价是“每个产物白胖 ~70MB”
   //（实测 dev 档 st.exe 76.96MB，其中 89% 是 `.debug_*`），而分离的代价是零。
   options.strip_debug = !arguments.has("no-strip");
@@ -788,6 +800,13 @@ auto command_test(const Arguments& arguments) -> int {
     return 1;
   }
   if (*code > 0) {
+    // 126 = 过滤未命中（见 `test_runner.cpp` 的 `matched_nothing`）。
+    // 它不是“用例失败”，误报成“失败用例（126）”会把“名字拼错”指成一片红。
+    if (*code == 126) {
+      std::fprintf(stderr, "\n===== 过滤未命中 =====\n本轮没有任何用例被选中——"
+                           "**不是测试失败，也不是通过**（名字拼错了？）\n");
+      return 126;
+    }
     std::fprintf(stderr, "\n===== 失败用例（%d）=====\n（以上为用例断言红；产物正常、分片正常）\n", *code);
   }
   return *code;

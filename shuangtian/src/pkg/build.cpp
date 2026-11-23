@@ -4,6 +4,7 @@
 #include "st/pkg/embed.hpp"
 #include "st/pkg/memory.hpp"
 #include "st/pkg/framework.hpp"
+#include "st/pkg/graph.hpp"
 #include "st/pkg/junit.hpp"
 
 #include <algorithm>
@@ -60,8 +61,14 @@ struct CompileUnit {
   SourceLang lang{SourceLang::Cxx};
   bool third_party{false};     ///< 第三方源码（放宽告警、不进 PCH）
   /// 框架单元（来自被引用的框架）。这类单元的编译命令**必须与引用方工程无关**：
-  /// 不含工程的 `-I`/`-D`，也不用工程的 PCH——否则共享对象缓存的键会随工程变化，缓存永不命中。
+  /// 不含工程的 `-I`/`-D`——否则共享对象缓存的键会随工程变化，缓存永不命中。
   /// 语义上也是对的：框架源只应看到框架自己的头，不该被引用方的同名头影响。
+  ///
+  /// ⚠ **2026-11-23：它也可以吃 PCH 了**（旧注释说不吃）。
+  /// 旧理由：“PCH 路径带工程目录 → 键随工程变”。现在 PCH 产物放在**全局缓存**
+  ///（`~/.shuangtian/cache/pch/<档位+编译器+三元组哈希>`），路径与工程无关，
+  /// 那条理由不再成立。而框架单元占 233/234，让它们吃 PCH 才是收益主体
+  ///（实测单单元 −16%~−39%）。第三方源仍然不吃（不包含框架头，强制 `-include` 改变语义）。
   bool framework_unit{false};
   /// 该单元专属的包含目录。
   ///
@@ -654,6 +661,32 @@ struct PchContext {
   std::string token{};
 };
 
+/// 从一组编译标志里剔掉**随目标变化的宏**，得到“PCH 创建标志”。
+///
+/// ## 为何必须剔
+///
+/// GCC 对 PCH 的匹配是**严格**的：创建与消费的标志集不一致就**静默丢弃**
+/// （`not used because 'ST_NO_THREE' not defined [-Winvalid-pch]`）。
+/// 而本仓有一批宏**逐目标不同**：
+///
+/// - **能力拆链宏** `ST_NO_WEBVIEW` / `ST_NO_SCRIPT` / `ST_NO_THREE`：
+///   由 `target_uses_*()` 根据“这个应用用不用”算出，同一个框架单元
+///   在 gallery 与 xiangqi 下拿到不同的宏值；
+/// - **命令行宏** `--define NAME=VALUE`：显式只作用于本次构建。
+///
+/// PCH 的内容（`include/st/pch.hpp`）**只用标准库头与 `st/core/cxx.hpp`**，
+/// 它在任何宏组合下都产生同一份声明——所以剔掉这些宏**不损失正确性**，
+/// 却让它能被所有目标复用。
+///
+/// 实测（2026-11-23）：不带能力宏创建的 `.gch`，在被 `ST_NO_WEBVIEW`+`ST_NO_THREE`、
+/// 单宏、无宏三种消费端下均报 `✓ 采纳`（`-H` 标记为 `!`）。
+///
+/// ⚠ **不能剔的**：`-std=` / `-O*` / `-g*` / `-f*` / `-W*` / `-I` / `-D_WIN32_WINNT` 这类
+/// 与平台/语言模式相关的项——它们会改变 PCH 里头的**语义**（比如 `_WIN32_WINNT`
+/// 影响 `<windows.h>` 的可见 APIs），剔了就会产生错误的 PCH。
+///
+/// 声明与完整理由在 `st/pkg/build.hpp`（导出供回归测试断言）。
+
 /// 构建（或复用）预编译头；失败时返回空（不阻断构建，只是慢一点）。
 ///
 /// 关键细节（都踩过坑）：
@@ -662,8 +695,12 @@ struct PchContext {
 ///    改为生成 `prefix.hpp`（仅一行 `#include "st/pch.hpp"`）作为编译入口，问题消失且标志可完全一致。
 /// 2. **标志一致**：PCH 创建与消费必须使用同一套标志（std/优化/告警/宏/包含路径）；
 ///    消费端只多 `-include` 与依赖输出选项（与 PCH 有效性无关）。
+///    ⚠ 但创建与消费的**差异**是允许的——消费端多出的宏会被 GCC 忽略（实测）：
+///    所以创建时剔掉逐目标宏（见 `pch_creating_flags`）而消费端保留完整标志。
 /// 3. **`target_triple` 必须一致**：`--target` 决定用哪套系统头/运行库，创建与消费两侧
 ///    不一致时编译器会**静默忽略** PCH（不报错，只是变慢）——所以它由调用方拼进同一份 flags。
+/// 4. **`directory` 由调用方给**："全局缓存"与"工程内"两种布局共用本函数，
+///    差别只在传入的目录（见 `build()` 里对 `ensure_pch` 的调用）。
 [[nodiscard]] auto ensure_pch(const std::string& compiler, const std::vector<std::string>& flags,
                               const std::vector<std::string>& include_dirs,
                               const std::string& build_dir, const std::string& header_path)
@@ -685,11 +722,16 @@ struct PchContext {
   const std::string gch = wrapper + ".gch";
   const std::string depfile = gch + ".d";
   const std::string stamp_path = fs::join(directory, "pch.stamp");
-  // PCH 的身份 = **它的输入内容**：编译器 + 标志 + 包含路径 + 代理头与全部依赖头的哈希。
+  // PCH 的身份 = **它的输入内容**：编译器 + **创建标志** + 包含路径 + 代理头与全部依赖头的哈希。
   // 不用 `.gch` 的时间戳/体积：`objcopy`/拷贝/checkout 都会让它们变而内容不变。
+  //
+  // ⚠ 用 `creating` 而不是 `flags`：身份必须对应"真正用于编译 .gch 的那套标志"，
+  // 否则同一个目标每次构建算出的 stamp 不同（消费端带能力宏、创建端不带）→
+  // **PCH 每次重建**（108 MB，4.4 秒），比不用 PCH 还贵。
+  const std::vector<std::string> creating = pch_creating_flags(flags);
   const auto stamp = [&]() -> std::string {
     std::string material = compiler;
-    for (const auto& flag : flags) material.append("\n").append(flag);
+    for (const auto& flag : creating) material.append("\n").append(flag);
     for (const auto& dir : include_dirs) material.append("\n-I").append(dir);
     std::set<std::string> deps{};
     for (const auto& dep : parse_depfile(depfile)) deps.insert(dep);
@@ -710,7 +752,8 @@ struct PchContext {
   }();
   if (!up_to_date) {
     std::vector<std::string> args;
-    for (const auto& flag : flags) args.push_back(flag);
+    // 用**剔过逐目标宏**的标志创建（理由见 `pch_creating_flags`”。
+    for (const auto& flag : creating) args.push_back(flag);
     for (const auto& dir : include_dirs) args.push_back(std::format("-I{}", dir));
     args.push_back(std::format("-I{}", directory));
     args.push_back("-x");
@@ -1160,13 +1203,37 @@ struct LanguageFlags {
       }
       return std::string{};
     }();
+    // ## PCH 产物放哪里：**全局缓存，而不是 `build/<档位>/pch/`**
+    //
+    // 为何要搬到全局（这一条是“让框架单元也能吃 PCH”的前提）：
+    // 框架单元的编译命令必须**与引用方工程无关**，否则共享对象缓存的键
+    // 会随工程目录漂移、缓存永不跨工程命中（见 `framework_unit` 的注释）。
+    // 而 PCH 路径会进命令行（`-I<dir>`）——放在 `build/<档位>/pch/` 里就带上了
+    // 工程的绝对路径，直接废掉那条约束。
+    //
+    // 放全局后：同一套（编译器 + 标志 + 框架头内容）产出的 `.gch` 被所有工程共享。
+    // 这是安全的：`.gch` 的有效性完全由**创建标志 + 依赖头内容**决定（`stamp` 算的就是它们），
+    // 与工程无关。
+    //
+    // 目录名取 "档位 + 编译器族 + 目标三元组" 的哈希：不同档位（`-O1` vs `-O2`）、
+    // 不同编译器、不同目标必须各自一份——它们标志不同，共用会互相判无效。
+    const std::string pch_directory = [&]() -> std::string {
+      std::string home;
+      if (const auto env = fs::read_env("ST_HOME"); env.has_value() && !env->empty()) {
+        home = *env;
+      } else {
+        home = fs::join(fs::home_dir(), ".shuangtian");
+      }
+      if (home.empty()) return build_dir;  // 取不到用户目录 → 退回工程内（功能不丢）
+      std::string material = options.profile;
+      material.append("\n").append(compiler_kind_name(toolchain.kind));
+      material.append("\n").append(toolchain.triple);
+      return fs::join(home, std::format("cache/pch/{}", st::hash::fnv1a64_hex(material)));
+    }();
     // 检查模式**也建/读 PCH**：`st check` 默认用与 build 相同的编译器（gcc），
     // 此时 `.gch` 可复用——每单元省去重新解析标准库头。
-    // 跨编译器（`--toolchain=clang`）时 ensure_pch 的产物目录按编译器隔离
-    // （`build/<profile>/pch/` 下按 compiler 分目录），clang 吃到的是自己编的 .gch，
-    // 不会读到 gcc 的——因此这里不区分 check/build，一律尝试。
     if (!pch_header.empty()) {
-      pch = ensure_pch(compiler_path, flags, include_dirs, build_dir, pch_header);
+      pch = ensure_pch(compiler_path, flags, include_dirs, pch_directory, pch_header);
     }
   }
   const PchContext* pch_ptr = pch.has_value() ? &*pch : nullptr;
@@ -1195,8 +1262,15 @@ struct LanguageFlags {
   };
   // 该单元消费的 PCH 身份（不消费者为空）：只有“真正会吃 PCH 的单元”才带 token，
   // 与编译分支的判定条件保持一致（否则无关单元会因 PCH 重建而无谓重编）。
+  //
+  // **框架单元也吃 PCH（2026-11-23）**：原先它们被排除，理由是“PCH 路径带工程目录 →
+  // 缓存键跨工程不稳”。现在 PCH 已搬到全局缓存（目录只由档位+编译器+三元组哈希决定，
+  // 与工程无关），所以这条理由不再成立——而框架单元占全库 233/234 个，
+  // 让它们吃 PCH 才是收益主体（实测单单元省 16~39%）。
+  //
+  // 第三方源仍然不吃：它们不包含框架头，强制 `-include` 会改变其编译语义。
   const auto pch_token_for = [&](const CompileUnit& unit) -> std::string {
-    if (pch_ptr == nullptr || unit.lang == SourceLang::C || unit.framework_unit || unit.third_party) {
+    if (pch_ptr == nullptr || unit.lang == SourceLang::C || unit.third_party) {
       return {};
     }
     return pch_ptr->token;
@@ -1412,12 +1486,16 @@ struct LanguageFlags {
         args.push_back(std::format("-I{}", dir));
       }
       if (unit->third_party) args.push_back("-w");
-      // PCH 只服务本工程/框架自己的 C++ 单元：
+      // PCH 服务**所有 C++ 单元**（含框架单元与目标自己的源）：
       // - C 源是另一套语言标准，不能吃；
-      // - 框架单元跳过，保证其编译命令与引用方工程无关（对象缓存才能跨工程命中）；
       // - 第三方源码不吃：它们并不包含框架头，强制包含 PCH（`-include`）会改变其编译语义，
       //   且上游源码里"弃用但合法"的用法会被 `-Werror` 当成构建错误——那不是我们要修的东西。
-      if (pch_ptr != nullptr && !is_c && !unit->framework_unit && !unit->third_party) {
+      //
+      // **框架单元也吃（2026-11-23 改变）**：原先排除它们是为了让编译命令与引用方工程无关
+      // （对象缓存跨工程命中）。现在 PCH 已搬到全局缓存目录（只由档位+编译器+三元组决定，
+      // 与工程目录无关），那条理由不再成立——而框架单元占 233/234，
+      // 让它们吃 PCH 才是收益主体（实测单单元省 16~39%）。
+      if (pch_ptr != nullptr && !is_c && !unit->third_party) {
         const std::vector<std::string> pch_args =
             pch_consume_args(pch_ptr->directory, pch_ptr->header);
         args.insert(args.end(), pch_args.begin(), pch_args.end());
@@ -2391,6 +2469,179 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   });
 }
 
+/// 按包图**自动裁剪**库级框架单元（按需编译）——对应 Go 的“没 import 的包不编”。
+///
+/// ## 它做什么
+///
+/// 从**目标自己的源**的 `#include` 起点算出包闭包（头 + 实现两侧都算，严口径），
+/// 然后把“闭包外、且不是目标自己”的框架单元从编译集合里剔除。
+///
+/// ## 为何默认开
+///
+/// 全量编译 + 链接期裁剪的旧路径里，编译成本与应用用量无关：一个不碰
+/// 3D/LSP/打包器的应用也要先把 `st/raster` 的 3D 部分、`st/lsp`、`st/pkg` 编一遍。
+/// 实测（2026-11-23）每个应用可剔除 11~14% 的框架单元。
+///
+/// ## 安全阀（三道，缺一不可）
+///
+/// 1. **清单声明优先**：目标写了 `include_sources` 就完全跳过本函数
+///    （清单是声明式的，人的意图高于推导）；
+/// 2. **读不出就全留**：目标源读不到/展开失败/没有任何 `st/` include 时返回空，
+///    即"不裁"——宁可多编，不可错裁；
+/// 3. **`--no-auto-prune`**：显式关掉（见 `BuildOptions::auto_prune`）。
+///
+/// 裁错的失败模式是**链接期 undefined reference**（可见、可定位到符号），
+/// 而不是静默错误——这是选在“黑名单”方向裁剪的理由。
+///
+/// 自注册组件（58 个 `ST_UI_COMPONENT_IMPL`）不进 include 图，但实测它们
+/// **全部**落在 `st/ui` / `st/ui/components`，同属一个强连通分量且是任何 UI 应用
+/// 的必经依赖——所以不会被本函数裁掉（由 `pkg_graph` 的用例钉住）。
+[[nodiscard]] auto auto_prune_units(const Manifest& manifest, const BuildOptions& options,
+                                    const std::vector<std::string>& candidates)
+    -> std::vector<std::string> {
+  if (!options.auto_prune) return candidates;
+  // 安全阀 ①：清单显式声明了白名单 → 人的意图优先，不猜。
+  if (const TargetSpec* spec = manifest.find_target(options.target);
+      spec != nullptr && !spec->include_sources.empty()) {
+    return candidates;
+  }
+
+  // 收集：目标自己的源（用于取 include 起点）与全部头文件（用于定包归属）。
+  std::vector<std::string> app_sources;
+  if (const TargetSpec* spec = manifest.find_target(options.target); spec != nullptr) {
+    for (const auto& pattern : spec->sources) {
+      auto matches = fs::expand_glob(manifest.directory, pattern);
+      if (!matches) return candidates;  // 安全阀 ②：展开失败 → 不裁
+      for (const auto& path : *matches) app_sources.push_back(path);
+    }
+  } else {
+    return candidates;  // 没有目标（如整库构建）→ 不裁
+  }
+  if (app_sources.empty()) return candidates;
+
+  // **应用自己的头文件也要算起点**（实测踩过一次，gbcode 链接失败）：
+  // 应用常把框架头收敛在自己的 `.hpp` 里（`apps/gbcode/page.hpp` 就 include 了
+  // `st/search/search.hpp`），而 `.cpp` 只 include 自己的 `page.hpp`。
+  // 只扫 `.cpp` 会漏掉这类间接依赖 ⇒ `st/search` 被判“不需要”⇒
+  // 链接报 `undefined symbol: st::search::enumerate`。
+  //
+  // 取**目标源同目录及其子目录**下的全部 `.hpp`（只多扫几个文件，代价可忽略；
+  // 除 `.hpp` 外也收 `.h`/`.inl`，与 `target_matches_source` 的收录口径一致）。
+  {
+    std::set<std::string> directories;
+    for (const auto& source : app_sources) {
+      directories.insert(std::string(fs::parent(source)));
+    }
+    for (const auto& directory : directories) {
+      const std::string relative = fs::relative_to(directory, manifest.directory);
+      if (auto found = fs::expand_glob(manifest.directory, relative + "/**/*.hpp"); found) {
+        for (const auto& path : *found) app_sources.push_back(path);
+      }
+      if (auto found = fs::expand_glob(manifest.directory, relative + "/**/*.h"); found) {
+        for (const auto& path : *found) app_sources.push_back(path);
+      }
+    }
+    std::ranges::sort(app_sources);
+    app_sources.erase(std::unique(app_sources.begin(), app_sources.end()), app_sources.end());
+  }
+
+  // 头文件全表（**相对仓库根**的 posix 路径，如 `include/st/ui/button.hpp`）。
+  //
+  // ⚠ 必须归一成相对路径：`fs::expand_glob` 返回的是**绝对路径**，而
+  // `package_of_unit` / `package_of_header` 只会认 `src/…`、`st/…` 这类前缀。
+  // 拿绝对路径直接丢给它们，算出来的“包名”是 `D:/code/…/include/st/ui` 这种无意义值，
+  // 与include 命中的 `st/ui` 永远对不上 ⇒ 闭包失真 ⇒ **整包误裁**。
+  // 实测症状：链接报 `undefined symbol: st::ui::WebView::load_html`（整个
+  // `st/ui/components` 被当成“未被需要”）。
+  std::vector<std::string> headers;
+  if (auto found = fs::expand_glob(manifest.directory, "include/st/**/*.hpp"); found) {
+    for (const auto& path : *found) {
+      headers.push_back(std::string(fs::relative_to(path, manifest.directory)));
+    }
+  }
+  if (headers.empty()) return candidates;  // 安全阀 ②：连头都找不到 → 不裁
+  // 候选单元同样归一成相对路径（`PackageGraph` 的包归属规则以相对路径为前提）。
+  std::vector<std::string> relative_candidates;
+  relative_candidates.reserve(candidates.size());
+  for (const auto& path : candidates) {
+    relative_candidates.push_back(std::string(fs::relative_to(path, manifest.directory)));
+  }
+
+  const auto read_includes = [&](const std::string& file) -> std::set<std::string> {
+    std::set<std::string> result;
+    const auto text = fs::read_text(file);
+    if (!text.has_value()) return result;
+    // 只认行首的 `#include "st/…"`：尖括号是系统/第三方，不进包图。
+    //
+    // ⚠ **不能先 `lex::strip_to_code` 再找**（这是个静默失效的坑，已踩过一次）：
+    // 那个函数会把**字符串字面量一起糊掉**，而 `#include "st/x.hpp"` 的路径
+    // 恰好就是一个字符串字面量——净化后变成 `#include ""`，于是提取结果恒为空，
+    // 三道安全阀里的“目标一个 st/ 头都不引用 → 不裁”永远成立，
+    // 按需编译**静默地一次也不生效**（现象：单元数完全不变，无任何告警）。
+    //
+    // 正确做法：按行扫，只认行首（允许前导空白）的 `#include "…"`——
+    // 注释里的 `#include` 本来就不会出现在行首，因此不需要净化。
+    static constexpr std::string_view kMarker = "#include \"";
+    std::size_t line_begin = 0;
+    while (line_begin < text->size()) {
+      std::size_t line_end = text->find('\n', line_begin);
+      if (line_end == std::string::npos) line_end = text->size();
+      const std::string_view line(text->data() + line_begin, line_end - line_begin);
+      std::size_t cursor = 0;
+      while (cursor < line.size() && (line[cursor] == ' ' || line[cursor] == '\t')) ++cursor;
+      if (line.compare(cursor, kMarker.size(), kMarker) == 0) {
+        const std::size_t begin = cursor + kMarker.size();
+        const std::size_t end = line.find('"', begin);
+        if (end != std::string_view::npos) {
+          const std::string target(line.substr(begin, end - begin));
+          if (target.starts_with("st/")) result.insert(target);
+        }
+      }
+      line_begin = line_end + 1;
+    }
+    return result;
+  };
+
+  const auto graph = PackageGraph::build(headers, relative_candidates, read_includes);
+
+  // include 起点：目标源里出现过的 `st/…` 头对应的包。
+  std::set<std::string> roots;
+  for (const auto& source : app_sources) {
+    for (const auto& included : read_includes(source)) roots.insert(package_of_header(included));
+  }
+  roots.erase("");
+  if (roots.empty()) return candidates;  // 安全阀 ②：目标一个 st/ 头都不引用 → 不裁
+
+  const auto needed_packages = graph.closure(roots);
+  const auto needed_units = graph.units_for(needed_packages);
+  const std::set<std::string> keep(needed_units.begin(), needed_units.end());
+
+  std::vector<std::string> pruned;
+  std::vector<std::string> dropped;
+  for (const auto& unit : candidates) {
+    const std::string relative = fs::relative_to(unit, manifest.directory);
+    // 只裁“框架单位”（`src/` 下的库源）：第三方源、目标自己的源、
+    // 嵌入生成物（`build/<档>/embed/**`）一律保留。
+    if (!relative.starts_with("src/")) {
+      pruned.push_back(unit);
+      continue;
+    }
+    if (keep.contains(relative)) {
+      pruned.push_back(unit);
+    } else {
+      dropped.push_back(relative);
+    }
+  }
+  if (!dropped.empty()) {
+    // 打印明细：裁错时的症状是链接期 undefined reference，没有这份清单就没法定位
+    // 到底是“推错了”还是“源码真的没引用”。用 `--no-auto-prune` 对照即可二分。
+    ST_LOG_INFO("按需裁剪：目标 {} 剔除 {} / {} 个框架单元（包闭包 {} 个包）", options.target,
+                dropped.size(), candidates.size(), needed_packages.size());
+    for (const auto& unit : dropped) ST_LOG_DEBUG("  裁剪: {}", unit);
+  }
+  return pruned;
+}
+
 /// 链接头部旗标：单一事实源（声明与理由见 `build.hpp`）。
 /// 匿名空间里的同名实现不动——它是命令行的内部拼装口径；导出这层只做同名转发，
 /// 保证“测试断言的就是链接实际用的”。
@@ -2441,6 +2692,26 @@ std::mutex g_hash_mutex;
 // lint-allow: L8 同上（与 mutex 配套的哈希表）
 std::map<std::string, std::optional<std::uint64_t>> g_hash_cache;
 }  // namespace
+
+auto pch_creating_flags(const std::vector<std::string>& flags) -> std::vector<std::string> {
+  // 按名字识别“逐目标可变”的宏。名单短且稳定，所以用显式列举而不是前缀猜——
+  // 猜错过一次（`ST_` 前缀会把 `ST_VERSION` / `ST_ENABLE_LINT` 这类全局宏一起剔掉，
+  // 而它们对 PCH 里的声明有影响）。
+  static const std::set<std::string> kTargetVarying = {"ST_NO_WEBVIEW", "ST_NO_SCRIPT",
+                                                      "ST_NO_THREE"};
+  std::vector<std::string> result;
+  result.reserve(flags.size());
+  for (const auto& flag : flags) {
+    if (flag.starts_with("-D")) {
+      const auto equals = flag.find('=');
+      const std::string name = flag.substr(2, equals == std::string::npos ? std::string::npos
+                                                                          : equals - 2);
+      if (kTargetVarying.contains(name)) continue;
+    }
+    result.push_back(flag);
+  }
+  return result;
+}
 
 [[nodiscard]] auto content_hash_cached(const std::string& path) -> std::optional<std::uint64_t> {
   {
@@ -3360,8 +3631,18 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   std::ranges::sort(all_sources);
   all_sources.erase(std::unique(all_sources.begin(), all_sources.end()), all_sources.end());
 
+  // **按需编译**：只把包闭包内的框架单元交给编译。
+  //
+  // 位置很关键：必须在框架源已全部并入 `library_sources`（上面 ②/③）**之后**、
+  // `make_units` **之前**——提前拿不到完整的候选集，晚了就白枚举了。
+  //
+  // 只裁 `.cpp` 库源；第三方源（`third_party_paths`）不在此处理：
+  // 它们是**原子依赖**（引用 `src/ext/database.cpp` 就需要整包 sqlite），
+  // 按文件级切会切碎到不可用，那种粒度由 `include_third_party_sources` 负责。
+  std::vector<std::string> pruned_sources = auto_prune_units(effective, options, all_sources);
+
   std::vector<CompileUnit> units =
-      make_units(effective, all_sources, object_dir, third_party_paths, library_includes,
+      make_units(effective, pruned_sources, object_dir, third_party_paths, library_includes,
                  framework_sources);
   // 框架单元专用的标志集（框架自己的头/宏/严格集）——它决定框架对象能否跨工程命中缓存。
   // **C 标志必须取 `framework->c_flags`**（框架清单的）：取 `manifest.c_flags` 在框架自建时
