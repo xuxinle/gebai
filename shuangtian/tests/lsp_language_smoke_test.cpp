@@ -116,7 +116,7 @@ auto smoke(const std::string& program, const std::vector<std::string>& args,
 ST_TEST(lsp_language_clangd_smoke) {
   Sandbox sandbox("clangd");
   sandbox.write("compile_commands.json",
-                std::format(R"([{{"directory":"{}","file":"{}/a.cpp","command":"c++ -std=c++20 -c a.cpp"}}])",
+                std::format(R"([{{"directory":"{}","file":"{}/a.cpp","command":"c++ -std=c++23 -c a.cpp"}}])",
                             sandbox.dir.string(), sandbox.dir.string()));
   // 故意写一个未声明标识符（+ 缺分号）。
   const std::string path = sandbox.write("a.cpp",

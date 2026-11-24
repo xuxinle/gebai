@@ -175,12 +175,12 @@ ST_TEST(switching_away_from_primary_clears_the_gradient) {
                                Variant::Danger, Variant::Plain}) {
     Button button("动作", Variant::Primary, Button::Size::Small);
     button.refresh_theme(theme);
-    ST_REQUIRE(button.style().background_gradient.has_value());   // 前提：确实铺过渐变
+    ST_REQUIRE(button.style().background_gradient != nullptr);   // 前提：确实铺过渐变
 
     button.set_variant(target);
     button.refresh_theme(theme);   // `UiRoot` 每帧就是这么做的
 
-    const bool leaked = button.style().background_gradient.has_value();
+    const bool leaked = button.style().background_gradient != nullptr;
     if (leaked) {
       st::log::out("[variant] 切到 {} 后仍残留渐变（缺陷复现）\n",
                    st::ui::variant_name(target));
@@ -244,7 +244,7 @@ ST_TEST(every_variant_keeps_text_readable_against_its_background) {
       return (std::max(l1, l2) + 0.05) / (std::min(l1, l2) + 0.05);
     };
     double ratio = 0.0;
-    if (style.background_gradient.has_value() && !style.background_gradient->stops().empty()) {
+    if (style.background_gradient != nullptr && !style.background_gradient->stops().empty()) {
       ratio = std::numeric_limits<double>::max();
       for (const auto& stop : style.background_gradient->stops()) {
         ratio = std::min(ratio, contrast(stop.color));

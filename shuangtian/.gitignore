@@ -67,6 +67,15 @@ apps/caiyun/mtfilm/qa/*.mp4
 apps/caiyun/mtfilm/qa/*.png
 apps/caiyun/mtfilm/qa/*.log
 
+# 视觉回归的**证据快照**（`tools/capture_gradient_baseline.py` 这类脚本的产物）：
+# 逐像素对比用的改前/改后截图。全部可从脚本重新采，而且**多轮并行时会同名覆盖**
+# （历史消息里按路径引用的产物会变成别的内容）——所以落会话目录或临时目录，不入库。
+#
+# 只锢在本目录（`/` 前缀 = 相对本 .gitignore 所在目录 = 仓库的 `shuangtian/`）：
+# 裸 `qa/` 会匹配**任意层级**名为 qa 的目录，
+# 而 `apps/caiyun/mtfilm/qa/` 是应用自己的素材目录（上面三条按扩展名收窄）。
+/qa/
+
 # 逆向验证脚本的备份文件（`tools/*_reverse_verify*` 与临时脚本会产生）：
 # 它们是“回退前的源码快照”，只在验证过程中存在。若不忽略，
 # 一次 `git add -A` 就会把整份源文件当成新文件提交（实测发生过：3 个 `.revert-bak`）。

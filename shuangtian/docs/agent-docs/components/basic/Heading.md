@@ -21,7 +21,9 @@ auto w = std::make_unique<st::ui::Heading>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-本组件**没有自己的属性面**——只能读写通用属性（`id`/`visible`/几何/样式）与它自己的 C++ 接口。要断言内容，用 `tree` 的 `text`/`value` 字段或截图。
+**可读写**：`level`
+
+> 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
 
 ## 动作面（控制通道 `invoke`）
 

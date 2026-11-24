@@ -55,6 +55,7 @@
 #include "st/ui/components/tabs.hpp"
 #include "st/ui/components/terminal.hpp"
 #include "st/ui/components/timeline_view.hpp"
+#include "st/ui/components/mermaid_view.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/toggle.hpp"
 #include "st/ui/components/tree.hpp"
@@ -144,6 +145,7 @@ using st::ui::Terminal;
 using st::ui::Text;
 using st::ui::TextAlign;
 using st::ui::TimelineView;
+using st::ui::MermaidView;
 using st::ui::Tone;
 using st::ui::Tooltip;
 using st::ui::Tree;
@@ -828,7 +830,7 @@ namespace {
   auto chip_row = make_row(10.0f, true);
   auto* chip_row_ptr = chip_row.get();
   for (const auto& [text, closable] : std::vector<std::pair<std::string, bool>>{
-           {"C++20", false}, {"零依赖", false}, {"可关闭", true}, {"再点一次消失", true}}) {
+           {"C++23", false}, {"零依赖", false}, {"可关闭", true}, {"再点一次消失", true}}) {
     auto chip = std::make_unique<Chip>(text, closable);
     auto* chip_self = chip.get();
     chip->set_id("chip-" + st::ascii_lower(text));
@@ -2604,7 +2606,7 @@ namespace {
 
   // —— 键值 ——
   auto facts_card = make_card("card-facts", "键值对");
-  facts_card->add_child(std::make_unique<KeyValueRow>("语言", "C++20"));
+  facts_card->add_child(std::make_unique<KeyValueRow>("语言", "C++23"));
   {
     // 真实文件的编译期嵌入：与控制通道读回交叉验证
     const auto embedded = b::embed<"apps/gallery/assets/about.txt">();
@@ -2622,6 +2624,50 @@ namespace {
   facts_card->add_child(std::make_unique<KeyValueRow>("协议", "st-control/1"));
   facts_card->add_child(std::make_unique<KeyValueRow>("编译", "stpm 直驱（g++ 默认 / MSVC 回退）"));
   page->add_child(std::move(facts_card));
+
+  // —— Mermaid 图（自绘：流程图 / 时序图 / 饼图）——
+  auto mermaid_card = make_card("card-mermaid", "Mermaid 图（自绘解析 + 布局）");
+  mermaid_card->add_child(make_caption(
+      "一段 Mermaid 文本 → 原生自绘：流程图（分层正交连线/菱形判定/自环）、时序图（生命线 + 实虚线消息）、"
+      "饼图（12 点顺时针 + 图例）；Ctrl+滚轮以指针为锚缩放、空白拖拽平移；"
+      "控制通道：get kind·error·node_count，invoke zoom_in·zoom_out·reset_view"));
+  auto mermaid_flow = std::make_unique<MermaidView>();
+  mermaid_flow->set_id("demo-mermaid-flow");
+  mermaid_flow->set_source(
+      "flowchart TD\n"
+      "  A[提交] --> B{校验通过?}\n"
+      "  B -->|是| C[构建]\n"
+      "  B -->|否| D[报错]\n"
+      "  C --> E((发布))\n"
+      "  D --> A\n");
+  mermaid_flow->style().height = 240.0f;
+  mermaid_card->add_child(std::move(mermaid_flow));
+
+  auto mermaid_row = make_row(12.0f, /*wrap=*/true);
+  auto mermaid_sequence = std::make_unique<MermaidView>();
+  mermaid_sequence->set_id("demo-mermaid-sequence");
+  mermaid_sequence->set_source(
+      "sequenceDiagram\n"
+      "  participant C as 客户端\n"
+      "  participant S as 服务端\n"
+      "  C->>S: 请求\n"
+      "  S-->>C: 响应\n");
+  mermaid_sequence->style().width = 320.0f;
+  mermaid_sequence->style().height = 200.0f;
+  mermaid_row->add_child(std::move(mermaid_sequence));
+
+  auto mermaid_pie = std::make_unique<MermaidView>();
+  mermaid_pie->set_id("demo-mermaid-pie");
+  mermaid_pie->set_source(
+      "pie title 用例分布\n"
+      "  \"ui\" : 62\n"
+      "  \"raster\" : 24\n"
+      "  \"text\" : 14\n");
+  mermaid_pie->style().width = 320.0f;
+  mermaid_pie->style().height = 200.0f;
+  mermaid_row->add_child(std::move(mermaid_pie));
+  mermaid_card->add_child(std::move(mermaid_row));
+  page->add_child(std::move(mermaid_card));
   return page;
 }
 
@@ -2752,7 +2798,7 @@ namespace {
   auto version_card = make_card("card-version", "版本");
   version_card->add_child(std::make_unique<KeyValueRow>("名称", "霜天 Shuangtian"));
   version_card->add_child(std::make_unique<KeyValueRow>("版本", "0.1.0"));
-  version_card->add_child(std::make_unique<KeyValueRow>("语言", "C++20（全现代子集 + 静态禁令扫描）"));
+  version_card->add_child(std::make_unique<KeyValueRow>("语言", "C++23（全现代子集 + 静态禁令扫描）"));
   version_card->add_child(std::make_unique<KeyValueRow>("依赖", "框架本体零依赖"));
   version_card->add_child(std::make_unique<KeyValueRow>("目标平台", "Linux / Windows / macOS"));
   page->add_child(std::move(version_card));

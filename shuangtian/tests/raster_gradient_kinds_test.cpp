@@ -26,7 +26,7 @@ using st::ui::Theme;
   const Theme theme = Theme::dark();
   st::ui::Style style;
   style.radius = 0.0f;
-  style.background_gradient = gradient;
+  style.set_background_gradient(gradient);
 
   st::ui::UiRoot root;
   root.set_theme(theme);

@@ -27,7 +27,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 if ($Jobs -le 0) { $Jobs = [Math]::Max(2, [int]((Get-CimInstance Win32_Processor).NumberOfLogicalProcessors * 0.6)) }
 
 # —— 编译器选择：ST_CXX/CXX 显式指定最高，其次 g++（主版本 ≥ 13），再次 clang++/c++ ——
-# 版本护栏与框架侧同口径：GCC < 13 缺 C++20 关键项（<format> 等），不选它。
+# 版本护栏与框架侧同口径：GCC < 13 缺 C++23 关键项（<format> / <mdspan> 等，<mdspan> 要 14+），不选它。
 $CXX = ''
 $CXX_FAMILY = 'gcc'
 if ($env:ST_CXX -and (Get-Command $env:ST_CXX -ErrorAction SilentlyContinue)) {
@@ -46,7 +46,7 @@ if (-not $CXX) {
     if ($gccMajor -ge 13) {
       $CXX = $gpp.Source
     } else {
-      Write-Host "[bootstrap] PATH 中的 g++ 主版本 $gccMajor < 13，跳过（缺 <format> 等 C++20 关键项）" -ForegroundColor Yellow
+      Write-Host "[bootstrap] PATH 中的 g++ 主版本 $gccMajor < 13，跳过（缺 <format> / <mdspan> 等 C++23 关键项）" -ForegroundColor Yellow
     }
   }
 }

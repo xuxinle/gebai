@@ -263,6 +263,16 @@ struct ColrTable {
 /// 与语言无关，且**不是可选排版特性**（`liga`/`dlig` 可以关、`ccmp` 不能）。
 /// 而 `liga`（连字）属于排版风格：关掉它是合法选择（代码里就不该连字），
 /// 所以本引擎只取 `ccmp`，避免把编程字体的连字偷偷打开。
+///
+/// ## Extension Substitution（Type 7）必须拆
+///
+/// 巨型字体（含大量 emoji 合字的 `seguiemj.ttf` 就是）把真实 lookup 全包进
+/// Type 7 里：`uint16 format, uint16 extensionLookupType, uint32 extensionOffset`。
+/// 实测该字体 `ccmp` 引用的 **17 个 lookup 全是 Type 7**，真实类型藏在子表里
+/// （4 合字 / 1 单字 / 6 链式上下文）。不拆这层就**一条规则也解不出来**，
+/// 而症状完全不像“解析失败”：彩色分层、普通排版全部正常，只有 emoji 序列
+/// （`👍🏽`）被排成两个图形、两倍宽——`has_ligature` 恒 false、
+/// `compose_ligature` 恒 `nullopt`。
 struct GsubTable {
   /// 单字替换：`ccmp` 里的 Type 1（如 `uni2764` → 彩色基础字形）。
   std::unordered_map<std::uint32_t, std::uint32_t> singles{};
@@ -1108,11 +1118,32 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
     const std::size_t sub_count = read_u16(bytes, lookup + 4);
     if (!in_table(lookup + 6, static_cast<std::size_t>(sub_count) * 2U)) continue;
     for (std::size_t s = 0; s < sub_count; ++s) {
-      const std::size_t sub = lookup + read_u16(bytes, lookup + 6 + s * 2U);
-      if (!in_table(sub, 6)) continue;
-      const std::uint16_t format = read_u16(bytes, sub);
+      const std::size_t raw_sub = lookup + read_u16(bytes, lookup + 6 + s * 2U);
+      if (!in_table(raw_sub, 6)) continue;
+      // ── Type 7：Extension Substitution（只转一层）──
+      //
+      // 巨型字体（含大量 emoji 合字的 seguiemj 就是）会把真实的 lookup 包进
+      // Extension 里：`uint16 format, uint16 extensionLookupType, uint32 extensionOffset`。
+      // 不拆这一层，「真实类型」就永远读不到——**整张 ccmp 一条规则也不会进表**。
+      //
+      // 症状极隐蔽（实测）：`has_ligature` 恒为 false、`compose_ligature` 恒为
+      // `nullopt`，而彩色分层（COLR/CPAL）与普通排版完全正常——看上去“字体支持
+      // 得很全”，只是 emoji 序列（👍🏽）被排成两个图形、两倍宽。
+      // 同一个包层也出现在 type 1/6 上，所以拆包要放在**按类型分支之前**。
+      std::size_t sub = raw_sub;
+      std::uint16_t real_type = type;
+      if (type == 7) {
+        if (read_u16(bytes, raw_sub) != 1) continue;   // 只支持 ExtensionSubstFormat1
+        real_type = static_cast<std::uint16_t>(read_u16(bytes, raw_sub + 2));
+        const std::size_t extension = raw_sub + read_u32(bytes, raw_sub + 4);
+        if (!in_table(extension, 4)) continue;
+        sub = extension;
+        // 嵌套 Extension 是非法数据（规范不允许），不再递归。
+        if (real_type == 7) continue;
+      }
+      const std::size_t format = read_u16(bytes, sub);
       const std::size_t coverage = sub + read_u16(bytes, sub + 2);
-      if (type == 1 && format == 1) {
+      if (real_type == 1 && format == 1) {
         // 单字替换 Format 1：`deltaGlyphID`。
         if (!in_table(sub, 6)) continue;
         const std::int16_t delta = read_i16(bytes, sub + 4);
@@ -1128,7 +1159,7 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
                                                   0xFFFF));
           }
         }
-      } else if (type == 1 && format == 2) {
+      } else if (real_type == 1 && format == 2) {
         // 单字替换 Format 2：`substituteGlyphIDs` 逐项替换。
         const std::size_t count = read_u16(bytes, sub + 4);
         if (!in_table(sub + 6, count * 2U) || !in_table(coverage, 4)) continue;
@@ -1139,7 +1170,7 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
           const std::uint32_t glyph = read_u16(bytes, coverage + 4 + i * 2U);
           data.gsub.singles.insert_or_assign(glyph, read_u16(bytes, sub + 6 + i * 2U));
         }
-      } else if (type == 4 && format == 1) {
+      } else if (real_type == 4 && format == 1) {
         // 合字：`coverage` 给出首字形集合，`LigatureSet` 逐项给后续序列。
         const std::size_t set_count = read_u16(bytes, sub + 4);
         if (!in_table(sub + 6, set_count * 2U)) continue;

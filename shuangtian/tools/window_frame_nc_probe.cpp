@@ -23,7 +23,7 @@
 //
 // ## 复跑方式
 //
-//   g++ -std=c++20 -O2 window_frame_nc_probe.cpp -o nc_probe.exe -ldwmapi -lgdi32 -luser32
+//   g++ -std=c++23 -O2 window_frame_nc_probe.cpp -o nc_probe.exe -ldwmapi -lgdi32 -luser32
 //   nc_probe.exe
 //
 // 判据只有一条：失焦带 == 0。

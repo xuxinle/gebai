@@ -759,7 +759,7 @@ auto run_app(int argc, char** argv) -> int {
   auto sidebar_spacer = std::make_unique<Panel>(FlexDirection::Column);
   sidebar_spacer->style().grow = true;
   sidebar->add_child(std::move(sidebar_spacer));
-  auto version_text = std::make_unique<Text>("霜天 v0.1.0 · C++20");
+  auto version_text = std::make_unique<Text>("霜天 v0.1.0 · C++23");
   version_text->set_tone(Tone::Faint);
   version_text->set_scale(Text::Scale::Xs2);
   sidebar->add_child(std::move(version_text));

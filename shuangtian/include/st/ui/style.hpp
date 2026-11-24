@@ -4,6 +4,7 @@
 /// 组件通过 `Style` 表达外观，具体色值来自 `Theme`（见 theme.hpp），实现"换主题不改组件代码"。
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <string>
@@ -154,7 +155,23 @@ struct Style {
   /// 为何用相对坐标而不是绝对坐标：`apply_theme` 在**布局之前**跑
   /// （`bounds_` 还是空的），那时拿不到尺寸；而渐变几何一旦存成绝对值，
   /// 就会随窗口缩放/内容变化而错位。
-  std::optional<raster::Gradient> background_gradient{};
+  ///
+  /// **间接持有**（`shared_ptr<const>`，2026-11-23）：`Gradient` 内含
+  /// `std::array<Color, 256> lut_`（1024 B 查表），内联持有会让**每个** UI 元素
+  /// 白背 1080 B——`sizeof(Style)` 的 83% 都在这一个字段上（实测 1304 中的 1080），
+  /// 而全仓设过渐变的元素只有主按钮/页面底那几处。改成指针后 `Style` 从 1304
+  /// 降到 240，`sizeof(Element)` 从 1632 降到 560。
+  ///
+  /// ⚠ 改完初测为 568（目标 560）：差的 8 字节不是字段变大，而是**对齐填充**——
+  /// `Element` 里的 `std::uint64_t applied_theme_version_` 被一串 `bool` 夹住，
+  /// 两侧各留一片填充。把 `theme_refresh_requested_` 上提到 bool 堆里即 560。
+  ///
+  /// 为何是 `shared_ptr<const>` 而不是 `unique_ptr`：与 `raster::Paint::gradient_`
+  /// 同一口径（两个同类型字段持有方式不同是纯粹的一致性债务）；且 `Style` 需要
+  /// 可拷贝（`Element::RenderExtras::animated_style`、`style() = style` 都是拷贝），
+  /// `unique_ptr` 会把 `Style` 变成不可拷贝，波及全仓。`const` 顺带把
+  /// 「渐变是不可变值」变成编译期保证——绘制侧只读（`stops()`/`kind()`/几何）。
+  std::shared_ptr<const raster::Gradient> background_gradient{};
   /// 渐变的不透明度（`1.0` = 按渐变自身的颜色合成）。
   float gradient_opacity{1.0f};
 
@@ -204,8 +221,23 @@ struct Style {
   /// 都是靠约定保护的不变式，都由历史证据证明守不住。所以把义务提进入口。
   void set_solid_background(math::Color fill) noexcept {
     background = fill;
-    background_gradient.reset();
+    background_gradient = nullptr;
     gradient_opacity = 1.0f;
+  }
+
+  /// 只设渐变（不动 `background` 回退色、也不动 `gradient_opacity`）。
+  ///
+  /// 存在理由：`background_gradient` 现在是指针，调用方（尤其是测试与探针）
+  /// 若直接写字段就得自己 `make_shared`——那会把“渐变是不可变值”这条语义
+  /// 漏到每个调用点。读侧只需 `!= nullptr` / `->`，写侧统一走本函数。
+  ///
+  /// **语义 = 字段赋值**（无副作用）：与 `set_gradient_background(fill, fallback)`
+  /// 的分工就在这里——后者是“把渐变底整体立起来”（同时定回退色、重置
+  /// `gradient_opacity = 1`），本函数只换渐变本体。两者不可互换：实测踩过
+  /// （`paint_box_gradient_opacity_is_respected`）——把本函数写成重置 opacity,
+  /// 会让“先设 `gradient_opacity = 0` 再给渐变”的调用方静默丢掉那个 0。
+  void set_background_gradient(raster::Gradient gradient) noexcept {
+    background_gradient = std::make_shared<const raster::Gradient>(std::move(gradient));
   }
 
   /// 设渐变底。`fallback` 是**渐变画不出来时的兜底色**（`gradient_opacity=0`、
@@ -217,7 +249,9 @@ struct Style {
 /// 而所有只查 `background` 的地方（包括单测）都会看到错的东西。
 void set_gradient_background(raster::Gradient fill, math::Color fallback) noexcept {
   background = fallback;
-  background_gradient = std::move(fill);
+  // 一次 `make_shared`（~50 ns）换下每元素 1080 B 的常驻查表；而且这里
+  // 只在**主题下发 / 构造**时跑（2026-11-23 起不再每帧），不进帧预算。
+  background_gradient = std::make_shared<const raster::Gradient>(std::move(fill));
   gradient_opacity = 1.0f;
 }
   /// **背板毛玻璃（元素级）**：> 0 时，本元素底色绘制**之前**先把

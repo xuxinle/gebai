@@ -72,7 +72,7 @@ struct MiniProject {
   "name": "check-probe",
   "version": "0.1.0",
   "sources": ["src/*.cpp"],
-  "flags": ["-std=c++20", "-Wall", "-Wextra", "-Werror"],
+  "flags": ["-std=c++23", "-Wall", "-Wextra", "-Werror"],
   "targets": {{ "probe": {{ "kind": "executable", "sources": ["src/*.cpp"] }} }}
 }})");
   const std::string manifest_path = st::fs::join(project.dir, "st.pkg");

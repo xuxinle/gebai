@@ -62,6 +62,21 @@ if (decl != nullptr) {
 3. 属性面写后要**下一帧**才看得见——要断言新值先 `tick()`（`wait`/`get` 默认已处理）。
 4. `compose()` 换页会先卸旧页，不要指望"再 compose 一次"是叠加。
 
+## 三条路之外：从 HTML 生成 XML
+
+若手上是一份 **HTML**（页面/原型/设计稿导出），不必手写一遍 XML：
+
+```cpp
+const auto result = st::html::to_ui_xml(html_text);   // 只翻视图，不翻逻辑
+```
+
+产出的是可直接 `build_from_xml` 的 XML（标签映射、CSS 声明、报告都会给全）。
+它**只负责视图**：不生成事件、不生成 JS、不碰数据源——逻辑仍由你用 JS/C++ 后加。
+
+两条不能写错的样式通道（都不是顾名思义）：字号用 `text_size` 而不是 `font_size`；
+块间空隙用父级 `gap` 而不是 `margin`。理由与量法见 `overview/pitfalls.md` 同名条目
+与 `docs/xml-ui.md`「从 HTML 生成 XML」节。
+
 ## 元素身份：`id` 与 `key` 分工
 
 - **`id`** 给外部世界（协议/选择器/测试）定位用；不写则自动生成（`Type@key` / `Type[i]`）。
@@ -72,7 +87,7 @@ if (decl != nullptr) {
 
 - 声明式完整设计（VDOM/重组/异步 resource/overlay 生命周期）：`docs/declarative.md`
   （**§5.5 是硬契约**，写代码前必读）
-- XML + JS 通路：`docs/xml-ui.md`
+- XML + JS 通路（含**从 HTML 生成 XML**）：`docs/xml-ui.md`
 - 改文件即生效（热重载语义）：`docs/hot-reload.md`
 - 组件清单与属性面：`components/index.md`
 - 属性/通用属性口径：`overview/properties.md`

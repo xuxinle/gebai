@@ -414,6 +414,32 @@ struct StyleField {
 
 [[nodiscard]] auto fmt_f2(float v) { return std::format("{:.2f}", static_cast<double>(v)); }
 
+/// 布局枚举的名字（与 `actions.cpp` 的 `parse_align` / `justify` 分支**同一口径**）。
+///
+/// 为何不复用 `ui::to_string`：那套是给语义层（`Role`/`Tone`）用的，布局枚举没有
+/// 对应重载；而写入侧解析用的就是这几个字面名字，读侧必须与之对齐（否则
+/// “写 `center` 读回 `Center`”——字符串不等的假失败）。
+[[nodiscard]] auto align_name(Align value) -> std::string_view {
+  switch (value) {
+    case Align::Start: return "start";
+    case Align::Center: return "center";
+    case Align::End: return "end";
+    case Align::Stretch: return "stretch";
+  }
+  return "start";
+}
+
+[[nodiscard]] auto justify_name(Justify value) -> std::string_view {
+  switch (value) {
+    case Justify::Start: return "start";
+    case Justify::Center: return "center";
+    case Justify::End: return "end";
+    case Justify::SpaceBetween: return "space_between";
+    case Justify::SpaceAround: return "space_around";
+  }
+  return "start";
+}
+
 const StyleField kStyleFields[] = {
     // —— 布局 ——
     {"width", "width", +[](const Style& s) { return fmt_f2(s.width); }},
@@ -489,6 +515,22 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   }
   if (name == "hover_progress") return std::format("{:.3f}", static_cast<double>(hover_progress()));
   if (name == "hover_effect") return hover_effect_.enabled ? "true" : "false";
+  // —— 布局枚举的读回口 ——
+  //
+  // `direction` / `align_items` / `align_self` / `justify` 一直在
+  // `property_names()` 里（声明可写）且能 `set`（走 `actions.cpp` 的布局分支），
+  // 但**读不到**——`get direction` 返回 `nullopt`。那是“声明了却读不到”的分裂，
+  // 后果是自动化无从断言“这个容器到底是行还是列”（而 `Row`/`Column` 在霜天里
+  // 都是 `Panel`，除了本属性没有别的区分办法）。
+  //
+  // 读回值必须与**写入侧解析的字面名字**一致（`parse_align` / 那个 if 链），
+  // 否则“写 `center` 读回 `Center`”就成了字符串不等的假失败。
+  if (name == "direction") {
+    return std::string(style_.direction == FlexDirection::Row ? "row" : "column");
+  }
+  if (name == "align_items") return std::string(align_name(style_.align_items));
+  if (name == "align_self") return std::string(align_name(style_.align_self));
+  if (name == "justify") return std::string(justify_name(style_.justify));
   // 显式排版覆盖的读回口（与写入口 `set_text_*` 对称）：
   // `color` 读的是**最终生效值**（`style_.color`，已是主题或覆盖的结果），
   // 而 `color_override` 读的是"有没有显式设过"——两者用途不同：
@@ -1892,7 +1934,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   // 目前只有线性渐变在用（主按钮的双色），非线性的语义需要“非等比缩放”决策，
   // 与其拍一个再重做，不如等真有需求时按那时候的场景定。
   bool painted_gradient = false;
-  if (style.background_gradient.has_value() &&
+  if (style.background_gradient != nullptr &&
       !style.background_gradient->stops().empty() && style.gradient_opacity > 0.0f) {
     const raster::Gradient& source = *style.background_gradient;
 

@@ -181,10 +181,16 @@ auto Table::graph_metrics() const noexcept -> GraphMetrics {
   //
   // 参照实测直径 10~11px（半径 ≈ 5）：取 `lane_pitch × 0.21` = 5.0（道间距 24 时）。
   // 上限 `row_height × 0.2`（行高 28 → 5.6）防大圆点贴住相邻节点。
+  //
+  // ⚠ **上下界可能交叉**：行高很小（既有用例有 20px、密集表格更小）时
+  // `row_cap = 20×0.2 = 4.0` < `kLaneDotRadiusMin(4.4)`，而 `std::clamp(v, lo, hi)`
+  // 要求 `lo <= hi`：libstdc++ 的 debug 断言会 **abort 整个进程**（release 下是 UB）。
+  // 实测代价：debug 档跑全量时整个分片进程消失、一条失败行都没有。
+  // 取 `max(最小可用上界, min(下界, 上界))` 把区间先归一，语义上也对：
+  // 行高装不下“最小圆点”时，就画行高能容下的那个尺寸（宁可小，不可溢出）。
   const float row_cap = row_height_at(0) * 0.20f;
-  metrics.dot_radius =
-      std::clamp(metrics.lane_pitch * 0.21F, kLaneDotRadiusMin,
-                 std::min({kLaneDotRadiusMax, row_cap}));
+  const float dot_max = std::max(kLaneDotRadiusMin, std::min({kLaneDotRadiusMax, row_cap}));
+  metrics.dot_radius = std::clamp(metrics.lane_pitch * 0.21F, kLaneDotRadiusMin, dot_max);
   metrics.curve_bend_rows = kLaneCurveBendRows;
   metrics.curve_stub_rows = kLaneCurveStubRows;
   metrics.curve_handle_ratio = kLaneCurveHandleRatio;

@@ -114,7 +114,12 @@ ST_TEST(font_ccmp_ligature_composes_emoji_sequences) {
   // 所以改为“字体带 GSUB 且该首字形在覆盖表里”就必须合成成功——没解析出来就是红。
   const st::text::GlyphId pair[2] = {thumb, skin};
   const auto composed = face->compose_ligature(std::span<const st::text::GlyphId>(pair, 2));
-  ST_CHECK(composed.has_value());
+  // ⚠ `has_value()` 用 `ST_REQUIRE` 而不是 `ST_CHECK`：
+  // 它失败后**下面两行会解引用空 optional**——在 dev 档是 UB、不崩（于是只看到
+  // 两条断言红）；在 debug 档 libstdc++ 的 `optional::operator->` 带断言，
+  // 直接 abort 整个测试进程，症状是“这个分片不见了、没有任何失败行”。
+  // 以“失败的根因”为前置条件时必须停住，不能往下跑。
+  ST_REQUIRE(composed.has_value());
   ST_CHECK(composed->second == 2U);      // 吃掉两个字形
   ST_CHECK(composed->first != thumb);    // 换成另一个字形（不是原样返回）
 }

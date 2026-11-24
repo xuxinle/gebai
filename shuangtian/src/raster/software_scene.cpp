@@ -771,6 +771,15 @@ class SoftwareScene final : public Scene3D {
         static_cast<std::uint8_t>(std::lround(st::raster::linear_to_srgb8(shadow_.color.y))),
         static_cast<std::uint8_t>(std::lround(st::raster::linear_to_srgb8(shadow_.color.z))),
         255};
+    // **取一次像素跨度**，循环内直写——不走 `pixel_at`/`set_pixel` 的逐次虚调用。
+    //
+    // 为何等价：`Canvas` 的像素访问就是 `pixels_[y * 物理宽 + x]` 的裸读写
+    // （`canvas.cpp` 的 `pixel_at`/`set_pixel` 全部实现），而 `canvas_` 是
+    // 以**物理尺寸** `width_ * kBake` 构造的、`device_scale` 为 1
+    //（见构造函数 `canvas_(width_ * kBake, height_ * kBake)`），所以跨度下标
+    // 与那两个函数内部算的偏移**逐字相同**。唯一差异是 `set_pixel` 会把直通色
+    // 预乘后存储，这里用 `math::premultiply` 保持同口径。
+    const std::span<std::uint32_t> pixels = canvas_.pixels();
     for (int y = min_y; y <= max_y; ++y) {
       for (int x = min_x; x <= max_x; ++x) {
         const float px = static_cast<float>(x) + 0.5f;
@@ -793,7 +802,8 @@ class SoftwareScene final : public Scene3D {
                                        static_cast<std::size_t>(bake_width) +
                                    static_cast<std::size_t>(x);
         if (entity_mask_[offset] != 0) continue;   // 被实体占据 → 不画阴影
-        const math::Color dst = canvas_.pixel_at(x, y);
+        // 直读跨度（与 `pixel_at` 同口径：存储值预乘，反预乘得直通色）。
+        const math::Color dst = math::unpremultiply(pixels[offset]);
         const auto mix = [&](int s, int d) -> int {
           const int out =
               static_cast<int>(std::lround(static_cast<float>(d) +
@@ -801,11 +811,11 @@ class SoftwareScene final : public Scene3D {
                                                strength));
           return std::clamp(out, 0, 255);
         };
-        canvas_.set_pixel(x, y,
-                          math::Color{static_cast<std::uint8_t>(mix(shadow_rgb.r, dst.r)),
-                                static_cast<std::uint8_t>(mix(shadow_rgb.g, dst.g)),
-                                static_cast<std::uint8_t>(mix(shadow_rgb.b, dst.b)),
-                                dst.a});
+        // 直写跨度（与 `set_pixel` 同口径：先预乘再存）。
+        pixels[offset] = math::premultiply(
+            math::Color{static_cast<std::uint8_t>(mix(shadow_rgb.r, dst.r)),
+                        static_cast<std::uint8_t>(mix(shadow_rgb.g, dst.g)),
+                        static_cast<std::uint8_t>(mix(shadow_rgb.b, dst.b)), dst.a});
       }
     }
   }
@@ -1302,6 +1312,10 @@ class SoftwareScene final : public Scene3D {
     const int max_y = std::min(bake_height - 1, static_cast<int>(std::ceil(std::max({p0.y, p1.y, p2.y}))));
     if (min_x > max_x || min_y > max_y) return;
 
+    // 像素跨度：循环内直读写，避开 `pixel_at`/`set_pixel` 的逐次虚调用与边界检查。
+    // 等价性论证见 `draw_shadow` 里同一处注释（物理尺寸 + device_scale=1 + 预乘存储）。
+    const std::span<std::uint32_t> pixels = canvas_.pixels();
+
     for (int y = min_y; y <= max_y; ++y) {
       for (int x = min_x; x <= max_x; ++x) {
         const float px = static_cast<float>(x) + 0.5f;
@@ -1389,8 +1403,12 @@ class SoftwareScene final : public Scene3D {
         //
         // `shade_terms` 仍返回**线性值**（两条腿共用的公式不变），
         // 颜色变换集中在这里——顺序写错很难定位（看起来像“配色不对”）。
+        //
+        // 写回走**像素跨度直写**（不走 `set_pixel` 的逐次虚调用 + 边界检查）：
+        // 等价性同 `draw_shadow` 里那段说明——`canvas_` 是物理尺寸、`device_scale` 为 1，
+        // 下标与 `set_pixel` 内部算的偏移逐字相同，存储一律预乘。
         if (opacity >= 0.999f) {
-          canvas_.set_pixel(x, y, st::raster::encode_pixel(shaded, 1.0f, tone_map_));
+          pixels[offset] = math::premultiply(st::raster::encode_pixel(shaded, 1.0f, tone_map_));
         } else {
           // ## 透明混合必须在**线性空间**做（实测很重要）
           //
@@ -1401,7 +1419,7 @@ class SoftwareScene final : public Scene3D {
           //   ① 解码已有像素回线性；
           //   ② 线性混合后再编码回去。
           // 成本比直接混 abgr 高，但正确；透明物体通常只占少部分像素。
-          const math::Color dst_encoded = canvas_.pixel_at(x, y);
+          const math::Color dst_encoded = math::unpremultiply(pixels[offset]);
           const float inv = 1.0f / 255.0f;
           const math::Vec3 dst_linear =
               srgb_to_linear(math::Vec3{static_cast<float>(dst_encoded.r) * inv,
@@ -1410,7 +1428,7 @@ class SoftwareScene final : public Scene3D {
           const math::Vec3 mixed{dst_linear.x + (lit.x - dst_linear.x) * opacity,
                                  dst_linear.y + (lit.y - dst_linear.y) * opacity,
                                  dst_linear.z + (lit.z - dst_linear.z) * opacity};
-          canvas_.set_pixel(x, y, st::raster::encode_pixel(mixed, 1.0f, tone_map_));
+          pixels[offset] = math::premultiply(st::raster::encode_pixel(mixed, 1.0f, tone_map_));
         }
       }
     }

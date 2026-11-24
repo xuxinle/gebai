@@ -123,7 +123,7 @@ struct CppSandbox {
     std::ofstream commands(dir / "compile_commands.json");
     commands << "[{\"directory\":\"" << dir.string()
              << "\",\"file\":\"" << (dir / "main.cpp").string()
-             << "\",\"command\":\"c++ -std=c++20 -c " << (dir / "main.cpp").string() << "\"}]\n";
+             << "\",\"command\":\"c++ -std=c++23 -c " << (dir / "main.cpp").string() << "\"}]\n";
     commands.close();
   }
   ~CppSandbox() {

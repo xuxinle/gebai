@@ -2874,6 +2874,26 @@
         "src/pkg/*"
       ],
       "//note": "暗色主题下「左右仍有高光」的成分拆解：完整/关折射/关高光/都关/edges=all 五组对照，并落 PNG 供 10x 放大核对"
+    },
+    "xml_font_size_probe": {
+      "kind": "executable",
+      "sources": [
+        "tools/xml_font_size_probe.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "XML 属性面通道对照：font_size / text_size / style size 在**主题刷新之后**是否还在。生成器据此选属性名。"
+    },
+    "html_to_xml_render": {
+      "kind": "executable",
+      "sources": [
+        "tools/html_to_xml_render.cpp"
+      ],
+      "exclude_sources": [
+        "src/pkg/*"
+      ],
+      "//note": "HTML → 霜天 XML 的端到端出图：真 HTML 进（标题/列表/表格样/代码块/按钮/输入/行内混排）、真像素出（PNG）。单测钉不住\"看起来对不对\"——属性全对而画面空的形态只能出图。判据：墨量>0、纵向覆盖>1/3 屏、元素数>=25、严格模式建树报告干净"
     }
   },
   "dependencies": {

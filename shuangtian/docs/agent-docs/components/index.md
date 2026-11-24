@@ -77,10 +77,11 @@ summary: 76 个已注册组件 + 4 个不进注册表的三维族，按"我要�
 
 ### 数据展示（`components/data.md`）
 
-`Table` `TimelineView` `GraphView`
+`Table` `TimelineView` `GraphView` `MermaidView`
 
-> 表格/时间轴/关系图。三者都是"外部数据模型 + 组件负责画与交互"。
-> 时间轴是**委托编辑**形态（组件不持有真值，编辑请求回调给应用）。
+> 表格/时间轴/关系图/Mermaid 图。四者都是"外部数据 + 组件负责画与交互"。
+> 时间轴是**委托编辑**形态（组件不持有真值，编辑请求回调给应用）；
+> `MermaidView` 吃一段 Mermaid 文本（流程图/时序图/饼图），原生自绘、不依赖浏览器。
 
 ### 编辑器与文档视图（`components/editor.md`）
 
@@ -113,6 +114,7 @@ summary: 76 个已注册组件 + 4 个不进注册表的三维族，按"我要�
 
 76 个注册组件全部有页（漏一个就会被 `tests/docs_agent_tree_test.cpp` 抓住），另有三维族的 4 页
 （`ThreeView` / `SceneView` / `LabelOverlay` / `GraphView`——它们**不进注册表**，由 C++ 直接 `new` 挂树）。
+注：个数以 `python tools/agent_docs_gen.py --check` 的输出为准（它数的是真实生成的页）。
 按名字直读 `components/<族>/<组件名>.md`；不确定族就看各页页头与上面分组表。
 
 ## 更细

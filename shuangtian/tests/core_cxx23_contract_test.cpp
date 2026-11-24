@@ -44,7 +44,7 @@ ST_TEST(cxx_standard_flag_follows_manifest) {
   ST_CHECK_EQ(st::pkg::Manifest::cxx_standard_flag(manifest->cxx_standard), std::string("-std=c++23"));
 }
 
-/// ② 清单没写 → 缺省就是 C++23（不是 C++20）。
+/// ② 清单没写 → 缺省就是 C++23。
 /// 这条守的是"新工程的缺省口径"：缺省一旦回落，新工程会以旧标准构建而毫无提示。
 ST_TEST(cxx_standard_defaults_to_23) {
   auto manifest = manifest_with_standard(R"("version": "0.1.0")");

@@ -75,6 +75,34 @@ constexpr int kCanvasH = 260;
   return canvas;
 }
 
+/// 行很高的档位：节点半径不得小于参照下限（否则圆点变成“小点”、与参照不一致）。
+///
+/// 这条同时钉住一个**真实的 clamp 参数倒置**：行很小时 `row_height × 0.2` 会小于
+/// `kLaneDotRadiusMin`，而 `std::clamp(v, lo, hi)` 要求 `lo <= hi`——libstdc++ 的
+/// debug 断言会 **abort 整个进程**（release 下是 UB，结果看编译器兴致）。
+/// 实测代价：debug 档跑全量时整张分片的进程直接消失，一条失败行都没有。
+ST_TEST(table_lane_dot_radius_survives_tiny_row_height) {
+  const Theme theme = Theme::dark();
+  // 行高 20 → `row_height × 0.2 = 4.0 < kLaneDotRadiusMin(4.4)`：正是交叉区间。
+  for (const float row_height : {20.0f, 12.0f, 4.0f}) {
+    std::vector<TableColumn> columns{TableColumn{.name = "A", .width = 200.0f}};
+    auto table = std::make_unique<Table>(std::move(columns));
+    table->set_row_height(row_height);
+    table->add_row({"child"});
+    table->add_row({"parent"});
+    table->set_graph(std::vector<Table::GraphNodeSpec>{
+                         Table::GraphNodeSpec{.row = 0, .lane = 0},
+                         Table::GraphNodeSpec{.row = 1, .lane = 1}},
+                     std::vector<Table::GraphEdgeSpec>{Table::GraphEdgeSpec{
+                         .from_row = 0, .from_lane = 0, .to_row = 1, .to_lane = 1}});
+    (void)render(*table, Rect{0.0f, 0.0f, 340.0f, 160.0f}, theme);
+    const Table::GraphMetrics metrics = table->graph_metrics();
+    // 不得小于参照下限（行高装不下时也是“宁可小到下限”而不是跨出盒子）。
+    ST_CHECK(metrics.dot_radius >= Table::kLaneDotRadiusMin - 0.01F);
+    ST_CHECK(metrics.dot_radius <= Table::kLaneDotRadiusMax + 0.01F);
+  }
+}
+
 /// 一条**跨道曲线**的最小场景：两行、两个节点，0 道 → 1 道。
 ///
 /// 行高取 36（与参照图的行距一致），这样手柄比例与参照可比。

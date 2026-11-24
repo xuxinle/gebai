@@ -27,8 +27,8 @@ ST_TEST(compiler_kind_detection) {
 }
 
 ST_TEST(compiler_kind_rejects_clang_cl) {
-  // `clang-cl` 是 MSVC 口径（`/std:c++20`、`/I`、`/WX`）：本层不支持，**必须明确拒绝**。
-  // 为什么不能"当成 Clang 凑合"：会拿 `-std=c++20` 去喂它，报一堆与真正原因
+  // `clang-cl` 是 MSVC 口径（`/std:c++latest`、`/I`、`/WX`）：本层不支持，**必须明确拒绝**。
+  // 为什么不能"当成 Clang 凑合"：会拿 `-std=c++23` 去喂它，报一堆与真正原因
   // （用错了家族）相隔很远的错——这正是本框架反复踩过的那类"报错位置骗人"。
   ST_CHECK(!st::pkg::compiler_kind_of("clang-cl").has_value());
   ST_CHECK(!st::pkg::compiler_kind_of("C:/LLVM/bin/clang-cl.exe").has_value());
@@ -81,7 +81,7 @@ ST_TEST(compiler_link_libraries_drops_posix_on_windows) {
 }
 
 ST_TEST(dialect_flags_empty_for_gcc_and_clang) {
-  // 两族都不需要恒定追加标志：`-std=c++20` 由清单给，编码按 UTF-8 读源码。
+  // 两族都不需要恒定追加标志：`-std=c++23` 由清单给，编码按 UTF-8 读源码。
   // 若将来某族需要（如 `/utf-8`），这里必须有测试跟着改——"空"是一个**结论**，不是缺省。
   ST_CHECK(st::pkg::dialect_flags(CompilerKind::Gcc, SourceLanguage::Cxx).empty());
   ST_CHECK(st::pkg::dialect_flags(CompilerKind::Clang, SourceLanguage::Cxx).empty());

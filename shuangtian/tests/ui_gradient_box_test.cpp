@@ -54,10 +54,10 @@ ST_TEST(paint_box_gradient_overrides_solid_background) {
   // 纯色故意用一个鲜艳的绿——如果它被画出来，下面会立刻发现。
   style.background = Color{0x00, 0xFF, 0x00, 0xFF};
   style.radius = 0.0f;
-  style.background_gradient =
+  style.set_background_gradient(
       Gradient::linear(Point{0.0f, 0.0f}, Point{1.0f, 1.0f},
                        {{0.0f, Color{0xFF, 0x00, 0x00, 0xFF}},
-                        {1.0f, Color{0x00, 0x00, 0xFF, 0xFF}}});
+                        {1.0f, Color{0x00, 0x00, 0xFF, 0xFF}}}));
   const Canvas canvas = render_panel(theme, style, 60, 60);
 
   const Color left = canvas.pixel_at_point(Point{3.0f, 3.0f});
@@ -81,10 +81,10 @@ ST_TEST(paint_box_gradient_scales_with_box) {
   const auto make_style = [] {
     st::ui::Style style;
     style.radius = 0.0f;
-    style.background_gradient =
+    style.set_background_gradient(
         Gradient::linear(Point{0.0f, 0.0f}, Point{1.0f, 1.0f},
                          {{0.0f, Color{0xFF, 0x00, 0x00, 0xFF}},
-                          {1.0f, Color{0x00, 0x00, 0xFF, 0xFF}}});
+                          {1.0f, Color{0x00, 0x00, 0xFF, 0xFF}}}));
     return style;
   };
 
@@ -107,10 +107,10 @@ ST_TEST(paint_box_gradient_respects_radius) {
   const Theme theme = Theme::dark();
   st::ui::Style style;
   style.radius = 16.0f;
-  style.background_gradient =
+  style.set_background_gradient(
       Gradient::linear(Point{0.0f, 0.0f}, Point{1.0f, 0.0f},
                        {{0.0f, Color{0xFF, 0x00, 0x00, 0xFF}},
-                        {1.0f, Color{0x00, 0x00, 0xFF, 0xFF}}});
+                        {1.0f, Color{0x00, 0x00, 0xFF, 0xFF}}}));
   const Canvas canvas = render_panel(theme, style, 60, 60);
   // 圆角外的四角必须仍是主题底色（渐变不能溢出）。
   const Color corner = canvas.pixel_at_point(Point{1.0f, 1.0f});
@@ -125,10 +125,10 @@ ST_TEST(paint_box_gradient_opacity_is_respected) {
     style.radius = 0.0f;
     style.background = Color{0x00, 0x11, 0x22, 0xFF};
     style.gradient_opacity = opacity;
-    style.background_gradient =
+    style.set_background_gradient(
         Gradient::linear(Point{0.0f, 0.0f}, Point{1.0f, 0.0f},
                          {{0.0f, Color{0xFF, 0x00, 0x00, 0xFF}},
-                          {1.0f, Color{0xFF, 0x00, 0x00, 0xFF}}});
+                          {1.0f, Color{0xFF, 0x00, 0x00, 0xFF}}}));
     return style;
   };
   const Canvas opaque = render_panel(theme, make_style(1.0f), 40, 20);

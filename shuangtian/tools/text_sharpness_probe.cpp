@@ -60,7 +60,7 @@ struct Sample {
 const Sample kSamples[] = {
     {"body13.5", "自绘 UI · 跨平台 · 软硬件渲染兼容 · 无头可控 · DPI 感知", 13.5f},
     {"body12.5", "进度与状态（示例自绘组件）", 12.5f},
-    {"foot11", "霜天 v0.1.0 · C++20", 11.0f},
+    {"foot11", "霜天 v0.1.0 · C++23", 11.0f},
 };
 
 constexpr int kWidth = 760;

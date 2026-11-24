@@ -54,7 +54,7 @@ SQLite 的 **amalgamation** 分发形态：整个数据库引擎合并成 3 个�
 | 位置 | 内容 |
 |---|---|
 | `st.pkg` | `third_party_sources` 收 `third_party/sqlite/*.c`；`include_dirs` 加 `third_party/sqlite`；`c_flags` 前置 `-include st_sqlite3_config.h` |
-| `include/st/ext/database.hpp` / `src/ext/database.cpp` | C++20 侧封装（`st::ext::Database` / `Statement` / `Value`）——**公共头不外泄任何 sqlite3 符号** |
+| `include/st/ext/database.hpp` / `src/ext/database.cpp` | C++23 侧封装（`st::ext::Database` / `Statement` / `Value`）——**公共头不外泄任何 sqlite3 符号** |
 | `tests/ext_database_test.cpp` | 建库/参数化增删改查/事务/BLOB/错误路径的用例 |
 | `third_party/CHECKSUMS.sha256` | 逐文件 SHA-256 |
 

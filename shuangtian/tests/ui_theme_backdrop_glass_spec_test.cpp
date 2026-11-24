@@ -55,7 +55,7 @@ ST_TEST(backdrop_gradient_follows_theme) {
   root.layout(true);
 
   const auto& light_gradient = backdrop->style().background_gradient;
-  ST_REQUIRE(light_gradient.has_value());
+  ST_REQUIRE(light_gradient != nullptr);
   ST_REQUIRE(light_gradient->stops().size() >= 2);
   const math::Color light_first = light_gradient->stops().front().color;
 
@@ -63,7 +63,7 @@ ST_TEST(backdrop_gradient_follows_theme) {
   root.set_theme(Theme::dark());
   root.layout(true);
   const auto& dark_gradient = backdrop->style().background_gradient;
-  ST_REQUIRE(dark_gradient.has_value());
+  ST_REQUIRE(dark_gradient != nullptr);
   const math::Color dark_first = dark_gradient->stops().front().color;
 
   // 亮色首标（#FCF1E2）与暗色首标（#1A1712）**亮度相差极大**——
@@ -129,13 +129,13 @@ ST_TEST(backdrop_gradient_absent_falls_back_to_solid) {
 
   root.set_theme(Theme::light());
   root.layout(true);
-  ST_CHECK(backdrop->style().background_gradient.has_value());
+  ST_CHECK(backdrop->style().background_gradient != nullptr);
 
   Theme no_gradient = Theme::light();
   no_gradient.set_backdrop_gradient(std::nullopt);
   root.set_theme(no_gradient);
   root.layout(true);
-  ST_CHECK(!backdrop->style().background_gradient.has_value());
+  ST_CHECK(backdrop->style().background_gradient == nullptr);
   // 退回纯色时用的是主题底色（不透明），不是透明裸底。
   ST_CHECK(backdrop->style().background.a == 255U);
 }

@@ -1958,11 +1958,11 @@ class Element {
   FocusRingPolicy focus_ring_policy_{FocusRingPolicy::Auto};
   bool dirty_{true};
   bool layout_dirty_{true};
+  /// “我的样式输入变了，请重新下发主题”（见 `request_theme_refresh`）。
+  /// 必须与其余 bool 摆在一起：`uint64_t` 需 8 字节对齐，夹在 bool 之间会两侧留填充。
+  bool theme_refresh_requested_{false};
   /// 已按哪个主题版本应用过样式（`0` = 从未；见 `applied_theme_version` 的说明）。
   std::uint64_t applied_theme_version_{0};
-  /// “我的样式输入变了，请重新下发主题”（由 setter 声明，`UiRoot` 消费）。
-  /// 不冒泡：主题重算是逐元素的，见 `request_theme_refresh` 的说明。
-  bool theme_refresh_requested_{false};
   /// 宿主（`UiRoot`），由 UiRoot 在挂载/摘除时维护；未上树为 nullptr。
   /// 宿主焦点契约（未上树时为 `nullptr`）。**类型化**——见上方 `HostFocus` 的说明。
   HostFocus* host_{nullptr};

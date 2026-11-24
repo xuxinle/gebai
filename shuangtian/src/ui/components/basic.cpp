@@ -667,6 +667,40 @@ void Heading::apply_theme(const Theme& theme) {
   apply_text_overrides();
 }
 
+// `Heading` 的属性面。
+//
+// 此前它**只有 `set_level` 而没有属性面入口**，于是 XML 里写
+// `<Heading level="2">` 会被判为「值没被接受」（严格模式直接建树失败）、
+// 控制通道 `set level=2` 报未知名——而组件明明支持这件事。
+// 这类「能力存在但用不了」是框架缺口：三条入口（XML / 协议 / 脚本）共用属性面，
+// 缺一个入口就等于这个能力只对 C++ 可见。
+auto Heading::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (name == "level") return std::format("{}", level_);
+  return Text::get_property(name);
+}
+
+auto Heading::set_property(std::string_view name, std::string_view value) -> bool {
+  if (name == "level") {
+    // 值必须是 1..6 的整数。越界**拒**而不是夹取：夹取会让 `level="9"`
+    // 静默变成 6，调用方以为写对了（与 `set_level` 的夹取分工不同——
+    // 那是 C++ 内部的宽容，属性面是外部契约）。
+    const std::string text{value};
+    char* end = nullptr;
+    // 定宽 `int64` 而不是 `long`（Windows 上 `long` 是 32 位，跨平台口径不一致）。
+    const std::int64_t parsed = std::strtoll(text.c_str(), &end, 10);
+    if (end == text.c_str() || parsed < 1 || parsed > 6) return false;
+    set_level(static_cast<std::uint32_t>(parsed));
+    return true;
+  }
+  return Text::set_property(name, value);
+}
+
+auto Heading::property_names() const -> std::vector<std::string_view> {
+  std::vector<std::string_view> names = Text::property_names();
+  names.push_back("level");
+  return names;
+}
+
 // —— IconView ——
 
 IconView::IconView(std::string name, float size) : icon_(std::move(name)), size_(size) {}

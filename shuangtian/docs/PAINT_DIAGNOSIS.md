@@ -210,12 +210,90 @@ p50 的比值在 **30×~47×** 之间摆、偶发一轮整体抬到 58×——�
   圆角填充（2.0 ms，可做专用扫描线）、清屏（0.8 ms，可与绘制合并）。
 - 帧门禁的阈值按**现状**收紧（75× → 45×），余量 1.94 倍已进入 `kMaxHeadroom` 的可收紧区间。
 
-## 5. 探针清单（都接受 `ST_*` 环境变量，可复现）
+## 5. 渐变 LUT 的跨帧复用（2026-11-24）
+
+### 5.1 问题
+
+`Gradient::rebuild()` 无条件填满 256 项查表，而**这张表只取决于色标序列**
+（颜色 + 偏移），与渐变的几何（`start_`/`end_`/`radius_`）无关——
+几何参与的是 `sample()` 里算 `position` 那一步，之后才查表。
+于是「同一组色标」的任何两个渐变，无论画在哪、多大，查表内容**逐位相同**。
+
+而 `Element::paint_box` 的 `paint_highlight_edges` 会为**每张卡片每帧**现场构造
+4 个渐变（上下左右各一，`element.cpp:1669/1684/1710/1716`）。
+它们的色标在帧间完全不变（只随主题/圆角尺寸变），于是同一张表被反复重算。
+
+### 5.2 实测代价（`probe_edge_gradients`，32 卡片 × 100 帧 = 12800 个渐变）
+
+| 项 | 原始 | LutPool | 变化 |
+|---|---|---|---|
+| 每次渐变构造 | **2115.6 ns** | **195.1 ns** | **10.8× 快** |
+| 每张卡片（4 渐变） | 8462.4 ns | 780.3 ns | 10.8× 快 |
+| **每帧（32 卡片）** | **0.271 ms** | **0.025 ms** | 省 0.246 ms |
+| 折合 96 卡片 | ≈0.74 ms | ≈0.074 ms | **省 ≈0.67 ms/帧** |
+
+拆解（原始实现，`probe_paint_split`）：256 项 LUT 填充占 **90%**（每项 6.92 ns），
+`make_shared` 搬运 1072 字节只占 4%，`sort` 2 色标占 2%。
+**问题在算法不在分配**——所以修法是把表缓存起来，而非把 LUT 改成惰性。
+
+### 5.3 为什么**不**把 LUT 改成惰性（实测否决）
+
+惰性方案（只存色标、采样时直接插值）构造快 48×，但**像素不等价**：
+
+| 色标数 | 差异通道 / 4096 | 最大差 |
+|---|---|---|
+| 2（edge→transparent） | 0 | 0 LSB |
+| **3（透明→亮→透明）** | **109（2.7%）** | **1 LSB** |
+| 4（侧边渐变） | 6（0.1%） | 2 LSB |
+
+原因是 LUT 把连续插值**量化到 256 档**，而直接插值不做那个量化。
+本项目对像素零容差，故惰性方案被否决。
+
+此外惰性对**这条路径收益为 0**：4 个高光渐变都紧跟 `fill_path`，必然被采样，
+惰性只是把 1772 ns 从「构造时」挪到「首次采样时」。
+
+### 5.4 实现与验证
+
+`src/raster/paint.cpp` 新增 `LutPool`：按色标指纹（偏移量化到 1/65536、颜色 4 通道）
+做进程级共享表；命中只读共享表，未命中在锁外算完再插入（双检）。
+`Gradient::rebuild()` 改为 `lut_ = LutPool::acquire(stops_)`，
+填充逻辑原样搬到 `LutPool::fill_lut`（**两处必须同口径**）。
+
+表不淘汰：条目数受色标组合数约束（真实界面个位数到几十），单条 1 KB。
+
+**验证**（零容差）：
+- `st test gradient` 26 项全过，含 `gpu_gradient_uses_same_lut_as_software`
+  （证明 LutPool 与 GPU 侧 `ramp_texture` 口径一致）；
+- `st test highlight / styling / ui_` 共 196 项全过；
+- gallery 端到端 A/B 截图：除端口号文本外**逐像素一致**。
+
+### 5.5 软件三维光栅的像素跨度直写（2026-11-24）
+
+`src/raster/software_scene.cpp` 的 `rasterize` 与 `draw_shadow` 里，
+逐像素的 `canvas_.pixel_at(x,y)` / `canvas_.set_pixel(x,y,c)` 改为取一次
+`canvas_.pixels()` 跨度后直读写。
+
+**等价性论据**：`Canvas` 的像素访问就是 `pixels_[y * 物理宽 + x]` 的裸读写，
+而 `canvas_` 以物理尺寸 `width_ * kBake` 构造、`device_scale` 为 1，
+所以跨度下标与那两个函数内部算的偏移**逐字相同**；唯一差异是 `set_pixel`
+会把直通色预乘后存储，故直写路径用 `math::premultiply` 保持同口径。
+
+**验证**（逐字节，含透明分支）：同一份真实渲染载荷（不透明立方体 ×2 +
+曲面球 + `opacity=0.45` 透明球 + 输出 192×144 含 308 种颜色），
+原始版与改动版导出的 RGBA 字节流 **SHA-256 完全相同**。
+
+**收益**：在 640×480 的一帧软件三维渲染上**测不出来**
+（448 ms vs 448 ms，交替三轮，噪声内）。原因：软件三维的成本压倒性在
+三角形着色（逐像素 PBR/纹理/阴影查询），像素写回只占很小一部分。
+该改动保留了「接口粒度对齐」的正确性收益（逐像素虚访问 → 批量），
+但**不应把它当作性能优化来宣传**——真实数据就是没量到差异。
+
+## 6. 探针清单（都接受 `ST_*` 环境变量，可复现）
 
 > 全部探针都走**手工编译**（与 `tools/` 下其余量尺同一约定，见 `tools/README.md`）：
 >
 > ```bash
-> g++ -std=c++20 -O2 -Iinclude -Isrc/raster -Ithird_party -Ithird_party/sqlite \
+> g++ -std=c++23 -O2 -Iinclude -Isrc/raster -Ithird_party -Ithird_party/sqlite \
 >     tools/<探针>.cpp $(ls build/release/obj/*.o \
 >       | grep -v '_tests_\|test_main\|_src_test_\|apps_gallery\|platform_d3d11\|platform_gl\|shell_backend\|src_app_app\|src_shell_\|src_control_\|src_pkg_') \
 >     -o build/probe/<探针> -lpthread -ldl -lm

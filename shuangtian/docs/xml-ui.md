@@ -215,10 +215,68 @@ bridge.expose("fs.read", [](const std::vector<st::Json>& args) -> st::Result<st:
 | 属性写了没生效 | 看应用 stderr 的 `[hot] 属性未生效：…`（报告里有标签名与行号） |
 | JS 里 `xxx is not a function` | 桥没暴露（`bridge.exposed()` 可查）/ 名字写错 / 桥在 `start()` 之前建（必须在之后） |
 
+## 从 HTML 生成 XML（**只翻视图，不翻逻辑**）
+
+手写 `main.xml` 之前先看这条路：一份 HTML（含内联 `<style>`）可以**机器翻**成
+霜天 XML，翻出来直接 `build_from_xml` 就是真元素树。
+
+```cpp
+#include "st/html/to_ui_xml.hpp"
+
+const auto result = st::html::to_ui_xml(html_text);
+st::fs::write_text("ui/main.xml", result.xml);
+st::ui::XmlBuildReport report;
+st::ui::XmlBuildOptions options;
+options.strict = true;                 // 生成的东西必须干净
+auto tree = st::ui::build_from_xml(result.xml, &report, options);
+```
+
+命令行验证（真 HTML 进、真像素出，含人眼可读的 PNG）：
+
+```sh
+build/dev/bin/st build html_to_xml_render
+build/dev/bin/html_to_xml_render.exe build/html-to-xml
+# 看 build/html-to-xml/generated.xml 与 rendered.png
+```
+
+### 它翻什么、不翻什么
+
+| HTML | 霜天 XML | 备注 |
+|---|---|---|
+| `div`/`section`/`p`/`body` | `Column` | 块级 → 纵向容器 |
+| 块里的行内内容 | 一个 `Text multiline="true"` | **不切碎**（霜天 Text 是单样式单元） |
+| `h1`…`h6` | `Heading level="n"` | 字号由 level 取主题字阶 |
+| `a[href]` | `Link url="…"` | `http(s)` 自动加 `external` |
+| `button` | `Button`（`type=submit` → `variant="primary"`） | |
+| `input` / `textarea` / `select` | `Input` / `TextArea` / `Select` | `checkbox`/`radio`/`range` 也映射 |
+| `ul`/`ol`/`li` | `Column` + `Row`（`•`/`1.` 前缀） | |
+| `table`（带表头） | `Table columns="…"` | 无表头 → `Row` 网格 |
+| `pre`/`code` | `Text multiline monospace`（**CDATA**） | 保留空白与缩进 |
+| `img` | `Avatar` 占位（`name`=alt） | 像素内容不在 XML 里，如实进报告 |
+
+- **不生成逻辑**：不写事件、不生成 JS、不碰数据源。
+- **不做像素保真**：`float`/`position`/`transform`/`flex`/`grid` 一律忽略（解析层本就不支持）。
+- **丢掉什么都会报**：`ToUiXmlReport` 的 `dropped_declarations` / `unmapped_tags` / `images` / `scripts`。
+  > 静默丢弃会让“翻了但样式不对”变成谜——这是本模块的设计取向（与 `XmlBuildReport` 一致）。
+
+### 两条**不能写错**的样式通道（都不是顾名思义）
+
+| 想表达 | 不要写 | 要写 | 原因 |
+|---|---|---|---|
+| 字号 | `font_size="18"` | `text_size="18"` | `font_size` 直接写 `Style::font_size`，会被 `Text::apply_theme` 按主题 `font_base` 覆盖；`text_size` 记成显式覆盖，主题回放末尾重新落位。量法见 `tools/xml_font_size_probe.cpp` |
+| 块间空隙 | `margin="8"` | 父容器的 `gap="8"` | 霜天 `margin` 是**把子元素盒四边向内缩**（`arrange` 里 `target.inset(margin)`），不是 CSS 的外距——写上去会挤窄并裁掉内容。见 `docs/BACKLOG.md` P1 |
+
+另外两条值得记住的：
+
+- **`surface` 在所有元素上都生效**（含 Button/Card/Input 这些自己写底色的组件）：显式声明 > 组件默认。
+- **根元素要 `grow="true"`**（否则内容贴顶、底部留白）——生成器默认已加，手写时要记得。
+
 ## 参考
 
 - 完整可运行示例：`apps/xiangqi/`（相期：桌面常驻卡片面板，界面零 C++ UI 代码）
 - **改文件即生效**：`docs/hot-reload.md`（`ui::HotReload`，`DESIGN.md` §4.2.28）
 - 端到端回归：`tools/hot_reload_e2e.py`（改文件即生效的四个分支）；相期自身能力面见 `tools/xiangqi_e2e.py`
 - 设计说明：`DESIGN.md` §4.2.20（XML 建树）与 §4.2.21（脚本桥）
+- **从 HTML 生成 XML**：`include/st/html/to_ui_xml.hpp`（接口与能力边界都在头注释里）·
+  回归：`st test html_to_xml` · 出图验收：`tools/html_to_xml_render.cpp`
 - C++ 声明式（不需要 XML 时的另一条路）：`docs/declarative.md`
