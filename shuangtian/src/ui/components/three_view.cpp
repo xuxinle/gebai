@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "st/core/fs.hpp"
 #include "st/core/log.hpp"
 #include "st/raster/bpy_runtime.hpp"
 #include "st/raster/canvas.hpp"
@@ -577,20 +578,12 @@ void ThreeView::render_into(const RenderContext& context, raster::Surface& canva
     const bool force = !backend_pref_.empty();
     if (force) {
       const std::scoped_lock lock(raster::Scene3D::backend_mutex());
-      const char* previous = std::getenv("ST_SCENE3D_BACKEND");
-      const std::string saved = previous != nullptr ? previous : std::string();
-#if defined(_WIN32)
-      (void)_putenv_s("ST_SCENE3D_BACKEND", backend_pref_.c_str());
-#else
-      (void)setenv("ST_SCENE3D_BACKEND", backend_pref_.c_str(), 1);
-#endif
+      const auto saved = st::fs::read_env("ST_SCENE3D_BACKEND");
+      (void)st::fs::set_env("ST_SCENE3D_BACKEND", backend_pref_);
       auto result = raster::Scene3D::create(width, height);
-#if defined(_WIN32)
-      (void)_putenv_s("ST_SCENE3D_BACKEND", saved.c_str());
-#else
-      if (saved.empty()) (void)unsetenv("ST_SCENE3D_BACKEND");
-      else (void)setenv("ST_SCENE3D_BACKEND", saved.c_str(), 1);
-#endif
+      // 还原：原先没这个变量就删掉，有就写回原值。
+      if (saved.has_value()) (void)st::fs::set_env("ST_SCENE3D_BACKEND", *saved);
+      else (void)st::fs::unset_env("ST_SCENE3D_BACKEND");
       if (result.has_value()) created = std::move(*result);
       else failure = result.error().message;
     } else {

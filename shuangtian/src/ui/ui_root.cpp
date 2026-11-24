@@ -825,10 +825,18 @@ auto UiRoot::live_hint_target() -> Element* {
   // 没存 id = 没有目标
   if (hint_target_id_.empty()) return nullptr;
   // 原生指针仍在树上且 hint 没变 → 直接用（不走 id 查询，省一次遍历）
-  if (hint_target_ != nullptr && !hint_target_->hint().empty() &&
+  //
+  // ⚠ 这个“快路径”必须先证明指针**没悬垂**才能解引用。
+  // 调用点（`update_hint`）在 `prune_stale_pointers()` **之前**调本函数，
+  // 而声明式界面每帧重组会 `clear_children()` 销毁元素——此时
+  // `hint_target_->hint()` 就是 use-after-free（实测 ASan 报在地址 828 行）。
+  // 判据就是 `prune_stale_pointers` 里那个 `on_tree`：只做指针相等比较，
+  // 结果缓存为成员 `hint_target_on_tree_`，避免每次悬停快路径都全树遍历。
+  if (hint_target_ != nullptr && hint_target_on_tree_ && !hint_target_->hint().empty() &&
       hint_target_->id() == hint_target_id_) {
     return hint_target_;
   }
+  hint_target_on_tree_ = false;
   // 声明式重建：按 id 重新找。
   //
   // ⚠ 找到了也要**校验 hint 非空**：重组初期新实例可能还没调到 `set_hint`，
@@ -877,11 +885,13 @@ void UiRoot::set_hint_target(Element* target) {
       !owner_id.empty() ? owner_id == hint_target_id_ : owner == hint_target_;
   if (same_owner) {
     hint_target_ = owner;   // 跟上新实例（但计时不动）
+    hint_target_on_tree_ = true;   // `owner` 刚从悬停链上来，本帧一定在树上
     return;
   }
   ++g_hint_target_changed;
   hide_hint();   // 新目标先收掉上一个的气泡（否则会挂在错误的位置上）
   hint_target_ = owner;
+  hint_target_on_tree_ = true;
   hint_target_id_ = owner->id();   // 声明式重建后靠 id 重新定位（指针会悬垂）
   hint_elapsed_ms_ = 0.0;
   // 起点用**单调钟**（`st::time::now_ns`）而不是 `time_seconds_`
@@ -910,6 +920,7 @@ void UiRoot::update_hint(double delta_ms) {
   // 于是每帧都被当成“目标没了”——计时永远是 0（实测 `bail_start` 几百次）。
   if (Element* live = live_hint_target(); live != nullptr) {
     hint_target_ = live;
+    hint_target_on_tree_ = true;   // `live` 经 `find()` / 悬停链来，一定在树上
   } else if (find(hint_target_id_) != nullptr) {
     // **元素还在，但 hint 还是空**（声明式重组尚未调到 `set_hint`）：
     // 这一帧跳过，保留目标与计时——不能当成“目标没了”把状态清掉。
@@ -918,6 +929,7 @@ void UiRoot::update_hint(double delta_ms) {
   } else {
     ++g_hint_bail_gone;
     hint_target_ = nullptr;
+    hint_target_on_tree_ = false;
     hint_target_id_.clear();
     hide_hint();
     return;
@@ -1557,7 +1569,12 @@ void UiRoot::prune_stale_pointers() {
   // 提示的两个观察者：目标（在内容树）与气泡（在叠加层——上面的 `on_tree`
   // 也遍历 `overlays_`，所以同一条判据能用）。气泡被外部摘掉（`clear_overlays`）
   // 之后不能继续用，否则下一帧 `set_active` 就是 use-after-free。
-  if (!on_tree(hint_target_)) {
+  //
+  // 目标的结果**缓存成成员** `hint_target_on_tree_`：`live_hint_target()` 的快路径
+  // （在 `update_hint` 里、**早于**本函数执行）必须能判断指针是否悬垂，而它自己
+  // 不遍历树（那是每帧都付的成本）。本函数就是那唯一一次遍历。
+  hint_target_on_tree_ = on_tree(hint_target_);
+  if (!hint_target_on_tree_) {
     // 只清**指针**，保留 id 与计时：声明式重建后新实例可由 id 找回，
     // 而一旦把 id 也清了就永久失去目标；把计时也清了则每帧重组都会重新等延时
     //（实测：气泡一直不出来）。

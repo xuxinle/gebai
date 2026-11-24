@@ -1821,11 +1821,20 @@ void WaylandBackend::teardown() {
 
 /// 工厂入口（声明见 `shell.hpp`；与 `create_x11_backend`/`create_win32_backend` 同形）。
 ///
-/// 只做"能力探测 + 构造"：真正的可用性判断在 `create_window`（那里才知道
-/// `WAYLAND_DISPLAY` 能不能连上、合成器有没有给必需全局对象）——与 X11 侧同姿态。
+/// 两道判据缺一不可，且**必须与 X11 侧对称**：
+/// · 库不在 → 失败（本机根本没有这条路）；
+/// · 库在但 `WAYLAND_DISPLAY` 未设 → **也要失败**。
+///   只查库就会返回一个“建窗必然失败”的桩对象，而调用方看到的是
+///   “后端可用”——`platform_backends_report_unavailable_honestly` 就是钉这个的
+///   （实测：无显示服务的容器里本分支曾直接第三个地返回对象，用例红在
+///   `!backend.has_value()`）。X11 侧早就有这道检查（`has_display()`）。
 [[nodiscard]] auto create_wayland_backend() -> Result<std::unique_ptr<Backend>> {
   if (!wayland_available()) {
     return unexpected(ErrorCode::Unsupported, "未探测到 libwayland-client");
+  }
+  if (!has_display()) {
+    return unexpected(ErrorCode::Unsupported,
+                      "存在 libwayland-client 但无 WAYLAND_DISPLAY 环境变量（非 Wayland 会话）");
   }
   return std::unique_ptr<Backend>(std::make_unique<WaylandBackend>());
 }

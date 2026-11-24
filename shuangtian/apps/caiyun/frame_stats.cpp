@@ -100,7 +100,7 @@ auto StatsAccumulator::downscale_luma(std::span<const std::uint8_t> rgba, int wi
         }
       }
       out[static_cast<std::size_t>(oy) * static_cast<std::size_t>(out_w) + static_cast<std::size_t>(ox)] =
-          count > 0 ? static_cast<std::uint8_t>(sum / count) : 0;
+          count > 0 ? static_cast<std::uint8_t>(sum / count) : std::uint8_t{0};
     }
   }
   return out;

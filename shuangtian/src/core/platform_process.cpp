@@ -304,7 +304,10 @@ auto spawn_detached(const std::string& program, const std::vector<std::string>& 
     // 生命周期管理，而 `execv` 这条路径已在用，不新增第二套。
     if (!workdir.empty()) {
       const std::string dir(workdir);
-      (void)::chdir(dir.c_str());  // NOLINT(l14)
+      // 失败不处理（子进程照常启动，只是不换目录）；但 glibc 给 `chdir` 标了
+      // `warn_unused_result`，`(void)` 强转在 GCC 下不再豁免——接住返回值才能等价表达这一语义。
+      if (::chdir(dir.c_str()) != 0) {  // NOLINT(l14)
+      }
     }
     std::vector<std::string> argv_storage;
     argv_storage.reserve(args.size() + 1);

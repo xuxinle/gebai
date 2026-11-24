@@ -587,6 +587,27 @@ auto read_env(std::string_view name) -> std::optional<std::string> {
   return std::string(value);
 }
 
+auto set_env(std::string_view name, std::string_view value) -> bool {
+  const std::string key(name);
+  const std::string text(value);
+#if defined(_WIN32)
+  // `_putenv_s` 拒绝名字为空或含 `=`（返回非 0）。
+  return ::_putenv_s(key.c_str(), text.c_str()) == 0;
+#else
+  return ::setenv(key.c_str(), text.c_str(), 1) == 0;
+#endif
+}
+
+auto unset_env(std::string_view name) -> bool {
+  const std::string key(name);
+#if defined(_WIN32)
+  // Windows 的“删除”就是把值设成空串（`_putenv_s` 传空串即移除该变量）。
+  return ::_putenv_s(key.c_str(), "") == 0;
+#else
+  return ::unsetenv(key.c_str()) == 0;
+#endif
+}
+
 auto join(std::string_view base, std::string_view leaf) -> std::string {
   if (base.empty()) return std::string(leaf);
   if (leaf.empty()) return std::string(base);

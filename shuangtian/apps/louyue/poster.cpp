@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
 
 #include "st/core/error.hpp"
@@ -186,9 +187,9 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
   }
   PosterScript poster{};
   poster.name = st::json_get_string(root, "name", poster.name);
-  poster.width = static_cast<int>(std::clamp(st::json_get_i64(root, "width", poster.width), 64LL, 7680LL));
+  poster.width = static_cast<int>(std::clamp<std::int64_t>((st::json_get_i64(root, "width", poster.width)), std::int64_t{64}, std::int64_t{7680}));
   poster.height =
-      static_cast<int>(std::clamp(st::json_get_i64(root, "height", poster.height), 64LL, 7680LL));
+      static_cast<int>(std::clamp<std::int64_t>((st::json_get_i64(root, "height", poster.height)), std::int64_t{64}, std::int64_t{7680}));
   poster.out_width = static_cast<int>(st::json_get_i64(root, "out_width", 0));
   poster.out_height = static_cast<int>(st::json_get_i64(root, "out_height", 0));
   poster.background = color_field(root, "background", poster.background);
@@ -203,7 +204,7 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
   poster.glow_radius = static_cast<float>(
       std::clamp(st::json_get_double(root, "glow_radius", poster.glow_radius), 0.05, 2.0));
   poster.glow_color = color_field(root, "glow_color", poster.glow_color);
-  poster.grain = static_cast<int>(std::clamp(st::json_get_i64(root, "grain", 0), 0LL, 20000LL));
+  poster.grain = static_cast<int>(std::clamp<std::int64_t>((st::json_get_i64(root, "grain", 0)), std::int64_t{0}, std::int64_t{20000}));
   poster.grain_alpha = static_cast<float>(
       std::clamp(st::json_get_double(root, "grain_alpha", poster.grain_alpha), 0.0, 1.0));
   poster.vignette =
@@ -234,12 +235,12 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
     block.tracking = static_cast<float>(std::clamp(st::json_get_double(node, "tracking", 0.0), 0.0, 200.0));
     block.bold = st::json_get_bool(node, "bold", false);
     block.align = static_cast<int>(
-        std::clamp(st::json_get_i64(node, "align", block.align), 0LL, 2LL));
+        std::clamp<std::int64_t>((st::json_get_i64(node, "align", block.align)), std::int64_t{0}, std::int64_t{2}));
     // 窄幅重排（见 poster.hpp 的 flow 注释）
     block.flow = static_cast<int>(
-        std::clamp(st::json_get_i64(node, "flow", block.flow), 0LL, 9999LL));
+        std::clamp<std::int64_t>((st::json_get_i64(node, "flow", block.flow)), std::int64_t{0}, std::int64_t{9999}));
     block.flow_rank = static_cast<int>(
-        std::clamp(st::json_get_i64(node, "flow_rank", block.flow_rank), 0LL, 9999LL));
+        std::clamp<std::int64_t>((st::json_get_i64(node, "flow_rank", block.flow_rank)), std::int64_t{0}, std::int64_t{9999}));
     block.alpha = static_cast<float>(std::clamp(st::json_get_double(node, "alpha", 1.0), 0.0, 1.0));
     block.width = static_cast<float>(std::clamp(st::json_get_double(node, "width", 0.0), 0.0, 8000.0));
     block.radius = static_cast<float>(std::clamp(st::json_get_double(node, "radius", 0.0), 0.0, 2000.0));

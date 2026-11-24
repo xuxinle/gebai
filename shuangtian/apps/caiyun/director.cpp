@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <optional>
 #include <string_view>
@@ -333,7 +334,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     layer.stroke = color_field(node, "stroke", layer.stroke);
     layer.color = color_field(node, "color", layer.color);
     layer.gradient_dir = static_cast<int>(
-        std::clamp(st::json_get_i64(node, "gradient_dir", layer.gradient_dir), 0LL, 1LL));
+        std::clamp<std::int64_t>((st::json_get_i64(node, "gradient_dir", layer.gradient_dir)), std::int64_t{0}, std::int64_t{1}));
     layer.stroke_width = static_cast<float>(
         std::clamp(st::json_get_double(node, "stroke_width", layer.stroke_width), 0.0, 80.0));
     layer.radius = static_cast<float>(
@@ -385,7 +386,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     layer.intensity = static_cast<float>(
         std::clamp(st::json_get_double(node, "intensity", layer.intensity), 0.0, 1.0));
     layer.count = static_cast<int>(
-        std::clamp(st::json_get_i64(node, "count", layer.count), 0LL, 600LL));
+        std::clamp<std::int64_t>((st::json_get_i64(node, "count", layer.count)), std::int64_t{0}, std::int64_t{600}));
     layer.spread = static_cast<float>(
         std::clamp(st::json_get_double(node, "spread", layer.spread), 0.02, 2.0));
 
@@ -406,7 +407,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     layer.model_color = color_field(node, "model_color", layer.model_color);
     layer.model_color_alt = color_field(node, "model_color_alt", layer.model_color_alt);
     layer.model_segments = static_cast<int>(
-        std::clamp(st::json_get_i64(node, "model_segments", layer.model_segments), 3LL, 96LL));
+        std::clamp<std::int64_t>((st::json_get_i64(node, "model_segments", layer.model_segments)), std::int64_t{3}, std::int64_t{96}));
     layer.model_scale = static_cast<float>(
         std::clamp(st::json_get_double(node, "model_scale", layer.model_scale), 0.05, 8.0));
     // PBR 材质：此前引擎支持但剧本层没暴露，导致所有三维图层都是塑料。
@@ -844,12 +845,12 @@ auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_
   // 影像特效（默认 0 = 关闭且零开销）
   scene.dof = static_cast<float>(std::clamp(st::json_get_double(node, "dof", scene.dof), 0.0, 1.0));
   scene.particles = static_cast<int>(
-      std::clamp(st::json_get_i64(node, "particles", scene.particles), 0LL, 600LL));
+      std::clamp<std::int64_t>((st::json_get_i64(node, "particles", scene.particles)), std::int64_t{0}, std::int64_t{600}));
   scene.particle_alpha = static_cast<float>(
       std::clamp(st::json_get_double(node, "particle_alpha", scene.particle_alpha), 0.0, 1.0));
   // 背景颗粒：让「静止段」安静而不冻结（实测能把变化强度中位数提 30 倍）
       scene.grain = static_cast<int>(
-        std::clamp(st::json_get_i64(node, "grain", scene.grain), 0LL, 12000LL));
+        std::clamp<std::int64_t>((st::json_get_i64(node, "grain", scene.grain)), std::int64_t{0}, std::int64_t{12000}));
   scene.grain_alpha = static_cast<float>(
       std::clamp(st::json_get_double(node, "grain_alpha", scene.grain_alpha), 0.0, 0.6));
   scene.wrap = st::json_get_bool(node, "wrap", scene.wrap);
@@ -1047,7 +1048,7 @@ auto parse_script(std::string_view json, std::string_view asset_basis) -> Result
     script.audio.enabled = st::json_get_bool(*audio, "enabled", script.audio.enabled);
     script.audio.style = st::json_get_string(*audio, "style", script.audio.style);
     script.audio.bpm = static_cast<int>(
-        std::clamp(st::json_get_i64(*audio, "bpm", script.audio.bpm), 40LL, 240LL));
+        std::clamp<std::int64_t>((st::json_get_i64(*audio, "bpm", script.audio.bpm)), std::int64_t{40}, std::int64_t{240}));
     script.audio.gain = static_cast<float>(
         std::clamp(st::json_get_double(*audio, "gain", script.audio.gain), 0.0, 1.0));
     if (const st::Json* voice = st::json_find(*audio, "voice");

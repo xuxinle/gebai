@@ -1,11 +1,11 @@
 #include <chrono>
 #include <cstdio>
-#include <windows.h>
 #include <memory>
 
 #include <cstdlib>
 #include <string>
 
+#include "st/core/fs.hpp"
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
 #include "st/raster/gpu.hpp"
@@ -76,9 +76,15 @@ ST_TEST(gpu_zero_copy_beats_software_readback) {
   constexpr int kRounds = 4;
   const auto spec = make_scene(kWidth, kHeight);
 
+  // GPU 三维腿只在 Windows 上实现（`platform_d3d11.cpp` 的非 Windows 分支恒返 Unsupported）。
+  // 无 GPU 腿时本用例没有可量的东西——但必须**可区分地报告为跳过**，不能静默计成绿。
+  if (!st::raster::gpu::available()) {
+    ST_SKIP("GPU 渲染在本平台/本机不可用（仅 D3D11 后端）");
+  }
+
   // ── A：软件场景 → 软件画布 ──
   st::raster::Canvas soft_canvas{kWidth, kHeight, 1.0f};
-  ::SetEnvironmentVariableA("ST_SCENE3D_BACKEND", "software");
+  (void)st::fs::set_env("ST_SCENE3D_BACKEND", "software");
   auto soft_scene = st::raster::Scene3D::create(kWidth, kHeight);
   ST_REQUIRE(soft_scene.has_value());
   const double soft_ms = time_rounds(kRounds, [&] {
@@ -91,9 +97,9 @@ ST_TEST(gpu_zero_copy_beats_software_readback) {
   double readback_ms = -1.0;
   double zero_copy_ms = -1.0;
   std::string gpu_reason = st::raster::gpu_scene3d_unavailable_reason();
-  ::SetEnvironmentVariableA("ST_SCENE3D_BACKEND", nullptr);
+  (void)st::fs::unset_env("ST_SCENE3D_BACKEND");
   if (gpu_reason.empty()) {
-    ::SetEnvironmentVariableA("ST_SCENE3D_BACKEND", "gpu");
+    (void)st::fs::set_env("ST_SCENE3D_BACKEND", "gpu");
     auto gpu_scene = st::raster::Scene3D::create(kWidth, kHeight);
     ST_REQUIRE(gpu_scene.has_value());
     readback_ms = time_rounds(kRounds, [&] {

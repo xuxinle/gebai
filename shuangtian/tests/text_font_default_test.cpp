@@ -307,12 +307,15 @@ ST_TEST(font_default_emoji_prefer_emoji_face_over_symbol_face) {
   if (!has_emoji_face) return;
   for (const char32_t codepoint : {U'\U0001F600', U'\U0001F4C1'}) {
     const auto* regular = fixture.stack->find_face(codepoint, FontRole::Proportional);
-    ST_CHECK(regular != nullptr);
+    // **必须用 `ST_REQUIRE`**：`ST_CHECK` 失败不中止，下一行会解引用空指针
+    // ——那是测试自己造出的 SEGV（实测 UBSan 报 “member call on null pointer”，
+    // 随后 ASan 报 DEADLYSIGNAL，把真正的断言失败信息盖掉）。
+    ST_REQUIRE(regular != nullptr);
     ST_CHECK(regular->path().ends_with(emoji_face_file()));
     // 粗体链同理：粗体链漏了这一档时，emoji 在粗体文本里**又变回符号字体**的
     // 单色方块（同一串文本两种字重两种字形，是那种“只在标题里坏”的缺陷）。
     const auto* bold = fixture.stack->find_face(codepoint, FontRole::Proportional, /*bold=*/true);
-    ST_CHECK(bold != nullptr);
+    ST_REQUIRE(bold != nullptr);
     ST_CHECK(bold->path().ends_with(emoji_face_file()));
   }
   // 两条链的下标必须仍然对齐（emoji 档是插在中间的一档，最容易只加进常规链）。

@@ -32,6 +32,13 @@
 #include <cstdint>
 #include <string>
 
+#if !defined(_WIN32)
+// POSIX 分支用到的标准库设施（`<chrono>` 原先只在 Windows 分支里引入）。
+#include <chrono>
+#include <filesystem>
+#include <system_error>
+#endif
+
 #include "st/core/error.hpp"
 
 namespace st::fs {
@@ -74,11 +81,23 @@ auto platform_modified_ns(const std::string& path) -> Result<std::int64_t> {
 #else
 
 auto platform_modified_ns(const std::string& path) -> Result<std::int64_t> {
-  // POSIX：标准库的实现基于 `st_mtim`，本就是纳秒，不需要绕路。
+  // POSIX：`st_mtim` 本就是纳秒精度（不需要像 Windows 那样绕路），
+  // 但它的**时基不是 Unix 纪元**：`std::filesystem` 用的是实现自定的
+  // `file_time_type::clock`（libstdc++ 上是 2174-01-01 起算），
+  // 直接取 `time_since_epoch()` 会得到一个 1823 年附近的负数。
+  //
+  // 头文件契约是“自 Unix 纪元起的纳秒”，两条平台分支必须同一时基——否则
+  // 跨平台可比的数字变得不可比，而“比较两个 mtime 谁更新”这种用法只要
+  // 内部一致就看不出来（真实后果是断言 `second_mtime == first_mtime` 上
+  // 两个负值不相等，报出来的数字没人看得懂）——见 `pkg_debug_strip_test`。
+  //
+  // 换算办法：先转成 `system_clock`（`clock_cast` 不可用时的标准手法是取
+  // 两个时钟的当前值差）。这里用标准库提供的 `file_clock::to_sys`（C++20）。
   std::error_code ec;
   const auto stamp = std::filesystem::last_write_time(std::filesystem::path(path), ec);
   if (ec) return unexpected(ErrorCode::NotFound, "无法读取文件时间戳: " + path);
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(stamp.time_since_epoch()).count();
+  const auto system_time = std::filesystem::file_time_type::clock::to_sys(stamp);
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(system_time.time_since_epoch()).count();
 }
 
 #endif

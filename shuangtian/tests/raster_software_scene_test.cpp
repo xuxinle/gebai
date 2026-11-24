@@ -204,12 +204,11 @@ ST_TEST(software_scene_transparent_clear_keeps_alpha_zero_in_empty_area) {
   // 同一手法），并用 `Scene3D::backend_mutex()` 做进程级互斥——那个环境变量是
   // **进程级**的，测试运行器每用例开一个线程，不持锁会互相踩。
   const std::lock_guard<std::mutex> guard(Scene3D::backend_mutex());
-  const char* previous = std::getenv("ST_SCENE3D_BACKEND");
-  std::string saved = previous != nullptr ? previous : "";
-  const bool had_previous = previous != nullptr;
-  (void)::_putenv_s("ST_SCENE3D_BACKEND", "software");
+  const auto previous = st::fs::read_env("ST_SCENE3D_BACKEND");
+  (void)st::fs::set_env("ST_SCENE3D_BACKEND", "software");
   auto software_only = Scene3D::create(kWidth, kHeight);
-  (void)::_putenv_s("ST_SCENE3D_BACKEND", had_previous ? saved.c_str() : "");
+  if (previous.has_value()) (void)st::fs::set_env("ST_SCENE3D_BACKEND", *previous);
+  else (void)st::fs::unset_env("ST_SCENE3D_BACKEND");
   if (!software_only.has_value() || (*software_only)->backend() != "software") return;
   Canvas canvas{kWidth, kHeight};
   canvas.clear(Color{0x20, 0x30, 0x40, 0xFF});   // 下层画面（不透明）

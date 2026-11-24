@@ -1513,10 +1513,20 @@ auto Win32WebView::webview_set_script_enabled(bool enabled) -> Status {
 
 auto create_win32_webview(void* parent, float device_scale) -> std::unique_ptr<WebViewHost> {
   // `parent` 为空 = 还没建窗（不支持就是如实回答，不是错误）。
-  // 非 Windows 目标上整个文件体被 `#if defined(_WIN32)` 挡掉，不会走到这里。
   if (parent == nullptr) return nullptr;
   return std::make_unique<Win32WebView>(static_cast<HWND>(parent), device_scale);
 }
+
+}  // namespace st::shell::webview
+
+#else   // !_WIN32
+
+// 非 Windows：头文件契约是“返回 `nullptr` = 本平台没有实现”（不是错误）。
+// 这一分支必须存在：`Application::start()` 在未定义 `ST_NO_WEBVIEW` 时会调用它，
+// 缺了就在**链接期**报 undefined reference，而错报在 `app.cpp`、根因在本文件。
+namespace st::shell::webview {
+
+auto create_win32_webview(void*, float) -> std::unique_ptr<WebViewHost> { return nullptr; }
 
 }  // namespace st::shell::webview
 

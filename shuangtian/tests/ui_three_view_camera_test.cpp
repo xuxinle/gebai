@@ -50,12 +50,19 @@ scene.add(box);
 scene;
 )js";
 
+/// 测试共用一个真实主题：`RenderContext::theme` 是**引用**，用
+/// `*static_cast<const Theme*>(nullptr)` 造一个空引用本身就是 UB
+///（UBSan 报 “reference binding to null pointer”，一旦组件真的读了主题字段就是 SEGV）。
+[[nodiscard]] auto test_theme() -> const st::ui::Theme& {
+  static const st::ui::Theme theme = st::ui::Theme::light();
+  return theme;
+}
+
 auto make_view(const char* script, const char* name) -> std::unique_ptr<ThreeView> {
   auto view = std::make_unique<ThreeView>();
   view->set_id("viewport");
   view->load_script(script, name);
-  view->arrange(st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr), nullptr, 0.0,
-                                     nullptr},
+  view->arrange(st::ui::RenderContext{test_theme(), nullptr, 0.0, nullptr},
                 st::math::Rect{0.0f, 0.0f, 640.0f, 400.0f});
   return view;
 }

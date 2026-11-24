@@ -289,8 +289,8 @@ auto fnv1a64_bytes(std::span<const std::uint8_t> data) noexcept -> std::uint64_t
 // 跨平台回退：非 Windows 仍用框架的 `sha256_hex`（正确性一致，只是慢一点）。
 
 auto content_hash64(std::span<const std::uint8_t> data) noexcept -> std::uint64_t {
-  std::array<std::uint8_t, 8> head{};
 #if defined(_WIN32)
+  std::array<std::uint8_t, 8> head{};
   // CNG：开算法 → 建哈希 → 喂数据 → 取摘要。失败（算法不可用等）则回退框架实现——
   // 这里是**指纹判定**不是安全边界，回退不影响正确性，只影响速度。
   BCRYPT_ALG_HANDLE algorithm = nullptr;

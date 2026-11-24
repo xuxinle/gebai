@@ -456,6 +456,35 @@ ScriptEngine::ScriptEngine(ScriptLimits limits)
 }
 
 ScriptEngine::~ScriptEngine() {
+  release_runtime();
+}
+
+ScriptEngine::ScriptEngine(ScriptEngine&& other) noexcept
+    : impl_(std::move(other.impl_)), limits_(other.limits_), stats_(other.stats_) {}
+
+auto ScriptEngine::operator=(ScriptEngine&& other) noexcept -> ScriptEngine& {
+  if (this != &other) {
+    // **必须先释放自己原有的运行时**。
+    //
+    // `ScriptState` 持有裸 `JSRuntime*` / `JSContext*`，而且**没有析构函数**
+    // （释放只在 `~ScriptEngine` 里）——所以 `impl_ = std::move(...)` 直接覆盖
+    // 就等于把旧状态的运行时与上下文**永远丢掉**：`unique_ptr` 只回收
+    // `ScriptState` 那几十字节，QuickJS 那边几 MB 的 arena/原子表无人释放。
+    //
+    // 实测代价：`caiyun::LayoutEngine::load()` 里有一句
+    // `impl_->engine = st::ext::ScriptEngine{limits};`，而成员 `engine{}` 在
+    // 构造时已建过一个默认运行时。于是**每次 load 泄漏一整个 QuickJS 运行时**
+    // （~670 KB）；`caiyun_spring_test` 反复建引擎采样弹簧，单个用例泄 161 MB，
+    // 全量 LSan 报 330 MB。
+    release_runtime();
+    impl_ = std::move(other.impl_);
+    limits_ = other.limits_;
+    stats_ = other.stats_;
+  }
+  return *this;
+}
+
+auto ScriptEngine::release_runtime() noexcept -> void {
   if (impl_ == nullptr) return;
   if (impl_->context != nullptr) {
     JS_SetContextOpaque(impl_->context, nullptr);
@@ -466,18 +495,6 @@ ScriptEngine::~ScriptEngine() {
     JS_FreeRuntime(impl_->runtime);
     impl_->runtime = nullptr;
   }
-}
-
-ScriptEngine::ScriptEngine(ScriptEngine&& other) noexcept
-    : impl_(std::move(other.impl_)), limits_(other.limits_), stats_(other.stats_) {}
-
-auto ScriptEngine::operator=(ScriptEngine&& other) noexcept -> ScriptEngine& {
-  if (this != &other) {
-    impl_ = std::move(other.impl_);
-    limits_ = other.limits_;
-    stats_ = other.stats_;
-  }
-  return *this;
 }
 
 auto ScriptEngine::valid() const noexcept -> bool {

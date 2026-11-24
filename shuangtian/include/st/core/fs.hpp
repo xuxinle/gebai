@@ -142,6 +142,20 @@ struct DirEntry {
 [[nodiscard]] auto home_dir() -> std::string;
 [[nodiscard]] auto read_env(std::string_view name) -> std::optional<std::string>;
 
+/// 写进程环境变量（`value` 为空串 = 设为空值，**不是**删除——删用 `unset_env`）。
+///
+/// 返回 `false` = 平台调用失败（Windows `_putenv_s` 在名字含 `=` 或内存不足时失败）。
+///
+/// 为何要有这一层：环境变量的**写**在两平台 API 不同（`_putenv_s` / `setenv`），
+/// 而调用点（测试强制三维后端、应用切后端、会话目录重定向）是平台无关的业务逻辑。
+/// 每次各自写 `#if defined(_WIN32)` 的代价已经实测过：漏一个分支，
+/// 整个 POSIX 构建就编不过，而本机开发环境（Windows）永远复现不出来。
+/// 与 `read_env` 成对：读写同一处封装（`CONVENTIONS.md` §10 第 1 条）。
+[[nodiscard]] auto set_env(std::string_view name, std::string_view value) -> bool;
+
+/// 删除进程环境变量。返回 `false` = 平台调用失败。
+[[nodiscard]] auto unset_env(std::string_view name) -> bool;
+
 [[nodiscard]] auto join(std::string_view base, std::string_view leaf) -> std::string;
 [[nodiscard]] auto normalize(std::string_view path) -> std::string;
 [[nodiscard]] auto absolute(std::string_view path) -> Result<std::string>;

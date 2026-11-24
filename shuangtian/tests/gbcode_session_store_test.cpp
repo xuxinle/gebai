@@ -117,17 +117,9 @@ ST_TEST(gbcode_default_session_path_honors_st_home) {
   // ST_HOME 重定向（e2e 用同一机制把会话文件关进临时目录）。
   const std::string home = fresh_session_path("home");
   (void)st::fs::write_text(st::fs::join(home, "probe"), "");
-#ifdef _WIN32
-  (void)_putenv_s("ST_HOME", home.c_str());
-#else
-  (void)setenv("ST_HOME", home.c_str(), 1);
-#endif
+  (void)st::fs::set_env("ST_HOME", home);
   const std::string path = gbcode::default_session_path();
   ST_CHECK(path.rfind(home, 0) == 0);
   ST_CHECK(path.find("gbcode") != std::string::npos);
-#ifdef _WIN32
-  (void)_putenv_s("ST_HOME", "");
-#else
-  (void)unsetenv("ST_HOME");
-#endif
+  (void)st::fs::unset_env("ST_HOME");
 }

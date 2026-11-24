@@ -23,15 +23,16 @@
 /// 那比不测更糟（假装测过）。这里的判据是：**平均通道差 < 6/255、投影面积差 < 3%**，
 /// 这个量级能抓住“光照写错”“矩阵转置错”“深度测试失效”，而不会误报插值噪声。
 
-// 只需 `<cstdlib>`（`getenv`）与 `_putenv_s` 的声明：后者在 `<stdlib.h>` 里，
-// MinGW 的 `<cstdlib>` 已带入。**不引 `<windows.h>`**——本文件不需要任何 Win32 类型，
-// 引入反而会与 PCH 里已定义的 `NOMINMAX` 撞车（-Werror 直接拦下）。
+// 环境变量读写一律走 `st::fs`（`read_env` / `set_env` / `unset_env`）——
+// 平台差异（`_putenv_s` vs `setenv`/`unsetenv`）封在那一层，这里不写平台分支。
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "st/core/fs.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/raster/scene3d.hpp"
@@ -74,16 +75,13 @@ constexpr int kHeight = 240;
 /// （函数内 static），所以跨用例互斥；持有时间是一次渲染，代价可接受。
 class ForcedBackend {
  public:
-  explicit ForcedBackend(const char* value) : lock_(Scene3D::backend_mutex()) {
-    const char* previous = std::getenv("ST_SCENE3D_BACKEND");
-    if (previous != nullptr) {
-      previous_ = previous;
-      had_previous_ = true;
-    }
-    (void)::_putenv_s("ST_SCENE3D_BACKEND", value);
+  explicit ForcedBackend(std::string value) : lock_(Scene3D::backend_mutex()) {
+    previous_ = st::fs::read_env("ST_SCENE3D_BACKEND");
+    (void)st::fs::set_env("ST_SCENE3D_BACKEND", value);
   }
   ~ForcedBackend() {
-    (void)::_putenv_s("ST_SCENE3D_BACKEND", had_previous_ ? previous_.c_str() : "");
+    if (previous_.has_value()) (void)st::fs::set_env("ST_SCENE3D_BACKEND", *previous_);
+    else (void)st::fs::unset_env("ST_SCENE3D_BACKEND");
   }
   ForcedBackend(const ForcedBackend&) = delete;
   auto operator=(const ForcedBackend&) -> ForcedBackend& = delete;
@@ -92,8 +90,7 @@ class ForcedBackend {
   /// 声明顺序很重要：先拿锁、后改环境变量；析构时先还原、后放锁
   /// （成员逆序析构，所以锁放最后）。
   std::unique_lock<std::mutex> lock_;
-  std::string previous_{};
-  bool had_previous_{false};
+  std::optional<std::string> previous_;
 };
 
 /// 用给定腿渲染一帧，返回画布。

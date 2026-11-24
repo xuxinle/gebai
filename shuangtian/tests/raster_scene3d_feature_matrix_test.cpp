@@ -37,8 +37,10 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
+#include "st/core/fs.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/scene3d.hpp"
 #include "st/test/test.hpp"
@@ -93,24 +95,20 @@ constexpr double kOpacityTolerance = 8.0;
 /// 测试运行器每个用例开一个线程，不互斥就会互相踩（实测过偶发红）。
 class ForcedBackend {
  public:
-  explicit ForcedBackend(const char* value) : lock_(Scene3D::backend_mutex()) {
-    const char* previous = std::getenv("ST_SCENE3D_BACKEND");
-    if (previous != nullptr) {
-      previous_ = previous;
-      had_previous_ = true;
-    }
-    (void)::_putenv_s("ST_SCENE3D_BACKEND", value);
+  explicit ForcedBackend(std::string value) : lock_(Scene3D::backend_mutex()) {
+    previous_ = st::fs::read_env("ST_SCENE3D_BACKEND");
+    (void)st::fs::set_env("ST_SCENE3D_BACKEND", value);
   }
   ~ForcedBackend() {
-    (void)::_putenv_s("ST_SCENE3D_BACKEND", had_previous_ ? previous_.c_str() : "");
+    if (previous_.has_value()) (void)st::fs::set_env("ST_SCENE3D_BACKEND", *previous_);
+    else (void)st::fs::unset_env("ST_SCENE3D_BACKEND");
   }
   ForcedBackend(const ForcedBackend&) = delete;
   auto operator=(const ForcedBackend&) -> ForcedBackend& = delete;
 
  private:
   std::unique_lock<std::mutex> lock_;
-  std::string previous_{};
-  bool had_previous_{false};
+  std::optional<std::string> previous_;
 };
 
 /// 用给定腿 + 给定材质渲染一帧。

@@ -193,6 +193,13 @@ class ScriptEngine {
   [[nodiscard]] static auto version() -> std::string_view;
 
  private:
+  /// 释放 `impl_` 持有的 QuickJS 运行时与上下文（幂等；不动 `impl_` 自身）。
+  ///
+  /// 为何要单独一个函数：`detail::ScriptState` 里是**裸指针**且它自己没有析构，
+  /// 于是“换掉 impl_”这个动作（移动赋值）默认会变成一个泄漏。
+  /// 析构与移动赋值都走这里，只留一份释放逻辑。
+  auto release_runtime() noexcept -> void;
+
   std::unique_ptr<detail::ScriptState> impl_;
   ScriptLimits limits_{};
   ScriptStats stats_{};

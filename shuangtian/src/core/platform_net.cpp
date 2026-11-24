@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <fcntl.h>
+#include <netdb.h>   // `getaddrinfo`/`addrinfo`/`freeaddrinfo`（域名解析）
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>

@@ -384,6 +384,15 @@ class UiRoot : public HostFocus {
     if (removed) {
       hovered_ = nullptr;
       hover_chain_.clear();
+      // 提示目标与之同理：声明式重建（`clear_children` + 逐项重建）销毁了旧实例，
+      // 而 `hint_target_on_tree_` 仍是上一次 `prune` 的答案（“当时在树上”）。
+      // 不在这里失效，`update_hint` 的快路径就会拿**已释放**的指针去读 `hint()`
+      // ——实测 ASan 报在 `live_hint_target()`（heap-use-after-free）。
+      //
+      // 只作废“在树上”这个事实，**保留** `hint_target_` 的指针值不碰（不去解引用、
+      // 也不清 id 与计时）：按 id 重新定位是下一帧 `live_hint_target()` 的事，
+      // 而计时一清，声明式界面每帧重组都会重新等延时（实测：气泡一直不出来）。
+      hint_target_on_tree_ = false;
     }
     pointer_state_dirty_ = true;
   }
@@ -671,6 +680,13 @@ class UiRoot : public HostFocus {
   ///（`hint_target_->hint()` 读到空串 → 当成“没提示”直接 hide，计时跟着清零）。
   /// 存 id 就能在需要时从树上重新定位——id 是声明式稳定不变量，指针不是。
   std::string hint_target_id_{};
+  /// `hint_target_` 当前是否**确实在这棵树上**（由 `prune_stale_pointers` 写入）。
+  ///
+  /// `live_hint_target()` 的快路径要解引用 `hint_target_`，而它的调用点在
+  /// `prune_stale_pointers()` **之前**——没有这个标志就只能两种选择：
+  /// 每次悬停都全树遍历（贵），或者盲解引用悬垂指针（实测 ASan 报 UAF）。
+  /// 声明式每帧重组会 `clear_children()` 销毁元素，所以后者不是理论风险。
+  bool hint_target_on_tree_{false};
   /// 按 id 取当前目标（悬垂时返回 nullptr）。
   [[nodiscard]] auto live_hint_target() -> Element*;
   std::string hint_text_cache_{};       ///< 当前气泡文本（可断言面）

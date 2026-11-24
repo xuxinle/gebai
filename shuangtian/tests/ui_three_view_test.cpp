@@ -31,6 +31,14 @@ using st::ui::ThreeView;
 
 namespace {
 
+/// 测试共用一个真实主题：`RenderContext::theme` 是**引用**，用
+/// `*static_cast<const Theme*>(nullptr)` 造一个空引用本身就是 UB
+///（UBSan 报 “reference binding to null pointer”，一旦组件真读了主题字段就是 SEGV）。
+[[nodiscard]] auto test_theme() -> const st::ui::Theme& {
+  static const st::ui::Theme theme = st::ui::Theme::light();
+  return theme;
+}
+
 /// 三物体场景：球 + 盒 + 底座（与示例素材同形）。
 constexpr const char* kScene = R"js(
 const scene = new THREE.Scene();
@@ -67,7 +75,7 @@ auto make_view(float width = 640.0f, float height = 400.0f) -> std::unique_ptr<T
   auto view = std::make_unique<ThreeView>();
   view->set_id("viewport");
   view->load_script(kScene, "test-scene.js");
-  view->arrange(st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  view->arrange(st::ui::RenderContext{test_theme(),
                                       nullptr, 0.0, nullptr},
                 st::math::Rect{0.0f, 0.0f, width, height});
   return view;
@@ -166,7 +174,7 @@ ST_TEST(three_view_hover_picks_named_object) {
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
 
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
   std::string hit_name;
   std::uint64_t events_before = view->hover_events();
@@ -198,7 +206,7 @@ ST_TEST(three_view_hover_picks_named_object) {
 ST_TEST(three_view_click_selects_object) {
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
 
   // 先找一个能命中的点
@@ -243,7 +251,7 @@ ST_TEST(three_view_click_selects_object) {
 ST_TEST(three_view_drag_orbits_but_does_not_select) {
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
   const float yaw_before = view->camera_state().yaw;
 
@@ -273,7 +281,7 @@ ST_TEST(three_view_drag_orbits_but_does_not_select) {
 ST_TEST(three_view_wheel_zooms) {
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
   const float before = view->camera_state().distance;
 
@@ -304,7 +312,7 @@ ST_TEST(three_view_wheel_forward_zooms_in) {
   // 方向反了也照样绿（实测真踩到）。
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
   const float before = view->camera_state().distance;
 
@@ -326,7 +334,7 @@ ST_TEST(three_view_real_button_numbers_drive_orbit_and_pan) {
   // 按的也是 `0`，所以一直绿。
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
   const auto drag = [&](int button, st::math::Point to) {
     st::ui::Event down;
@@ -368,7 +376,7 @@ ST_TEST(three_view_double_click_returns_home) {
   // 双击回到初始视角（头文件里声明的交互契约）。
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
   const float home_yaw = view->camera_state().yaw;
 
@@ -496,7 +504,7 @@ scene;
 )js";
   auto view = std::make_unique<ThreeView>();
   ST_REQUIRE(view->load_script(kSpin, "spin.js"));
-  view->arrange(st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr), nullptr, 0.0,
+  view->arrange(st::ui::RenderContext{test_theme(), nullptr, 0.0,
                                      nullptr},
                 st::math::Rect{0.0f, 0.0f, 400.0f, 300.0f});
 
@@ -540,7 +548,7 @@ ST_TEST(three_view_pick_enabled_switch_works) {
   auto view = make_view(640.0f, 400.0f);
   view->frame_scene();
   view->set_pick_enabled(false);
-  const auto context = st::ui::RenderContext{*static_cast<const st::ui::Theme*>(nullptr),
+  const auto context = st::ui::RenderContext{test_theme(),
                                              nullptr, 0.0, nullptr};
 
   std::uint64_t events = view->hover_events();

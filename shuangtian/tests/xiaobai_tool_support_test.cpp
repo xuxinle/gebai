@@ -28,7 +28,10 @@ namespace tool = xiaobai::tool;
 
 ST_TEST(xiaobai_read_rejects_binary_by_nul_probe) {
   // 二进制：含裸 NUL（几乎所有二进制格式都有）
-  ST_CHECK(tool::looks_binary(std::string("PNG\x89\0\x1a\n", 9)));
+  // 字节表用**显式字符列表**表达：字符串字面量 `"...\0..."` 的可见长度与实际
+  // 字节数很容易写错（原先写 `std::string("PNG\x89\0\x1a\n", 9)` ——字面量只有
+  // 7 字节，多读 2 字节，ASan 报 global-buffer-overflow）。
+  ST_CHECK(tool::looks_binary(std::string{'P', 'N', 'G', '\x89', '\0', '\x1a', '\n'}));
   ST_CHECK(tool::looks_binary(std::string{'a', 'b', '\0', 'c'}));
 
   // 文本：UTF-8 中文、GBK 字节序列、UTF-16 都不含**裸** NUL 的文本形态

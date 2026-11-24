@@ -174,7 +174,25 @@ const std::optional<Tone> Element::kNoTone{};
 const std::optional<FontWeight> Element::kNoWeight{};
 
 Element::Element() = default;
-Element::~Element() = default;
+
+Element::~Element() {
+  // **析构期间先把子元素的 `parent_` 断开**。
+  //
+  // 为何必须有这道：`children_` 会在本类成员析构时逐个销毁，而子元素析构有可能
+  // 走 `mark_dirty()`（例：`NativeHost::~NativeHost` 调 `detach()` 解除嵌入，
+  // 那是必须做的事——否则外部窗口会挂在一个正在消失的窗口下）。而
+  // `mark_dirty` / `record_damage` 会沿 `parent_` 链向上写 `dirty_` 与 `extras()`
+  // ——**此时父元素（含本对象）已不在有效生命周期内**，那是 write-after-free
+  //（实测 ASan：`Element::record_damage()` 写已释放的 `Element::dirty_`，
+  //  调用栈 `NativeHost::~NativeHost` → `detach` → `mark_dirty`）。
+  //
+  // 断开后子元素沿链走一步就停（`parent_ == nullptr`），不碰任何已释放对象；
+  // 同时 `notify_structure_changed` 也不会再沿链找回本对象上报结构变化。
+  // `clear_children()` 里已有同样的处理，这里补的是“析构”这条路径。
+  for (auto& child : children_) {
+    if (child != nullptr) child->parent_ = nullptr;
+  }
+}
 
 auto Element::child_at(std::size_t index) const noexcept -> Element* {
   return index < children_.size() ? children_[index].get() : nullptr;

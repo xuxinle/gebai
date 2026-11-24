@@ -71,6 +71,10 @@
 
 #if !defined(_WIN32)
 
+// 非 Windows 分支要返回 `std::unique_ptr<Scene3D>`（GPU 三维腿的声明面），
+// 而 `gpu.hpp` 不含三维类型——那是 raster 的另一层。
+#include "st/raster/scene3d.hpp"
+
 namespace st::raster::gpu {
 
 auto available() noexcept -> bool { return false; }

@@ -1034,10 +1034,11 @@ class X11Backend final : public Backend {
       return unexpected(ErrorCode::Unsupported, "拿不到屏幕尺寸");
     }
     const float s = scale_ > 0.0f ? scale_ : 1.0f;
-    const int window_w = static_cast<int>(std::lround(static_cast<double>(current.width) * s));
-    const int window_h = static_cast<int>(std::lround(static_cast<double>(current.height) * s));
-    const int screen_w = static_cast<int>(std::lround(static_cast<double>(screen.width) * s));
-    const int screen_h = static_cast<int>(std::lround(static_cast<double>(screen.height) * s));
+    const double scale = static_cast<double>(s);
+    const int window_w = static_cast<int>(std::lround(static_cast<double>(current.width) * scale));
+    const int window_h = static_cast<int>(std::lround(static_cast<double>(current.height) * scale));
+    const int screen_w = static_cast<int>(std::lround(static_cast<double>(screen.width) * scale));
+    const int screen_h = static_cast<int>(std::lround(static_cast<double>(screen.height) * scale));
     // 居中数学与 Win32 共用一份纯函数（`shell::centered_origin`）。
     const math::IntPoint origin = centered_origin(
         math::IntRect{0, 0, window_w, window_h}, math::IntRect{0, 0, screen_w, screen_h});

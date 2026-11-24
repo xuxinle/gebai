@@ -367,12 +367,13 @@ struct SceneSlot {
     //
     // 所以这条判据必须保留在这里：**目标能零拷贝（Surface）才用 GPU**。
     // 等 ① 的零拷贝路径打通后，这个常量才会变成 true。
-    const char* previous = std::getenv("ST_SCENE3D_BACKEND");
-    const std::string saved = previous != nullptr ? previous : "";
-    const bool had = previous != nullptr;
-    if (!want_gpu_target) (void)::_putenv_s("ST_SCENE3D_BACKEND", "software");
+    const auto previous = st::fs::read_env("ST_SCENE3D_BACKEND");
+    if (!want_gpu_target) (void)st::fs::set_env("ST_SCENE3D_BACKEND", "software");
     auto created = st::raster::Scene3D::create(want_width, want_height);
-    if (!want_gpu_target) (void)::_putenv_s("ST_SCENE3D_BACKEND", had ? saved.c_str() : "");
+    if (!want_gpu_target) {
+      if (previous.has_value()) (void)st::fs::set_env("ST_SCENE3D_BACKEND", *previous);
+      else (void)st::fs::unset_env("ST_SCENE3D_BACKEND");
+    }
     if (!created.has_value()) {
       ST_LOG_WARN("裁云三维：建场景失败（{}×{}）：{}", want_width, want_height,
                   created.error().message);
