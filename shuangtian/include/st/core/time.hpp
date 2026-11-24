@@ -1,17 +1,24 @@
 #pragma once
 
-/// 时间与计时（`std::chrono` 封装）：单调时钟用于测量，系统时钟用于时间戳。
+/// 时间与计时：单调时钟用于测量，系统时钟用于时间戳。
+///
+/// ## 为何这个头**不** include `<chrono>`（2026-11 实测）
+///
+/// `<chrono>` 单个头的编译成本是 **1,488 ms**（空 TU 基线 259 ms），
+/// 而它被 **29 个 TU** 直接包含——头部成本因此长期挂在「足迹榜」前列。
+/// 但本头**一个 chrono 类型都不需要**：对外只需 `std::int64_t` 纳秒与毫秒，
+/// `now_ns()`/`unix_ms()` 的实现在 `time.cpp` 里（那里才 include `<chrono>`）。
+/// `SteadyClock`/`SystemClock` 两个别名原先在这里定义但**全库零使用**（已删）。
+///
+/// 纪律：本头新增依赖前先算一遍 `py -3 tools/tu_cost.py headers`——
+/// 它被 29 个 TU 拖，多一个重头就多 ×29。
 
-#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <string>
 #include <string_view>
 
 namespace st::time {
-
-using SteadyClock = std::chrono::steady_clock;
-using SystemClock = std::chrono::system_clock;
 
 /// 单调时钟当前值（纳秒，进程内相对基准）。
 [[nodiscard]] auto now_ns() noexcept -> std::int64_t;

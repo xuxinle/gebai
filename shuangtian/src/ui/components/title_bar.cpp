@@ -1,6 +1,7 @@
 #include "st/ui/components/title_bar.hpp"
 
 #include <algorithm>
+#include <format>  // std::format（PCH 里有，但单编译时必须自己包含；见 CONVENTIONS §10.3）
 #include <memory>
 #include <utility>
 

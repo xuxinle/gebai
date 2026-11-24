@@ -7,6 +7,10 @@
 namespace st::time {
 namespace {
 
+/// 与 `time.hpp` 的约定一致：`<chrono>` 只活在本翻译单元里，不上浮到头文件。
+using SteadyClock = std::chrono::steady_clock;
+using SystemClock = std::chrono::system_clock;
+
 /// 天数 → 公历年月日（Howard Hinnant 的 civil_from_days，全部整数运算，无平台时区依赖）。
 struct CivilDate {
   std::int64_t year{1970};

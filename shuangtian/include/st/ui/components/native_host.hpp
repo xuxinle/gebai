@@ -126,7 +126,7 @@ class NativeHost : public Element {
   /// 为什么要公开它：嵌入内容的像素不进 `framebuffer()`，这组读数是**唯一**能
   /// 判断“内容是否真的在跑、有没有落在 (0,0) 并填满宿主”的信息源。
   /// 应用层把它贴到界面上/日志里，才能让人（与自动化）看见嵌入物的真实状态。
-  [[nodiscard]] auto child_view_probe() const -> Element::ChildViewProbe;
+  [[nodiscard]] auto child_view_probe() const -> ChildViewProbe;
 
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
@@ -145,7 +145,7 @@ class NativeHost : public Element {
   /// 内容是否已经落在 (0,0) 且尺寸等于宿主（“真的就位了”的唯一判据）。
   [[nodiscard]] auto content_fits() const -> bool;
   /// 读宿主侧的嵌入状态（每次都要重新读——外部窗口可能已经没了）。
-  [[nodiscard]] auto probe() const -> Element::ChildViewProbe;
+  [[nodiscard]] auto probe() const -> ChildViewProbe;
 
   static constexpr float kDefaultHeight{360.0f};
   /// 嵌入/改尺寸后最多再重测多少帧（≈ 带上限的短收敛，不是常驻轮询）。

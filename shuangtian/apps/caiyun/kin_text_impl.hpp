@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string_view>  // CONVENTIONS §10.3：PCH 不是契约，单编译时必须自己包含
 #include <vector>
 
 namespace caiyun {

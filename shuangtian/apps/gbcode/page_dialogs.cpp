@@ -11,6 +11,14 @@
 #include <vector>
 
 #include "page.hpp"
+#include "st/ui/components/file_dialog.hpp"
+#include "st/ui/components/completion_popup.hpp"
+#include "st/ui/components/terminal.hpp"
+#include "st/ui/icon.hpp"
+#include "st/ui/components/tabs.hpp"
+#include "st/ui/components/split_view.hpp"
+#include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/window_frame.hpp"
 #include "shortcut_help.hpp"   // 快捷键单源表：帮助卡正文从它生成（BACKLOG 3982）
 #include "st/core/string.hpp"
 #include "st/ui/components/command_palette.hpp"

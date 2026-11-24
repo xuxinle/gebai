@@ -55,6 +55,7 @@ import { dataSubdir, log, setLogLevel } from "@gebai/sdk/node"
 import { FeishuConn } from "../feishu-bot/conn"
 import { ChannelRegistry, ChannelInputBridge, SentMessageRegistry, defaultChannelScanDirs } from "@gebai/channels"
 import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard, redirectUriProblems, loopbackRedirectHint } from "../core/session/persona-expiry"
+import { ApprovalBridge } from "../core/session/persona-approval"
 import { HumanSpeechWindow, yieldWindowFromEnv } from "../core/session/human-speech-window"
 import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
 import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
@@ -406,6 +407,70 @@ const events = new EventBus()
 const inputQueue = new SessionInputQueue()
   const subAgents = new SubAgentManager({ registry, preloadOverride: config.preloadSubAgents })
 
+  /**
+   * 相期卡片工具（惰性取）：交互桥与出站审核共用。
+   *
+   * 为何是函数而非快照：子Agent 发现/热加载是运行期的事，早期 defOf 为空、后来才有；
+   * 捕获空值会让桥永远弹不出卡（而日志上只会看到“相期未注册”）。
+   * 为何走子Agent 定义而不直接 import 相期源码：内置子Agent 是构建期打包的，
+   * 源码路径不属于 server 的可引用面（与 syncAuthCard 同模式）。
+   */
+  const xiangqiCardTool = (tool: "card_ask" | "card_dismiss"): import("../core/tools/persona-outbound-review").AskCardTool | null => {
+    const t = subAgents.defOf("xiangqi")?.tools?.[tool]
+    if (!t) return null
+    return {
+      execute: async (args, _ctx) => {
+        const r = await t.execute(args, _ctx as never)
+        // 收敛到卡片消费方期望的形状（ToolResult 宽类型 → 明确子集）
+        const d = r.data as
+          | { id?: string; delivered?: boolean; answered?: boolean; cleared?: boolean; answer?: { choice?: unknown } }
+          | undefined
+        return {
+          output: r.output,
+          data: {
+            ...(d?.id !== undefined ? { id: d.id } : {}),
+            ...(d?.delivered !== undefined ? { delivered: d.delivered } : {}),
+            ...(d?.answered !== undefined ? { answered: d.answered } : {}),
+            ...(d?.cleared !== undefined ? { cleared: d.cleared } : {}),
+            ...(d?.answer !== undefined ? { answer: d.answer } : {}),
+          },
+        }
+      },
+    }
+  }
+  /** 相期窗口此刻是否连着（控制器可能尚未构造：异常即视为未连）。 */
+  const xiangqiConnected = (): boolean => {
+    try {
+      return xiangqiController().isConnected()
+    } catch {
+      return false
+    }
+  }
+  /** 相期 `card_ask` 的惰性执行面：每次调用才解析工具（不捕获快照）。 */
+  const lazyAskCard: import("../core/tools/persona-outbound-review").AskCardTool = {
+    execute: async (args, ctx) => {
+      const t = xiangqiCardTool("card_ask")
+      if (!t) return { output: "相期未注册（xiangqi 子Agent 未发现）——无法推卡", data: { delivered: false, answered: false } }
+      return t.execute(args, ctx)
+    },
+  }
+  /**
+   * 撤卡（只撤指定 id）：镜像卡用它在**自己的等待结束时**把卡收回。
+   *
+   * 为何镜像要主动撤：网页那张卡先被作答时，引擎那边的交互已经结束，
+   * 而桌面这张还在等它自己的超时——用户看到一张“已经没用了”的卡，
+   * 再点一次只会得到“该请求已失效”。卡的寿命应当等于提问的寿命。
+   */
+  const dismissCard = async (id: string): Promise<void> => {
+    const t = xiangqiCardTool("card_dismiss")
+    if (!t) return
+    try {
+      await t.execute({ id }, {} as never)
+    } catch {
+      // 撤卡失败不影响主流程：卡留着最多是噪声，抛出会打断本轮交互的结论提交
+    }
+  }
+
   // ── 拟人模式的飞书用户凭据（进程级，跨会话常驻）──
   //
   // 必须建在渠道之前：渠道发消息时要用它（`as_user=true` 以用户本人名义发）。
@@ -708,30 +773,7 @@ const inputQueue = new SessionInputQueue()
     // - askCard：相期 card_ask（子Agent 定义取工具，与 syncAuthCard 同模式；
     //   惰性取 def——发现是异步的，启动早期为空时 gate 会如实拒绝并说明）
     // - pushAuthCard：授权失效时的主动弹卡通路（复用 syncAuthCard，已含去重/TTL/重推逻辑）
-    personaOutboundDeps.askCard = {
-      execute: async (args, _ctx) => {
-        const def = subAgents.defOf("xiangqi")
-        const ask = def?.tools?.card_ask
-        if (!ask) {
-          return {
-            output: "相期未注册（xiangqi 子Agent 未发现）——无法推审核卡",
-            data: { delivered: false, answered: false },
-          }
-        }
-        const r = await ask.execute(args, _ctx as never)
-        // 收敛到 gate 期望的形状（ToolResult 宽类型 → 明确子集）
-        const d = r.data as { id?: string; delivered?: boolean; answered?: boolean; answer?: { choice?: unknown } } | undefined
-        return {
-          output: r.output,
-          data: {
-            ...(d?.id !== undefined ? { id: d.id } : {}),
-            ...(d?.delivered !== undefined ? { delivered: d.delivered } : {}),
-            ...(d?.answered !== undefined ? { answered: d.answered } : {}),
-            ...(d?.answer !== undefined ? { answer: d.answer } : {}),
-          },
-        }
-      },
-    }
+    personaOutboundDeps.askCard = lazyAskCard
     personaOutboundDeps.pushAuthCard = async () => {
       const status = await creds.status()
       await syncAuthCard(status)
@@ -1034,7 +1076,11 @@ const inputQueue = new SessionInputQueue()
   let personaSources: import("@gebai/persona").EventSourceManager | null = null
   /** 渠道入站桥接（诊断计数；未启用时为 null）。 */
   let personaChannelBridge: ChannelInputBridge | null = null
-  /** 人格审批桥（把引擎审批/选择送到相期弹窗）。只在名单命中时才会真被用到，但始终装配干净。 */
+  /**
+   * 交互桥（把引擎的审批/选择请求送到相期桌面弹窗）：人格会话裁决、普通会话镜像。
+   *
+   * 不是人格模式的附属物——`GEBAI_INTERACT_VIA=xiangqi` 下它在未启用人格时也要装配。
+   */
   let approvalBridge: import("../core/session/persona-approval").ApprovalBridge | null = null
   /** 运行态快照（REST /api/v1/persona/state 与前端面板共用）。 */
   let personaState: (() => Promise<import("../core/session/persona-status").PersonaStateSnapshot>) | null = null
@@ -1086,7 +1132,6 @@ const inputQueue = new SessionInputQueue()
     const { collectPersonaState } = await import("../core/session/persona-status")
     const { SessionWorkerSpawner } = await import("../core/session/worker-spawner")
     const { createWorkerTools, createWorkerTaskBook } = await import("../core/session/worker-tools")
-    const { ApprovalBridge } = await import("../core/session/persona-approval")
     const { ScheduleControl } = await import("@gebai/persona")
 
     // 定时任务启停控制面：先载入落盘状态，再装读取器（否则首次 tick 会用空状态把全部当启用）。
@@ -1417,32 +1462,12 @@ const inputQueue = new SessionInputQueue()
       if (n > 0) log.info(`[gebai] 已恢复 ${n} 个人格会话绑定`)
     })
 
-    // ── 审批桥：只在 `ask` 档装配（工具执行要人点头时）──
+    // ── 会话归属与交互桥 ──
     //
-    // 为何是“桥”而不是“引擎里加个分支”：引擎只负责「发起询问 + 等结论」，
-    // 询问**送到哪里**是部署形态（网页/飞书/相期桌面），不该写进引擎。
-    // 人格场景的实际形态是：人不在终端前，但桌面常驻着相期窗口。
-    //
-    // ## 为何只在 ask 档装配（而不是每档都装）
-    //
-    // 缺省 `readonly` 的语义是「**工具执行不审，输出才审**」，而输出审核走
-    // `persona-outbound-review.ts`（独立开关、默认开）。若这里也订阅审批事件，
-    // 就会把“改个文件/跑个查询”也推成卡——那正是把人格卡死在无人值守里的原因。
-    //
-    // 只代理人**人格会话**：普通 web 会话有真前端，用户会自己在页面上点，
-    // 不判定的话会把网页里的审批重复推一张到桌面。
-    //
-    // ## 现在无条件装配
-    //
-    // 不再有“哪个档才装”的分支：工具默认全部不审批，只有 `askTools` 名单里的
-    // 工具会被引擎的 `forceApprovalFor` 钩子拦回来。不配名单就永远不会走到这里。
+    // 这一段只自负一件事：回答“这个会话属于哪个人格/分身”。它同时被引擎的
+    // `forceApprovalFor`（审批名单）与下文的交互桥（只在人格会话上裁决）用——
+    // 同一条判定不能两处各写一遍，所以返回**身份**而不只是 bool。
     {
-      // 注意：`approvalBridge` 是外层声明的变量（与本块共用）——不要再 let 一次，
-      // 那会遮蔽外层，导致外部读到的永远是 null。
-      // 只代理人**人格会话**：普通 web 会话有真前端，用户会自己点；
-      // 不判定的话会把网页里的审批重复推一张到桌面。
-      // 这一段同时被引擎的 `forceApprovalFor` 用（同一条判定，不能两处各写一遍）——
-      // 所以返回**身份**而不只是 bool：审批名单是按 persona/driver 不同而不同的。
       personaSessionIdentity = async (sid: string) => {
         const s = await store.load(sid, "admin").catch(() => null)
         if (s?.persona?.personaId) return { personaId: s.persona.personaId, driverId: s.persona.driverId }
@@ -1458,27 +1483,11 @@ const inputQueue = new SessionInputQueue()
         }
         return null
       }
-      approvalBridge = new ApprovalBridge({
-        engine: {
-          decideApproval: (sid, tcId, approve) => engine.decideApproval(sid, tcId, approve),
-          decideChoice: (sid, chId, selection) => engine.decideChoice(sid, chId, selection),
-          isPersonaSession: async (sid) => (await personaSessionIdentity(sid)) !== null,
-        },
-        deps: {
-          ...(personaOutboundDeps.askCard ? { askCard: personaOutboundDeps.askCard } : {}),
-          ...(personaOutboundDeps.isXiangqiConnected ? { isXiangqiConnected: personaOutboundDeps.isXiangqiConnected } : {}),
-          log: { info: log.info, warn: log.warn },
-        },
-      })
-      events.subscribe((ev) => {
-        // 只关心两类交互请求（其它事件零成本跳过）
-        if (ev.type !== "event.approval.request" && ev.type !== "event.choice.request") return
-        if (!ev.sessionId) return
-        approvalBridge!.onEvent({ type: ev.type, sessionId: ev.sessionId, payload: ev.payload })
-      })
-      // 启动时把“哪些分身的哪些工具会弹卡”逐条说清楚：
-      // 名单是**逐分身**的，一句“有名单/无名单”说不明白——而“我以为 sh 会被拦、
-      // 结果它直接执行了”是安全相关的事，必须可核。
+    }
+    // 启动时把“哪些分身的哪些工具会弹卡”逐条说清楚：
+    // 名单是**逐分身**的，一句“有名单/无名单”说不明白——而“我以为 sh 会被拦、
+    // 结果它直接执行了”是安全相关的事，必须可核。
+    {
       const globalList = askToolsForPure(process.env as Record<string, string | undefined>, "")
       const perDriver: string[] = []
       for (const p of personaCatalog?.all() ?? []) {
@@ -1736,6 +1745,53 @@ const inputQueue = new SessionInputQueue()
           `  已回滚为「拟人未启用」：入站事件只记日志。修好后重启即可，或把 GEBAI_PERSONA_<ID> 配置注释掉显式关闭。`,
       )
       if (err instanceof Error && err.stack) log.warn(`[gebai] 拟人装配堆栈：\n${err.stack}`)
+    }
+  }
+
+  // ── 交互桥：把引擎的审批/选择请求送到相期桌面弹窗 ──
+  //
+  // 为何是“桥”而不是“引擎里加个分支”：引擎只负责「发起询问 + 等结论」，
+  // 询问**送到哪里**是部署形态（网页/飞书/相期桌面），不该写进引擎。
+  //
+  // ## 两种姿态（桥内按会话性质分派）
+  //
+  // | 会话 | 姿态 | 相期送不到时 |
+  // |---|---|---|
+  // | 人格会话（无人值守，没有活人前端） | **裁决** | 拒绝（fail-closed） |
+  // | 普通会话 + `GEBAI_INTERACT_VIA=xiangqi` | **镜像** | 不提交（网页那张卡照旧可答） |
+  // | 普通会话（未开镜像） | 不介入（真前端自己弹） | — |
+  //
+  // ## 为何提到拟人块之外装配
+  //
+  // 镜像姿态（`GEBAI_INTERACT_VIA=xiangqi`）不是拟人模式的附属功能：它服务的就是
+  // “我人在别处、让 agent 自己跑”的普通会话。放在 `if (config.personaEnabled)` 里会让
+  // 「不配人格、只开镜像」的部署拿不到任何桌面弹窗，而那一组配置看着完全正常。
+  {
+    approvalBridge = new ApprovalBridge({
+      engine: {
+        decideApproval: (sid, tcId, approve) => engine.decideApproval(sid, tcId, approve),
+        decideChoice: (sid, chId, selection) => engine.decideChoice(sid, chId, selection),
+        isPersonaSession: async (sid) => (await personaSessionIdentity(sid)) !== null,
+      },
+      deps: {
+        askCard: lazyAskCard,
+        isXiangqiConnected: xiangqiConnected,
+        ...(config.interactVia === "xiangqi" ? { mirrorAll: true, dismissCard } : {}),
+        log: { info: log.info, warn: log.warn },
+      },
+    })
+    // 只关心两类交互请求（其它事件零成本跳过）；两路事件都只走**一个**桥，
+    // 避免两处各推一张卡（用户在窗口上看到两张一样的卡，还得自己判断哪张有效）。
+    events.subscribe((ev) => {
+      if (ev.type !== "event.approval.request" && ev.type !== "event.choice.request") return
+      if (!ev.sessionId) return
+      approvalBridge!.onEvent({ type: ev.type, sessionId: ev.sessionId, payload: ev.payload })
+    })
+    if (config.interactVia === "xiangqi") {
+      log.info(
+        `[gebai] 交互通道：相期（GEBAI_INTERACT_VIA=xiangqi）——每一处问人的同时推一张桌面卡；` +
+          `网页那张照旧可答，任一处作答即生效（相期没开/超时/被清除时不代你裁决）`,
+      )
     }
   }
 
@@ -2057,21 +2113,24 @@ const inputQueue = new SessionInputQueue()
 
   // ── 相期桌面窗口拉起（方案 B）──
   //
-  // 目标：“拟人模式 agent 服务一启动，相期就在”。窗口是独立 C++ 桌面程序
+  // 目标：“需要用桌面弹窗问人时，相期就在”。窗口是独立 C++ 桌面程序
   // `xiangqi.exe`，作为 WS 客户端连**主服务端口**的 `/xiangqi`（不是独立 7717）。
   //
-  // 何时拉起：仅在**本地形态**（auth=local，桌面/开发部署）且拟人模式启用时——
+  // 何时拉起：**本地形态**（auth=local，桌面/开发部署）且以下任一 ——
+  // - 拟人模式启用（人格/出站审核靠它问人）；
+  // - `GEBAI_INTERACT_VIA=xiangqi`（每一处问人都要推桌面卡，没窗口这个开关等于没开）。
   // 服务模式下没有用户的桌面，拉起窗口无处可放。
   //
   // 可配置：`XIANGQI_BIN` 覆盖 exe 路径（缺省按部署副本/仓库标记探测，见 boot/xiangqi-launch）；
   // `XIANGQI_AUTO=off` 显式关闭（不想让服务替你开窗口时）。
   //
   // 失败策略：找不到/启动失败只记日志，绝不阻断服务——相期是附加提醒面，
-  // 没有它时授权卡仍走 REST 链接降级（`/api/v1/persona/status` 的 authorizeUrl）。
+  // 没有它时网页前端仍能回答一切（镜像姿态从不代用户裁决）。
   const launchXiangqi = async (port: number): Promise<void> => {
     // 出站审核的自动重启引用（persona 块里声明，此处填充——启动即生效）
     launchXiangqiRef = launchXiangqi
-    if (!config.personaEnabled || config.auth !== "local") return
+    if (config.auth !== "local") return
+    if (!config.personaEnabled && config.interactVia !== "xiangqi") return
     const plan = planXiangqiLaunch({
       gebaiHome: config.gebaiHome,
       // 服务自身所在目录：源码形态 = packages/server/src/boot，dist 形态 = packages/server/dist

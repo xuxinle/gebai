@@ -97,6 +97,7 @@
 
 
 #include "page.hpp"
+#include "st/ui/components/markdown_view.hpp"
 #include "page_data.hpp"
 #include "session_store.hpp"   // 会话恢复（restore_session 的入参类型）
 

@@ -59,13 +59,13 @@ void NativeHost::set_placeholder_text(std::string text) {
   mark_dirty();
 }
 
-auto NativeHost::probe() const -> Element::ChildViewProbe {
+auto NativeHost::probe() const -> ChildViewProbe {
   const HostFocus* owner = host();
   if (owner == nullptr) return {};
   return owner->host_child_view_probe();
 }
 
-auto NativeHost::child_view_probe() const -> Element::ChildViewProbe { return probe(); }
+auto NativeHost::child_view_probe() const -> ChildViewProbe { return probe(); }
 
 auto NativeHost::attached() const -> bool {
   // 读**宿主侧真实状态**而不是本地 `child_ != nullptr`：

@@ -1,5 +1,18 @@
 /**
- * 人格运行的**审批桥**：把引擎的审批请求 / 选择请求送到相期窗口，等人点。
+ * 交互桥：把引擎的审批请求 / 选择请求送到相期窗口，等人点。
+ *
+ * 两种姿态，按会话性质分派（同一份代码，同一套卡片与结论通道）：
+ *
+ * | 会话 | 姿态 | 相期送不到时 | 用户「全部清除」 |
+ * |---|---|---|---|
+ * | 人格会话（无人值守，没有活人前端） | **裁决** | 拒绝（fail-closed） | 拒绝 |
+ * | 普通会话 + `GEBAI_INTERACT_VIA=xiangqi` | **镜像** | 什么都不做（网页那张卡还在） | 什么都不做 |
+ * | 普通会话（未开镜像） | 不介入 | — | — |
+ *
+ * 镜像姿态的存在理由：用户想让 agent 纯后台工作、只盯桌面弹窗。但网页前端**同时**
+ * 还拿着同一张卡——两条通路先到者胜。所以镜像只把**明确的作答**回传引擎，
+ * 未送达/超时/清除一律不提交：那些情况下用户在网页上仍可作答，替他把话说了
+ * 等于让一张刷新掉的页面否决掉他本人的决定。
  *
  * ## 为什么必须有这一层
  *
@@ -26,7 +39,7 @@
  *
  * ## 三条工程约束（都是真实事故形态）
  *
- * 1. **相期不在 ≠ 可以放行**：送不到就**拒绝**并说明原因（fail-closed）。
+ * 1. **相期不在 ≠ 可以放行**（仅裁决姿态）：送不到就**拒绝**并说明原因（fail-closed）。
  *    反过来「送不到就放行」会让一张送不出去的卡变成一张空白支票。
  * 2. **同一个 toolCallId 只问一次**：引擎在审批被拒/超时后会重试同一调用（`retries` 递增），
  *    每次都推一张卡会把窗口刷成瀑布。已知结论的（已批准/已拒绝）按结论回答。
@@ -65,8 +78,27 @@ export interface ApprovalBridgeDeps {
   isXiangqiConnected?: () => boolean
   /** 等待答复时限（毫秒，缺省 5 分钟；与引擎审批超时对齐）。 */
   waitMs?: number
+  /**
+   * 镜像姿态开关（`GEBAI_INTERACT_VIA=xiangqi`）：非人格会话的交互也推一张相期卡。
+   *
+   * 只回传**明确的作答**——未送达 / 超时 / 用户清除一律不提交结论，
+   * 让网页前端那条通路继续有效（两条路先到者胜，不是互相否决）。
+   */
+  mirrorAll?: boolean
+  /**
+   * 撤掉一张已推出的卡（镜像用）：提问已经结束时，桌面那张不该独立活到自己的超时。
+   *
+   * 不传 = 卡留在窗口上直到用户处理或引擎侧超时（可接受，但会积死卡）。
+   */
+  dismissCard?: (id: string) => Promise<void> | void
   log?: { info(msg: string): void; warn(msg: string): void }
 }
+
+/** 镜像卡片的来源标签（与人格卡的「人格审批」区分，用户一眼看出这是他自己那条会话）。 */
+export const MIRROR_FROM = "歌白"
+
+/** 镜像卡片正文里计划全文的上限（相期卡片可滚动，但一段超长正文会挤掉判断所需的信息）。 */
+const PLAN_BODY_MAX = 4000
 
 /** 默认等待时限：与引擎 `APPROVAL_TIMEOUT` 对齐（5 分钟）。 */
 export const DEFAULT_APPROVAL_WAIT_MS = 5 * 60 * 1000
@@ -153,7 +185,7 @@ export interface ApprovalRequest {
   personaName?: string
 }
 
-/** 一次选择请求（ask 选项分支）。 */
+/** 一次选择请求（ask 选项分支 / 计划审批）。 */
 export interface ChoiceRequest {
   sessionId: string
   choiceId: string
@@ -161,6 +193,25 @@ export interface ChoiceRequest {
   options: unknown[]
   multi: boolean
   personaName?: string
+  /** 计划审批载荷（ask 计划分支）：选项固定为批准/拒绝，卡片正文带计划全文。 */
+  plan?: { title: string; content: string; path: string }
+}
+
+/** 计划载荷形态校验（事件载荷是不可信 JSON，字段缺一个就不当计划卡处理）。 */
+function isPlanPayload(v: unknown): v is { title: string; content: string; path: string } {
+  if (typeof v !== "object" || v === null) return false
+  const o = v as { title?: unknown; content?: unknown; path?: unknown }
+  return typeof o.title === "string" && typeof o.content === "string" && typeof o.path === "string"
+}
+
+/** 选项规范化：引擎的 options 可能是字符串或 `{title,description}`（与 ask 工具同口径）。 */
+export function normalizeChoiceOptions(raw: unknown[]): Array<{ label: string; value: string; hint?: string }> {
+  return raw.map((o, i) => {
+    if (typeof o === "string") return { label: o, value: o }
+    const obj = o as { title?: unknown; description?: unknown }
+    const label = obj?.title !== undefined ? String(obj.title) : `选项 ${i + 1}`
+    return { label, value: label, ...(obj?.description !== undefined ? { hint: String(obj.description) } : {}) }
+  })
 }
 
 /**
@@ -216,6 +267,7 @@ export class ApprovalBridge {
         options: Array.isArray(p.options) ? p.options : [],
         multi: p.multi === true,
         ...(typeof p.personaName === "string" ? { personaName: p.personaName } : {}),
+        ...(isPlanPayload(p.plan) ? { plan: p.plan } : {}),
       })
     }
   }
@@ -230,11 +282,72 @@ export class ApprovalBridge {
     return task
   }
 
+  /**
+   * 镜像一次审批请求（普通会话 + `GEBAI_INTERACT_VIA=xiangqi`）：把网页里那张审批卡再推一张到桌面。
+   *
+   * ## 为何与裁决路径分开写
+   *
+   * 看着像同一件事，差在**送不到时怎么办**：
+   *
+   * | 情况 | 裁决（人格会话） | 镜像（普通会话） |
+   * |---|---|---|
+   * | 相期没连 / 卡没送达 | 拒绝（fail-closed） | **不提交**（网页那张还在） |
+   * | 超时 | 拒绝（这一轮不能永远挂着） | **不提交**（引擎自己的超时仍然是 5 分钟） |
+   * | 用户「全部清除」 | 拒绝（已明确没作答） | **不提交**（清桌面卡 ≠ 否决网页） |
+   *
+   * 镜像只负责把**明确的点击**送出去（批准/驳回）。把“没看到”当成“拒绝”在普通会话里是错的：
+   * 用户此刻可能正在网页上作答，桌面这一份只是个便捷入口。
+   */
+  private async mirrorApproval(req: ApprovalRequest): Promise<void> {
+    const ask = this.deps.askCard
+    if (!ask) return
+    // 相期没连就不推（推也是写入没人读的降级目录，还会白等一轮）
+    if (this.deps.isXiangqiConnected && !this.deps.isXiangqiConnected()) return
+
+    const retryNote = req.retries && req.retries > 0 ? `\n\n（第 ${req.retries} 次询问同一操作）` : ""
+    let res: { data?: { id?: string; delivered?: boolean; answered?: boolean; cleared?: boolean; answer?: { choice?: unknown } } }
+    try {
+      res = await ask.execute(
+        {
+          kind: "choice",
+          title: `请求${describeTool(req.tool)}`,
+          from: MIRROR_FROM,
+          body:
+            `**工具**：\`${req.tool}\`\n\n` +
+            `**参数**：\n\`\`\`\n${summarizeArgs(req.args)}\n\`\`\`\n\n` +
+            `批准后它将继续执行；驳回则这一轮会放弃这个操作。\n\n` +
+            `（网页里也有一张同样的卡，任一处点一下即可）${retryNote}`,
+          options: [
+            { label: "批准", value: "approve" },
+            { label: "驳回", value: "reject" },
+          ],
+          wait_ms: this.deps.waitMs ?? DEFAULT_APPROVAL_WAIT_MS,
+        },
+        {},
+      )
+    } catch (err) {
+      // 推卡抛错：只记日志。普通会话有人看着，不提交结论让网页那张继续可选
+      this.deps.log?.warn(`[mirror:approval] 推卡失败（不提交结论）: ${String((err as Error)?.message || err)}`)
+      return
+    }
+    const data = res.data ?? {}
+    // 本轮提问已结束（可能已在网页上作答，也可能超时）：桌面那张卡不该继续挂着。
+    if (typeof data.id === "string" && data.id !== "") void this.deps.dismissCard?.(data.id)
+    if (data.delivered === false || data.answered !== true || data.cleared === true) return
+    const choice = String((data.answer as { choice?: unknown } | undefined)?.choice ?? "")
+    if (choice !== "approve" && choice !== "reject") return
+    const approved = choice === "approve"
+    this.verdicts.set(`${req.sessionId}:${req.toolCallId}`, approved ? "approved" : "rejected")
+    this.deps.log?.info(`[mirror:approval] ${req.tool}（${req.toolCallId}）→ ${approved ? "批准" : "驳回"}`)
+    await this.decide(req.sessionId, req.toolCallId, approved, `mirror:${choice}`)
+  }
+
   private async doApproval(req: ApprovalRequest): Promise<void> {
-    // ① 只代理人**人格会话**：普通 web 会话有真前端，用户会自己在页面上点。
-    //    不判定的话，所有人格之外的会话也会往桌面弹卡（把网页里的审批重复推一遍）。
+    // ① 先判会话性质：人格会话走**裁决**（无人值守，相期是唯一能问到人的地方）；
+    //    普通 web 会话默认不介入（有真前端）；开了镜像则走**镜像**（多推一张到桌面）。
     const isPersona = await this.safeIsPersona(req.sessionId)
-    if (!isPersona) return
+    if (!isPersona && this.deps.mirrorAll !== true) return
+    if (!isPersona) return this.mirrorApproval(req)
 
     // ② 走到这里就说明**名单命中**（名单外的工具根本不会被引擎拦回来），直接问人。
     // 旧实现在这里还有一段“按档位放行/拒绝”的分支，那些档位已取消：
@@ -325,7 +438,8 @@ export class ApprovalBridge {
 
   private async doChoice(req: ChoiceRequest): Promise<void> {
     const isPersona = await this.safeIsPersona(req.sessionId)
-    if (!isPersona) return
+    if (!isPersona && this.deps.mirrorAll !== true) return
+    if (!isPersona) return this.mirrorChoice(req)
 
     // 选择请求（模型的 `ask` 工具）与审批名单无关：它本身就是“模型想听人拿主意”，
     // 应该照实弹出选项。旧实现在这里还按档位提前回 null，已随档位一起删。
@@ -333,12 +447,7 @@ export class ApprovalBridge {
     if (!ask) return // 没卡工具：不干预，等引擎自己的超时（拒绝语义）
 
     // 选项规范化：引擎的 options 可能是字符串或 {title,description}（与 ask 工具同口径）
-    const options = req.options.map((o, i) => {
-      if (typeof o === "string") return { label: o, value: o }
-      const obj = o as { title?: unknown; description?: unknown }
-      const label = obj?.title !== undefined ? String(obj.title) : `选项 ${i + 1}`
-      return { label, value: label, ...(obj?.description !== undefined ? { hint: String(obj.description) } : {}) }
-    })
+    const options = normalizeChoiceOptions(req.options)
     if (!options.length) return
 
     const who = req.personaName ? `人格「${req.personaName}」` : "人格"
@@ -374,6 +483,73 @@ export class ApprovalBridge {
     await this.safeDecideChoice(req.sessionId, req.choiceId, picked)
   }
 
+  /**
+   * 镜像一次选择请求（普通会话 + `GEBAI_INTERACT_VIA=xiangqi`）。
+   *
+   * 与裁决路径同样只在**明确作答**时提交：超时/未送达/清除都不提交，网页那张卡照旧可答。
+   *
+   * 多选（`multi`）的降级：相期的卡片是“点一下就答”，没有“勾选多项再提交”的形态。
+   * 所以点选一项就按“只选了它”提交（`["该项"]`）——那是多选的一个**合法**答案，
+   * 而不是伪造。卡上写明这一限制，并把“要选多项”引导到网页。
+   */
+  private async mirrorChoice(req: ChoiceRequest): Promise<void> {
+    const ask = this.deps.askCard
+    if (!ask) return
+    if (this.deps.isXiangqiConnected && !this.deps.isXiangqiConnected()) return
+
+    // 计划审批（ask 计划分支）：卡片里嵌计划要点，选项固定为「批准执行 / 拒绝执行」——
+    // 与网页卡同一份文案契约（tool 侧按字面比较这两个值）。
+    if (req.plan) {
+      const clipped = req.plan.content.length > PLAN_BODY_MAX ? `${req.plan.content.slice(0, PLAN_BODY_MAX)}\n\n…（全文 ${req.plan.content.length} 字，见 ${req.plan.path}）` : req.plan.content
+      const res = await this.runMirrorCard({
+        kind: "choice",
+        title: `请审核计划「${req.plan.title}」`,
+        from: MIRROR_FROM,
+        body: `${clipped}\n\n批准后将按计划逐步执行；拒绝则这一轮停下。`,
+        options: [
+          { label: "批准执行", value: "批准执行" },
+          { label: "拒绝执行", value: "拒绝执行" },
+        ],
+      })
+      if (res === null) return
+      await this.safeDecideChoice(req.sessionId, req.choiceId, res)
+      return
+    }
+
+    const options = normalizeChoiceOptions(req.options)
+    if (!options.length) return
+    const multiNote = req.multi ? "\n\n（这是多选问题；在桌面点选将只提交你点的那一项，要选多项请在网页上选）" : ""
+    const picked = await this.runMirrorCard({
+      kind: "choice",
+      title: "在问你一件事",
+      from: MIRROR_FROM,
+      body: `${req.prompt}${multiNote}`,
+      options,
+    })
+    if (picked === null) return
+    await this.safeDecideChoice(req.sessionId, req.choiceId, req.multi ? [picked] : picked)
+  }
+
+  /** 推一张镜像卡，返回用户点的 value（未作答/送不到/出错 → null）。 */
+  private async runMirrorCard(spec: { kind: "choice"; title: string; from: string; body: string; options: Array<{ label: string; value: string; hint?: string }> }): Promise<string | null> {
+    const ask = this.deps.askCard
+    if (!ask) return null
+    try {
+      const res = await ask.execute({ ...spec, wait_ms: this.deps.waitMs ?? DEFAULT_APPROVAL_WAIT_MS }, {})
+      const data = res.data ?? {}
+      // 卡已推到窗口上：不管结论如何，本轮的提问已经结束（引擎那边可能已在网页上被作答，
+      // 或已超时）——卡不该比提问活得更久。撤卡失败不影响下面返回结论。
+      const cardId = data.id
+      if (typeof cardId === "string" && cardId !== "") void this.deps.dismissCard?.(cardId)
+      if (data.delivered === false || data.answered !== true || data.cleared === true) return null
+      const value = String((data.answer as { choice?: unknown } | undefined)?.choice ?? "")
+      return value === "" ? null : value
+    } catch (err) {
+      this.deps.log?.warn(`[mirror:choice] 推选择卡失败（不提交结论）: ${String((err as Error)?.message || err)}`)
+      return null
+    }
+  }
+
   /** 诊断：已记住的结论条数。 */
   stats(): { remembered: number; inflight: number } {
     return { remembered: this.verdicts.size(), inflight: this.inflight.size }
@@ -396,7 +572,7 @@ export class ApprovalBridge {
     }
   }
 
-  private async safeDecideChoice(sessionId: string, choiceId: string, selection: string | null): Promise<void> {
+  private async safeDecideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<void> {
     try {
       await this.engine.decideChoice(sessionId, choiceId, selection)
     } catch (err) {

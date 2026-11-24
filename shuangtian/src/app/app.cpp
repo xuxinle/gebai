@@ -326,7 +326,7 @@ inline constexpr std::size_t kLogLineCapacity = 512;
 ///
 /// ## 为何两个结构不合并
 ///
-/// 与 `Element::ChildViewProbe` / `shell::ChildViewProbe` 同一先例：两边各留一份，
+/// 与 `ChildViewProbe` / `shell::ChildViewProbe` 同一先例：两边各留一份，
 /// 字段一一对应。合并的唯一办法是让 ui 包含 shell（方向反了）。
 class WebViewPortAdapter final : public ui::WebViewPort {
  public:
@@ -1999,9 +1999,9 @@ auto Application::start() -> Status {
           backend_ptr->sync_child_view(child, bounds, clip);
         },
         [backend_ptr](void* child) { backend_ptr->dismiss_child_view(child); },
-        [backend_ptr]() -> ui::Element::ChildViewProbe {
+        [backend_ptr]() -> ui::ChildViewProbe {
           const shell::ChildViewProbe probe = backend_ptr->child_view_probe();
-          ui::Element::ChildViewProbe out;
+          ui::ChildViewProbe out;
           out.attached = probe.attached;
           out.title_bar_height = probe.title_bar_height;
           out.content_x = probe.content_x;

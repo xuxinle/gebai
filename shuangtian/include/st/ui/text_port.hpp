@@ -13,7 +13,7 @@
 
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
-#include "st/raster/canvas.hpp"
+#include "st/raster/surface.hpp"  // 只用 `raster::Surface&`（具名引用）；原先拖的是整个 canvas.hpp
 #include "st/ui/style.hpp"  // FontWeight（合成加粗档位）
 
 namespace st::ui {

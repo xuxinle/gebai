@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <format>  // std::format（PCH 里有，但单编译时必须自己包含；见 CONVENTIONS §10.3）
 #include <span>
 #include <utility>
 

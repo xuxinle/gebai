@@ -86,7 +86,7 @@ void CommandPalette::grab_focus() {
   // on_submit 提交），拿它当“拿焦点”会当场触发一次提交。
   if (input_ == nullptr) return;
   // 类型化宿主契约（原先 `owner_as<UiRoot>()` 是 `void*` + `static_cast`：
-  // 转到错误类型是静默 UB；现在走 `Element::HostFocus`，写错即编译错误）。
+  // 转到错误类型是静默 UB；现在走 `HostFocus`，写错即编译错误）。
   if (auto* host = this->host(); host != nullptr) {
     (void)host->set_keyboard_focus(input_);
     return;

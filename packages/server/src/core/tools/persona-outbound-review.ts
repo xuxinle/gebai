@@ -44,12 +44,17 @@ import type { ToolContext } from "../base/types"
 import { parsePersonaEnv } from "@gebai/persona"
 import { isFeishuTarget, instanceTypesOf } from "./persona-outbound"
 
-/** 相期 card_ask 工具的最小执行面（注入形态；compose 从 subAgents.defOf 取）。 */
+/** 相期 card_ask 工具的最小执行面（注入形态；compose 从 subAgents.defOf 取）。
+ *  `cleared` = 用户点「全部清除」把卡消了（未作答）：与“超时”同为 `answered:false`，
+ *  但它是一个**已知的人为动作**，消费方可以据此写更准确的话（而不是“没人理”）。 */
 export interface AskCardTool {
   execute(
     args: Record<string, unknown>,
     ctx: unknown,
-  ): Promise<{ output: string; data?: { id?: string; delivered?: boolean; answered?: boolean; answer?: { choice?: unknown } } }>
+  ): Promise<{
+    output: string
+    data?: { id?: string; delivered?: boolean; answered?: boolean; cleared?: boolean; answer?: { choice?: unknown } }
+  }>
 }
 
 /**

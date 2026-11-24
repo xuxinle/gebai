@@ -26,7 +26,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 19> kRules{{
+constexpr std::array<RuleSpec, 20> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -167,6 +167,27 @@ constexpr std::array<RuleSpec, 19> kRules{{
     // 或 `set_variant|set_elevation|...` 的**新声明**。
     // 合法写法是 `using Variant = st::ui::Variant;`（同名即同一份词表）。
     {"L19", "组件不得自定义与样式系统同名的属性面（用 using X = st::ui::X）", ""},
+    // L20：**文件规模与编译成本**（提示级；存量登记制）
+    //
+    // 为什么需要它（2026-11 实测，全库 312 个 TU 完整 `-c -O1` 扫描）：
+    // 按行数整改是**错的**。实测：`platform_d3d11.cpp` 6,610 行 8.2 s，
+    // 而 `src/ui/dsl_component_imports.cpp` **52 行**要 6.9 s（它 include 了
+    // `components/all.hpp`）；`src/core/platform_wait.cpp` **99 行** 6.7 s；
+    // `st/core/time.hpp` **66 行**竟要 1,984 ms（纯被 `<chrono>` 拖累，
+    // 而空 TU 基线只有 259 ms）。
+    // 更关键的反例：`apps/gbcode` 的 page 系列**已经按职责拆成 8 个文件**，
+    // 而它们**每个都重**（10.1 / 10.0 / 9.9 / 9.3 / 9.1 s）——因为每个都
+    // `#include "page.hpp"`（38 个 include）。拆 8 份 = 把同一个 include 面付了 8 遍。
+    //
+    // 所以本条**只管"文件太大是个信号"，不承诺拆了就快**。真正的判据在
+    // `CONVENTIONS.md` §11：`单头重量 × 被包含 TU 数` 才是成本。
+    // 大规模整改前先跑 `tools/compile_eff.py --scan`。
+    //
+    // 为何提示级 + 存量登记制：现有 71 个文件已超线。做成阻断级会让 `st lint`
+    // 立刻全红，"一上来就红的规则"必然被整体关掉——那比没有更糟。
+    // 真正的强制由清单侧门禁承担：`st.pkg` 的 `lint.file-lines` 登记的既有超标文件
+    // 只许变小不许变大（见 `check_file_lines`）。
+    {"L20", "文件过大信号（>1500 行 / 头文件 >600 行）——先量成本再决定是否拆", "", true},
 }};
 
 // 词法净化（去注释 / 去字符串内容）已抽到 `st/pkg/cpp_lex.hpp` 共用：
@@ -690,6 +711,45 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
   return violations;
 }
 
+/// L20：**文件规模信号**（提示级）——超线的文件先量成本再决定是否拆。
+///
+/// ## 为何是专用检查而不是单行正则
+///
+/// 判据是**整个文件的行数**，不看任何一行。并需区分体制（实现文件 1500 / 头文件 600）
+/// ——头文件更严，因为它的成本还要乘上被包含的 TU 数。
+///
+/// ## 为何只报第一行
+///
+/// 一个 6,610 行的文件值得说一次，不值得说 6,610 次。报在行 1，附真实行数。
+///
+/// ## 阈值从哪里来（实测依据，不是拍的）
+///
+/// 全库 312 个 TU 扫描后的分布：>1500 行共 71 个（.cpp 51 / .hpp 20）。
+/// 而成本与行数的相关性很弱——`time.hpp` 66 行却要 1,984 ms。
+/// 所以阈值只用来**挑出值得看一眼的文件**，不用来断言“很慢”。
+[[nodiscard]] auto check_file_lines(const std::vector<std::string_view>& lines, std::string_view path,
+                                   std::size_t& suppressed) -> std::vector<LintViolation> {
+  const std::string file_name = fs::file_name(path);
+  const bool is_header = file_name.ends_with(".hpp") || file_name.ends_with(".h");
+  const std::size_t limit = is_header ? 600 : 1500;
+  if (lines.size() <= limit) return {};
+  // 行内豁免：在文件头前 5 行写 `// lint-allow: L20 <原因>`（登记制）。
+  for (std::size_t index = 0; index < lines.size() && index < 5; ++index) {
+    if (has_allow_comment(lines[index], "L20")) {
+      ++suppressed;
+      return {};
+    }
+  }
+  LintViolation violation;
+  violation.file = std::string(path);
+  violation.line = 1;
+  violation.rule = "L20";
+  violation.text = std::format("{} 行（{}阈值 {}）；先量成本：py -3 tools/compile_eff.py --unit {}",
+                               lines.size(), is_header ? "头文件" : "实现文件", limit, path);
+  violation.advisory = true;
+  return {violation};
+}
+
 [[nodiscard]] auto scan_text(std::string_view path, std::string_view text, std::size_t& suppressed,
                              const LintExemptions& exemptions, std::size_t& manifest_suppressed)
     -> std::vector<LintViolation> {
@@ -739,6 +799,9 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
     violations.push_back(std::move(violation));
   }
   for (auto& violation : check_style_vocabulary_fork(lines, path, suppressed)) {
+    violations.push_back(std::move(violation));
+  }
+  for (auto& violation : check_file_lines(lines, path, suppressed)) {
     violations.push_back(std::move(violation));
   }
   return violations;

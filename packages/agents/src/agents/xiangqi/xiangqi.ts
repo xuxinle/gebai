@@ -63,7 +63,8 @@ export const envVars = [
   },
   {
     name: "XIANGQI_AUTO",
-    description: "`off` = 拟人模式启动时不自动拉起相期窗口；其余值或未设 = 自动拉起",
+    description:
+      "`off` = 启动时不自动拉起相期窗口（拟人模式或 `GEBAI_INTERACT_VIA=xiangqi` 本来会拉起）；其余值或未设 = 自动拉起",
   },
   {
     name: "XIANGQI_WAIT_MS",

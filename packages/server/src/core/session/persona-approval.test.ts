@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test"
 import { ApprovalBridge, describeTool, summarizeArgs, type AskCardToolLike } from "./persona-approval"
 
 /** 可编排的 AskCard 替身：记录每次调用，按预设回答。 */
-function makeAsk(reply: { delivered?: boolean; answered?: boolean; choice?: string; throw?: string }) {
+function makeAsk(reply: { delivered?: boolean; answered?: boolean; choice?: string; cleared?: boolean; id?: string; throw?: string }) {
   const calls: Array<Record<string, unknown>> = []
   const tool: AskCardToolLike = {
     async execute(args) {
@@ -26,8 +26,10 @@ function makeAsk(reply: { delivered?: boolean; answered?: boolean; choice?: stri
       return {
         output: "ok",
         data: {
+          id: reply.id ?? "card-1",
           delivered: reply.delivered !== false,
           answered: reply.answered === true,
+          ...(reply.cleared !== undefined ? { cleared: reply.cleared } : {}),
           ...(reply.choice !== undefined ? { answer: { choice: reply.choice } } : {}),
         },
       }
@@ -236,6 +238,125 @@ describe("审批桥：选择请求（ask 选项分支）", () => {
     await b.handleChoice(CH)
     expect(ask.calls).toHaveLength(0)
     expect(choices).toHaveLength(0)
+  })
+})
+
+describe("交互桥：镜像姿态（GEBAI_INTERACT_VIA=xiangqi）", () => {
+  /** 普通会话（非人格）的镜像用例：两者都传 mirrorAll。 */
+  function mirrorDeps(ask: AskCardToolLike, extra: Record<string, unknown> = {}) {
+    return { askCard: ask, mirrorAll: true, ...extra }
+  }
+
+  test("普通会话 + 未开镜像：完全不干预（网页自己弹）", async () => {
+    const ask = makeAsk({ answered: true, choice: "approve" })
+    const { engine, approvals } = makeEngine({ persona: false })
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool } })
+    await b.handleApproval(REQ)
+    expect(ask.calls).toHaveLength(0)
+    expect(approvals).toHaveLength(0)
+  })
+
+  test("普通会话 + 开镜像：批准 → 提交 approve=true", async () => {
+    const ask = makeAsk({ answered: true, choice: "approve" })
+    const { engine, approvals } = makeEngine({ persona: false })
+    const b = new ApprovalBridge({ engine, deps: mirrorDeps(ask.tool) })
+    await b.handleApproval(REQ)
+    expect(approvals).toEqual([{ sessionId: "s1", toolCallId: "tc1", approve: true }])
+    const body = String(ask.calls[0]!.body)
+    expect(body).toContain("rm -rf /tmp/x")
+    // 卡片必须说清“网页里也有一张”：否则用户以为只能在这里答，反而不敢离开
+    expect(body).toContain("网页里也有一张同样的卡")
+  })
+
+  test("普通会话 + 开镜像：超时/未送达/被清除 → **不提交**（网页那张还能答）", async () => {
+    for (const reply of [
+      { delivered: true, answered: false },
+      { delivered: false },
+      { delivered: true, answered: false, cleared: true },
+    ]) {
+      const ask = makeAsk(reply)
+      const { engine, approvals } = makeEngine({ persona: false })
+      const b = new ApprovalBridge({ engine, deps: mirrorDeps(ask.tool) })
+      await b.handleApproval(REQ)
+      expect(approvals).toHaveLength(0)
+    }
+  })
+
+  test("普通会话 + 开镜像：相期未连 → 连推都不推，也不给结论", async () => {
+    const ask = makeAsk({ answered: true, choice: "approve" })
+    const { engine, approvals } = makeEngine({ persona: false })
+    const b = new ApprovalBridge({ engine, deps: mirrorDeps(ask.tool, { isXiangqiConnected: () => false }) })
+    await b.handleApproval(REQ)
+    expect(ask.calls).toHaveLength(0)
+    expect(approvals).toHaveLength(0)
+  })
+
+  test("普通会话 + 开镜像：推卡抛错 → 不提交（异常不得变成裁定）", async () => {
+    const ask = makeAsk({ throw: "相期炸了" })
+    const { engine, approvals } = makeEngine({ persona: false })
+    const b = new ApprovalBridge({ engine, deps: mirrorDeps(ask.tool) })
+    await b.handleApproval(REQ)
+    expect(approvals).toHaveLength(0)
+  })
+
+  test("普通会话 + 开镜像：选择问题点选 → 原值回引擎；多选只交那一项", async () => {
+    const CH = { sessionId: "s1", choiceId: "c1", prompt: "用哪个方案？", options: ["甲", "乙"], multi: false }
+    const ask = makeAsk({ answered: true, choice: "乙" })
+    const { engine, choices } = makeEngine({ persona: false })
+    const b = new ApprovalBridge({ engine, deps: mirrorDeps(ask.tool) })
+    await b.handleChoice(CH)
+    expect(choices[0]!.selection).toBe("乙")
+
+    const askMulti = makeAsk({ answered: true, choice: "丙" })
+    const multiEngine = makeEngine({ persona: false })
+    const b2 = new ApprovalBridge({ engine: multiEngine.engine, deps: mirrorDeps(askMulti.tool) })
+    await b2.handleChoice({ ...CH, choiceId: "c2", options: ["丙", "丁"], multi: true })
+    // 多选也必须“有结果”：点了一项就是只选了它（不伪造多项，也不交空）
+    expect(multiEngine.choices[0]!.selection).toEqual(["丙"])
+    expect(String(askMulti.calls[0]!.body)).toContain("多选")
+  })
+
+  test("普通会话 + 开镜像：计划审批 → 批准/拒绝原样回引擎（与网页卡同一份字面契约）", async () => {
+    const plan = { title: "升级依赖", content: "- [ ] 先跑测试", path: "plans/plan-x.md" }
+    const ask = makeAsk({ answered: true, choice: "批准执行" })
+    const { engine, choices } = makeEngine({ persona: false })
+    const b = new ApprovalBridge({ engine, deps: mirrorDeps(ask.tool) })
+    await b.handleChoice({ sessionId: "s1", choiceId: "p1", prompt: "请审核计划", options: ["批准执行", "拒绝执行"], multi: false, plan })
+    expect(choices[0]!.selection).toBe("批准执行")
+    const spec = ask.calls[0]!
+    expect(String(spec.title)).toContain("升级依赖")
+    expect(String(spec.body)).toContain("先跑测试")
+    const opts = spec.options as Array<{ label: string; value: string }>
+    expect(opts.map((o) => o.value)).toEqual(["批准执行", "拒绝执行"])
+  })
+
+  test("普通会话 + 开镜像：提议结束后主动撤卡（卡不比提问活得久）", async () => {
+    const ask = makeAsk({ answered: true, choice: "approve", id: "card-abc" })
+    const dismissed: string[] = []
+    const { engine } = makeEngine({ persona: false })
+    const b = new ApprovalBridge({
+      engine,
+      deps: mirrorDeps(ask.tool, { dismissCard: (id: string) => void dismissed.push(id) }),
+    })
+    await b.handleApproval(REQ)
+    expect(dismissed).toEqual(["card-abc"])
+  })
+
+  test("人格会话（裁决）**不**主动撤卡：卡要留在窗口上等人点（引擎只超时不开除）", async () => {
+    const ask = makeAsk({ answered: true, choice: "approve", id: "card-p1" })
+    const dismissed: string[] = []
+    const { engine } = makeEngine()
+    const b = new ApprovalBridge({ engine, deps: { askCard: ask.tool, dismissCard: (id: string) => void dismissed.push(id) } })
+    await b.handleApproval(REQ)
+    expect(dismissed).toEqual([])
+  })
+
+  test("人格会话在镜像开关下仍走**裁决**姿态（超时 → 拒绝，而不是不提交）", async () => {
+    const ask = makeAsk({ delivered: true, answered: false })
+    const { engine, approvals } = makeEngine()
+    const b = new ApprovalBridge({ engine, deps: mirrorDeps(ask.tool) })
+    await b.handleApproval(REQ)
+    expect(approvals).toEqual([{ sessionId: "s1", toolCallId: "tc1", approve: false }])
   })
 })
 

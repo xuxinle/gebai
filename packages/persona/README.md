@@ -277,9 +277,10 @@ GEBAI_PERSONA_XIAOSHUANG_SUPPORT_SESSION_MAP=[{"when":"message","key":"{chat}-{t
    只传 `interactionMode: "none"` 的 deny 实际是“全部放行”。
 2. **`interactionMode` 不能是引擎缺省的 `realtime`**——它假定有前端，会让 `ask` 推无人看的卡并阻塞 5 分钟。
 
-审批桥（`core/session/persona-approval.ts`）**只在 `ask` 档装配**：其它档根本不订阅审批事件
-（否则就是“每步弹卡”的回潮）。四条硬规矩：fail-closed（相期不在 → 拒绝）、同一 `toolCallId`
-只问一次、超时不记结论、只代理人**人格会话**。
+交互桥（`core/session/persona-approval.ts`）**两套姿态**：人格会话走**裁决**（fail-closed：相期不在 → 拒绝；
+同一 `toolCallId` 只问一次；超时不记结论），普通会话在 `GEBAI_INTERACT_VIA=xiangqi` 下走**镜像**
+（只回传明确的点击；未送达/超时/被清除时不提交——网页那张卡照旧可答）。
+详见 `design/02-architecture-core.md` 的「交互桥」与「交互通道」。
 
 ## 定时任务：`driver.schedules`
 

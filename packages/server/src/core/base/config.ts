@@ -94,6 +94,14 @@ export interface ServerConfig {
   logLevel: "debug" | "info" | "warn" | "error"
   toolEnable?: string[]
   toolDisable?: string[]
+  /**
+   * 交互通道：`web`（缺省，只在网页前端弹卡）/ `xiangqi`（`GEBAI_INTERACT_VIA=xiangqi`）：
+   * **每一处问人同时推一张相期桌面卡**，用户可以只盯弹窗、不在网页坐着。
+   *
+   * 只管“问到人的通道”，不管“谁能答”：两条路并存，先到者胜。
+   * 相期没开 / 卡送不到 / 超时 / 用户清除时**不代用户裁决**，网页那张卡照旧可答。
+   */
+  interactVia: "web" | "xiangqi"
   selfModify: boolean
   gebaiHome: string
   binaryMode: boolean
@@ -418,6 +426,8 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     promptExtra: trim.prompt.extra,
     profile: trim.profile,
     selfModify: bool("GEBAI_SELF_MODIFY", false),
+  // 交互通道（GEBAI_INTERACT_VIA）：xiangqi = 每一处问人同时推一张相期桌面卡（只管通道，不管裁决权）
+  interactVia: env("GEBAI_INTERACT_VIA").trim().toLowerCase() === "xiangqi" ? "xiangqi" : "web",
     gebaiHome,
     binaryMode: isBinaryMode(),
     webDist: defaultWebDist,

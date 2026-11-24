@@ -27,6 +27,26 @@ describe("loadConfig 模式与密钥解析", () => {
     }
   })
 
+  test("GEBAI_INTERACT_VIA：缺省 web，xiangqi（大小写/空白宽容）开启，其余值回落 web", () => {
+    const prev = process.env.GEBAI_INTERACT_VIA
+    try {
+      delete process.env.GEBAI_INTERACT_VIA
+      expect(loadConfig().interactVia).toBe("web")
+      process.env.GEBAI_INTERACT_VIA = "xiangqi"
+      expect(loadConfig().interactVia).toBe("xiangqi")
+      process.env.GEBAI_INTERACT_VIA = " XiangQi "
+      expect(loadConfig().interactVia).toBe("xiangqi")
+      // 未知值不当作任何特殊通道（宁可不推卡，也不猜用户想要什么）
+      for (const bad of ["", "web", "feishu", "1", "true"]) {
+        process.env.GEBAI_INTERACT_VIA = bad
+        expect(loadConfig().interactVia).toBe("web")
+      }
+    } finally {
+      if (prev === undefined) delete process.env.GEBAI_INTERACT_VIA
+      else process.env.GEBAI_INTERACT_VIA = prev
+    }
+  })
+
   test("GEBAI_TASKS_ENABLED 默认开启，显式 false 关闭", () => {
     const prev = process.env.GEBAI_TASKS_ENABLED
     try {

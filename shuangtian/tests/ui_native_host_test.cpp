@@ -40,7 +40,9 @@
 
 using st::math::Rect;
 using st::math::Size;
+using st::ui::ChildViewProbe;
 using st::ui::Element;
+using st::ui::HostFocus;
 using st::ui::NativeHost;
 
 namespace {
@@ -77,7 +79,7 @@ constexpr std::uintptr_t kFakeChild2Addr = 0x5678;
 ///
 /// 这里最容易写成"永远返回 true"的假桩——那样"组件有没有真的检查返回值"就测不出来了。
 /// 所以 `supports` / `adopt_ok` / `attached` 都是**可编程**的，各用例自己摆。
-struct HostStub final : Element::HostFocus {
+struct HostStub final : HostFocus {
   bool supports{false};
   bool adopt_ok{true};
   /// 每次 `host_child_view_probe` 返回的 attached（模拟外部窗口还在/没了）。
@@ -89,7 +91,7 @@ struct HostStub final : Element::HostFocus {
   ///（CONVENTIONS.md §7.2：桩把差异抹平了）。
   int reflow_steps{0};
   /// 每次 probe 时内容相对宿主的偏移（由 `reflow_steps` 递减到 0）。
-  Element::ChildViewProbe probe_state{};
+  ChildViewProbe probe_state{};
 
   std::vector<void*> adopted{};
   std::vector<Rect> adopted_bounds{};
@@ -161,8 +163,8 @@ struct HostStub final : Element::HostFocus {
     probe_state = {};
   }
 
-  [[nodiscard]] auto host_child_view_probe() const -> Element::ChildViewProbe override {
-    Element::ChildViewProbe probe;
+  [[nodiscard]] auto host_child_view_probe() const -> ChildViewProbe override {
+    ChildViewProbe probe;
     probe.attached = attached;
     if (!attached) return probe;
     probe = probe_state;
@@ -205,7 +207,7 @@ struct Fixture {
         },
         [this](void* child, Rect bounds, Rect clip) { stub.host_sync_child_view(child, bounds, clip); },
         [this](void* child) { stub.host_dismiss_child_view(child); },
-        [this]() -> Element::ChildViewProbe { return stub.host_child_view_probe(); });
+        [this]() -> ChildViewProbe { return stub.host_child_view_probe(); });
 
     auto panel = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
     auto owned = std::make_unique<NativeHost>();

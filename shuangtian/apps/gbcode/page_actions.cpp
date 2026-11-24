@@ -18,6 +18,10 @@
 #include <vector>
 
 #include "page.hpp"
+#include "st/ui/components/terminal.hpp"
+#include "st/ui/components/file_dialog.hpp"
+#include "st/ui/components/window_frame.hpp"
+#include "st/ui/components/markdown_view.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/hash.hpp"
 #include "st/core/print.hpp"

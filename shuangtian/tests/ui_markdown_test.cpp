@@ -1207,7 +1207,7 @@ ST_TEST(md_view_table_wrap_keeps_all_cells_content) {
 ST_TEST(md_view_copy_action_prefers_selection) {
   // copy 动作：无选择 → 拷**原文**（源码）；有选择 → 拷**选中纯文本**。
   // 用 HostFocus 的剪贴板桩接住写入值（“谁把什么传给了剪贴板”）。
-  struct ClipboardHost : st::ui::Element::HostFocus {
+  struct ClipboardHost : st::ui::HostFocus {
     auto set_keyboard_focus(st::ui::Element*) -> bool override { return false; }
     auto host_clipboard_text() -> std::string override { return {}; }
     auto host_set_clipboard_text(std::string_view text) -> bool override {

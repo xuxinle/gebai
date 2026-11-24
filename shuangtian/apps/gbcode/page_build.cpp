@@ -10,6 +10,15 @@
 #include <vector>
 
 #include "page.hpp"
+#include "st/ui/components/window_frame.hpp"
+#include "st/ui/components/terminal.hpp"
+#include "st/ui/components/slow_content.hpp"
+#include "st/ui/components/tabs.hpp"
+#include "st/ui/components/split_view.hpp"
+#include "st/ui/components/markdown_view.hpp"
+#include "st/ui/icon.hpp"
+#include "st/ui/components/list.hpp"
+#include "st/ui/components/tree.hpp"
 #include "st/app/text_port.hpp"   // OffscreenTextPort（后台排版的独立缓存域）
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"

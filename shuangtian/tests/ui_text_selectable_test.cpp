@@ -36,7 +36,7 @@ using st::ui::RenderContext;
 using st::ui::Theme;
 
 /// 只实现本用例要用的两个宿主契约：给焦点、收剪贴板。
-class RecordingHost final : public st::ui::Element::HostFocus {
+class RecordingHost final : public st::ui::HostFocus {
  public:
   auto set_keyboard_focus(Element* element) -> bool override {
     focused_ = element;

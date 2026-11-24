@@ -28,27 +28,49 @@
 #include "st/search/search.hpp"  // 工作区文件枚举/内容搜索基础库
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
-#include "st/ui/components/completion_popup.hpp"
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/diff_view.hpp"
 #include "st/ui/components/feedback.hpp"
-#include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/input.hpp"
-#include "st/ui/components/list.hpp"
-#include "st/ui/components/menu.hpp"
-#include "st/ui/components/markdown_view.hpp"
-#include "st/ui/components/slow_content.hpp"
+#include "st/ui/components/menu.hpp"  // `dsl::menu_bar`/`dsl::menu_panel_overlay` 声明在此；`MenuBar*` 成员也由此转出声明
 #include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
-#include "st/ui/components/split_view.hpp"
-#include "st/ui/components/tabs.hpp"
-#include "st/ui/components/terminal.hpp"
 #include "st/ui/components/title_bar.hpp"
-#include "st/ui/components/tree.hpp"
-#include "st/ui/components/window_frame.hpp"
-#include "st/ui/dsl.hpp"
-#include "st/ui/icon.hpp"
+#include "st/ui/dsl.hpp"  // `DeclarativeHost` 不可前向（`unique_ptr` 成员需完整析构体）
+
+// ── 为何这里没有剩下的组件头（2026-11 实测，见 CONVENTIONS §11.7）──
+//
+// 本头原先包含 29 个组件头，其中一批**在本文件里零使用**——它们只是把 include 面
+// 摊给每个包含 `page.hpp` 的 .cpp。而六个 `page_*.cpp` 各自 9~10 s，
+// 正是在**付同一笔账**：审计测出 `page.hpp` 单独就有 4,457 ms 固定开销，
+// 占 `page_actions.cpp` 全部 include 成本的 96%。
+//
+// 现在按“谁用谁付”落位（每一条都核过本头的真实用法）：
+//   `markdown_view.hpp` → 本头只用 `MarkdownView*`（指针）⇒ **前向声明**
+//   `terminal.hpp` / `window_frame.hpp` / `menu.hpp` / `icon.hpp`
+//                       → 同上，只用指针 ⇒ 前向声明
+//   `slow_content.hpp`  → 本头零用 ⇒ 移到 `page_build.cpp`
+//   `file_dialog.hpp`   → 零用 ⇒ `page_actions.cpp` / `page_dialogs.cpp`
+//   `tabs.hpp`/`split_view.hpp` → 零用 ⇒ 用到它们的 .cpp
+//   `tree.hpp`/`list.hpp`/`completion_popup.hpp` → 零用 ⇒ 各自的 .cpp
+//
+// 纪律：在本头加一个 include 之前，先问“page.hpp 自己用不用它” ——
+// 只用指针就前向声明；零使用就放到真正用的那个 .cpp。
+
+// 前向声明：本头只存它们的**指针**（`Terminal*`/`MarkdownView*`…），
+// 不调其成员、不继承、不按值存 ⇒ 不需要完整类型。
+// 这是 `page.hpp` 减掉重头的关键（`markdown_view.hpp` 单独就要 3,311 ms）。
+//
+// ⚠ **必须写在 `namespace gbcode_ui` 外面**：写在里面会声明出
+// `gbcode_ui::Terminal`，它**遮蔽** `st::ui::Terminal`（`using namespace st::ui`），
+// 于是 .cpp 里 `Terminal*` 指向一个永远不完整的类型
+//（实测：`invalid use of incomplete type 'class gbcode_ui::Terminal'`）。
+namespace st::ui {
+class MarkdownView;
+class Terminal;
+class WindowFrame;
+}  // namespace st::ui
 
 namespace gbcode_ui {
 

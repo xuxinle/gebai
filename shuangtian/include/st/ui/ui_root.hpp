@@ -20,7 +20,7 @@
 
 namespace st::ui {
 
-class UiRoot : public Element::HostFocus {
+class UiRoot : public HostFocus {
  public:
   UiRoot();
   ~UiRoot();
@@ -218,7 +218,7 @@ class UiRoot : public Element::HostFocus {
   /// 否则隐藏窗口期间残留的 hover（如关闭按钮红色高亮）会带进下一次显示。
   /// 鼠标一旦真的移动，`dispatch(MouseMove)` 会按新位置重新 hover，不受影响。
   void clear_hover();
-  /// `Element::HostFocus` 的实现（子组件隔着 `element.hpp` 请求焦点时用）。
+  /// `HostFocus` 的实现（子组件隔着 `element.hpp` 请求焦点时用）。
   auto set_keyboard_focus(Element* element) -> bool override { return set_focus(element); }
   /// 当前**焦点环是否应该画出来**（键盘导航语义；组件画环前问它）。
   ///
@@ -265,7 +265,7 @@ class UiRoot : public Element::HostFocus {
     focus_ring_visible_ = value;
     on_focus_ring_changed();
   }
-  /// `Element::HostFocus` 的剪贴板实现：转发给 provider（`Application` 装的）。
+  /// `HostFocus` 的剪贴板实现：转发给 provider（`Application` 装的）。
   /// 没装 provider 时如实返回空串（headless 测试里粘贴路径自然降级，不会抢错）。
   [[nodiscard]] auto host_clipboard_text() -> std::string override {
     return clipboard_provider_ ? clipboard_provider_() : std::string{};
@@ -302,8 +302,8 @@ class UiRoot : public Element::HostFocus {
   void host_dismiss_child_view(void* child) override {
     if (child_view_dismiss_) child_view_dismiss_(child);
   }
-  [[nodiscard]] auto host_child_view_probe() const -> Element::ChildViewProbe override {
-    return child_view_probe_ ? child_view_probe_() : Element::ChildViewProbe{};
+  [[nodiscard]] auto host_child_view_probe() const -> ChildViewProbe override {
+    return child_view_probe_ ? child_view_probe_() : ChildViewProbe{};
   }
 
   /// 装原生子窗口 provider（`Application` 在拿到 backend 后接上）。
@@ -311,7 +311,7 @@ class UiRoot : public Element::HostFocus {
                                 std::function<bool(void*, math::Rect)> adopt,
                                 std::function<void(void*, math::Rect, math::Rect)> sync,
                                 std::function<void(void*)> dismiss,
-                                std::function<Element::ChildViewProbe()> probe) {
+                                std::function<ChildViewProbe()> probe) {
     child_view_supported_ = std::move(supported);
     child_view_adopt_ = std::move(adopt);
     child_view_sync_ = std::move(sync);
@@ -346,7 +346,7 @@ class UiRoot : public Element::HostFocus {
   /// 实现在 `ui_root.cpp`（需要遍历树，而元素类型在实现里）。
   void dispatch_webview_events(const std::vector<WebViewEvent>& events);
 
-  /// `Element::HostFocus::host_structure_changed` 的实现：内容树/浮层结构变了，
+  /// `HostFocus::host_structure_changed` 的实现：内容树/浮层结构变了，
   /// 命中链就可能变，而指针位置没动——下一帧按最后指针位置重算悬浮/光标。
   ///
   /// 它由 `Element::add_child`/`insert_child`/`remove_child`/`clear_children`
@@ -569,7 +569,7 @@ class UiRoot : public Element::HostFocus {
   /// 单独抽出来是因为 **叠加层的 `paint` 可以摘除自己**（`Toast` 到期），
   /// 那时 `remove_overlay` 必须延后释放，而延后就得有人在绘完当前对象之后回收。
   void paint_overlays(const RenderContext& context, raster::Surface& canvas);
-  /// 把宿主契约（`this`，作为 `Element::HostFocus`）写到整棵子树（`Element::set_host`）。
+  /// 把宿主契约（`this`，作为 `HostFocus`）写到整棵子树（`Element::set_host`）。
   /// 子组件据此请求焦点，同时保持 `element.hpp` 不反向依赖 `ui_root.hpp`。
   void wire_owner(Element& element);
   void layout_subtree(Element& element, math::Rect rect);
@@ -820,7 +820,7 @@ class UiRoot : public Element::HostFocus {
   std::function<bool(void*, math::Rect)> child_view_adopt_{};
   std::function<void(void*, math::Rect, math::Rect)> child_view_sync_{};
   std::function<void(void*)> child_view_dismiss_{};
-  std::function<Element::ChildViewProbe()> child_view_probe_{};
+  std::function<ChildViewProbe()> child_view_probe_{};
   /// 嵌入浏览器端口（`set_webview_port` 装入；`nullptr` = 该能力不可用）。非拥有。
   WebViewPort* webview_port_{nullptr};
   /// 已登记的声明式树推进回调（见 `register_declarative_host`）。

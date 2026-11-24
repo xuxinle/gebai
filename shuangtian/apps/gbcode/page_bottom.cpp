@@ -12,6 +12,13 @@
 #include <vector>
 
 #include "page.hpp"
+#include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/terminal.hpp"
+#include "st/ui/components/tabs.hpp"
+#include "st/ui/components/split_view.hpp"
+#include "st/ui/icon.hpp"
+#include "st/ui/components/list.hpp"
+#include "st/ui/components/tree.hpp"
 #include "st/core/string.hpp"
 #include "st/ui/components/table.hpp"
 

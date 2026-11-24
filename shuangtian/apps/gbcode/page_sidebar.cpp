@@ -10,6 +10,9 @@
 #include <vector>
 
 #include "page.hpp"
+#include "st/ui/components/tree.hpp"
+#include "st/ui/components/list.hpp"
+#include "st/ui/components/split_view.hpp"
 #include "st/core/string.hpp"
 #include "st/text/diff.hpp"
 

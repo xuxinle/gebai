@@ -29,6 +29,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>  // std::uint8_t（Joint 的底层类型）；PCH 不是契约，见 CONVENTIONS §10.3
 #include <string>
 #include <string_view>
 #include <vector>
