@@ -229,6 +229,18 @@ void ScrollView::scroll_to(float offset) {
   if (target == offset_) return;
   offset_ = target;
   mark_layout_dirty();
+  // **必须自己报一块损坏区**（2026-11-24，实测代价）。
+  //
+  // 只 `mark_layout_dirty()` 不报 damage 的后果：`Application::render_frame`
+  // 在 `paint_frame` **之前**已经跑过一次 `layout()`，所以等 `paint_frame` 里
+  // 再比几何签名时“前后一致”——`pending_full_` 不会被置上。而本帧唯一的
+  // 损坏区来源就只剩了滚动条自己的 `mark_dirty`（一条 8px 宽的带子）。
+  // 屏幕上的现象因此是：**只重画了滚动条那一窄带，其余内容全部停在旧位置上**
+  // ——鼠标滚一下看起来“没反应”，截图里能看到窄带内是新内容、带外是旧内容
+  // （实测相期：滚动 502px 后整屏仍是滚前的图，只有 x≈491..532 那一带变了）。
+  //
+  // 报自己的 `bounds_` 就是精确的“可见区全脏”：滚动改变的是视口内**所有**像素。
+  record_damage();
   if (on_scroll_) on_scroll_(offset_);
 }
 

@@ -1184,7 +1184,7 @@ void Element::measure(const RenderContext& context, const Constraints& constrain
       // 绝对定位改变的是“占不占位”，不是“能多大”。约束不同的话，同一个子元素
       // 在两种摆法下会量出不同尺寸——那不是这个字段该管的事。
       Constraints own;
-      own.max_width = row ? kUnbounded : available_width;
+      own.max_width = row ? (wrapping ? available_width : kUnbounded) : available_width;
       own.max_height = row ? available_height : kUnbounded;
       own.available_width = available_width;
       own.available_height = available_height;
@@ -1192,7 +1192,14 @@ void Element::measure(const RenderContext& context, const Constraints& constrain
       continue;
     }
     Constraints child_constraints;
-    child_constraints.max_width = row ? kUnbounded : available_width;
+    // **换行的行里，子项上界 = 行自己的可用宽**（不是 `kUnbounded`）。
+    //
+    // 为何：换行的意义就是“装不下就换行”，而那假定了子项**不会比行更宽**。
+    // 上一版对行内子项给的是无界宽，于是超长标签的按钮按自身内容量出
+    // **528px（而行只有 484）**：它既不换行也不被夹，右端连边框一起跑到
+    // 卡片外面（实测：相期选项按钮的尾字与圆角在卡片外，看不见也点不到）。
+    // 约束到行宽后，“超长文本怎么办”交回控件自己（省略号 / 折行）。
+    child_constraints.max_width = row ? (wrapping ? available_width : kUnbounded) : available_width;
     child_constraints.max_height = row ? available_height : kUnbounded;
     child_constraints.available_width = available_width;
     child_constraints.available_height = available_height;

@@ -21,9 +21,9 @@ auto w = std::make_unique<st::ui::MermaidView>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`source` · `zoom` · `fit` · `font_size` · `pan_x` · `pan_y`
+**可读写**：`source` · `zoom` · `fit` · `font_size` · `pan_x` · `pan_y` · `pan_enabled` · `wheel_zoom`
 
-**只读**（能 `get`，`set` 不生效）：`kind` · `error` · `diagnostics` · `node_count` · `edge_count` · `content_width` · `content_height` · `scale`
+**只读**（能 `get`，`set` 不生效）：`kind` · `error` · `diagnostics` · `node_count` · `edge_count` · `content_width` · `content_height` · `scale` · `dragging`
 
 > 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
 

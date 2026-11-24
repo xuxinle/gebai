@@ -392,6 +392,74 @@ def main():
             check(ci.get("icon") in ("link", "warning"),
                   f"显示连接状态图标（{ci.get('icon')!r}）")
 
+        # ③e 长内容不得缩略（2026-11-24 用户要求“任何内容都不要缩略，要折行”）
+        #
+        # 三条都得验（每条的失败形态不同，且都是“看不見”而不是“报错”）：
+        #   ① 长选项标签 —— 旧实现下按钮宽 528 而行只有 484，右端跑到卡片外
+        #   ② 长标题/来源 —— 旧实现是单行 + 尾部省略号，后半句根本没有
+        #   ③ 长正文 —— 曾是 `max_height=220` 的内层滚动，看起来只是“内容短”
+        long_opt = "把这个结果发到支持群（oc_support_of_the_whole_company_team_channel）"
+        long_title = "这是一条非常长的标题，用来验证标题会不会折行而不是被尾部省略号截断：" \
+                     "需要飞书授权——令牌属于应用 cli_a1b2c3d4e5f6，与当前应用不一致。"
+        long_from = "小霜（长来源标签：这个名字故意写得很长，看尾巴会不会被吃掉）"
+        long_body = "\n".join(f"- 第 {i} 条：用来把正文攞高的内容。" for i in range(1, 16))
+        server.send_text(json.dumps({"type": "cards", "cards": [
+            {"id": "longc", "kind": "choice", "title": long_title,
+             "body": long_body, "from": long_from,
+             "options": [{"label": long_opt, "value": "a"}]},
+        ]}))
+        grew = wait_for(lambda: len(find("#card-0")) > 0, 6.0)
+        check(grew, "长内容卡已渲染")
+        if grew:
+            time.sleep(0.5)
+            card_box = (client.ok("get", {"id": "card-0"}).get("bounds") or {})
+            inner_right = card_box.get("x", 0) + card_box.get("width", 0) - 16
+            opt_box = (client.ok("get", {"id": "card-0-act-opt-0"}).get("bounds") or {})
+            opt_right = opt_box.get("x", 0) + opt_box.get("width", 0)
+            check(opt_right <= inner_right + 0.5,
+                  f"长选项按钮不超出卡片内容区（{opt_right:.1f} <= {inner_right:.1f}）")
+            # 折行的直接证迹：按钮高大于单行控件高（Small = 28）
+            check(opt_box.get("height", 0) > 30,
+                  f"长选项真的折了行（高 {opt_box.get('height')} > 30）")
+            # 正文不得被内部滚动截断：max_scroll 必须为 0（整个正文在卡里展开）
+            body_value = (client.ok("get", {"id": "card-0-body"}).get("value") or "")
+            check("scroll=0.0/0.0" in body_value,
+                  f"长正文全高展开、不在卡内自己滚（{body_value!r}）")
+            # 截一张留证（人工复核用）
+            try:
+                client.ok("capture", {"path": str(shots / "xiangqi-long-content.png")})
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ③f 「全部清除」：清掉**所有类型**的卡，并逐张回告 agent
+        #
+        # 旧语义是“只清 notice”（choice/todo 清不掉）——用户报的就是“点了没反应”。
+        # 改成全清后必须配套“一定回告”，否则 agent 会把“清掉”误读为默认同意。
+        server.send_text(json.dumps({"type": "cards", "cards": [
+            {"id": "cl-notice", "kind": "notice", "title": "提示"},
+            {"id": "cl-choice", "kind": "choice", "title": "选一个",
+             "options": [{"label": "A", "value": "a"}]},
+            {"id": "cl-todo", "kind": "todo", "title": "做一件事"},
+        ]}))
+        ready = wait_for(lambda: len(find("#card-2")) > 0, 6.0)
+        check(ready, "清除前：三类卡片都在场")
+        if ready:
+            label = text_of("#dismiss-all")
+            check(label == "全部清除", f"底部按钮叫「全部清除」（{label!r}）")
+            before = sum(1 for m in server.received if m.get("type") == "answer")
+            client.ok("invoke", {"id": "dismiss-all", "action": "click"})
+            cleared = wait_for(
+                lambda: sum(1 for m in server.received if m.get("type") == "answer") >= before + 3,
+                6.0,
+            )
+            check(cleared, "全部清除后三张卡都回告了 agent（不是默默消失）")
+            answers = [m for m in server.received if m.get("type") == "answer"][before:]
+            check(len(answers) == 3 and all((m.get("answer") or {}).get("cleared") is True
+                                            for m in answers),
+                  f"回告内容都是 {{cleared:true}}（{[(m.get('id'), m.get('answer')) for m in answers]}）")
+            check(wait_for(lambda: len(find("#card-0")) == 0, 4.0),
+                  "选择卡与待办卡也真的从窗口上清掉了")
+
         # ④ 断线如实显示：关掉控制器后界面应转成未连接
         server.stop()
         # 等两个轮询周期（500ms × 2）+ 余量，让 tick 感知到断开并重绘

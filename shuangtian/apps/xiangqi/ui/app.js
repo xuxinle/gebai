@@ -6,16 +6,17 @@
 //   choice  选择：必须给一个答案。点选项 → 答复回给 agent。
 //   todo    待办：等你去做（可能很久）。做完点「完成」，或标「先放着」。
 //
-// 三者的差别是**能否被忽略**：
-//   - notice 可以「全部忽略」批量清掉（它不承载决策）
-//   - choice/todo 不能忽略——那两类的价值就是"必须有结果"，
-//     允许忽略等于允许 agent 的请求静默消失（比不弹出来更糟）。
+// 三者的差别是**能否被批量清掉**：
+//   - 旧语义下只有 notice 能被批量清：choice/todo 不能——“那两类必须有结果”。
+//   - 2026-11-24 改成：**三类都能清**（用户要求。旧实现里窗口堆满时根本甩不掉，
+//     用户报“点了没反应”）。但 choice/todo 被清掉时**一定会回告 agent**
+//     （答复体 `{cleared:true}`）：它们仍然“有结果”，那个结果叫「用户清掉了、未作答」。
 //
 // ## 宿主能力（C++ 侧 expose，见 main.cpp）
 //
 //   app.cards.list()                  → [{id, kind, title, body, options?, …}, …]
 //   app.cards.answer(id, value)       → 新列表（选了一项 / 点了知道了 / 标了完成）
-//   app.cards.dismiss_all()           → 新列表（只清 notice）
+//   app.cards.dismiss_all()           → 新列表（**清掉全部类型的卡**，逐张回告 agent）
 //   app.cards.poll()                  → {cards, peer}；peer 是连接状态
 //
 // 卡片从哪来、答复往哪去，都在 C++（文件/管道/套接字）。JS 只管呈现与转发——
@@ -129,7 +130,7 @@
     const emptyNow = cards.length === 0;
     $('#empty').set({ visible: emptyNow ? 'true' : 'false' });
     $('#cards-scroll').set({ visible: emptyNow ? 'false' : 'true' });
-    // 「全部忽略」无卡时隐藏：空态下没有任何可忽略的东西，
+    // 「全部清除」无卡时隐藏：空态下没有任何可清的东西，
     // 留着一个总能点的按钮只会让人以为“有东西被藏起来了”。
     $('#footer-actions').set({ visible: emptyNow ? 'false' : 'true' });
 
@@ -179,14 +180,41 @@
       border_width: '1',
     });
 
-    // ① 抬头：Badge 胶囊（类别）+ 来源。Badge 自带 tone 柔底色，
+    // ① 抬头：Badge 胶囊（类别）+ 元信息（截止/来源）。Badge 自带 tone 柔底色，
     // 比“图标+彩字”更有质感且天然跟主题走（feedback 组件的既成能力，不重造）。
+    //
+    // ## 为何元信息**各自占一行**而不是挤在抬头行右侧（2026-11-24 实测）
+    //
+    // 抬头行是 `Row`：行内子项拿到的是**无界宽上界**（Row 语义：按内容定宽），
+    // 于是长 `from`/`due` 不被夹、不被折，直接画到卡片外面去了
+    //（实测：`due` ="今天下班前（本地 18:00，过了这个点就等明天）" 时，
+    // 尾巴那一整句跑到卡片右缘之外，既看不见也点不到）。
+    // 试过给抬头行开 `wrap`：`Spacer(grow)` 与换行的叠层会把子项排成
+    // 实测重叠的样子（`Spacer` 宽只剩 23px 且与后面的文字挤在同一行）。
+    //
+    // 所以改成：抬头行只留 Badge（短、不会溢出），元信息**各占一行**且
+    // `multiline` 打开——它们换行时拿到的是卡片的确定内容宽，折行必然在卡内。
+    // 代价是丢掉“来源靠右”的排位：但那个位置只能用“省略号”或“溢出”换，
+    // 而**内容看得全是底线**。
     const headId = sid + '-head';
     $('#' + sid).append('Row', { id: headId, gap: '8', align_items: 'center' });
     $('#' + headId).append('Badge', { id: sid + '-kind', text: tone.label, tone: tone.tone });
-    $('#' + headId).append('Spacer', { grow: 'true' });
+    // 截止时间：`todo` 才有，时间敏感所以排在最前（紧跟类别徽标）。
+    if (card.due) {
+      $('#' + sid).append('Text', {
+        id: sid + '-due',
+        font_size: '11',
+        text: '截止：' + card.due,
+        tone: 'warning',
+        multiline: 'true',
+      });
+    }
     if (card.from) {
-      $('#' + headId).append('Text', { font_size: '11', text: card.from, tone: 'faint', margin_left: '6' });
+      // `multiline` 必须开：`Text` 缺省单行且尾部省略号，长来源的尾巴会整段消失。
+      $('#' + sid).append('Text', {
+        id: sid + '-from',
+        font_size: '11', text: card.from, tone: 'faint', multiline: 'true',
+      });
     }
 
     // ② 标题与正文：标题加重一档，正文用 muted 退后一层，层级靠色阶而不是字号堆砌。
@@ -206,12 +234,17 @@
       //（列表、代码块、强调、表格）。当普通文本画的话，`**粗**`、`- 项`、
       // ```code``` 都会原样露出来。
       //
-      // 注：`max_height` 给一个上限，否则一条长回答会把整张卡撑到很高、
-      // 把下面全挤出去。超出部分由 MarkdownView 自己滚（它有 scroll 属性）。
+      // ✗ **不给 `max_height`**（2026-11-24，用户要求「任何内容都不要缩略」）。
+      // 旧值 220 的含义是“超出就在正文自己那块里滚”，看上去像没截断，
+      // 实际是把内容藏进一个**没有滚动条提示**的小窗口里：用户不知道下面还有，
+      // 于是长授权说明/长报告永远只读到前 220px（实测：探针正文 305px 内容，
+      // 可见区只有 220px）。
+      //
+      // 现在正文按内容全高展开，整张卡片由外层 `#cards-scroll` 统一滚动——
+      // 一份内容只有**一条**滚动轴，不存在“卡内还有个小滚动”。
       $('#' + sid).append('MarkdownView', {
         id: sid + '-body',
         markdown: card.body,
-        max_height: '220',
         // 链接可点（框架能力）：点击直接交给系统浏览器。
         // 卡片正文里的授权/登录链接是“要去做的事”，点不动等于断在半路。
         open_links: 'true',
@@ -233,7 +266,11 @@
     $('#' + sid).append('Row', { id: actId, gap: '8', padding_y: '2', wrap: 'true' });
 
     if (card.kind === 'choice' && card.options) {
-      // 选择卡：每个选项一个按钮，**不给「忽略」**——那类的价值就是必须定夺
+      // 选择卡：每个选项一个按钮。
+      //
+      // 注：本卡**没有「忽略」按钮**（那类的价值就是必须定夺）；
+      // 但底部的「全部清除」能把它清掉，并回告 agent `{cleared:true}`——
+      // 两条语义不矛盾：卡上不给“我没意见”的快捷，全局清理则一定记账。
       card.options.forEach(function (opt, oi) {
         const bid = actId + '-opt-' + oi;
         $('#' + actId).append('Button', {
@@ -243,6 +280,10 @@
           variant: oi === 0 ? 'primary' : 'soft',
           scale: 'small',
           hint: opt.url ? '在浏览器中打开' : (opt.hint || ''),
+          // **长选项标签折行**（而不是省略号截断）：选项文字就是“你要定什么事”，
+          // 被截掉一半等于让人看半句话去做决定（实测：50+ 字标签时按钮宽 528px
+          // 而行只有 484，右端连边框一起跑到卡片外）。折行后高按行数自适应。
+          label_wrap: 'true',
         });
         $('#' + bid).on('click', function () {
           // 链接项不是「选项」：它的作用是把人送到浏览器去办事（授权/登录），
@@ -271,15 +312,8 @@
       $('#' + laterId).on('click', function () {
         submit(card.id, { snooze: true });
       });
-      // 截止时间挂到抬头（与来源同侧）：塞在按钮行里会挤压操作区，
-      // 且它是元信息不是动作，与 from 同层级更顺。
-      if (card.due) {
-        const dueId = sid + '-due';
-        $('#' + sid + '-head').append('Icon', { id: dueId, icon: 'clock', font_size: '11', tone: 'warning' });
-        $('#' + sid + '-head').append('Text', {
-          id: dueId + '-t', font_size: '11', text: card.due, tone: 'warning',
-        });
-      }
+      // 截止时间不挂在这里：它已作为独立一行排在标题之上（见 ①）。
+      // 塞在按钮行里会与主操作挤宽度，且它是元信息不是动作。
     } else {
       // 提示卡：知道就行。带 check 图标与 todo 的「完成了」呼应，
       // 也让纯文字按钮不再单薄（视觉反馈建议）。
@@ -492,10 +526,13 @@
 
   $('#dismiss-all').on('click', function () {
     try {
+      // 这句同时做了两件事：清掉**全部类型**的卡（choice/todo 也清），
+      // 且 C++ 侧会逐张把 `{cleared:true}` 答复送回 agent——所以
+      // 「清掉」对 agent 是可见的结果，不是静默消失。
       cards = app.cards.dismiss_all();
       dirty = true;           // 统一由 tick 渲染（不在事件栈上改结构）
     } catch (e) {
-      log('相期：批量忽略失败 — ' + e);
+      log('相期：全部清除失败 — ' + e);
     }
   });
 

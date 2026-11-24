@@ -38,17 +38,29 @@
 ///
 /// ## 属性面
 ///
-/// 可写：`source`（Mermaid 文本）、`zoom`、`fit`、`font_size`、`pan_x`/`pan_y`。
+/// 可写：`source`（Mermaid 文本）、`zoom`、`fit`、`font_size`、`pan_x`/`pan_y`、
+/// `pan_enabled`、`wheel_zoom`。
 /// 只读：`kind`、`error`（首条诊断）、`diagnostics`（条数）、`node_count`、`edge_count`、
-/// `content_width`/`content_height`（布局尺寸，便于断言）。
+/// `content_width`/`content_height`（布局尺寸）、`scale`（实际倍率）、`dragging`（是否在拖）。
 ///
 /// 动作：`zoom_in` / `zoom_out` / `reset_view` / `fit`（重算并回到居中）。
 ///
 /// ## 交互
 ///
-/// - 滚轮：纵向平移；`Ctrl+滚轮`：以指针为锚缩放（与 `Viewport`/`TimelineView` 同约定）。
-/// - 拖拽空白：平移。命中区就是整个组件（图不是可编辑控件，没有"点中某节点"的语义；
-///   需要节点点击时用 `st::md::mermaid` 的几何自己接，或改用 `GraphView`）。
+/// | 手势 | 行为 |
+/// |---|---|
+/// | **左键拖拽** | 平移（指针移上去是 `Move` 光标——截图里看不到光标，没有它就没人知道能拖） |
+/// | **滚轮** | **以指针为锚缩放**（不要求 Ctrl） |
+/// | **双击** | 回初始视角（`zoom = 1`、居中；与 `ThreeView` 同约定） |
+/// | Ctrl+滚轮 | 同上（保留：习惯了编辑器的人仍能用） |
+///
+/// 为何滚轮不再需要 Ctrl（实测）：图的阅读动作就是“看细节 / 看全局”，
+/// 滚轮是最直接的手势；藏在 Ctrl 后面等于没实现（不告知就没人会发现）。
+/// 嵌套在滚动容器里时：图区内的滚轮被图消费、区外照常滚页面（边界清楚）——
+/// 这也与“滚一下就缩放而不是页面跳了”的直觉一致。
+///
+/// 不需要这套行为（比如宿主自己有拖拽语义）时用 `set_pan_enabled(false)` /
+/// `set_wheel_zoom(false)` 逐项关掉，关掉后会如实让出事件（`on_event` 返回 false）。
 
 #include <cstddef>
 #include <optional>
@@ -107,6 +119,22 @@ class MermaidView : public Element {
   [[nodiscard]] auto pan_y() const noexcept -> float { return pan_y_; }
   /// 回到居中、zoom = 1（fit 仍生效）。
   void reset_view();
+  /// **以某个屏幕点为锚**缩放：缩放前后该点下的内容不动（滚轮与双指缩放的通行语义）。
+  ///
+  /// 为何要独立入口：只改 `zoom` 而不动 `pan` 时，图会以**视口中心**为轴缩放，
+  /// 指针下的东西会跑走——在“看局部细节”时这是最刺眼的一种手感错误。
+  void zoom_at(math::Point anchor, float factor);
+  /// 拖拽平移开关（默认开）。关掉后左键按下不再平移（宿主自己做拖拽时用）。
+  void set_pan_enabled(bool enabled) noexcept { pan_enabled_ = enabled; }
+  [[nodiscard]] auto pan_enabled() const noexcept -> bool { return pan_enabled_; }
+  /// 滚轮直接缩放（默认开）。关掉后滚轮退回“内容装不下时纵向平移”的老行为。
+  ///
+  /// 为何默认直接缩放：图的阅读动作以“看细节/看全局”为主，而滚轮是最直接的那个手势；
+  /// 要求按 Ctrl 才能缩放，相当于把主操作藏起来（实测：不告知就没人发现）。
+  void set_wheel_zoom(bool enabled) noexcept { wheel_zoom_ = enabled; }
+  [[nodiscard]] auto wheel_zoom() const noexcept -> bool { return wheel_zoom_; }
+  /// 是否正在拖拽（属性面 `dragging` 只读项；自动化断言“拖到手了没”用它）。
+  [[nodiscard]] auto dragging() const noexcept -> bool { return dragging_; }
 
   /// 布局选项（改完调 `relayout()` 生效）。
   [[nodiscard]] auto layout_options() -> st::md::mermaid::LayoutOptions& { return options_; }
@@ -124,6 +152,8 @@ class MermaidView : public Element {
   void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
+  /// 光标：可拖动区给 `Move`（这是“这里能拖”的唯一非视觉提示——截图里没有光标）。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override;
   [[nodiscard]] auto semantics_text() const -> std::string override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
@@ -177,9 +207,13 @@ class MermaidView : public Element {
 
   // 拖拽平移（`MouseDown` 起、`MouseUp` 止）。
   bool dragging_{false};
+  bool pan_enabled_{true};
+  bool wheel_zoom_{true};
   math::Point drag_origin_{};
   float drag_pan_x_{0.0f};
   float drag_pan_y_{0.0f};
+  /// 拖拽中累计的位移量（屏幕像素）：小于阈值不算“拖过”，用于双击/单击区分与断言。
+  float drag_distance_{0.0f};
 };
 
 }  // namespace st::ui

@@ -10,6 +10,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 #include "st/ui/component_registry.hpp"
 #include "st/ui/components/icon_view.hpp"
 #include "st/ui/element.hpp"
@@ -74,6 +75,24 @@ class Button : public Element {
     mark_dirty();
   }
   [[nodiscard]] auto ellipsize_middle() const noexcept -> bool { return ellipsize_middle_; }
+  /// 标签**折行**（默认 false = 单行 + 尾部省略号）。
+  ///
+  /// ## 为什么需要它（2026-11-24，实测）
+  ///
+  /// 单行语义下长标签只有两条出路：溢出（被父容器夹窄后仍按自身宽度画）
+  /// 或省略号截断。相期的选项按钮把它撞成显式缺陷：标签 50+ 字时
+  /// 按钮实测宽 **528px 而内容区只有 484px**——右端连文字带边框一起跑到卡片外，
+  /// 用户看不到被截掉的那一截（那不是“短一点”，是**内容不可见**）。
+  ///
+  /// 折行打开后：宽仍受父约束，高按行数自适应（见 `measure`），
+  /// 文字逐行绘制、整块垂直居中。`ellipsize_middle` 只在单行时有用。
+  void set_label_wrap(bool value) noexcept {
+    if (label_wrap_ == value) return;
+    label_wrap_ = value;
+    wrap_cache_width_ = -1.0f;   // 折行结果与“用哪种排版”绑定，切换即失效
+    mark_layout_dirty();
+  }
+  [[nodiscard]] auto label_wrap() const noexcept -> bool { return label_wrap_; }
   [[nodiscard]] auto variant() const noexcept -> Variant { return variant_; }
 
   /// **图标盒径**（逻辑 px）——与 `apply_theme` 同一入口写入，供测试/宿主读取。
@@ -130,6 +149,25 @@ class Button : public Element {
   Align content_align_{Align::Center};
   /// 超长时中段省略（见 `set_ellipsize_middle`；默认尾部省略）。
   bool ellipsize_middle_{false};
+  /// 标签折行（见 `set_label_wrap`；默认单行省略）。
+  bool label_wrap_{false};
+  /// 折行缓存：`(标签, 可用宽, 字号, 端口)` 四者不变就复用。
+  ///
+  /// 为何要缓存：`measure` 每帧跑、`paint_content` 也每帧跑，而全量折行是
+  /// O(标签长度)。不缓存的话，长标签按钮会把这份开销乘上帧数——与 `Text`
+  /// 的多行缓存同一条理由（见 `text.hpp` 里 `display_lines_` 的说明）。
+  mutable std::vector<std::string> wrapped_lines_{};
+  mutable std::string wrap_cache_content_{};
+  mutable float wrap_cache_width_{-1.0f};
+  mutable float wrap_cache_font_size_{-1.0f};
+  mutable const TextPort* wrap_cache_port_{nullptr};
+
+  /// 折行时可分给标签的宽度（已扣除内边距与图标占位）。`measure`/`paint_content`
+  /// 共用同一函数——两处各写一份会让“量出的行数”与“画出的行数”分家。
+  [[nodiscard]] auto wrap_budget(const RenderContext& context, float limit) const -> float;
+  /// 取（并缓存）按给定可用宽折行后的标签行。
+  [[nodiscard]] auto wrapped_label(const RenderContext& context, float available) const
+      -> const std::vector<std::string>&;
 };
 
 }  // namespace st::ui

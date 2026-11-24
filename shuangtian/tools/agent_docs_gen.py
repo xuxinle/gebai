@@ -72,6 +72,7 @@ FAMILY: dict[str, str] = {
     "ContextMenu": "navigation", "CommandPalette": "navigation", "Tree": "navigation",
     # 数据展示
     "Table": "data", "TimelineView": "data", "GraphView": "data", "MermaidView": "data",
+    "MindMapView": "data",
     # 编辑器与文档视图
     "CodeEditor": "editor", "DiffView": "editor", "MergeView": "editor",
     "MarkdownView": "editor", "HtmlView": "editor", "Terminal": "editor",

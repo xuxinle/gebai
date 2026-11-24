@@ -161,14 +161,24 @@ class TcpStreamAdapter : public st::net::ws::WsSession::Stream {
   /// ## 为何必须有这个方法（它对应一个“卡片永不出现”的真缺陷）
   ///
   /// `check_eof()` 必须从 socket 真读一次才能区分「有序关闭（0 字节）」与
-  /// 「有数据」。但读出来的那个字节**不能丢**：它是 WS 帧的第一个字节，
+  /// 「有数据」。但读出来的那个字节**不能丢**：它是 WS 帧流的一部分，
   /// 丢了之后解码器的流就从帧中间开始，长度字段/掩码全错位，
-  /// 从此再也解析不出任何一条消息（帧缓冲区一直等不到“凑齐”）。
+  /// 从此再也解析不出任何一条消息。
   ///
   /// 实测症状极具欺骗性：窗口显示「已连接」，心跳里 `可读=` 在涨，
   /// 而 `处理=` 永远是 0、`卡片=` 永远是 0——数据确实到了，只是全成了碎片。
   /// 而它**只在“一次 poll 读不到消息”之后触发**，所以时好时坏。
-  void unread_one(std::uint8_t byte) { pending_.insert(pending_.begin(), static_cast<char>(byte)); }
+  ///
+  /// ## 为何是**追加到末尾**而不是插到头部（2026-11-24 实测修正）
+  ///
+  /// 探测读到的字节来自 socket，而 `pending_` 里可能还有没交付的字节、
+  /// 解码器里也可能已经攒了半帧——那一字节在流里的位置恒为「**现有全部字节之后**」。
+  /// 旧写法 `insert(begin, …)` 把它放到了流的最前面，后果是**帧流乱序**：
+  /// 只要一帧大到需要多次 `pump`（`WS 帧 > 4KB 提案缓冲`），第一次 pump 后
+  /// `poll()` 返回空 → `check_eof()` 读 1 字节插队 → 解码器从此解错位。
+  /// 实测：相期推一张带长正文的卡片（JSON 7233 字节）**整批消失**，
+  /// 而心跳显示“连接正常、可读 1 次、处理 0 条”；短卡片（1335 字节）则正常。
+  void unread_one(std::uint8_t byte) { pending_.push_back(static_cast<char>(byte)); }
 
   auto write_all(std::span<const std::uint8_t> data) -> bool override {
     return static_cast<bool>(tcp_.write_all(data));
@@ -180,6 +190,7 @@ class TcpStreamAdapter : public st::net::ws::WsSession::Stream {
       const std::size_t n = std::min(buffer.size(), pending_.size());
       std::memcpy(buffer.data(), pending_.data(), n);
       pending_.erase(0, n);
+      delivered_ += n;
       return static_cast<int>(n);
     }
     // **必须用非阻塞读**：`WsSession::Stream::read_some` 的契约是“非阻塞”（-1 = 无数据/错误）。
@@ -187,15 +198,25 @@ class TcpStreamAdapter : public st::net::ws::WsSession::Stream {
     // 表现为相期主界面长时间冻结（实测症状：连接上服务、长时间无新消息后卡住）。
     const auto n = tcp_.read_some_nonblocking(buffer);
     if (!n.has_value()) return -1;              // 错误与 EOF 在这里归为"不可继续读"
+    delivered_ += *n;
     return static_cast<int>(*n);                // 0 = 对端关闭（与接口约定一致）
   }
 
   /// 预置字节是否还没被解码器取完（`poll` 据此判断要不要无条件探一把）。
   [[nodiscard]] auto has_pending() const -> bool { return !pending_.empty(); }
 
+  /// **已交付给解码器的累计字节数**（`poll` 的多轮泵靠它判“这一轮有没有真读到东西”）。
+  ///
+  /// 为何需要这个量：大帧要多次 `pump_frames` 才能凑齐（一次只读 4096），所以
+  /// `poll` 要多泵几轮。但“socket 可读”不等于“能读到字节”——**EOF 时它仍然报可读**
+  /// （读到 0）。按可读性循环会让 EOF 空转，并把本该立即发现的断开拖到保活超时
+  /// （实测：控制器停掉后图标仍显示已连接）。按“字节数有没有增长”判就不会。
+  [[nodiscard]] auto delivered() const -> std::size_t { return delivered_; }
+
  private:
   st::net::TcpStream& tcp_;
   std::string pending_{};
+  std::size_t delivered_{0};
 };
 
 /// 断线重连的退避节奏（毫秒）。
@@ -449,7 +470,28 @@ class AgentLink {
     // read_message_nb 一次 pump + 取帧。返回 nullopt 只表示"这次没有完整消息"
     // ——可能是数据未凑齐（TCP 分包/大帧），**不是断开**。只有对方发了 Close
     // 帧或 wait_readable 持续报错才断开（由 close_received / 保活判定）。
-    const auto message = session_->read_message_nb();
+    //
+    // ## 为何要多泵几轮（2026-11-24，实测代价）
+    //
+    // `pump_frames` 一次只读 **4096 字节**，而一帧可以远大于它（带长正文的卡片
+    // JSON 七千多字节）。只泵一次就返回 nullopt 的后果不是“慢一帧”，而是
+    // 把“半帧”交给后面的 `check_eof()`——那时它读到 1 个字节并回灌，
+    // 流的拼接位置一旦出错，这帧就永远凑不齐（实测：长卡整批消失，短卡正常）。
+    //
+    // 判据用**已交付字节数有没有增长**，不用 `wait_readable`：EOF 时 socket
+    // 仍然报可读（读到 0），按可读性循环会空转 64 轮，并把本该立即发现的断开
+    // 拖到保活超时（实测：控制器停掉后图标仍显示已连接）。上限 64 轮 = 256KB，
+    // 防止对端刷屏把一帧拖成无限循环。
+    std::optional<st::net::ws::Message> message;
+    for (int round = 0; round < 64; ++round) {
+      const std::size_t before_bytes = adapter_ == nullptr ? 0U : adapter_->delivered();
+      message = session_->read_message_nb();
+      if (message.has_value()) break;
+      if (session_->close_received()) break;
+      // 本轮一个字节也没读到：要么是真没数据，要么是 EOF/错误——两种都该交给
+      // 下面的 `check_eof()` 去分辨，不在这里猜。
+      if (adapter_ == nullptr || adapter_->delivered() == before_bytes) break;
+    }
     if (!message.has_value()) {
       // 真的关闭（收到 Close 帧）才断开；否则只是"这次没读到"，下帧再试
       if (session_->close_received()) {
@@ -708,16 +750,17 @@ struct CardStore {
     }
   }
 
-  /// 答复：优先走 WebSocket，同时落 outbox。
-  auto answer(const std::string& id, const Json& value) -> Json {
-    auto it = std::find_if(cards.begin(), cards.end(), [&](const Card& c) { return c.id == id; });
-    if (it == cards.end()) return as_json();   // 已处理过（重复点击）：不报错
-
-    Json record = Json::object({{"type", "answer"},
-                                {"id", id},
-                                {"kind", it->kind},
-                                {"answer", value},
-                                {"answered_at_ms", st::time::now_ms()}});
+  /// 把一条答复送出去（WS 优先 + **总是**落 outbox 留底）。
+  ///
+  /// 抽成函数是必要的：`answer`（单张作答）与 `dismiss_all`（全部清除）
+  /// 走的是**同一条答复通道**——两条各写一份的话，后加的那个总会漏掉
+  /// 「WS 断了就靠盘」这条保护（而症状是“点了没反应、盘上也没记录”）。
+  void emit_answer(const Card& card, const Json& value) {
+    Json record = Json::object({{ "type", "answer" },
+                                { "id", card.id },
+                                { "kind", card.kind },
+                                { "answer", value },
+                                { "answered_at_ms", st::time::now_ms() }});
 
     // 双写：WS 送达 agent + 落盘留底。
     // 为何两份都要：WS 可能恰好断在这一刻（send 失败就靠盘）；而盘上有记录
@@ -725,22 +768,43 @@ struct CardStore {
     bool sent = false;
     if (link != nullptr && link->connected()) sent = link->send(record);
     (void)st::fs::create_directories(outbox_dir());
-    (void)st::fs::write_text(st::fs::join(outbox_dir(), id + ".json"), st::json_dump(record, true));
-    if (!sent) st::log::out("[相期] 答复 {} 未能实时送达（已落盘 {}）\n", id, outbox_dir());
+    (void)st::fs::write_text(st::fs::join(outbox_dir(), card.id + ".json"),
+                             st::json_dump(record, true));
+    if (!sent) st::log::out("[相期] 答复 {} 未能实时送达（已落盘 {}）\n", card.id, outbox_dir());
+  }
 
+  /// 答复：优先走 WebSocket，同时落 outbox。
+  auto answer(const std::string& id, const Json& value) -> Json {
+    auto it = std::find_if(cards.begin(), cards.end(), [&](const Card& c) { return c.id == id; });
+    if (it == cards.end()) return as_json();   // 已处理过（重复点击）：不报错
+
+    emit_answer(*it, value);
     cards.erase(it);
     return as_json();
   }
 
-  /// 批量忽略：**只清 notice**（choice/todo 必须给出结果）。
+  /// 全部清除：**清掉窗口上所有类型的卡片**（notice / choice / todo 都清）。
+  ///
+  /// ## 为何不再“只清 notice”（2026-11-24，用户明确要求）
+  ///
+  /// 旧语义下 choice/todo 被刻意保护——“那两类的价值就是必须有结果”。
+  /// 那条原则本身是对的，但它买的是「不能静默消失」：旧实现里用户想
+  /// 收拾一块堆满过期卡的窗口时根本做不到（按钮点了没反应，人只能看着）。
+  ///
+  /// 现在改成：**都清，而且一定告诉 agent**——每张被清掉的卡都走正式答复
+  /// 通道回一条 `{cleared:true}`。于是 choice/todo 仍然“有结果”，
+  /// 只是这个结果叫「用户清掉了，没有作答」，而不是让 agent 以为默认同意。
+  /// 这比“清不掉”诚实，也比“默默清掉”诚实。
+  ///
+  /// 等待中的 `card_ask` 因此**立即返回**（而不是只能等超时）：
+  /// 它拿到的答复里 `cleared` 为真，可据此判定“用户没选，得另想办法”。
   auto dismiss_all() -> Json {
-    std::vector<Card> kept;
-    kept.reserve(cards.size());
-    for (auto& card : cards) {
-      if (card.kind == KIND_NOTICE) continue;
-      kept.push_back(card);
+    const std::size_t count = cards.size();
+    for (const auto& card : cards) {
+      emit_answer(card, Json::object({{"cleared", true}, {"by", "user"}}));
     }
-    cards = std::move(kept);
+    cards.clear();
+    st::log::out("[相期] 全部清除：{} 张卡已清掉（已逐张回告 agent）\n", count);
     return as_json();
   }
 

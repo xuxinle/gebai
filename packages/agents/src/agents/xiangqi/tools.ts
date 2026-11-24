@@ -44,6 +44,17 @@ function textResult(output: string, data?: unknown): ToolResult {
 /** 把用户答复渲染成给模型看的自然语言（按 kind 分支，不糊成一坨 JSON）。 */
 export function describeAnswer(card: CardSpec, answer: CardAnswer): string {
   const body = answer.answer
+  // **「全部清除」优先判定**（相期侧点底部的「全部清除」会把每一张卡都回一条
+  // `{cleared:true}`）。必须排在 kind 分支**之前**：
+  //
+  // 否则 choice 卡会落到 `JSON.stringify(body.choice)`——那里是 `undefined`，
+  // 模型读到的是「用户选了「undefined」」，比不告诉它还糟：它会当真去用那个值。
+  // todo 卡同理会被渲染成「用户给了答复：{...}」，读起来像“他做完了/先放着”
+  // 那种正常结果，而事实是“他没做，直接把卡清掉了”。
+  if (body.cleared === true) {
+    const by = body.by === "user" ? "" : `（${String(body.by)}）`
+    return `用户把这张卡**清除了，没有作答**${by}——这不等于同意，也不等于完成；该决定仍未做出，请自行判断后续`
+  }
   if (card.kind === "choice") {
     const picked = typeof body.choice === "string" ? body.choice : JSON.stringify(body.choice)
     // 把 value 反查成 label：模型给用户看的是 label，回来的是 value，
@@ -205,10 +216,15 @@ export function createTools(deps: { controller?: ReturnType<typeof controller> }
           { id, kind, answered: false, timedOut: true },
         )
       }
+      // 「全部清除」也会唤醒本等待：`cleared=true` 不是作答，把它归到
+      // `answered:false`——否则调用方（审批桥/出站审核）会把它当成“用户给了答案”，
+      // 那是最危险的一种误判（它等于自己给自己发了授权）。
+      const cleared = answer.answer.cleared === true
       return textResult(`用户已答复：${describeAnswer(spec, answer)}`, {
         id,
         kind,
-        answered: true,
+        answered: !cleared,
+        cleared,
         answer: answer.answer,
       })
     },

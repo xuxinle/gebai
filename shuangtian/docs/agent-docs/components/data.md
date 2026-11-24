@@ -1,6 +1,6 @@
 ---
-title: 数据展示族 · Table/Timeline/Graph/Mermaid
-summary: 四者都是"外部数据 + 组件负责画与交互"；组件不持有领域真值，编辑请求回调给应用。
+title: 数据展示族 · Table/Timeline/Graph/Mermaid/MindMap
+summary: 五者都是"外部数据 + 组件负责画与交互"；多半不持有领域真值，编辑请求回调给应用。
 ---
 
 # 数据展示（data）
@@ -13,6 +13,11 @@ summary: 四者都是"外部数据 + 组件负责画与交互"；组件不持有
 | 时间轴（轨道 + 片段 + 播放头） | `TimelineView` | **外部真值源**（`st::ui::timeline::Model`）+ 委托编辑 |
 | 关系图（节点 + 连线，可转视角） | `GraphView`（三维图：线在三维、文字在屏幕） | 应用 |
 | Mermaid 文本（流程图 / 时序图 / 饼图） | `MermaidView`（自绘解析 + 布局） | 文本本身（组件只解析与画） |
+| 树形思维导图（可编辑、读写 FreeMind `.mm`） | `MindMapView` | **组件内的 `md::mindmap::Document`** |
+
+> 「真值在哪」这一列是这个族**最重要的区分**：`MindMapView` 是唯一**自己持有并编辑**数据的那个。
+> 它能这么做的前提是：它的数据就只有一棵树（没有外部真值源要同步），且作者就是用户本人。
+> 一旦数据要和别处双向同步（如知识库词条），就应该像 `TimelineView` 那样改用**委托编辑**。
 
 ## Table
 
@@ -42,6 +47,20 @@ summary: 四者都是"外部数据 + 组件负责画与交互"；组件不持有
 - 不支持的图类型与语句**进 `diagnostics`**（属性面 `error` 读首条）：能画的照画，缺的部分有文字线索，
   绝不静默空白。
 - `fit`（默认开，只缩不放）与 `zoom` 是**两个量**：窗口变化自动适配，用户放大不被清掉。
+- **手势：左键拖拽平移 · 滚轮以指针为锚缩放（不需 Ctrl）· 双击复位**；指针移上去是 `Move` 光标
+  （截图里没有光标，不给提示就没人知道能拖）。宿主另有拖拽语义时用
+  `pan_enabled` / `wheel_zoom` 逐项关掉，关掉后如实让出事件。
+
+## MindMapView
+
+- 三个能力对应三层接口：**查看**（布局 + 缩放平移）、**编辑**（增删改移/折叠/拖拽改父级 + 撤销栈）、
+  **保存**（FreeMind `.mm` 读写）。
+- 纯计算层在 `st/md/mindmap.hpp`（树模型 / 编辑 / 序列化 / tidy-tree 布局），组件只负责画与交互。
+- **内嵌改名用真的 `Input` 子元素**（绝对定位铺在节点框上），不自建光标状态机——
+  否则输入法、选区、双击选词、候选窗定位都要重踩一遍。
+- 键鼠**走同一条编辑入口**（`apply_edit`），所以撤销栈不会出现"鼠标能撤、键盘撤不了"的不对称。
+- 折叠只影响可见性，**不截断子树**（`subtree_size` 不看折叠）。
+- 着色按**一级分支**而不是按深度：按深度会让同层全同色，读者看不出归属。
 
 ## 坑
 
@@ -51,17 +70,22 @@ summary: 四者都是"外部数据 + 组件负责画与交互"；组件不持有
 | 时间轴拖拽时边改模型边刷新 | 会与拖拽状态打架；拖拽中只更新"预览"，松手才提交 |
 | 用 `Table` 展示 10 万行 | 虚拟滚动是按行高算的，行高不一致会错位；固定行高 |
 | 把 Mermaid 当作"什么都支持" | 只实现了三类图的可执行子集；`subgraph`/`loop`/`class`/样式指令都进 `diagnostics`——先看 `error` 再排 |
+| 思维导图用自定义 JSON 存盘 | 交换性归零（只有自己读得懂）。`.mm` 是被多个工具读的开源原生格式；实测 209 节点下原始体积只比紧凑 JSON 大 45%、gzip 后差 7%，而互操作差距是"别人能不能打开" |
+| 按**深度**给思维导图着色 | 同一层的所有节点同色，读者看不出"哪些叶子属于哪一支"。要按**一级分支**着色（组件已这么做，有用例钉住） |
+| 自己写"迷你编辑器"做内嵌改名 | 光标闪烁/选区/双击选词/输入法/候选窗定位全要重踩一遍。直接挂一个真 `Input` 子元素 |
+| 把别人的导图读进来再存出去、丢掉不认识的属性 | 那是**替用户删数据**（FreeMind 的 `STYLE`/`ICON`/时间戳）。本组件将它们原样留在 `Node::extra_attributes` |
 
 ## 本族清单
 
-`Table` · `TimelineView` · `GraphView` · `MermaidView`
+`Table` · `TimelineView` · `GraphView` · `MermaidView` · `MindMapView`
 
 - 逐个：`components/data/Table.md` · `components/data/TimelineView.md` · `components/data/GraphView.md` ·
-  `components/data/MermaidView.md`
+  `components/data/MermaidView.md` · `components/data/MindMapView.md`
 
 ## 更细
 
 - 时间轴的四块落地记录（播放头/头部栏/编辑委托/投影刷新）：`DESIGN.md` §4.2.25–§4.2.27
 - 图布局算法：`include/st/ui/graph_layout.hpp`
 - Mermaid 的解析/布局层：`include/st/md/mermaid.hpp`（`DESIGN.md` §4.4.1）
+- 思维导图的树模型/序列化/布局层：`include/st/md/mindmap.hpp`（`DESIGN.md` §4.4.4）
 - 裁云（时间轴的重度使用者）：`docs/caiyun_ONBOARDING.md`

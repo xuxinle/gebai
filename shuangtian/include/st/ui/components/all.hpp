@@ -113,6 +113,7 @@
 #include "st/ui/components/html_view.hpp"
 #include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/mermaid_view.hpp"
+#include "st/ui/components/mind_map_view.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/native_host.hpp"   // 原生子窗口嵌入（可选能力，降级为占位块）
@@ -174,7 +175,7 @@ inline void import_all_components() {
       CodeEditor, ColorPicker, CommandPalette, CompletionPopup, DiffView, FileDialog,
       MarkdownView, MenuBar, MenuPanel, ContextMenu, MergeView, SlowContent, Terminal,
       ThemePicker, TimelineView, TitleBar, WindowFrame, HtmlView, NativeHost,
-      MermaidView>();
+      MermaidView, MindMapView>();
   // 三维族（ThreeView / LabelOverlay / SceneView / GraphView）**不在**导入列表里：
   // 它们不进声明式注册表（理由见各自头文件末尾）。它们的头仍被上面的 include 引入，
   // 所以想直接 `new` 它们的代码只需要 `all.hpp` 就够了。

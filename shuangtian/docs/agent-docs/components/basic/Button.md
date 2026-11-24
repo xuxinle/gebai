@@ -21,7 +21,7 @@ auto w = std::make_unique<st::ui::Button>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`label` · `text` · `icon` · `variant` · `scale` · `hint` · `tone`
+**可读写**：`label` · `text` · `icon` · `variant` · `scale` · `hint` · `tone` · `label_wrap`
 
 > 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
 
@@ -33,7 +33,7 @@ auto w = std::make_unique<st::ui::Button>();
 
 ## 头注释里的逐条取舍（读源码前先看这里）
 
-- 「为何用 `ui::Variant` 而不是自己一套（2026-11-10，词表统一）」— `include/st/ui/components/button.hpp:21`
+- 「为何用 `ui::Variant` 而不是自己一套（2026-11-10，词表统一）」— `include/st/ui/components/button.hpp:22`
 
 > 这些是**为什么这样做**的记录（多半是踩过的坑）。改行为之前逐条读，否则会重新踩一遍。
 

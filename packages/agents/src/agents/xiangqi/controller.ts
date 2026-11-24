@@ -180,7 +180,13 @@ export interface XiangqiController {
   waitForAnswer(id: string, timeoutMs: number): Promise<CardAnswer | null>
   /** 当前等答复的卡（供 `card_list`）。 */
   pending(): Array<{ id: string; title: string; kind: CardKind; sentAtMs: number }>
-  /** 撤回全部卡片。 */
+  /**
+   * agent 侧主动撤回全部卡片（不经过用户）。
+   *
+   * ⚠ 与窗口上那个「全部清除」按钮**不是同一件事**：那个由用户点，相期会把每张卡
+   * 回一条 `{cleared:true}`；本函数是 agent 自己认为“这些已经过时”，所以**直接
+   * 摘掉不上报**——否则 agent 会收到一批自己刚造出来的答复。
+   */
   dismissAll(): void
   /** 撤回单张卡片（授权完成/失效后让那张卡自动消失）；返回是否真的撤了。 */
   dismiss(id: string): boolean
@@ -712,6 +718,11 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
   function dismissAll(): void {
     live.clear()
     arrivedEarly.clear()
+    // **也要取消还在等的 waitForAnswer**：否则清完之后 `card_ask` 会白等到超时，
+    // 而用户那头已经什么都没得看了（两边都在等一个永远不会来的答复）。
+    // 与 `dismiss(id)` 同一处置：唤醒为 null = “没人作答”。
+    for (const [, card] of waiting) card.cancel()
+    waiting.clear()
     // 同 `push`：持有 peer 就试一次，不凭衰减判据放弃（否则活连接被永久判死后，
     // 扇卡也送不出去，用户看到的是“agent 说撤了，窗口上还挂着”）。
     if (peer !== null) sendCards()

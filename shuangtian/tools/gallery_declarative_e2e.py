@@ -127,8 +127,29 @@ def main():
               f"{len(rows_before)}→{len(rows_after)} {rows_before}")
 
         # 条件内容：取消勾选 → 统计卡从树上消失（裁剪，不是隐藏）。
-        # 注意：`find` 有条数上限（实测 50），所以用「按文本断言在/不在」而不是计数差。
-        stats_probe = lambda: len(matches("Text[text~=待办]"))
+        #
+        # ## 探针必须按 **id 路径**、不能按文本包含（2026-11-24 实测修正）
+        #
+        # 旧写法是 `Text[text~=待办]`——而全树里除了统计卡自己，**导航页的
+        # Steps 说明文案**也含这两个字（“已完成画对勾、进行中外圈光环、**待办**淡描边”）。
+        # 于是计数永远从 2 跌到 1，永远到不了 0：开关真的生效了，断言却报红。
+        #
+        # 这是“探针写得太宽”的典型形态：断言看起来在问“统计卡还在不在”，
+        # 实际问的是“全界面还有哪段文字提到待办”——后者与条件裁剪毫无关系。
+        #
+        # 改成**属性前缀匹配**（`id^=`）：`declarative-host/Card@cond/Card@stats/…`
+        # 只可能来自那张条件卡，文案怎么改都不影响它。实测对照（开关开→关）：
+        #
+        # | 写法 | 开 | 关 |
+        # |---|---|---|
+        # | `Text[text~=待办]` | 2 | **1**（被导航页文案误命中） |
+        # | `Text[id^=…Card@stats/]` | 2 | **0** ✓ |
+        # | Python 侧按 id 前缀过滤 | 0 | 0（`find` 有 50 条上限，那个卡不在返回里） |
+        #
+        # 第三种看着更“灵活”，实际不能用：`find` 截断后剩下的恰好不含目标，
+        # 于是一个**永远 0** 的探针会让断言变成“看运气”。
+        stats_selector = "Text[id^=declarative-host/Card@cond/Card@stats/]"
+        stats_probe = lambda: len(matches(stats_selector))
         stats_before = stats_probe()
         toggle = by_suffix("Checkbox@toggle-stats")
         check("条件开关可达", toggle is not None, str(toggle))
@@ -138,7 +159,7 @@ def main():
         call("wait", {"for": "frames", "count": 3})
         stats_after = stats_probe()
         check("条件内容裁剪（不声明即移除）", stats_before > 0 and stats_after == 0,
-              f"统计卡匹配数 {stats_before} → {stats_after}")
+              f"统计卡 Text 数 {stats_before} → {stats_after}（选择器 {stats_selector}）")
 
         # 再打开：条件内容重新进树（裁剪不是单向销毁；同时验证同一元素可反复进出）
         call("invoke", {"id": toggle, "action": "click"})

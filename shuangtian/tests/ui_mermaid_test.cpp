@@ -626,62 +626,154 @@ ST_TEST(mermaid_view_pie_outline_is_a_true_circle) {
   }
 }
 
-/// 滚轮：内容装得下时**不吞事件**（冒泡给外层，嵌套滚动正解）；放大到溢出后
-/// 才捕获并纵向平移。滚轮缩放走 `Ctrl`（与 `Viewport`/`TimelineView` 同约定）。
-ST_TEST(mermaid_view_wheel_and_pan) {
+/// 缩放手势：**滚轮直接缩放**（不要求 Ctrl）、以指针为锚、双击复位、上下限夹取。
+///
+/// 为何这三条必须一起验：只验“zoom 变了”会掩盖“以中心缩放”（指针下的东西跑走）
+/// 与“没法回去”（拖到别处后没有复位手势）两个手感缺陷。
+ST_TEST(mermaid_view_zoom_gestures) {
   Fixture fixture;
   MermaidView view;
-  view.set_source("flowchart TD\n  A --> B\n  B --> C\n  C --> D\n");
-  fixture.layout(view, 400.0f, 120.0f);
+  view.set_source("flowchart TD\n  A[很长的一个标签文字] --> B[另一个很长的标签文字]\n  B --> C[第三个]\n");
+  fixture.layout(view, 400.0f, 300.0f);
 
-  // fit 开着 ⇒ 整图已装进视口，没东西可滚 ⇒ 返回 false 让外层接管。
-  st::ui::Event wheel{ };
-  wheel.kind = st::ui::EventKind::Wheel;
-  wheel.position = st::math::Point{200.0f, 60.0f};
-  wheel.wheel_delta = -1.0f;
-  ST_CHECK(!view.on_event(fixture.context, wheel));
-
-  // 关 fit + 放大 4 倍 ⇒ 内容溢出 ⇒ 滚轮被捕获且真的改了 pan。
-  view.set_fit(false);
-  view.set_zoom(4.0f);
-  view.set_pan(0.0f, 0.0f);
-  const float pan_before = view.pan_y();
-  ST_CHECK(view.on_event(fixture.context, wheel));
-  ST_CHECK(view.pan_y() != pan_before);
-
-  // Ctrl+滚轮：以指针为锚缩放（缩放前后指针下的内容点不变）。
-  view.reset_view();
+  // ① 滚轮（无 Ctrl）就缩放：前推放大、后推缩小。
   const float zoom_before = view.zoom();
+  st::ui::Event up{};
+  up.kind = st::ui::EventKind::Wheel;
+  up.position = st::math::Point{120.0f, 90.0f};
+  up.wheel_delta = 1.0f;
+  ST_CHECK(view.on_event(fixture.context, up));
+  ST_CHECK(view.zoom() > zoom_before);
+  const float zoom_after_up = view.zoom();
+  st::ui::Event down{};
+  down.kind = st::ui::EventKind::Wheel;
+  down.position = st::math::Point{120.0f, 90.0f};
+  down.wheel_delta = -1.0f;
+  ST_CHECK(view.on_event(fixture.context, down));
+  ST_CHECK(view.zoom() < zoom_after_up);
+
+  // ② **以指针为锚**：缩放前后，指针下的那个内容点不动。
+  view.reset_view();
+  const st::math::Point anchor{90.0f, 70.0f};
+  const auto content_under = [&](st::math::Point screen) {
+    const float scale = view.effective_scale();
+    const float origin_x = view.bounds().x +
+                           (view.bounds().width - view.content_size().width * scale) * 0.5f +
+                           view.pan_x();
+    const float origin_y = view.bounds().y +
+                           (view.bounds().height - view.content_size().height * scale) * 0.5f +
+                           view.pan_y();
+    return st::math::Point{(screen.x - origin_x) / scale, (screen.y - origin_y) / scale};
+  };
+  const st::math::Point before_point = content_under(anchor);
+  st::ui::Event zoom_in{};
+  zoom_in.kind = st::ui::EventKind::Wheel;
+  zoom_in.position = anchor;
+  zoom_in.wheel_delta = 1.0f;
+  ST_CHECK(view.on_event(fixture.context, zoom_in));
+  const st::math::Point after_point = content_under(anchor);
+  ST_CHECK(std::abs(after_point.x - before_point.x) < 0.5f);
+  ST_CHECK(std::abs(after_point.y - before_point.y) < 0.5f);
+
+  // ③ Ctrl+滚轮仍可用（习惯编辑器的用户）。
+  const float zoom_before_ctrl = view.zoom();
   st::ui::Event ctrl_wheel{};
   ctrl_wheel.kind = st::ui::EventKind::Wheel;
-  ctrl_wheel.position = st::math::Point{120.0f, 70.0f};
+  ctrl_wheel.position = anchor;
   ctrl_wheel.wheel_delta = 1.0f;
   ctrl_wheel.ctrl = true;
   ST_CHECK(view.on_event(fixture.context, ctrl_wheel));
-  ST_CHECK(view.zoom() > zoom_before);
+  ST_CHECK(view.zoom() > zoom_before_ctrl);
 
-  // 拖拽平移：按下 → 移动 → 抬起。
-  view.set_fit(false);
-  view.set_zoom(2.0f);
-  view.set_pan(0.0f, 0.0f);
+  // ④ 双击复位：zoom 回 1、pan 归零。
+  view.set_zoom(3.0f);
+  view.set_pan(40.0f, 25.0f);
+  st::ui::Event dbl{};
+  dbl.kind = st::ui::EventKind::DoubleClick;
+  dbl.position = st::math::Point{200.0f, 150.0f};
+  ST_CHECK(view.on_event(fixture.context, dbl));
+  ST_CHECK(std::abs(view.zoom() - 1.0f) < 1e-6f);
+  ST_CHECK(std::abs(view.pan_x()) < 1e-6f);
+  ST_CHECK(std::abs(view.pan_y()) < 1e-6f);
+}
+
+/// 拖拽平移：按下 → 移动 → 抬起；以及“指针移上去是 Move 光标”这个唯一提示。
+///
+/// 光标是**系统级效果，截图里不存在**——不给它就没有任何“这里能拖”的线索
+///（`mouse_cursor` 是只读属性面项，正是为了把这个看不见的东西变成可断言的）。
+ST_TEST(mermaid_view_drag_pans_and_advertises_cursor) {
+  Fixture fixture;
+  MermaidView view;
+  view.set_source("flowchart TD\n  A --> B\n  B --> C\n");
+  fixture.layout(view, 300.0f, 200.0f);
+
+  // 光标：组件内 = Move；组件外 = Arrow（不抢宿主的箭头）。
+  ST_CHECK(view.cursor_at(st::math::Point{150.0f, 100.0f}) == st::ui::MouseCursor::Move);
+  ST_CHECK(view.cursor_at(st::math::Point{-20.0f, -20.0f}) == st::ui::MouseCursor::Arrow);
+
+  // 只认**左键**（右键在宿主里通常是上下文菜单，不该被图吞掉）。
+  st::ui::Event right_down{};
+  right_down.kind = st::ui::EventKind::MouseDown;
+  right_down.position = st::math::Point{100.0f, 80.0f};
+  right_down.button = 2;
+  ST_CHECK(!view.on_event(fixture.context, right_down));
+  ST_CHECK(!view.dragging());
+
+  // 左键：按下 → move → up，pan 跟手。
   st::ui::Event down{};
   down.kind = st::ui::EventKind::MouseDown;
-  down.position = st::math::Point{50.0f, 50.0f};
+  down.position = st::math::Point{100.0f, 80.0f};
+  down.button = 1;
   ST_CHECK(view.on_event(fixture.context, down));
+  ST_CHECK(view.dragging());
   st::ui::Event move{};
   move.kind = st::ui::EventKind::MouseMove;
-  move.position = st::math::Point{80.0f, 66.0f};
+  move.position = st::math::Point{130.0f, 95.0f};
   ST_CHECK(view.on_event(fixture.context, move));
   ST_CHECK(std::abs(view.pan_x() - 30.0f) < 0.01f);
-  ST_CHECK(std::abs(view.pan_y() - 16.0f) < 0.01f);
+  ST_CHECK(std::abs(view.pan_y() - 15.0f) < 0.01f);
   st::ui::Event up{};
   up.kind = st::ui::EventKind::MouseUp;
-  up.position = st::math::Point{80.0f, 66.0f};
+  up.position = st::math::Point{130.0f, 95.0f};
   ST_CHECK(view.on_event(fixture.context, up));
-  // 抬起后再移动不再改 pan（不是"粘住指针"）。
+  ST_CHECK(!view.dragging());
+  // 抬起后再移动不再改 pan（不是“粘住指针”）。
   st::ui::Event move2{};
   move2.kind = st::ui::EventKind::MouseMove;
-  move2.position = st::math::Point{200.0f, 100.0f};
+  move2.position = st::math::Point{250.0f, 180.0f};
   ST_CHECK(!view.on_event(fixture.context, move2));
   ST_CHECK(std::abs(view.pan_x() - 30.0f) < 0.01f);
+}
+
+/// 关掉交互后必须**如实让出事件**（返回 false），不能“关了却仍然吞掉”。
+ST_TEST(mermaid_view_gestures_can_be_disabled) {
+  Fixture fixture;
+  MermaidView view;
+  view.set_source("flowchart TD\n  A --> B\n");
+  fixture.layout(view, 300.0f, 200.0f);
+
+  view.set_pan_enabled(false);
+  ST_CHECK(view.cursor_at(st::math::Point{150.0f, 100.0f}) == st::ui::MouseCursor::Arrow);
+  st::ui::Event down{};
+  down.kind = st::ui::EventKind::MouseDown;
+  down.position = st::math::Point{100.0f, 80.0f};
+  down.button = 1;
+  ST_CHECK(!view.on_event(fixture.context, down));
+
+  view.set_wheel_zoom(false);
+  // 关掉缩放 + 内容装得下 ⇒ 滚轮让给外层（嵌套滚动正解）。
+  st::ui::Event wheel{};
+  wheel.kind = st::ui::EventKind::Wheel;
+  wheel.position = st::math::Point{150.0f, 100.0f};
+  wheel.wheel_delta = -1.0f;
+  ST_CHECK(!view.on_event(fixture.context, wheel));
+  // 关掉缩放但内容溢出时，退回纵向平移（不再缩放）。
+  view.set_fit(false);
+  view.set_zoom(4.0f);
+  view.set_pan(0.0f, 0.0f);
+  const float zoom_kept = view.zoom();
+  const float pan_before = view.pan_y();
+  ST_CHECK(view.on_event(fixture.context, wheel));
+  ST_CHECK(std::abs(view.zoom() - zoom_kept) < 1e-6f);
+  ST_CHECK(view.pan_y() != pan_before);
 }

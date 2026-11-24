@@ -983,38 +983,96 @@ void Button::apply_theme(const Theme& theme) {
 
 void Button::measure(const RenderContext& context, const Constraints& constraints) {
   const Metrics& metrics = context.theme.metrics();
-  const float height = size_ == Size::Small ? metrics.control_height_sm
-                                            : (size_ == Size::Large ? metrics.control_height_lg
-                                                                    : metrics.control_height);
+  const float control_height = size_ == Size::Small
+                                   ? metrics.control_height_sm
+                                   : (size_ == Size::Large ? metrics.control_height_lg
+                                                           : metrics.control_height);
   const float horizontal_padding = size_ == Size::Small ? metrics.space_md : metrics.space_lg;
   const TextPort& port = port_of(context);
-  float width = port.measure_width(label_, style_.font_size) + horizontal_padding * 2.0f;
   warn_unknown_icon_once(icon_);
-  // 图标宽度只在图标**真画得出来**时计入——与 `paint_content` 同一判据
-  // （名字无效时那里不画、这里若算了宽度，按钮就会宽出一截且内容偏移）。
-  // 间距只在**图标与文字同时存在**时计入（与 `paint_content` 的 `gap` 同规则）；
-  // 纯图标按钮只有图标本身。
+  // 图标占位：**按墨迹宽、且图标真画得出来才计入**（与 `paint_content` 同一判据）。
   //
-  // ⚠ **按图标实际墨迹宽计，不是盒宽**：`Icon::path` 会把墨迹等比缩放并
-  // **居中**到盒里，于是盒两侧有透明留白（描边式图标约 30%）。按盒宽排版
-  // 会让那些留白也占位置——而绘制时墨迹居中，重心因此偏向文字一侧。
+  // ⚠ 按图标实际墨迹宽计，不是盒宽：`Icon::path` 会把墨迹等比缩放并**居中**
+  // 到盒里，于是盒两侧有透明留白（描边式图标约 30%）。按盒宽排版会让那些留白
+  // 也占位置——而绘制时墨迹居中，重心因此偏向文字一侧。
   // 实测（图标+文字按钮）：偏移恰为 `(盒宽 − 墨迹宽) / 4`，且**随盒变大而线性变大**
-  // （图标盒 16→20 时偏差从 0.5 涨到 1.5px）。按墨迹排版后两个量同一个事实。
+  // （图标盒 16→20 时偏差从 0.5 涨到 1.5px）。按墨迹排版后两个量是同一个事实。
+  float icon_extent = 0.0f;
   if (!icon_.empty() && Icon::has(icon_)) {
-    width += icon_ink_size().width;
-    if (!label_.empty()) width += metrics.space_sm;
+    icon_extent = icon_ink_size().width;
+    if (!label_.empty()) icon_extent += metrics.space_sm;
   }
-  width = std::max(width, height);
+  float width = port.measure_width(label_, style_.font_size) + horizontal_padding * 2.0f;
+  width += icon_extent;
+  width = std::max(width, control_height);
   // **显式宽度优先**：与其它组件同口径（`style_.width` 是宿主/DSL 的明确意图）。
   if (style_.has_explicit_width()) width = style_.width;
   // **约束要听**：旧实现在这里 `(void)constraints`——宽度只看标签文本，
   // 于是窄容器里的长标签按钮**横向溢出**到相邻面板之上（实测：侧栏 Git 变更项
   // 叠在代码编辑器上面，看起来像绘制错乱，实质是测量忽略了可用宽度）。
-  // 夹到 `constraints` 后，超长文本由 `paint_content` 末位省略号收束。
+  // 夹到 `constraints` 后，超长文本由 `paint_content` 末位省略号收束
+  // （开了 `set_label_wrap` 时改为折行，见下）。
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
   if (style_.min_width > 0.0f) width = std::max(width, style_.min_width);
   width = std::min(width, style_.max_width);
+
+  // —— 折行时高度按行数自适应 ——
+  //
+  // 单行语义下高度恒为控件高（`control_height*`）。开了 `set_label_wrap` 后
+  // 标签可能排成多行，仍固定高度就会把第二行起**裁掉**——那和“省略号截断”
+  // 一样是内容不可见（实测：相期选项按钮标签 50+ 字时右端连边框一起跑到卡片外）。
+  // 多出的高度取“行数 × 行高 + 上下各半个 `space_xs`”，让多行块不贴边。
+  float height = style_.has_explicit_height() ? style_.height : control_height;
+  if (!style_.has_explicit_height() && label_wrap_ && !label_.empty() && width < kUnbounded) {
+    const float budget = wrap_budget(context, width);
+    const std::size_t rows = wrapped_label(context, budget).size();
+    if (rows > 1U) {
+      const float content = static_cast<float>(rows) * port.line_height(style_.font_size) +
+                            metrics.space_xs * 2.0f;
+      height = std::max(control_height, content);
+    }
+  }
+  height = std::clamp(height, style_.min_height, style_.max_height);
   measured_ = math::Size{width, height};
+}
+
+/// 折行时可分给标签的宽度（已扣除内边距与图标占位）。
+///
+/// `measure` 与 `paint_content` 必须用**同一个函数**算它：两处各写一份的话，
+/// 量出来的行数与画出来的行数会分家——而症状是“最后一行被切掉半截”这种
+/// 极难归因的表现（与 `MarkdownView` 里“宽度口径分家 ⇒ 末行被裁”同一类缺陷）。
+auto Button::wrap_budget(const RenderContext& context, float limit) const -> float {
+  if (limit >= kUnbounded) return kUnbounded;
+  const Metrics& metrics = context.theme.metrics();
+  const float horizontal_padding = size_ == Size::Small ? metrics.space_md : metrics.space_lg;
+  float reserved = horizontal_padding * 2.0f;
+  if (!icon_.empty() && Icon::has(icon_)) {
+    reserved += icon_ink_size().width;
+    if (!label_.empty()) reserved += metrics.space_sm;
+  }
+  return std::max(0.0f, limit - reserved);
+}
+
+auto Button::wrapped_label(const RenderContext& context, float available) const
+    -> const std::vector<std::string>& {
+  const TextPort& port = port_of(context);
+  const float size = style_.font_size;
+  if (wrap_cache_content_ == label_ && wrap_cache_width_ == available &&
+      wrap_cache_font_size_ == size && wrap_cache_port_ == context.text) {
+    return wrapped_lines_;
+  }
+  wrapped_lines_.clear();
+  if (available > 0.0f && !label_.empty()) {
+    for (const auto& line : port.wrap(label_, size, available)) {
+      wrapped_lines_.emplace_back(line);
+    }
+  }
+  if (wrapped_lines_.empty()) wrapped_lines_.emplace_back(label_);
+  wrap_cache_content_ = label_;
+  wrap_cache_width_ = available;
+  wrap_cache_font_size_ = size;
+  wrap_cache_port_ = context.text;
+  return wrapped_lines_;
 }
 
 void Button::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -1041,6 +1099,58 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   // （与 `measure` 用的是同一个量；见那里的推导与实测数据。）
   const float icon_ink = draws_icon ? icon_ink_size().width : 0.0f;
   const float icon_extent = draws_icon ? icon_ink + gap : 0.0f;
+  const float center_y = bounds_.center().y;
+
+  // —— 折行标签（`set_label_wrap`）——
+  //
+  // 逐行绘制、整块垂直居中。**宽度预算走同一个 `wrap_budget`**（与 `measure`
+  // 同一个函数），否则“量出的行数”与“画出的行数”会分家——症状是末行被
+  // 切掉半截，而它看起来像字体/裁剪问题（与 `MarkdownView` 里同一个坑）。
+  if (label_wrap_ && !label_.empty()) {
+    const std::vector<std::string>& lines =
+        wrapped_label(context, wrap_budget(context, bounds_.width));
+    const float line_height = port.line_height(font_size);
+    float widest = 0.0f;
+    for (const auto& line : lines) {
+      widest = std::max(widest, port.measure_width(line, font_size));
+    }
+    const float block_height = line_height * static_cast<float>(lines.size());
+    // 图标跟着**整块**一起居中（图标在左时靠块左缘、在右时靠块右缘）。
+    float block_left = content_align_ == Align::Start
+                           ? bounds_.x + style_.padding.left
+                           : bounds_.x + (bounds_.width - widest - icon_extent) * 0.5f;
+    block_left = std::max(block_left, bounds_.x + style_.padding.left);
+    float text_left = block_left;
+    if (draws_icon && icon_leading) {
+      Icon::draw(canvas, icon_,
+                 math::Rect{block_left - (icon_size - icon_ink) * 0.5f,
+                            center_y - icon_size * 0.5f, icon_size, icon_size},
+                 style_.color, 0.0f);
+      text_left += icon_extent;
+    }
+    float y = bounds_.y + (bounds_.height - block_height) * 0.5f;
+    for (const auto& line : lines) {
+      // 行内水平：`Start` 贴左（列表行），否则按行宽居中。
+      const float line_wide = port.measure_width(line, font_size);
+      const float x = content_align_ == Align::Start ? text_left
+                                                     : text_left + (widest - line_wide) * 0.5f;
+      port.draw(canvas, line,
+                math::Point{x, centered_line_top(port, line, font_size, y, line_height)}, font_size,
+                style_.color);
+      y += line_height;
+    }
+    if (draws_icon && !icon_leading) {
+      Icon::draw(canvas, icon_,
+                 math::Rect{text_left + widest + gap - (icon_size - icon_ink) * 0.5f,
+                            center_y - icon_size * 0.5f, icon_size, icon_size},
+                 style_.color, 0.0f);
+    }
+    if (focused_ && focus_ring_wanted(*this)) {
+      paint_focus_ring(context, canvas, bounds_, style_.radius);
+    }
+    return;
+  }
+
   // **文本先按可用宽度截断再加省略号**：不截断时超长标签会画到按钮之外
   // （按钮被父容器夹窄了，但文本宽度还是它自己的量法），于是相邻面板上会多出
   // 一截看不清源头的字——实测就是侧栏 Git 变更项的路径叠到了代码上。
@@ -1056,7 +1166,6 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   // 贴左时带上左内边距：否则文字紧贴描边（居中时看不出来——居中本就不靠边）。
   float cursor = content_align_ == Align::Start ? bounds_.x + style_.padding.left
                                                : bounds_.x + (bounds_.width - total) * 0.5f;
-  const float center_y = bounds_.center().y;
 
   if (draws_icon && icon_leading) {
     // 盒的左缘 = 当前光标 **减去墨迹在盒内的左边距**（`(盒 − 墨迹) / 2`，
@@ -1187,6 +1296,8 @@ auto Button::get_property(std::string_view name) const -> std::optional<std::str
   }
   if (name == "hint") return hint();
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
+  // 折行开关（属性面可读写）：声明式/控制通道都靠它把长标签按钮改成折行。
+  if (name == "label_wrap") return label_wrap_ ? "true" : "false";
   return Element::get_property(name);
 }
 
@@ -1259,6 +1370,10 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
     set_hint(std::string(value));
     return true;
   }
+  if (name == "label_wrap") {
+    set_label_wrap(value == "true" || value == "1");
+    return true;
+  }
   return Element::set_property(name, value);
 }
 
@@ -1266,7 +1381,8 @@ auto Button::property_names() const -> std::vector<std::string_view> {
   // `variant` **在这张表里**（名字认得、可写），但它的写入落到**声明**
   // （`Appearance`）而不是组件自己的 `variant_` 成员——见 `set_property` 的说明。
   // 读回也走同一份事实（`get_property` 优先报声明的值）。
-  return Element::with_universal({"label", "text", "icon", "variant", "scale", "hint", "tone"});
+  return Element::with_universal({"label", "text", "icon", "variant", "scale", "hint", "tone",
+                                  "label_wrap"});
 }
 
 auto Button::invoke_action(std::string_view action, std::string_view argument) -> bool {

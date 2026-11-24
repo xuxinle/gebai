@@ -56,6 +56,7 @@
 #include "st/ui/components/terminal.hpp"
 #include "st/ui/components/timeline_view.hpp"
 #include "st/ui/components/mermaid_view.hpp"
+#include "st/ui/components/mind_map_view.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/toggle.hpp"
 #include "st/ui/components/tree.hpp"
@@ -146,6 +147,7 @@ using st::ui::Text;
 using st::ui::TextAlign;
 using st::ui::TimelineView;
 using st::ui::MermaidView;
+using st::ui::MindMapView;
 using st::ui::Tone;
 using st::ui::Tooltip;
 using st::ui::Tree;
@@ -2629,8 +2631,9 @@ namespace {
   auto mermaid_card = make_card("card-mermaid", "Mermaid 图（自绘解析 + 布局）");
   mermaid_card->add_child(make_caption(
       "一段 Mermaid 文本 → 原生自绘：流程图（分层正交连线/菱形判定/自环）、时序图（生命线 + 实虚线消息）、"
-      "饼图（12 点顺时针 + 图例）；Ctrl+滚轮以指针为锚缩放、空白拖拽平移；"
-      "控制通道：get kind·error·node_count，invoke zoom_in·zoom_out·reset_view"));
+      "饼图（12 点顺时针 + 图例）；**左键拖拽平移 · 滚轮以指针为锚缩放 · 双击复位**；"
+      "控制通道：get kind·error·node_count·dragging，set source·zoom·pan_x·pan_y，"
+      "invoke zoom_in·zoom_out·reset_view"));
   auto mermaid_flow = std::make_unique<MermaidView>();
   mermaid_flow->set_id("demo-mermaid-flow");
   mermaid_flow->set_source(
@@ -2668,6 +2671,30 @@ namespace {
   mermaid_row->add_child(std::move(mermaid_pie));
   mermaid_card->add_child(std::move(mermaid_row));
   page->add_child(std::move(mermaid_card));
+
+  // —— 思维导图（查看 / 编辑 / 保存）——
+  auto mindmap_card = make_card("card-mindmap", "思维导图（查看 · 编辑 · 保存）");
+  mindmap_card->add_child(make_caption(
+      "双击节点改名 · 拖节点到另一节点改父级 · 点折叠徽标展开/折叠 · 滚轮以指针为锚缩放 · "
+      "键盘 Tab/方向键选节点、Enter 改名、Space 折叠、Insert 加子节点、Delete 删子树、"
+      "Ctrl+Z 撤销 · Ctrl+S 保存为 FreeMind .mm；控制通道：get node_count·selected_text·dirty，"
+      "set selected·direction·zoom，invoke add_child·remove·rename·toggle_collapse·undo·save"));
+  auto mindmap = std::make_unique<MindMapView>();
+  mindmap->set_id("demo-mindmap");
+  mindmap->set_source(
+      "2026 平台技术路线图\n"
+      "  框架内核\n"
+      "    组件库\n"
+      "      思维导图\n"
+      "      Mermaid 图\n"
+      "    渲染管线\n"
+      "  应用生态\n"
+      "    裁云（视频）\n"
+      "    镂月（海报）\n"
+      "  文档体系\n");
+  mindmap->style().height = 360.0f;
+  mindmap_card->add_child(std::move(mindmap));
+  page->add_child(std::move(mindmap_card));
   return page;
 }
 

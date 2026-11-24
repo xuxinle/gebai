@@ -35,6 +35,12 @@ constexpr float kFrameWidth = 1.0f;
 constexpr float kArrowLength = 8.0f;
 constexpr float kArrowHalfWidth = 3.6f;
 
+/// 鼠标按键（**后端口径**：1=左 / 2=右 / 3=中）。
+///
+/// ⚠ 不要写 0：图形 API（X11 的 `Button1`）常从 0 起，而本框架与真实后端
+/// 一律 1 起。写错的表现是“左键拖不动”而代码看着完全正确（`three_view.cpp` 踩过）。
+constexpr int kLeftButton{1};
+
 /// 把一段折线按 `on/off` 切成虚线段（光栅层没有 dash，只能在路径层分段）。
 void stroke_polyline(raster::Surface& canvas, const std::vector<math::Point>& points,
                      math::Color color, float width, bool dashed) {
@@ -285,6 +291,27 @@ void MermaidView::set_layout_font_size(float size) {
 void MermaidView::pan_by(float dx, float dy) {
   pan_x_ += dx;
   pan_y_ += dy;
+  update_view();
+  mark_dirty();
+}
+
+void MermaidView::zoom_at(math::Point anchor, float factor) {
+  const float clamped = std::clamp(zoom_ * factor, kMinZoom, kMaxZoom);
+  if (std::abs(clamped - zoom_) < 1e-6f) return;
+  // ① 先把锚点换成**内容坐标**（用缩放前的倍率）
+  const math::Point origin = content_origin();
+  const float content_x = (anchor.x - origin.x) / scale_;
+  const float content_y = (anchor.y - origin.y) / scale_;
+  // ② 改倍率 ③ 反解 `pan`，让同一个内容点重新落在锚点下。
+  //
+  // 为何要反解而不能只改 `zoom`：`content_origin()` 里的居中偏移包含
+  // `bounds - content × scale` 这一项，倍率一变它就变——只改 `zoom`
+  // 等于以**视口中心**为轴缩放，指针下的东西会跑走。
+  zoom_ = clamped;
+  update_view();
+  const math::Point moved_origin = content_origin();
+  pan_x_ += (anchor.x - moved_origin.x) - content_x * scale_;
+  pan_y_ += (anchor.y - moved_origin.y) - content_y * scale_;
   update_view();
   mark_dirty();
 }
@@ -584,51 +611,50 @@ void MermaidView::paint_content(const RenderContext& context, raster::Surface& c
 // ————————————————————————————————————————————————————————————————————————————
 
 auto MermaidView::on_event(const RenderContext& context, Event& event) -> bool {
+  const bool inside = bounds_.contains(event.position);
   switch (event.kind) {
     case EventKind::Wheel: {
-      if (!bounds_.contains(event.position) || event.wheel_delta == 0.0f) return false;
-      if (event.ctrl) {
-        // 以指针为锚缩放：缩放前后**指针下的内容点不变**（与 `Viewport` 同一约定）。
-        const float before = scale_;
-        const float target = zoom_ * (event.wheel_delta > 0.0f ? kWheelZoomStep
-                                                               : 1.0f / kWheelZoomStep);
-        const float clamped = std::clamp(target, kMinZoom, kMaxZoom);
-        if (std::abs(clamped - zoom_) < 1e-6f) return true;
-        const math::Point origin = content_origin();
-        const math::Point pointer = event.position;
-        const float content_x = (pointer.x - origin.x) / before;
-        const float content_y = (pointer.y - origin.y) / before;
-        zoom_ = clamped;
-        update_view();
-        // 让同一个内容点重新落在指针下：反解 pan。
-        pan_x_ = pointer.x - (bounds_.x + (bounds_.width - content_size_.width * scale_) * 0.5f) -
-                 content_x * scale_;
-        pan_y_ = pointer.y - (bounds_.y + (bounds_.height - content_size_.height * scale_) * 0.5f) -
-                 content_y * scale_;
-        mark_dirty();
+      if (!inside || event.wheel_delta == 0.0f) return false;
+      // **滚轮 = 缩放**（以指针为锚），不要求 Ctrl。
+      //
+      // 为何改掉“Ctrl+滚轮才缩放”（实测）：图的阅读动作就是“看细节/看全局”，
+      // 滚轮是最直接的手势；藏在 Ctrl 后面等于没实现——不告知就没人会发现。
+      // 嵌套在滚动容器里时，图区内的滚轮被消费、区外照常滚页面（边界清楚）。
+      if (wheel_zoom_) {
+        zoom_at(event.position,
+                event.wheel_delta > 0.0f ? kWheelZoomStep : 1.0f / kWheelZoomStep);
         return true;
       }
-      // 纵向平移；内容没超出视口时让给外层（嵌套滚动的正解）。
+      // 关掉缩放后：退回纵向平移；内容没超出视口则让给外层（嵌套滚动的正解）。
       const float scaled_height = content_size_.height * scale_;
       if (scaled_height <= bounds_.height) return false;
       pan_by(0.0f, event.wheel_delta * wheel_step(context.theme));
       return true;
     }
+    case EventKind::DoubleClick: {
+      // 双击复位：拖到别处/放到很大之后，这是“回去”的通行手势
+      //（与 `ThreeView` 同一约定）。
+      if (!inside) return false;
+      reset_view();
+      return true;
+    }
     case EventKind::MouseDown: {
-      if (event.position.x < bounds_.x || event.position.x >= bounds_.right() ||
-          event.position.y < bounds_.y || event.position.y >= bounds_.bottom()) {
-        return false;
-      }
+      // 只吃**左键**：右键/中键在宿主里通常另有语义（上下文菜单），不该被图吞掉。
+      if (!inside || !pan_enabled_ || event.button != kLeftButton) return false;
       dragging_ = true;
       drag_origin_ = event.position;
       drag_pan_x_ = pan_x_;
       drag_pan_y_ = pan_y_;
+      drag_distance_ = 0.0f;
       return true;
     }
     case EventKind::MouseMove: {
       if (!dragging_) return false;
-      pan_x_ = drag_pan_x_ + (event.position.x - drag_origin_.x);
-      pan_y_ = drag_pan_y_ + (event.position.y - drag_origin_.y);
+      const float dx = event.position.x - drag_origin_.x;
+      const float dy = event.position.y - drag_origin_.y;
+      drag_distance_ = std::max(drag_distance_, std::sqrt(dx * dx + dy * dy));
+      pan_x_ = drag_pan_x_ + dx;
+      pan_y_ = drag_pan_y_ + dy;
       mark_dirty();
       return true;
     }
@@ -640,6 +666,13 @@ auto MermaidView::on_event(const RenderContext& context, Event& event) -> bool {
     default:
       return false;
   }
+}
+
+auto MermaidView::cursor_at(math::Point point) const noexcept -> MouseCursor {
+  if (!bounds_.contains(point) || !pan_enabled_) return MouseCursor::Arrow;
+  // 能拖动的地方一律给 `Move`：光标是**系统级效果，截图里不存在**，
+  // 不给它就没有任何“这里能拖”的视觉线索（用户只能靠试）。
+  return MouseCursor::Move;
 }
 
 // ————————————————————————————————————————————————————————————————————————————
@@ -677,6 +710,9 @@ auto MermaidView::get_property(std::string_view name) const -> std::optional<std
   if (name == "pan_x") return std::format("{:.1f}", pan_x_);
   if (name == "pan_y") return std::format("{:.1f}", pan_y_);
   if (name == "scale") return std::format("{:.3f}", scale_);
+  if (name == "dragging") return std::string(dragging_ ? kFlagTrue : "false");
+  if (name == "pan_enabled") return std::string(pan_enabled_ ? kFlagTrue : "false");
+  if (name == "wheel_zoom") return std::string(wheel_zoom_ ? kFlagTrue : "false");
   if (name == "error") return first_diagnostic();
   if (name == "diagnostics") return std::to_string(document_.diagnostics.size());
   if (name == "node_count") {
@@ -722,17 +758,25 @@ auto MermaidView::set_property(std::string_view name, std::string_view value) ->
     else set_pan(pan_x_, static_cast<float>(*parsed));
     return true;
   }
+  if (name == "pan_enabled" || name == "wheel_zoom") {
+    const auto parsed = st::parse_bool(value);
+    if (!parsed.has_value()) return false;
+    if (name == "pan_enabled") set_pan_enabled(*parsed);
+    else set_wheel_zoom(*parsed);
+    return true;
+  }
   return Element::set_property(name, value);
 }
 
 auto MermaidView::property_names() const -> std::vector<std::string_view> {
-  return Element::with_universal({"source", "zoom", "fit", "font_size", "pan_x", "pan_y"});
+  return Element::with_universal(
+      {"source", "zoom", "fit", "font_size", "pan_x", "pan_y", "pan_enabled", "wheel_zoom"});
 }
 
 auto MermaidView::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"kind", "error", "diagnostics", "node_count",
                                            "edge_count", "content_width", "content_height",
-                                           "scale"});
+                                           "scale", "dragging"});
 }
 
 auto MermaidView::invoke_action(std::string_view action, std::string_view /*argument*/) -> bool {

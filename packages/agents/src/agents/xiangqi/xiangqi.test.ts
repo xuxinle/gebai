@@ -722,6 +722,83 @@ describe("card_dismiss 支持单卡撤回", () => {
     expect(peer.lastCards().length).toBe(0)
     peer.close()
   })
+
+  /**
+   * agent 自己 `dismissAll` 时**不能**把等待者挂到超时。
+   *
+   * 实测代价：用户那头已经什么都没得看了，而 `card_ask` 还在白等 5 分钟——
+   * 两边都在等一个永远不会来的答复。
+   */
+  it("控制器 dismissAll 会唤醒等待者（不让 card_ask 白等到超时）", async () => {
+    const ctl = fresh()
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => ctl.isConnected(), 2000, "连上")
+    const { id } = ctl.push({ kind: "choice", title: "选", options: [{ label: "A", value: "a" }] })
+    // 超时给 5 秒：真的没被唤醒的话，本用例会撑到 5 秒（而不是 30ms 就回）
+    const started = Date.now()
+    const waiting = ctl.waitForAnswer(id, 5000)
+    ctl.dismissAll()
+    expect(await waiting).toBeNull()
+    expect(Date.now() - started).toBeLessThan(2000)
+    peer.close()
+    ctl.close()
+  })
+})
+
+/**
+ * 「用户点了全部清除」的答复：`{cleared:true}`。
+ *
+ * 相期窗口底部的「全部清除」现在清掉**所有类型**的卡（含 choice/todo），
+ * 并逐张回一条 `{cleared:true}`。这组用例钉住 agent 侧的解读，因为
+ * **读错它的后果是“自己给自己发授权”**：
+ *
+ * | 读错方式 | 后果 |
+ * |---|---|
+ * | 当成正常作答（`answered:true`） | 审批桥看到“用户答复了” → 放行了一个用户从没做过的决定 |
+ * | choice 走通用分支 | 模型读到「用户选了「undefined」」→ 把它当真的值用 |
+ * | todo 走通用分支 | 模型读到「用户给了答复：{...}」→ 以为已完成/已撑置 |
+ */
+describe("答复 {cleared:true}（用户点了全部清除）", () => {
+  it("describeAnswer 说清“清除了、没作答”，不得当成同意/完成", () => {
+    const choiceCard = {
+      kind: "choice" as const,
+      title: "发哪个群",
+      options: [{ label: "支持群", value: "oc_support" }],
+    }
+    const text = describeAnswer(choiceCard, {
+      id: "c1",
+      kind: "choice",
+      answer: { cleared: true, by: "user" },
+      answeredAtMs: 0,
+    })
+    expect(text).toContain("清除")
+    expect(text).toContain("没有作答")
+    // 绝不能出现 kind 分支的痕迹（那正是读错的形态）
+    expect(text).not.toContain("用户选了")
+    expect(text).not.toContain("undefined")
+  })
+
+  it("card_ask 收到 cleared 时报 answered:false（否则审批桥会放行）", async () => {
+    const ctl = fresh()
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => ctl.isConnected(), 2000, "连上")
+    const tools = createTools({ controller: ctl })
+    const pending = tools.card_ask!.execute!(
+      { kind: "choice", title: "选", options: [{ label: "A", value: "a" }], wait_ms: 5000 },
+      {} as never,
+    )
+    // 等卡真的推出去再作答（否则 waitForAnswer 尚未注册等待）
+    await until(() => peer.lastCards().length === 1, 2000, "卡已到")
+    const id = peer.lastCards()[0]!.id
+    peer.answer(id, "choice", { cleared: true, by: "user" })
+    const result = await pending
+    const data = result.data as { answered?: boolean; cleared?: boolean }
+    expect(data.cleared).toBe(true)
+    expect(data.answered).toBe(false)
+    expect(String(result.output)).toContain("没有作答")
+    peer.close()
+    ctl.close()
+  })
 })
 
 describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
