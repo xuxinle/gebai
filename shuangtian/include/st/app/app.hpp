@@ -576,6 +576,12 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto window_maximized() const -> bool override;
   /// 从最小化/后台恢复到前台（常驻类应用的“点托盘把我叫回来”）。
   [[nodiscard]] auto window_restore() -> bool override;
+  /// 把窗口铺开到工作区 92%（外部验证用：见 `control::Host::window_control`）。
+  [[nodiscard]] auto window_fit_to_work_area() -> bool override;
+  /// 设为/取消钉在最底层。
+  [[nodiscard]] auto window_stay_at_bottom(bool enabled) -> bool override;
+  /// `control::Host` 的窗口控制端口（返回自身——本类同时实现了这两个接口）。
+  [[nodiscard]] auto window_control() -> ui::WindowControl* override;
 
   /// 运行时改窗口逻辑尺寸（常驻面板的“缩成一角 / 展开主界面”）。
   ///

@@ -53,9 +53,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <fcntl.h>     // lint-allow: L14 平台单点封装（O_CLOEXEC：剪贴板管道）
 #include <sys/mman.h>  // lint-allow: L14 平台单点封装（wl_shm 的共享内存）
 #include <time.h>      // lint-allow: L14 平台单点封装（nanosleep）
-#include <unistd.h>    // lint-allow: L14 平台单点封装（memfd/ftruncate/close）
+#include <unistd.h>    // lint-allow: L14 平台单点封装（memfd/ftruncate/close/pipe2/read/write）
 #include <vector>
 
 #include <dlfcn.h>  // lint-allow: L14 平台单点封装
@@ -118,6 +119,13 @@ constexpr std::uint32_t kBtnRight{0x111};
 constexpr std::uint32_t kBtnMiddle{0x112};
 /// `wl_pointer.axis` 的方向与 `wl_pointer.axis_source`。
 constexpr std::uint32_t kWlPointerAxisVertical{0};
+
+/// 剪贴板单次读取的字节上限（与 X11 后端同一口径）。
+///
+/// 为何要上限：Wayland 的 `receive` 是**对端往我们的管道里写**——不守规矩的对端
+/// 可以无限写，我们边读边存就是一次可被触发的内存膨胀。1 MiB 远超过任何真实
+/// 复制粘贴的文本量，超限时得到的是截断的文本（而非卡死）。
+constexpr std::size_t kClipboardMaxBytes{1024U * 1024U};
 
 /// libwayland-client 函数表（一次性取全；缺任何一个即整体视为不可用——
 /// 否则"库版本太旧少了某个函数"会变成运行到某条路径才崩，而不是启动时一句明确的话）。
@@ -478,6 +486,15 @@ class WaylandBackend final : public Backend {
   void on_output_scale(std::int32_t factor);
   void on_frame_callback_done(WlProxy* proxy);
   void on_preferred_buffer_scale(std::int32_t factor);
+  // —— 剪贴板（wl_data_device / wl_data_source）——
+  void on_data_device_offer(void* offer);
+  void on_data_device_selection(void* offer);
+  void on_data_source_target(const char* mime_type);
+  void on_data_source_send(const char* mime_type, std::int32_t fd);
+  void on_data_source_cancelled();
+  void on_data_offer_mime(const char* mime_type);
+  /// 建 `wl_data_device`（剪贴板通道）；幂等，等 data_device_manager 与 seat 都就绪。
+  void ensure_data_device();
 
  private:
   [[nodiscard]] auto bind_globals() -> bool;
@@ -513,6 +530,20 @@ class WaylandBackend final : public Backend {
   WlProxy* frame_callback_{nullptr};
   WlProxy* shm_pool_{nullptr};
 
+  // —— 剪贴板（wl_data_device 链路）——
+  WlProxy* data_device_manager_{nullptr};
+  WlProxy* data_device_{nullptr};
+  /// 写入方向：本进程持有的 **data_source**（`set_clipboard_text` 时新建）。
+  WlProxy* data_source_{nullptr};
+  /// 读取方向：合成器发来的 **data_offer**（选区变化时给，下一次再用时替换）。
+  WlProxy* data_offer_{nullptr};
+  /// data_offer 声明的 MIME 类型（`offer` 事件逐条追加）。
+  std::vector<std::string> offer_mime_types_{};
+  /// 进程内缓存（与 X11/headless 同口径：“读回自己刚写的”与“无合成器时的降级”）。
+  std::string clipboard_cache_{};
+  /// 是否已经拿到 data_device（= 能接剪贴板）。
+  bool clipboard_ready_{false};
+
   /// 一块共享内存缓冲（池里切出来的一格）。
   struct ShmBuffer {
     WlProxy* buffer{nullptr};
@@ -545,7 +576,6 @@ class WaylandBackend final : public Backend {
   std::string renderer_{"auto"};
   std::string renderer_name_{"software"};
   std::string renderer_note_{};
-  std::string clipboard_cache_{};
 
   bool decorations_{false};
   /// 是否要窗口外阴影（wayland 由合成器绘制；这里只如实接住开关）。
@@ -642,6 +672,16 @@ void surface_enter(void* data, void* proxy, void* output);
 void surface_leave(void* data, void* proxy, void* output);
 void surface_preferred_buffer_scale(void* data, void* proxy, std::int32_t factor);
 void surface_preferred_buffer_transform(void* data, void* proxy, std::uint32_t transform);
+// ——— wl_data_device / wl_data_source 的回调（剪贴板 + 拖放）———
+void data_device_offer(void* data, void* proxy, void* offer);
+void data_device_selection(void* data, void* proxy, void* offer);
+void data_device_dnd_noop(void* data, void* proxy);
+void data_source_target(void* data, void* proxy, const char* mime_type);
+void data_source_send(void* data, void* proxy, const char* mime_type, std::int32_t fd);
+void data_source_cancelled(void* data, void* proxy);
+void data_source_dnd_noop(void* data, void* proxy);
+void data_offer_offer(void* data, void* proxy, const char* mime_type);
+void data_offer_noop(void* data, void* proxy);
 
 template <typename Fn>
 [[nodiscard]] constexpr auto slot(Fn fn) -> void (*)(void) {
@@ -716,6 +756,35 @@ template <typename T>
 }
 [[nodiscard]] auto callback_listener() -> void (**)(void) {
   static void (*table[])(void) = {slot(&callback_done)};
+  return table;
+}
+[[nodiscard]] auto data_device_listener() -> void (**)(void) {
+  // `wl_data_device` 的事件表（顺序必须与协议 XML 一致）：
+  //   data_offer · enter · leave · motion · drop · selection
+  // 本版只接 `data_offer`（拿到 offer 才能读）与 `selection`（选区变了）。
+  // `enter`/`leave`/`motion`/`drop` 是拖放（DnD）的，剪贴板不走它们；
+  // 但不体位留空必须是合法函数指针（表长必须齐全，否则 libwayland 会越界读）。
+  static void (*table[])(void) = {
+      slot(&data_device_offer), slot(&data_device_dnd_noop),    slot(&data_device_dnd_noop),
+      slot(&data_device_dnd_noop), slot(&data_device_dnd_noop), slot(&data_device_selection)};
+  return table;
+}
+[[nodiscard]] auto data_source_listener() -> void (**)(void) {
+  // `wl_data_source` 的事件表：target · send · cancelled · dnd_drop_performed ·
+  // dnd_finished · action。
+  //
+  // **`send` 是剪贴板的命脉**：别的应用要粘贴时会发它（带一个 fd），客户端必须
+  // 把文本写进那个 fd。不应答的表现是“在别的应用里粘贴无反应”。
+  static void (*table[])(void) = {slot(&data_source_target), slot(&data_source_send),
+                                  slot(&data_source_cancelled), slot(&data_source_dnd_noop),
+                                  slot(&data_source_dnd_noop), slot(&data_source_dnd_noop)};
+  return table;
+}
+[[nodiscard]] auto data_offer_listener() -> void (**)(void) {
+  // `wl_data_offer` 的事件表：offer · source_actions · action。
+  // 本版只接 `offer`（逐条报 MIME 类型）——读剪贴板必须先知道对方能提供什么。
+  static void (*table[])(void) = {slot(&data_offer_offer), slot(&data_offer_noop),
+                                  slot(&data_offer_noop)};
   return table;
 }
 
@@ -828,6 +897,33 @@ void surface_preferred_buffer_scale(void* data, void* /*proxy*/, std::int32_t fa
 }
 void surface_preferred_buffer_transform(void* /*data*/, void* /*proxy*/,
                                         std::uint32_t /*transform*/) {}
+
+// —— 剪贴板（wl_data_device / wl_data_source）——
+
+void data_device_offer(void* data, void* /*proxy*/, void* offer) {
+  self_of<WaylandBackend>(data).on_data_device_offer(offer);
+}
+void data_device_selection(void* data, void* /*proxy*/, void* offer) {
+  self_of<WaylandBackend>(data).on_data_device_selection(offer);
+}
+void data_source_target(void* data, void* /*proxy*/, const char* mime_type) {
+  self_of<WaylandBackend>(data).on_data_source_target(mime_type);
+}
+void data_source_send(void* data, void* /*proxy*/, const char* mime_type, std::int32_t fd) {
+  self_of<WaylandBackend>(data).on_data_source_send(mime_type, fd);
+}
+void data_source_cancelled(void* data, void* /*proxy*/) {
+  self_of<WaylandBackend>(data).on_data_source_cancelled();
+}
+
+// 拖放（DnD）的事件本版不实现，但回调表的每个位必须是**合法函数指针**
+// （表长不齐 libwayland 会越界读）。所以这些位指向同一个空实现。
+void data_device_dnd_noop(void* /*data*/, void* /*proxy*/) {}
+void data_source_dnd_noop(void* /*data*/, void* /*proxy*/) {}
+void data_offer_offer(void* data, void* /*proxy*/, const char* mime_type) {
+  self_of<WaylandBackend>(data).on_data_offer_mime(mime_type);
+}
+void data_offer_noop(void* /*data*/, void* /*proxy*/) {}
 
 }  // namespace
 
@@ -1373,20 +1469,223 @@ auto WaylandBackend::begin_resize(WindowEdge edge) -> Status {
   return ok();
 }
 
+// —— 剪贴板（wl_data_device：真跨进程）——
+//
+// ## Wayland 的剪贴板模型与 X11 的差别
+//
+// | | X11 | Wayland |
+// |---|---|---|
+// | 所有权 | 客户端自己当所有者，应答 SelectionRequest | **合成器转**：客户端给 data_source |
+// | 写 | XSetSelectionOwner + 回属性 | 新建 data_source + offer(mime) + set_selection |
+// | 读 | XConvertSelection 等 SelectionNotify | 拿 data_offer + receive(mime, fd) 读 fd |
+// | 发现 | 查 selection owner | 合成器发 `data_device.selection` 事件 |
+//
+// 关键结论：**两边都是异步但形态相反**：X11 是“我应答”、Wayland 是“我读 fd”
+// （`receive` 把内容写进一个 pipe，我们读完就完事）。而写入是“对方来 `send`，
+// 我把内容写进他给的 fd”——两个方向都必须能在**事件泵里**处理，不能阻塞主循环。
+
 auto WaylandBackend::clipboard_text() -> Result<std::string> {
-  // 如实说明范围：Wayland 剪贴板要 `wl_data_device`（data_source/data_offer + MIME 协商，
-  // 还需合成器支持）。本版未实现跨进程剪贴板——进程内闭环可用（与 headless 同口径：
-  // 无头下"复制→粘贴"必须能用）；跨进程实现见 BACKLOG。
-  if (clipboard_cache_.empty()) {
-    return unexpected(ErrorCode::Unsupported,
-                      "Wayland 跨进程剪贴板尚未实现（本进程内复制粘贴可用）");
+  // 先把已有事件处理完：`data_device.selection` 可能刚到（别的应用刚写入剪贴板）。
+  pump_events();
+  if (data_offer_ == nullptr) {
+    // 没有 offer：要么合成器还没发、要么剪贴板为空。
+    //
+    // 这里不能报“跨进程剪贴板未实现”了——那是旧版姿态。如实区分两种情况：
+    //   ① 本进程自己就是内容持有者（刚 set 过）：直接给缓存；
+    //   ② 真没有任何内容：报空。
+    if (!clipboard_cache_.empty()) return clipboard_cache_;
+    return unexpected(ErrorCode::Unsupported, "剪贴板为空（合成器未提供 data_offer）");
   }
-  return clipboard_cache_;
+
+  // 选一个可用的 UTF-8 MIME。按优先序试：
+  //   `text/plain;charset=utf-8` → `text/plain` → `UTF8_STRING`（少数合成器用 X11 名）。
+  // 为何要列表而不用一个固定值：不同合成器（GNOME/KDE/wlroots）声明的集合不同，
+  // 只认一个会在别的桌面上“复制了但粘贴不出来”。
+  const std::string* chosen = nullptr;
+  for (const auto* candidate : {"text/plain;charset=utf-8", "text/plain", "UTF8_STRING",
+                                "text/plain;charset=UTF-8"}) {
+    for (const auto& available : offer_mime_types_) {
+      if (available == candidate) {
+        chosen = &available;
+        break;
+      }
+    }
+    if (chosen != nullptr) break;
+  }
+  if (chosen == nullptr) {
+    return unexpected(ErrorCode::Unsupported,
+                      "剪贴板里没有可用的文本 MIME（数据不是纯文本）");
+  }
+
+  // `receive(mime, fd)`：把 fd 的写端交给合成器，它把内容写进来。
+  // 必须用 pipe 2（Linux 的 `pipe2`）：O_CLOEXEC 防止 fd 漏给子进程。
+  int fds[2] = {-1, -1};
+  if (::pipe2(fds, O_CLOEXEC) != 0) {
+    return unexpected(ErrorCode::Io, "创建剪贴板管道失败");
+  }
+  const proto::Message* message = find_request(proto::kwl_data_offer, "receive");
+  if (message == nullptr) {
+    ::close(fds[0]);
+    ::close(fds[1]);
+    return unexpected(ErrorCode::Unsupported, "wl_data_offer 无 receive 请求");
+  }
+  Args args;
+  args.str(chosen->c_str()).fd(fds[1]);
+  (void)marshal(data_offer_, proto::kwl_data_offer, message, nullptr, 0, args);
+  (void)flush();
+  ::close(fds[1]);  // 写端已交出去，本进程留读端
+
+  // 读满整条管道。⚠ 必须读到 EOF：合成器写完会关写端，`read` 返回 0。
+  // 不能只读一次——一次 `read` 可能只拿到一部分（管道缓冲区默认 64 KiB）。
+  std::string collected;
+  std::array<char, 8192> chunk{};
+  for (;;) {
+    const ssize_t got = ::read(fds[0], chunk.data(), chunk.size());
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (got == 0) break;
+    collected.append(chunk.data(), static_cast<std::size_t>(got));
+    // 上限保护：异常对端可能无限写（同 X11 侧 1 MiB 口径）。
+    if (collected.size() > kClipboardMaxBytes) break;
+  }
+  ::close(fds[0]);
+
+  if (collected.empty()) {
+    return unexpected(ErrorCode::Unsupported, "剪贴板读取为空（对端未写入内容）");
+  }
+  clipboard_cache_ = collected;
+  return collected;
 }
 
 auto WaylandBackend::set_clipboard_text(std::string_view text) -> Status {
   clipboard_cache_ = std::string(text);
+  if (data_device_manager_ == nullptr || data_device_ == nullptr) {
+    // 内容已在本进程内可用（组件层的复制/粘贴仍能工作）——但要如实说跨进程不可用。
+    ST_LOG_WARN("wayland 剪贴板写入未完成：data_device_manager={} data_device={}",
+                data_device_manager_ != nullptr ? "有" : "无",
+                data_device_ != nullptr ? "有" : "无");
+    return unexpected(ErrorCode::Unsupported, "无 wl_data_device（剪贴板仅在进程内可用）");
+  }
+  // 旧的 data_source 要被替换：合成器只认最新一次 set_selection 的源。
+  if (data_source_ != nullptr) {
+    const WaylandApi& api = wayland_library();
+    if (const proto::Message* destroy = find_request(proto::kwl_data_source, "destroy");
+        destroy != nullptr) {
+      Args args;
+      (void)marshal(data_source_, proto::kwl_data_source, destroy, nullptr, 0, args);
+    }
+    api.proxy_destroy(data_source_);
+    data_source_ = nullptr;
+  }
+  const proto::Message* create = find_request(proto::kwl_data_device_manager, "create_data_source");
+  if (create == nullptr) return unexpected(ErrorCode::Unsupported, "无 create_data_source 请求");
+  {
+    Args args;
+    args.new_id();
+    data_source_ = marshal(data_device_manager_, proto::kwl_data_device_manager, create,
+                           &proto::kwl_data_source, proto::kwl_data_source.version, args);
+  }
+  if (data_source_ == nullptr) return unexpected(ErrorCode::Io, "创建 data_source 失败");
+  (void)wayland_library().proxy_add_listener(data_source_, data_source_listener(), this);
+
+  // 声明我们**能提供的** MIME。只声明 UTF-8 一档：
+  // 本框架内文本恒为 UTF-8，声称支持其它编码就是在骗对方（对方按 latin-1 读会乱码）。
+  if (const proto::Message* offer = find_request(proto::kwl_data_source, "offer");
+      offer != nullptr) {
+    Args args;
+    args.str("text/plain;charset=utf-8");
+    (void)marshal(data_source_, proto::kwl_data_source, offer, nullptr, 0, args);
+    Args args2;
+    args2.str("text/plain");  // 老客户端的兼容名
+    (void)marshal(data_source_, proto::kwl_data_source, offer, nullptr, 0, args2);
+  }
+  // `set_selection(data_source, serial)`：serial 必须是**最近一次输入事件的序列号**
+  // —— 这是 Wayland 的防滥用机制（防后台应用抢剪贴板）。拿不到 serial 就只能进程内用。
+  const proto::Message* set_selection = find_request(proto::kwl_data_device, "set_selection");
+  if (set_selection == nullptr) return unexpected(ErrorCode::Unsupported, "无 set_selection 请求");
+  if (last_input_serial_ == 0) {
+    // 无法拿 serial 时的**降级策略**：退到 X11 后端那条路？不行——这里已经是
+    // Wayland 会话。所以只能如实拒绝，但把缓存留住（进程内复制粘贴仍可用）。
+    //
+    // 为何会有这种情形：serial 只能来自**真实的输入事件**（键盘/指针）。
+    // 自动化测试走控制通道投递的事件不经过合成器，所以没有 serial；
+    // 而无输入的纯后台应用在 Wayland 下本来也抢不到剪贴板（安全模型使然）。
+    ST_LOG_WARN("wayland 剪贴板写入未完成：缺少输入序列号（last_input_serial_=0）");
+    return unexpected(ErrorCode::Unsupported,
+                      "缺少输入序列号（合成器会拒绝没输入的后台应用抢剪贴板；"
+                      "点一下窗口后再试）");
+  }
+  Args args;
+  args.obj(data_source_).u(last_input_serial_);
+  (void)marshal(data_device_, proto::kwl_data_device, set_selection, nullptr, 0, args);
+  (void)flush();
   return ok();
+}
+
+void WaylandBackend::on_data_device_offer(void* offer) {
+  // 新的 data_offer：之后会用 `data_offer.offer` 事件逐条报 MIME。
+  // 旧的要销毁（否则每换一次剪贴板就漏一个代理）。
+  const WaylandApi& api = wayland_library();
+  if (data_offer_ != nullptr) {
+    api.proxy_destroy(data_offer_);
+    data_offer_ = nullptr;
+  }
+  offer_mime_types_.clear();
+  data_offer_ = static_cast<WlProxy*>(offer);
+  if (data_offer_ == nullptr) return;
+  (void)api.proxy_add_listener(data_offer_, data_offer_listener(), this);
+}
+
+void WaylandBackend::on_data_device_selection(void* offer) {
+  // `selection`：当前选区的内容变了。`offer == nullptr` = 剪贴板被清空。
+  if (offer == nullptr) {
+    const WaylandApi& api = wayland_library();
+    if (data_offer_ != nullptr) {
+      api.proxy_destroy(data_offer_);
+      data_offer_ = nullptr;
+    }
+    offer_mime_types_.clear();
+    clipboard_cache_.clear();
+    return;
+  }
+  on_data_device_offer(offer);
+}
+
+void WaylandBackend::on_data_source_send(const char* mime_type, std::int32_t fd) {
+  // 别的应用在粘贴：把我们的文本写进他给的 fd。
+  //
+  // ⚠ **写失败不能报错到调用方**（这里没有调用方）——但要写**日志**：
+  // 写不出去的表现是“在别的应用里粘贴出来是空的”，而本进程一切正常，
+  // 不记日志就只能靠猜。
+  if (fd < 0) return;
+  const std::string& text = clipboard_cache_;
+  std::size_t written = 0;
+  while (written < text.size()) {
+    const ssize_t chunk = ::write(fd, text.data() + written, text.size() - written);
+    if (chunk < 0) {
+      if (errno == EINTR) continue;
+      ST_LOG_WARN("剪贴板写入失败（mime={}，已写 {}/{} 字节，errno={}）",
+                  mime_type != nullptr ? mime_type : "?", written, text.size(), errno);
+      break;
+    }
+    written += static_cast<std::size_t>(chunk);
+  }
+  ::close(fd);  // 必须关：不关对方会一直等到超时（“粘贴卡一下才出内容”）
+}
+
+void WaylandBackend::on_data_source_target(const char* /*mime_type*/) {
+  // 合成器告诉我们即将发生一次粘贴协商。不需要做什么（内容已在 set 时就备份在缓存里）。
+}
+
+void WaylandBackend::on_data_source_cancelled() {
+  // 别人抢走了剪贴板：本进程不再是所有者。缓存保留（“读回自己刚写的”）。
+}
+
+void WaylandBackend::on_data_offer_mime(const char* mime_type) {
+  if (mime_type == nullptr) return;
+  offer_mime_types_.emplace_back(mime_type);
 }
 
 auto WaylandBackend::framebuffer() -> raster::Surface& {
@@ -1428,6 +1727,9 @@ void WaylandBackend::on_registry_global(std::uint32_t name, const char* interfac
   } else if (iface == "wl_seat" && seat_ == nullptr) {
     wanted = &proto::kwl_seat;
     listener = seat_listener();
+  } else if (iface == "wl_data_device_manager" && data_device_manager_ == nullptr) {
+    // 剪贴板 + 拖放的入口（拿它才能 `get_data_device` 建 data_device）。
+    wanted = &proto::kwl_data_device_manager;
   } else if (iface == "wl_output" && output_ == nullptr) {
     wanted = &proto::kwl_output;
     listener = output_listener();
@@ -1451,7 +1753,10 @@ void WaylandBackend::on_registry_global(std::uint32_t name, const char* interfac
   else if (iface == "xdg_wm_base") xdg_wm_base_ = bound;
   else if (iface == "zxdg_decoration_manager_v1") decoration_manager_ = bound;
   else if (iface == "wl_seat") seat_ = bound;
+  else if (iface == "wl_data_device_manager") data_device_manager_ = bound;
   else if (iface == "wl_output") output_ = bound;
+  // data_device_manager 后到时，seat 可能已经就绪——所以两边都要试。
+  if (iface == "wl_data_device_manager" || iface == "wl_seat") ensure_data_device();
 }
 
 void WaylandBackend::on_shm_format(std::uint32_t format) {
@@ -1588,6 +1893,27 @@ void WaylandBackend::on_seat_capabilities(std::uint32_t capabilities) {
     api.proxy_destroy(pointer_);
     pointer_ = nullptr;
   }
+  // 剪贴板（`wl_data_device`）：它由 **wl_data_device_manager + wl_seat** 共同建出来，
+  // 因此必须等 seat 就绪。两个全局到齐的时机不固定（registry 事件顺序不定），
+  // 所以两边都试：谁后到就由谁触发。
+  ensure_data_device();
+}
+
+/// 建 `wl_data_device`（剪贴板通道）。幂等：已建过直接返回。
+void WaylandBackend::ensure_data_device() {
+  if (data_device_ != nullptr) return;
+  if (data_device_manager_ == nullptr || seat_ == nullptr) return;
+  const proto::Message* message = find_request(proto::kwl_data_device_manager, "get_data_device");
+  if (message == nullptr) return;
+  Args args;
+  args.new_id().obj(seat_);
+  data_device_ = marshal(data_device_manager_, proto::kwl_data_device_manager, message,
+                         &proto::kwl_data_device, proto::kwl_data_device.version, args);
+  if (data_device_ == nullptr) return;
+  (void)wayland_library().proxy_add_listener(data_device_, data_device_listener(), this);
+  clipboard_ready_ = true;
+  ST_LOG_INFO("wayland 剪贴板通道就绪（wl_data_device 已建）");
+  (void)flush();
 }
 
 void WaylandBackend::on_keyboard_keymap(std::uint32_t format, std::int32_t fd, std::uint32_t size) {

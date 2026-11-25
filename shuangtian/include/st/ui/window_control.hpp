@@ -92,6 +92,19 @@ class WindowControl {
   ///
   /// 默认实现返回 `false`（未实现的后端如实拒绝，不假装成功）。
   [[nodiscard]] virtual auto window_restore() -> bool { return false; }
+
+  /// 把窗口**铺开到屏幕工作区的 92%**（与启动时的 `fill_work_area` 同一口径）。
+  ///
+  /// 为何需要从外部触发（而不是只在启动时做一次）：
+  /// `tools/linux_window_semantics_check.py` 要从 **X 服务器侧**验证“铺开真生效”，
+  /// 而那条路只在启动时序里跑一次——测试无法区分“碰巧初始尺寸就是它”与“铺开真改了尺寸”。
+  /// 提供这个入口后，验证可以用“先改成另一个尺寸 → 再铺开 → 看是否回到 92%”这个闭环。
+  [[nodiscard]] virtual auto window_fit_to_work_area() -> bool { return false; }
+
+  /// 设为/取消“钉在最底层”。
+  ///
+  /// 同 `window_restore` 的姿态：不支持就返回 `false`，不静默无效。
+  [[nodiscard]] virtual auto window_stay_at_bottom(bool /*enabled*/) -> bool { return false; }
 };
 
 }  // namespace st::ui

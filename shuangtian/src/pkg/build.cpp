@@ -3010,6 +3010,48 @@ auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> b
 ///   而且它们的使用场景是"就地调试"（分离反而多一步）。
 /// - `objcopy` 从**与编译器同目录**开始找（交叉工具链的 `*-objcopy` 与它的 gcc 同装），
 ///   再回退 PATH——交叉构建时用宿主 objcopy 会因目标格式不同而报错。
+/// 标识符字符（`has_symbol_table` 的边界判定用）。
+[[nodiscard]] auto is_ident_char(char value) noexcept -> bool {
+  const bool digit = value >= '0' && value <= '9';
+  const bool upper = value >= 'A' && value <= 'Z';
+  const bool lower = value >= 'a' && value <= 'z';
+  return digit || upper || lower || value == '_';
+}
+
+/// `objdump -h` 的输出里是否列着**符号表段**（`.symtab` / COFF 的 `.symtab`）。
+///
+/// ## 为何用“段存在性”而不是文案
+///
+/// 两个格式的 `objdump` 输出文案完全不同：
+///   - **PE/COFF**（MinGW）：`objdump -p` 会打一句 `symbols stripped`（旧码只认它）；
+///   - **ELF**（Linux/macOS）：`objdump -p` 只列 Program Header 与动态段，
+///     **根本没有那句话** → 旧码的早退在 ELF 上永不生效。
+///
+/// 而 `--strip-all` 在两个格式上的**效果一致**：删掉 `.symtab`（只留 `.dynsym`）。
+/// 所以“段表里还有没有 `.symtab`”是跨格式成立的判据，且与
+/// `has_debug_sections` 用的是**同一次 `objdump -h` 输出**，不多跑一次工具。
+///
+/// 为何不误判 `.dynsym`：它的名字不是 `.symtab`，且 `objdump -h` 逐行列出段名，
+/// 整词比对（前后是非标识符字符）足够——`.strtab`/`.dynsym` 里都不含 `.symtab` 子串。
+[[nodiscard]] auto has_symbol_table(std::string_view objdump_headers) -> bool {
+  constexpr std::string_view kSymtab = ".symtab";
+  std::size_t at = objdump_headers.find(kSymtab);
+  while (at != std::string_view::npos) {
+    // 左边界：不能是标识符字符（防 `.debug_symtab` 这类 hypotethical 名字误中）；
+    // 右边界同理（`.symtabx`）。`objdump -h` 的段名列以空格分隔，两端必是空白。
+    const bool left_ok = at == 0 || !is_ident_char(objdump_headers[at - 1]);
+    const std::size_t after = at + kSymtab.size();
+    const bool right_ok = after >= objdump_headers.size() ||
+                          !is_ident_char(objdump_headers[after]);
+    if (left_ok && right_ok) return true;
+    at = objdump_headers.find(kSymtab, at + 1);
+  }
+  return false;
+}
+
+/// 把产物的调试信息**分离到 `<产物>.debug`**（并给产物加上 gnu-debuglink）。
+///
+/// 详细理由见上方大段注释（为何分离、为何用 DebugLink 而非自定义格式）。
 [[nodiscard]] auto separate_debug_info(const std::string& artifact,
                                        std::string_view compiler_path,
                                        std::string_view executable_suffix,
@@ -3050,7 +3092,27 @@ auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> b
         //
         // 判据：`objdump -p` 对已剥离符号的产物只输出 `symbols stripped`（实测
         // MinGW）——它比读 PE 头里的 `NumberOfSymbols` 更可移植（ELF 侧也认同一句）。
+        //
+        // ## ⚠ ELF 没有这句话（2026-11-24 真机实测发现的真缺陷）
+        //
+        // 旧码只认 `symbols stripped`，而那是 **PE/COFF 专属文案**：GNU `objdump -p`
+        // 对 ELF 只输出 Program Header + 动态段，**永远不会有它**。
+        // 后果：Linux 上这条早退**永不生效** → 每次构建都重跑一遍
+        // `--only-keep-debug` + `--strip-all` + `--add-gnu-debuglink`
+        // （本仓实测单次 ~0.7s/产物，全量发行构建是数十秒的白烧），
+        // 且产物的 mtime 每次都被刷新——`tests/pkg_debug_strip_test.cpp` 的
+        // “幂等 = mtime 不变”因此恒红（那是对的，缺陷在实现不在用例）。
+        //
+        // ELF 侧的等价事实：**符号表被剥掉时 `.symtab` 段就不存在**
+        //（`--strip-all` 会删 `.symtab`，只留 `.dynsym`）。
+        // 而 `.symtab` 是否存在，`objdump -h`（已在上面跑过）就能答：
+        // 它按行列出段名，`--strip-all` 后不再有 `.symtab`。
+        // 所以把判据从“文案”改成“**段存在性**”：两者都在同一次 `-h` 输出里，
+        // 不需要额外跑一次工具，也不需要区分 PE/ELF 的文案差异。
         if (!has_debug_sections) {
+          const bool has_symtab = has_symbol_table(headers->stdout_text);
+          if (!has_symtab) return ok();
+          // 兼容旧路径：个别工具链不列 `.symtab` 但会说 `symbols stripped`。
           if (auto priv = process::run(objdump, {"-p", artifact});
               priv.has_value() && priv->exit_code == 0) {
             if (priv->stdout_text.contains("symbols stripped")) return ok();

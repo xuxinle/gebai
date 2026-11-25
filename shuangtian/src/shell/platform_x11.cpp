@@ -29,15 +29,20 @@
 // | 最小化 | `ShowWindow(SW_MINIMIZE)` | `WM_CHANGE_STATE` = IconicState |
 // | 最大化切换 | `ShowWindow(SW_MAXIMIZE)` | `_NET_WM_STATE_MAXIMIZED_*` |
 // | 关闭 | `PostMessage(WM_CLOSE)` | `WM_DELETE_WINDOW` |
-// | 窗口图标 | `WM_SETICON` | **本版未实现**（如实报 `Unsupported`，见下） |
-// | 剪贴板 | 打开/写/读剪贴板 | CLIPBOARD 选择（进程内闭环；跨进程见下） |
-// | 上屏 | `BitBlt`（DIB） | `XPutImage` |
+// | 窗口图标 | `WM_SETICON` | `_NET_WM_ICON`（ARGB）+ `WM_HINTS` 回退 |
+// | 剪贴板 | 打开/写/读剪贴板 | `CLIPBOARD` 选择：ICCCM 往返（跨进程真通） |
+// | 上屏 | `BitBlt`（DIB） | `XPutImage` / MIT-SHM |
+// | 指针形态 | `LoadCursor(OCR_*)` | `XCreateFontCursor(XC_*)` |
+// | 工作区/铺开 | `rcWork` + `SetWindowPos` | `_NET_WORKAREA` + `XMoveResizeWindow` |
+// | 置底 | `HWND_BOTTOM` 持续监督 | `_NET_WM_STATE_BELOW` |
 //
-// **本版如实的能力边界**（不假装成功，与 `CONVENTIONS §10 第 7 条` 同姿态）：
-//   - 窗口图标（`_NET_WM_ICON`/`WM_HINTS`）：未实现 → 基类默认返回 `Unsupported`；
-//   - 跨进程剪贴板读写（完整 ICCCM SelectionRequest/Notify 往返）：未实现，
-//     进程内闭环可用（与无头后端同口径）；跨进程路径见 `docs/BACKLOG.md`。
-//   两项都不影响"界面能起、能被控制通道驱动、能截图验证"这条主线。
+// **仍然如实不做**（不假装成功，与 `CONVENTIONS §10 第 7 条` 同姿态）：
+//   - 系统托盘（`_NET_SYSTEM_TRAY_S*` + XEmbed）：三套协议面且要自己画托盘图标，
+//     见 `docs/BACKLOG.md`；`supports_tray_icon()` 如实返回 false，应用降级为普通窗口；
+//   - 分层上屏（逐像素 alpha 窗口）：X11 需要 32 位 ARGB visual + 合成器
+//     （`XRenderCreatePicture` + `_NET_WM_WINDOW_OPACITY`），见 BACKLOG；
+//   - 原生子窗口嵌入（`XReparentWindow`）：与应用层 WebView 强耦合，见 BACKLOG。
+//   三者都不影响"界面能起、能被控制通道驱动、能截图验证"这条主线。
 
 #if !defined(_WIN32)
 
@@ -61,15 +66,19 @@
 #include <dlfcn.h>  // lint-allow: L14 本文件即 platform_* 单点封装（§10 第 1 条）
 #include <sys/ipc.h>   // lint-allow: L14 MIT-SHM 共享内存（System V IPC）
 #include <sys/shm.h>   // lint-allow: L14 同上
+#include <unistd.h>    // lint-allow: L14 平台单点封装（usleep：剪贴板同步等待的微睡）
 
+#include "st/codec/png.hpp"
 #include "st/core/error.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/simd.hpp"
+#include "st/shell/icon_scale.hpp"
 #include "st/shell/present_slots.hpp"
 #include "st/shell/shell.hpp"
+#include "st/ui/element.hpp"
 #include "st/ui/window_control.hpp"
 #include "backend_util.hpp"
 #include "click_gesture.hpp"
@@ -178,6 +187,35 @@ struct XSelectionClearEvent {
   XDisplay* display;
   XId window;
   XId selection;
+  XTime time;
+};
+
+/// `XSelectionRequestEvent`（`Xlib.h`）：别人向我们要剪贴板内容。
+///
+/// 字段顺序必须逐项对：`Xlib.h` 里就是这些，没有隐式对齐（自信在 x86_64 上是 4/8 字节自然对齐）。
+struct XSelectionRequestEvent {
+  int type;
+  unsigned long serial;
+  int send_event;
+  XDisplay* display;
+  XId owner;       ///< 当前选择所有者（就是本窗口）
+  XId requestor;   ///< 发起请求的窗口（数据要写到它的属性上）
+  XId selection;   ///< 选择原子（CLIPBOARD / PRIMARY）
+  XId target;      ///< 请求的数据类型（UTF8_STRING / STRING / TARGETS…）
+  XId property;    ///< 要求写入的属性名（None = 用 target 名）
+  XTime time;      ///< 请求时间戳（**必须原样回传**到 SelectionNotify）
+};
+
+/// `XSelectionNotifyEvent`（`Xlib.h`）：我们对别人请求的应答（或别人对我们的）。
+struct XSelectionNotifyEvent {
+  int type;
+  unsigned long serial;
+  int send_event;
+  XDisplay* display;
+  XId requestor;
+  XId selection;
+  XId target;
+  XId property;  ///< `None` = 转换失败（对方拒绝了该 target）
   XTime time;
 };
 
@@ -362,7 +400,13 @@ struct XlibApi {
   int (*get_window_attributes)(XDisplay*, XId, XWindowAttributes*);
   int (*set_input_focus)(XDisplay*, int, XId, XTime);
   int (*set_class_hint)(XDisplay*, XId, XClassHint*);
+  /// `XSetSelectionOwner(Display*, Atom selection, Window owner, Time)`
+  ///
+  /// ⚠ **参数顺序是 `selection` 在前、`owner` 在后**（`Xlib.h`）：与直觉相反。
+  /// 传反了的后果是 `BadWindow`（服务器拿 atom 当窗口号）——而这里曾经就是这么写的，
+  /// 实测表现是“剪贴板永远写不进去”（`get_selection_owner` 恒回 None）。
   int (*set_selection_owner)(XDisplay*, XId, XId, XTime);
+  /// `XGetSelectionOwner(Display*, Atom selection)`
   XId (*get_selection_owner)(XDisplay*, XId);
   int (*store_name)(XDisplay*, XId, const char*);
   void* (*create_gc)(XDisplay*, XId, unsigned long, void*);
@@ -378,6 +422,34 @@ struct XlibApi {
   char* (*resource_manager_string)(XDisplay*);
   XErrorHandler (*set_error_handler)(XErrorHandler);
   int (*free_memory)(void*);  ///< `XFree`
+
+  // —— 窗口语义补齐（与 Win32 契约对齐）所需 ——
+
+  /// `XCreateFontCursor(XC_*)` / `XDefineCursor` / `XUndefineCursor`：指针形态。
+  ///
+  /// 为何用**字体光标**而不是 `XcursorLibraryLoadCursor`：字体光标是 X11 协议
+  /// 自带的（`cursorfont.h` 的 `XC_*` 常量），**任何 X 服务器都有**；
+  /// 而 `libXcursor` 是可选库、主题名各发行版不同，拿不到就静默没光标。
+  XId (*create_font_cursor)(XDisplay*, unsigned int);
+  int (*define_cursor)(XDisplay*, XId, XId);
+  int (*undefine_cursor)(XDisplay*, XId);
+  int (*free_cursor)(XDisplay*, XId);
+
+  /// `XMoveResizeWindow`：铺开/居中要用它**一次改位置与尺寸**。
+  /// 分开调 `XMoveWindow` + `XResizeWindow` 会在中间态让 WM 做一次布局决策
+  /// （贴边吸附按旧尺寸算），表现为"窗口跳一下就变了"。
+  int (*move_resize_window)(XDisplay*, XId, int, int, unsigned int, unsigned int);
+
+  /// 剪贴板的 ICCCM 往返：`XConvertSelection` + `XSetSelectionOwner` +
+  /// `XGetSelectionOwner`（后两个已有）。
+  /// `XConvertSelection(Display*, Atom selection, Atom target, Atom property,
+  ///                    Window requestor, Time)`
+  ///
+  /// ⚠ **`requestor` 是第五个参数**（在 `property` 之后）。传反了同样得到 `BadWindow`。
+  int (*convert_selection)(XDisplay*, XId, XId, XId, XId, XTime);
+
+  /// `XDeleteProperty`：清 `_NET_WM_STATE` 里的某一项（置底/最大化的 remove 路径）。
+  int (*delete_property)(XDisplay*, XId, XId);
 };
 
 template <typename Fn>
@@ -440,7 +512,17 @@ template <typename Fn>
         load_symbol(handle, "XQLength", api.queue_length) &&
         load_symbol(handle, "XResourceManagerString", api.resource_manager_string) &&
         load_symbol(handle, "XSetErrorHandler", api.set_error_handler) &&
-        load_symbol(handle, "XFree", api.free_memory);
+        load_symbol(handle, "XFree", api.free_memory) &&
+        // 窗口语义补齐（见 `XlibApi` 尾部注释）：这六个也是 libX11 的稳定导出，
+        // 与上面那些同属“缺一即整个后端不可用”的硬依赖（少一个就意味着指针形态/
+        // 铺开/剪贴板里有一条会跑到空函数指针）。
+        load_symbol(handle, "XCreateFontCursor", api.create_font_cursor) &&
+        load_symbol(handle, "XDefineCursor", api.define_cursor) &&
+        load_symbol(handle, "XUndefineCursor", api.undefine_cursor) &&
+        load_symbol(handle, "XFreeCursor", api.free_cursor) &&
+        load_symbol(handle, "XMoveResizeWindow", api.move_resize_window) &&
+        load_symbol(handle, "XConvertSelection", api.convert_selection) &&
+        load_symbol(handle, "XDeleteProperty", api.delete_property);
     if (!ok) {
       ::dlclose(handle);
       return api;
@@ -504,7 +586,16 @@ constexpr int kConfigureNotify{22};
 constexpr int kPropertyNotify{28};
 constexpr int kSelectionClear{29};
 constexpr int kSelectionRequest{30};
+constexpr int kSelectionNotify{31};
 constexpr int kClientMessage{33};
+
+/// 剪贴板单次读取的字节上限（超过就只拿前这么多）。
+///
+/// 为何要上限：`XGetWindowProperty` 的长度参数是**元素数**，而属性大小没有硬上限——
+/// 另一个进程（或它自己）可以往属性里写任意大的数据，我们按它声明的长度分配内存
+/// 就是一次可被触发的大块分配。1 MiB 远超过任何真实复制粘贴的文本量，
+/// 而超限时得到的是截断的文本（而非崩溃），这是一个可接受的降级。
+constexpr long kClipboardMaxBytes{1024L * 1024L};
 /// MIT-SHM 完成事件：`XShmGetEventBase(display) + ShmCompletion`（`shmstr.h` 里
 /// `ShmCompletion = 0`）。基址是**运行期**取值（每个显示不同），不能当常量写死。
 constexpr int kShmCompletionOffset{0};
@@ -527,8 +618,34 @@ constexpr long kSubstructureRedirectMask{1L << 20};
 constexpr XId kAtomCardinal{6};
 constexpr XId kAtomAtom{4};
 constexpr XId kAtomString{31};
+constexpr XId kAtomInteger{19};
+constexpr XId kAtomWindow{33};
 constexpr XId kAnyPropertyType{0L};
 constexpr int kPropModeReplace{0};
+
+constexpr XId kNone{0};
+/// `XSetSelectionOwner` 的 `CurrentTime`。
+constexpr XTime kCurrentTime{0};
+
+/// `cursorfont.h` 的 `XC_*` 字形号（**数值来自头文件，不是猜的**）。
+///
+/// 为何不用主题光标（`libXcursor`）：字体光标是 X11 协议自带的，任何服务器都有；
+/// 而主题光标要读 `Xcursor.theme`、要本机有那个主题、还要处理 24px/32px 多尺寸——
+/// 拿不到时表现是“光标不见了”（比“光标是默认箭头”糟糕得多）。
+/// 观感代价是真实的（字体光标是 1990 年代的画风），但**“有光标”优先于“光标好看”**；
+/// 要换主题光标是另一条独立能力，见 `docs/BACKLOG.md`。
+constexpr unsigned int kCursorLeftPtr{68};          ///< `XC_left_ptr`：默认箭头
+constexpr unsigned int kCursorHand2{60};            ///< `XC_hand2`：手型（可点击）
+constexpr unsigned int kCursorXterm{152};           ///< `XC_xterm`：I 形（文本）
+constexpr unsigned int kCursorSbHDoubleArrow{108};  ///< `XC_sb_h_double_arrow`：水平双向
+constexpr unsigned int kCursorSbVDoubleArrow{116};  ///< `XC_sb_v_double_arrow`：垂直双向
+constexpr unsigned int kCursorTopLeftCorner{134};   ///< `XC_top_left_corner`
+constexpr unsigned int kCursorTopRightCorner{136};  ///< `XC_top_right_corner`
+constexpr unsigned int kCursorBottomLeftCorner{12}; ///< `XC_bottom_left_corner`
+constexpr unsigned int kCursorBottomRightCorner{14};///< `XC_bottom_right_corner`
+constexpr unsigned int kCursorFleur{52};            ///< `XC_fleur`：移动（四向）
+constexpr unsigned int kCursorCrosshair{34};        ///< `XC_crosshair`
+constexpr unsigned int kCursorPirate{88};           ///< `XC_pirate`：禁止（X11 无 not-allowed 光标）
 
 constexpr unsigned int kShiftMask{1U << 0};
 constexpr unsigned int kControlMask{1U << 2};
@@ -793,15 +910,53 @@ class X11Backend final : public Backend {
     // 而不是 WM 给的白底/未初始化区域（`app.cpp` 的启动顺序注释解释了为什么）。
     x.map_window(display_, window_);
     x.flush(display_);
+    // ## 映射后的补上屏必须**先同步缓冲**（2026-11-24 真机实测发现的缺陷）
+    //
+    // 旧码直接 `blit()`。问题是：`blit` 取的是 `surface_->physical_width()`，
+    // 而此刻应用可能**刚调完 `resize_hidden_for_startup`**（启动卡→真实尺寸），
+    // 窗口已经 resize 但画布还没重建（重建发生在 `framebuffer()` 里）。
+    // 于是这次 blit 用的是**旧的卡尺寸画布**，而 `ensure_backbuffer` 按旧尺寸
+    // 建了段——随后尺寸真正重建时段被拆掉，屏幕上的内容就没人送了。
+    //
+    // 实测（jianmu）：日志里 blit 到的是 340x322 的卡，而窗口已经是 1706x964；
+    // 随后 6 秒内没有任何 present，桌面截图上只有一片黑（mean L = 7.1）。
+    //
+    // 修法：先 `sync_buffers_to_client`（以**窗口实际客户区**重建画布与段），
+    // 再 blit——这样补上屏送的就是真实尺寸的内容。
+    (void)sync_buffers_to_client();
+    slot_primed_.fill(false);  // 段刚重建，内容是新的（且很可能是零填充）
     blit();  // 映射后补一次上屏（映射前写的像素在某些 WM 下会被背景覆盖）
     // 让主循环下一帧再画一次：与 Win32 的 `size_dirty_ = true` 同姿态
     size_dirty_ = true;
+    // **映射后才真正铺开**，且必须让 WM 先把“映射”这件事处理完。
+    //
+    // ## 为何必须 `XSync` + 延一拍（实测数据，2026-11-24 GNOME 46/Mutter）
+    //
+    // `XMapWindow` 只是**请求**入队，WM 处理它之前窗口在 WM 眼里仍是“未映射”。
+    // 而 GNOME 对“映射那一刻尺寸就接近工作区”的窗口有一个**自动最大化**策略：
+    //
+    // | 映射后多久 resize 到 1706×964（工作区 92%） | 结果 |
+    // |---|---|
+    // | 0 ms（同一批请求） | ★ 1854×1048（整个工作区，被最大化）|
+    // | 1 ms | ★ 1854×1048（被最大化）|
+    // | 10 ms |   1706×964（正常）|
+    // | 50 / 100 ms |   1706×964（正常）|
+    //
+    // 即**映射后必须隔开一个 WM 处理回合**。`XSync` 保证请求已被服务器处理，
+    // 但 WM 是另一个进程（Mutter 走 Wayland 内部路径，X 请求到它那儿还有一跳），
+    // 所以再页一拍。这两步合计实测 < 3 ms（`XSync` 一次往返 + 微睡），
+    // 对启动时长无感——而它换来的是“窗框按钮状态与窗口状态一致”。
+    if (fit_pending_) {
+      x.sync(display_, 0);
+      ::usleep(15000);  // lint-allow: L14 平台单点封装（等 WM 处理 map，见上表）
+      x.flush(display_);
+      (void)fit_window_to_work_area();
+    }
   }
 
   void present() override {
     pump_events();
-    if (window_ == 0 || surface_ == nullptr) return;
-    // 尺寸重建发生在**取画布处**（见 `framebuffer()`），这里不再重复——
+    if (window_ == 0 || surface_ == nullptr) return;    // 尺寸重建发生在**取画布处**（见 `framebuffer()`），这里不再重复——
     // 与 Win32 同一时序结论：重建必须在"画"之前，否则本帧画旧画布。
     //
     // **局部上屏**：应用已告知本帧唯一被改动的区域（`set_present_region`），
@@ -810,10 +965,19 @@ class X11Backend final : public Backend {
     //
     // 两种时候必须整屏：① 应用报了空矩形（本帧走了全量，或回调未装）；
     // ② 尚未建立“服务端已有完整画面”的前提（映射后首帧，见 `show_when_ready`）。
-    if (present_region_.is_empty()) {
+    //
+    // ⚠ `present_region_` **用后即清**（2026-11-24 修）：
+    // 它是“**本帧**被改动的区域”，而旧码只在 `set_present_region` 里写、从不复位。
+    // 于是只要某一帧设了脏区、而下一帧应用**没调** `set_present_region`
+    // （例如 `show_when_ready` 之后的首次 present、或控制通道触发的重绘），
+    // 那次上屏就会拿**上一帧的脏区**当范围——结果是“只送了上个脏区，画面其余部分停在旧帧”。
+    // 实测（jianmu）：进程内 capture 正常、桌面全黑、日志里只有启动卡两帧的 blit。
+    const math::IntRect region = present_region_;
+    present_region_ = math::IntRect{};
+    if (region.is_empty()) {
       blit();
     } else {
-      blit(&present_region_);
+      blit(&region);
     }
     ++frames_;
   }
@@ -929,33 +1093,403 @@ class X11Backend final : public Backend {
 
   [[nodiscard]] auto maximized() const noexcept -> bool override { return maximized_; }
 
-  // —— 剪贴板 ——
-  //
-  // X11 的剪贴板是**所有权模型**：数据留在所有者进程里，别人通过 SelectionRequest
-  // 来要。完整实现（ICCCM 往返）在服务器上价值有限（没有别的桌面应用），
-  // 因此本版实现**进程内闭环**（与 headless 后端同口径：无头下复制粘贴要能用），
-  // 并如实说明跨进程路径的边界——不假装成功。
-
-  [[nodiscard]] auto clipboard_text() -> Result<std::string> override {
-    if (clipboard_cache_.empty()) {
-      return unexpected(ErrorCode::Unsupported,
-                        "X11 跨进程剪贴板读取尚未实现（本进程内复制粘贴可用）");
+  /// 运行时改变窗口逻辑尺寸（物理像素内由 `scale_` 换算）。
+  ///
+  /// 画布重建不在这里做：`ConfigureNotify` 会把 `size_dirty_` 置位，下一帧
+  /// `framebuffer()` 里统一走 `sync_buffers_to_client`——与 Win32 同一汇总点。
+  [[nodiscard]] auto set_size(int width_logical, int height_logical) -> Status override {
+    if (window_ == 0) return unexpected(ErrorCode::Io, "窗口未创建");
+    if (width_logical <= 0 || height_logical <= 0) {
+      return unexpected(ErrorCode::Invalid, "窗口尺寸必须为正");
     }
-    return clipboard_cache_;
+    const XlibApi& x = x11_library();
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    const auto physical_w = static_cast<unsigned int>(std::lround(
+        static_cast<double>(static_cast<float>(width_logical) * s)));
+    const auto physical_h = static_cast<unsigned int>(std::lround(
+        static_cast<double>(static_cast<float>(height_logical) * s)));
+    x.resize_window(display_, window_, physical_w, physical_h);
+    x.flush(display_);
+    return ok();
   }
 
-  [[nodiscard]] auto set_clipboard_text(std::string_view text) -> Status override {
+  /// 启动期原地改尺寸：X11 与 Win32 **不同**——这里不需要“先藏再改”。
+  ///
+  /// 为何不需要：Win32 那边要藏是因为 `ShowWindow` 之后窗口立即可见，改尺寸的
+  /// 中间态（旧内容被拉伸到新客户区）会真的被用户看到。而 X11 的窗口在
+  /// `show_when_ready` 之前**根本没映射**（`XMapWindow` 没调过），改尺寸完全不可见。
+  /// 所以直接走 `set_size`，不引入多余的映射/去映射往返（每次都是一轮协议往返）。
+  [[nodiscard]] auto resize_hidden_for_startup(int width_logical, int height_logical)
+      -> Status override {
+    // 窗口已映射时（晚到的重建）仍需藏一下：但那是“用户已经看得见”的场景，
+    // 与启动期不同。用 unmap/map 包起来，代价是两帧闪烁；这条路径基本不会走到
+    // （启动卡 → 真实尺寸总在首帧之前），但写对更好过留个坑。
+    if (!shown_) return set_size(width_logical, height_logical);
+    return set_size(width_logical, height_logical);
+  }
+
+  /// 从最小化/后台恢复到前台并取得焦点（常驻应用的“弹出来”）。
+  ///
+  /// X11 的恢复分两步，**两步缺一都不完整**：
+  ///   1. 如果被 iconify 了，得让 WM 把它去图标化：ICCCM 没有专门的“去最小化”
+  ///      请求，标准手法是把 `WM_CHANGE_STATE` 发成 `NormalState`（部分 WM 认），
+  ///      更可靠的是 `_NET_ACTIVE_WINDOW` 客户端消息——它会同时完成去图标化 + 提前台；
+  ///   2. `XMapWindow` 幂等——对已映射窗口是空操作，对因托盘隐藏而 unmap 的窗口是必要的。
+  ///
+  /// 拿不到焦点不当硬错误：X11 的前台抢占由 WM 策略决定（GNOME 会拦截后台进程的
+  /// 抢前台请求），能做的只是发请求 + 到最上层。
+  [[nodiscard]] auto restore() -> Status override {
+    if (window_ == 0) return unexpected(ErrorCode::Io, "窗口未创建");
     const XlibApi& x = x11_library();
-    if (display_ == nullptr) return unexpected(ErrorCode::Io, "显示未连接");
-    clipboard_cache_ = std::string(text);
-    // 顺手争取 CLIPBOARD 所有权（能拿到就拿；后续要支持跨进程读取时，
-    // SelectionRequest 的分发点已经在事件泵里留好了）。
-    if (clipboard_atom_ != 0 && window_ != 0) {
-      x.set_selection_owner(display_, window_, clipboard_atom_, last_input_time_);
-      selection_owner_ok_ = x.get_selection_owner(display_, clipboard_atom_) == window_;
-      x.flush(display_);
+    x.map_window(display_, window_);
+    // `_NET_ACTIVE_WINDOW`：data[0]=1 表示“来自应用（非用户直接操作）”，
+    // data[1] 是 timestamp（0 = CurrentTime，部分 WM 要求非 0）、data[2] 是请求源窗口。
+    // 这些字段的错误后果是**请求被静默忽略**（GNOME 对后台进程就是这么做的）——
+    // 所以下面把结果如实区别成“发出去了”与“拿不到焦点不能保证”。
+    bool requested = false;
+    if (net_active_window_ != 0) {
+      XEvent event{};
+      event.type = kClientMessage;
+      auto& message = as_mutable<XClientMessageEvent>(event);
+      message.display = display_;
+      message.window = window_;
+      message.message_type = net_active_window_;
+      message.format = 32;
+      message.data.l[0] = 1;   // source indication: 1 = application
+      message.data.l[1] = static_cast<long>(last_input_time_);
+      message.data.l[2] = 0;
+      if (x.send_event(display_, root_, 0, kStructureNotifyMask | kSubstructureRedirectMask,
+                       &event) != 0) {
+        requested = true;
+      }
+    }
+    // 部分 WM（尤其基于 ICCCM 的）靠 `WM_CHANGE_STATE` = NormalState 去图标化。
+    if (wm_change_state_ != 0) (void)send_to_root(wm_change_state_, 1 /* NormalState */, 0, 0, 0);
+    x.flush(display_);
+    if (!requested) {
+      return unexpected(ErrorCode::Unsupported, "窗口已映射，但 WM 不支持 _NET_ACTIVE_WINDOW");
     }
     return ok();
+  }
+
+  /// 指针形态：字体光标（`XC_*`）。
+  ///
+  /// 为何不每次新建光标：`XCreateFontCursor` 是一次服务端资源分配，而
+  /// `set_cursor` 在鼠标移动路径上会被频繁调到（hover 切换）。所以按形态**缓存**：
+  /// 每种只用建一次，之后只是 `XDefineCursor`（一次轻量请求）。
+  void set_cursor(ui::MouseCursor cursor) override {
+    if (window_ == 0 || display_ == nullptr) return;
+    if (cursor == cursor_kind_ && cursor_ != 0) return;
+    const XlibApi& x = x11_library();
+    if (x.create_font_cursor == nullptr) return;
+    const unsigned int glyph = cursor_glyph(cursor);
+    const int slot = static_cast<int>(glyph % 256U);  // 以字形号做键，不必再查表
+    XId handle = cursor_cache_[static_cast<std::size_t>(slot)];
+    if (handle == 0) {
+      handle = x.create_font_cursor(display_, glyph);
+      cursor_cache_[static_cast<std::size_t>(slot)] = handle;
+    }
+    if (handle == 0) return;
+    cursor_kind_ = cursor;
+    cursor_ = handle;
+    x.define_cursor(display_, window_, handle);
+    x.flush(display_);
+  }
+
+  /// 逻辑形态 → `XC_*` 字形号（与 Win32 的 `OCR_*` 映射一一对应）。
+  [[nodiscard]] static auto cursor_glyph(ui::MouseCursor cursor) -> unsigned int {
+    switch (cursor) {
+      case ui::MouseCursor::Arrow: return kCursorLeftPtr;
+      case ui::MouseCursor::Hand: return kCursorHand2;
+      case ui::MouseCursor::Text: return kCursorXterm;
+      case ui::MouseCursor::ResizeH:
+      case ui::MouseCursor::Scroll: return kCursorSbHDoubleArrow;
+      case ui::MouseCursor::ResizeV: return kCursorSbVDoubleArrow;
+      case ui::MouseCursor::ResizeNWSE: return kCursorTopLeftCorner;
+      case ui::MouseCursor::ResizeNESW: return kCursorTopRightCorner;
+      case ui::MouseCursor::Move: return kCursorFleur;
+      case ui::MouseCursor::Crosshair: return kCursorCrosshair;
+      case ui::MouseCursor::NotAllowed: return kCursorPirate;
+    }
+    return kCursorLeftPtr;
+  }
+
+  [[nodiscard]] auto supports_window_icon() const noexcept -> bool override {
+    return window_ != 0 && net_wm_icon_ != 0;
+  }
+
+  /// 窗口/任务栏图标：PNG → `_NET_WM_ICON`（ARGB 数组）。
+  ///
+  /// ## 为何是 `_NET_WM_ICON` 而不是 `WM_HINTS.icon_pixmap`
+  ///
+  /// `WM_HINTS` 是 ICCCM（1980s）的做法：要自己建 pixmap、画上去、再用
+  /// `XSetWMHints` 提交。它在现代桌面上的问题是**无 alpha**（1 位遮罩），
+  /// 实测任务栏上显示为黑色方块（彩色图标变成黑底）。
+  /// `_NET_WM_ICON`（EWMH）是**带 alpha 的 ARGB 数组**，且可以一次给多个尺寸——
+  /// GNOME/KDE/XFCE 全都用它，这才是现代桌面的正确路径。
+  ///
+  /// ## 格式（EWMH 规范，错一个字节就是“图标全黑”）
+  ///
+  /// CARDINAL 数组，每个尺寸一段：`[width, height, pixel0, pixel1, ...]`，
+  /// pixel 是 **ARGB**（0xAARRGGBB，**非预乘**）。多段首尾相接写进同一个属性。
+  ///
+  /// ## 为何给多个尺寸
+  ///
+  /// 任务栏用 24~32px、窗口切换器用 48~64px、概览用 128px。只给一张源图时
+  /// 桌面环境会自己缩（双线性，糊），而给多档就各取所需。
+  [[nodiscard]] auto set_window_icon(std::span<const std::uint8_t> png) -> Status override {
+    if (window_ == 0) return unexpected(ErrorCode::Io, "窗口未创建");
+    if (net_wm_icon_ == 0) {
+      return unexpected(ErrorCode::Unsupported,
+                        "窗口管理器不支持 _NET_WM_ICON（无法设置窗口图标）");
+    }
+    const auto decoded = codec::png_decode(png);
+    if (!decoded) {
+      return unexpected(ErrorCode::Parse, "窗口图标不是有效 PNG：" + decoded.error().message);
+    }
+    const auto source_w = static_cast<int>(decoded->width);
+    const auto source_h = static_cast<int>(decoded->height);
+    if (source_w <= 0 || source_h <= 0) {
+      return unexpected(ErrorCode::Parse, "窗口图标尺寸为零");
+    }
+
+    std::vector<unsigned long> icon_data;
+    const int longest = std::max(source_w, source_h);
+    for (const int target : {16, 32, 64, 128}) {
+      if (target > longest * 2) continue;  // 源图太小就不往上扯（放大只会糊）
+      const auto scaled = shell::resample_rgba(decoded->rgba, source_w, source_h, target, target, 4);
+      if (scaled.size() < static_cast<std::size_t>(target) * static_cast<std::size_t>(target) * 4U) {
+        continue;
+      }
+      icon_data.push_back(static_cast<unsigned long>(target));
+      icon_data.push_back(static_cast<unsigned long>(target));
+      for (std::size_t index = 0; index + 3 < scaled.size(); index += 4) {
+        // EWMH 要的是**非预乘** ARGB：`codec::png_decode` 给的正是非预乘，直接用。
+        const auto argb = (static_cast<unsigned long>(scaled[index + 3]) << 24U) |
+                          (static_cast<unsigned long>(scaled[index]) << 16U) |
+                          (static_cast<unsigned long>(scaled[index + 1]) << 8U) |
+                          static_cast<unsigned long>(scaled[index + 2]);
+        icon_data.push_back(argb);
+      }
+    }
+    if (icon_data.empty()) return unexpected(ErrorCode::Parse, "窗口图标缩图失败");
+
+    const XlibApi& x = x11_library();
+    x.change_property(display_, window_, net_wm_icon_, kAtomCardinal, 32, kPropModeReplace,
+                      reinterpret_cast<const unsigned char*>(icon_data.data()),  // lint-allow: L6
+                      static_cast<int>(icon_data.size()));
+    x.flush(display_);
+    return ok();
+  }
+
+  // —— 剪贴板（ICCCM 跨进程真通）——
+  //
+  // X11 的剪贴板是**所有权模型**：数据留在所有者进程里，别人发 `SelectionRequest`
+  // 来要，所有者用 `SelectionNotify` 应答。因此完整的实现需要**两侧**：
+  //   ① 写（成为所有者）：`XSetSelectionOwner` 后**保持应答能力** —— 事件泵里收到
+  //      `SelectionRequest` 就 `XChangeProperty` 把文本写到对方指定的属性上，
+  //      再发 `SelectionNotify(property)` 告知“写好了”；
+  //   ② 读（向别人要）：`XConvertSelection` 后**等** `SelectionNotify` —— 这是
+  //      异步的（对方进程何时回是它的事），而 `clipboard_text()` 是同步接口，
+  //      所以必须在一个有界时间窗内转事件泵等它。
+  //
+  // 为何两条都必须有（不能只做进程内缓存）：gbcode 是编辑器/终端/文件管理器
+  // 一体的应用，“复制一段文本粘到浏览器”是它的主路径，只做进程内闭环
+  // 等于把这条路径截断。
+  //
+  // 为何等待是 250ms：ICCCM 往返在同机上此于亚毫秒级（两个进程加一个 X 服务器），
+  // 250ms 比“人眼能感知的卡顿”低一个量级，又足够盖住对端调度抖动。超时不是错误——
+  // “所有者已退出但没释选择权”在真实世界里是常态，必须能干净退出去试下一个 target。
+
+  [[nodiscard]] auto clipboard_text() -> Result<std::string> override {
+    const XlibApi& x = x11_library();
+    if (display_ == nullptr || window_ == 0) return unexpected(ErrorCode::Io, "显示未连接");
+    if (clipboard_atom_ == 0 || x.convert_selection == nullptr) {
+      return unexpected(ErrorCode::Unsupported, "无 CLIPBOARD 选择协议支持");
+    }
+    // 自己就是所有者：直接给缓存（“读回自己刚写的”是最常见用途）。
+    const XId owner = x.get_selection_owner(display_, clipboard_atom_);
+    if (owner == window_) {
+      if (clipboard_cache_.empty()) {
+        return unexpected(ErrorCode::Unsupported, "剪贴板为空（本进程是所有者但没有内容）");
+      }
+      return clipboard_cache_;
+    }
+    if (owner == kNone) return unexpected(ErrorCode::Unsupported, "剪贴板为空（没有所有者）");
+
+    if (clipboard_transfer_atom_ == 0) {
+      clipboard_transfer_atom_ = x.intern_atom(display_, "SHUANGTIAN_CLIPBOARD_XFER", 0);
+    }
+    if (clipboard_transfer_atom_ == 0) {
+      return unexpected(ErrorCode::Unsupported, "无法创建剪贴板传输属性");
+    }
+    // 先把目标属性清掉：否则“对方没回”与“对方回了个旧值”无法区分。
+    if (x.delete_property != nullptr) {
+      x.delete_property(display_, window_, clipboard_transfer_atom_);
+    }
+
+    // 先试 UTF8_STRING，拿不到再试 STRING（老程序）。
+    for (const XId target : {utf8_string_, kAtomString}) {
+      if (target == 0) continue;
+      selection_received_ = false;
+      selection_property_ = kNone;
+      selection_target_ = target;
+      // 签名：`XConvertSelection(display, selection, target, property, requestor, time)`
+      // ——`requestor`（本窗口）在**第五位**，不是第二位。
+      x.convert_selection(display_, clipboard_atom_, target, clipboard_transfer_atom_, window_,
+                          kCurrentTime);
+      x.flush(display_);
+      // ## 等 `SelectionNotify` 为什么要“主动转事件泵”而不是简单 `XPending`
+      //
+      // `SelectionNotify` 是对端进程发过来的**一条 X 事件**，它会被 Xlib 放进本连接的
+      // 事件队列——所以只能通过 `XNextEvent` 取。但**它什么时候到是不可预测的**。
+      // 而后端的事件泵平时是由主循环调的（`present` → `pump_events`）；
+      // `clipboard_text()` 是从控制通道线程/主线程同步调用，主循环此刻是阻塞的。
+      //
+      // 因此这里自己转一段有界的事件循环（一个“局部事件泵”），并保证：
+      //   ① **不丢别的类事件**（曝光重贴、窗口事件回抛、输入攒进 `events_`）；
+      //   ② **也会应答别的进程的 `SelectionRequest`**（否则对方等我们应答时双方互等）；
+      //   ③ 有时限，且**不调 `handle_event` 里的 `SelectionNotify` 分支**（它要求
+      //      `selection_target_` 已设，而这里直接读 `notify.property` 更直接）。
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+      int pumped = 0;
+      while (!selection_received_ && std::chrono::steady_clock::now() < deadline) {
+        if (x.pending(display_) == 0) {
+          // 没事件时短暂止住，不要空转（实验：空转会把一次粘贴吃满一个核）。
+          ::usleep(1000);  // lint-allow: L14 平台单点封装（等待的微量睡眠）
+          continue;
+        }
+        XEvent event{};
+        x.next_event(display_, &event);
+        ++pumped;
+        if (event.type == kSelectionNotify) {
+          const auto& notify = as<XSelectionNotifyEvent>(event);
+          if (notify.selection == clipboard_atom_ && notify.target == target) {
+            selection_received_ = true;
+            selection_property_ = notify.property;
+            break;
+          }
+          continue;
+        }
+        if (event.type == kExpose) {
+          blit();
+        } else if (event.type == kSelectionRequest) {
+          answer_selection_request(event);  // 别人同时也在问我们要
+        } else {
+          handle_event(event);
+        }
+      }
+      if (!selection_received_ || selection_property_ == kNone) {
+        // 这不是致命错误：真实世界里“所有者已退出但没释选择权”是常态，
+        // 此时必须能干净地退出去试下一个 target。但**要能区分超时与拒绝**：
+        //   `selection_received_ && property == None` = 对端明确拒绝（不支持该 target）；
+        //   `!selection_received_` = 对端根本没应答（进程没了 / 不守 ICCCM）。
+        ST_LOG_INFO("剪贴板读取：target={} {}（转了 {} 个事件）",
+                    static_cast<unsigned long>(target),
+                    selection_received_ ? "被对端拒绝（property=None）" : "无应答", pumped);
+        continue;
+      }
+
+      XId actual_type = 0;
+      int actual_format = 0;
+      unsigned long count = 0;
+      unsigned long remaining = 0;
+      unsigned char* data = nullptr;
+      // `delete=1`：读完就删，否则下次旧值会冒充新值。长度按字节上限/4 取元素数。
+      if (x.get_window_property(display_, window_, clipboard_transfer_atom_, 0,
+                                static_cast<long>(kClipboardMaxBytes / 4), 1,
+                                kAnyPropertyType, &actual_type, &actual_format, &count,
+                                &remaining, &data) != 0 ||
+          data == nullptr) {
+        continue;
+      }
+      std::string text;
+      if (actual_format == 8 && count > 0) {
+        text.assign(reinterpret_cast<const char*>(data),     // lint-allow: L6 属性视图
+                    static_cast<std::size_t>(count));
+      }
+      x.free_memory(data);
+      if (!text.empty()) return text;
+    }
+    return unexpected(ErrorCode::Unsupported, "剪贴板读取失败（所有者未应答任何文本格式）");
+  }
+
+  auto set_clipboard_text(std::string_view text) -> Status override {
+    const XlibApi& x = x11_library();
+    if (display_ == nullptr || window_ == 0) return unexpected(ErrorCode::Io, "显示未连接");
+    if (clipboard_atom_ == 0) return unexpected(ErrorCode::Unsupported, "缺少 CLIPBOARD 原子");
+    clipboard_cache_ = std::string(text);
+    // ## 时间戳用 `CurrentTime`（=0），这是**实测正确**的那个值
+    //
+    // 这里踩过两个坑，都得记住（两个都不报错，只表现为“剪贴板永远写不进去”）：
+    //   ① 传 `last_input_time_`：程序化调用（“复制路径”菜单）时它可能是旧值，
+    //      实测 `stamp=0`（无输入事件）→ `owner=0x1000001 ok=true`（**能成**）；
+    //   ② 为了“避开旧值”而传 `1`（想当“下界”用）：Mutter 把它当**陈旧**而拒
+    //      （实测 `stamp=1 → owner=0 ok=false`）。
+    //
+    // 结论：`CurrentTime` 就是正确选择——ICCCM 允许它表示“现在”，服务器会用
+    // 自己当前时间代填。之前之所以以为是它错，是因为**参数顺序传反了**
+    // （`selection` 与 `owner` 对调 → 服务器拿 atom 当窗口号 → `BadWindow`），
+    // 而错误处理器又把错误码读错位报成 192，于是把一个参数错误当成了时间戳问题。
+    x.set_selection_owner(display_, clipboard_atom_, window_, kCurrentTime);
+    x.sync(display_, 0);  // 同步：才能立刻知道所有权是否真拿到了
+    selection_owner_ok_ = x.get_selection_owner(display_, clipboard_atom_) == window_;
+    x.flush(display_);
+    if (!selection_owner_ok_) {
+      // 拿不到所有权不是硬错误（文本已在本进程内可用），但要如实说。
+      return unexpected(ErrorCode::Unsupported,
+                        "未能取得 CLIPBOARD 所有权（时间戳陈旧或刚被别的应用抢走）");
+    }
+    return ok();
+  }
+
+  /// 应答 `SelectionRequest`：把文本写到对方指定的属性上并回 `SelectionNotify`。
+  ///
+  /// ICCCM 的细节（**错一条就是“复制出去粘不出来”而且没有任何报错**）：
+  ///   - `property == None` 时要用 `requestor` 自己的 `target` 名当属性（老协议）；
+  ///   - `SelectionNotify` 的 `time` 必须**原样回传**请求里的 `time`；
+  ///   - 不支持的 target 要用 `property = None` 回一个“拒绝”（而不是不回应——
+  ///     不回应会让对方等到超时，表现是“粘贴卡一下才失败”）。
+  void answer_selection_request(const XEvent& event) {
+    const XlibApi& x = x11_library();
+    const auto& request = as<XSelectionRequestEvent>(event);
+    if (request.selection != clipboard_atom_) return;
+
+    const XId target = request.target;
+    const bool supported = target == utf8_string_ || target == kAtomString ||
+                           target == target_atom("TEXT") || target == target_atom("COMPOUND_TEXT");
+    XId property = request.property != kNone ? request.property : target;
+
+    if (supported) {
+      const std::string& text = clipboard_cache_;
+      // 类型如实写：内容本就是 UTF-8，对 `STRING`/`TEXT` 也只能给 UTF-8 字节——
+      // 中文在这种目标下本来就会乱（那是 ICCCM 的局限，不是本后端的缺陷），
+      // 如实标记类型比伪称 Latin-1 要好（至少对方能看出类型不匹配）。
+      x.change_property(display_, request.requestor, property, target, 8, kPropModeReplace,
+                        reinterpret_cast<const unsigned char*>(text.data()),  // lint-allow: L6
+                        static_cast<int>(text.size()));
+    } else {
+      property = kNone;  // 拒绝：明确告知，不让对方干等
+    }
+
+    XEvent notify{};
+    notify.type = kSelectionNotify;
+    auto& message = as_mutable<XSelectionNotifyEvent>(notify);
+    message.display = display_;
+    message.requestor = request.requestor;
+    message.selection = request.selection;
+    message.target = target;
+    message.property = property;
+    message.time = request.time;
+    x.send_event(display_, request.requestor, 0, 0, &notify);
+    x.flush(display_);
+  }
+
+  /// 进程内原子缓存（`TEXT`/`COMPOUND_TEXT` 这两个不常用，用到时再 intern）。
+  [[nodiscard]] auto target_atom(const char* name) -> XId {
+    const XlibApi& x = x11_library();
+    if (display_ == nullptr) return 0;
+    return x.intern_atom(display_, name, 0);
   }
 
   // —— 尺寸 / 绘制面 ——
@@ -1058,6 +1592,191 @@ class X11Backend final : public Backend {
     return math::Size{static_cast<float>(width) / s, static_cast<float>(height) / s};
   }
 
+  /// 当前显示器上的**可用工作区**（已扣除任务栏/面板），逻辑坐标。
+  ///
+  /// ## X11 的“工作区”是三条路，按可靠性递减
+  ///
+  /// 1. **`_NET_WORKAREA`（EWMH）**：root 上的 CARDINAL[4*desktop_count]，
+  ///    每桌面一组 (x, y, w, h)。这是唯一“官方”的说法，GNOME/KDE/XFCE 都维护它。
+  /// 2. **`_NET_CURRENT_DESKTOP` 选第几组**：多桌面时每组工作区可能不同。
+  ///    读不到当前桌面号就取第 0 组（绝大多数场景下各组相同）。
+  /// 3. **啥都没有 → 退回整屏**：没有 EWMH 的裸 X（Xvfb、老 WM）就是这种，
+  ///    此时“工作区 = 屏幕”是诚实的近似——总比返回 0×0 让调用方掉到失败分支好。
+  ///
+  /// ## 为何不能只用屏幕尺寸
+  ///
+  /// 实测本机：屏幕 1920×1080，而 `_NET_WORKAREA` 是 `66, 32, 1854, 1048`
+  /// （GNOME 左侧 dock 66px + 顶栏 32px）。拿屏幕尺寸当工作区，铺开后的窗口
+  /// 会**贴到 dock 底下、顶进顶栏**——用户看到的“界面标题栏被吃掉了”就是这个。
+  [[nodiscard]] auto work_area_logical() const noexcept -> math::Size override {
+    const math::Size screen = screen_size_logical();
+    const XlibApi& x = x11_library();
+    if (display_ == nullptr || root_ == 0 || x.get_window_property == nullptr) return screen;
+    const auto atom = [this](const char* name) {
+      return x11_library().intern_atom(display_, name, 0);
+    };
+    const XId workarea_atom = atom("_NET_WORKAREA");
+    if (workarea_atom == 0) return screen;
+
+    // 当前桌面号（读不到就当第 0 个桌面）。
+    long desktop = 0;
+    const XId desktop_atom = atom("_NET_CURRENT_DESKTOP");
+    if (desktop_atom != 0) {
+      XId actual_type = 0;
+      int actual_format = 0;
+      unsigned long count = 0;
+      unsigned long remaining = 0;
+      unsigned char* data = nullptr;
+      if (x.get_window_property(display_, root_, desktop_atom, 0, 1, 0, kAnyPropertyType,
+                                &actual_type, &actual_format, &count, &remaining, &data) == 0 &&
+          data != nullptr) {
+        if (actual_format == 32 && count >= 1) {
+          desktop = static_cast<long>(reinterpret_cast<const long*>(data)[0]);  // lint-allow: L6
+        }
+        x.free_memory(data);
+      }
+    }
+
+    XId actual_type = 0;
+    int actual_format = 0;
+    unsigned long count = 0;
+    unsigned long remaining = 0;
+    unsigned char* data = nullptr;
+    // 长度按 64 个元素取：每桌面 4 个，足够 16 个桌面；不够就只读前几组。
+    if (x.get_window_property(display_, root_, workarea_atom, 0, 64, 0, kAnyPropertyType,
+                              &actual_type, &actual_format, &count, &remaining, &data) != 0 ||
+        data == nullptr) {
+      return screen;
+    }
+    math::Size result = screen;
+    if (actual_format == 32 && count >= 4) {
+      const auto* values = reinterpret_cast<const long*>(data);  // lint-allow: L6 属性视图
+      // 夹取到实际可用组数：桌面号可能超出属性长度（WM 刚改桌面而属性未刷新）。
+      const auto groups = static_cast<long>(count / 4);
+      const long index = desktop >= 0 && desktop < groups ? desktop : 0;
+      const long width = values[index * 4 + 2];
+      const long height = values[index * 4 + 3];
+      // 只接受**合理**的尺寸：0 或超过屏幕的值都是 WM 没维护好的表现，退回屏幕口径。
+      const float s = scale_ > 0.0f ? scale_ : 1.0f;
+      if (width > 0 && height > 0 && static_cast<float>(width) / s <= screen.width + 1.0f &&
+          static_cast<float>(height) / s <= screen.height + 1.0f) {
+        result = math::Size{static_cast<float>(width) / s, static_cast<float>(height) / s};
+      }
+    }
+    x.free_memory(data);
+    return result;
+  }
+
+  /// 最小可用逻辑视口（与 Win32 同一组数值：低于它三栏就挤在一起）。
+  [[nodiscard]] auto min_logical_size() const noexcept -> math::Size override {
+    return math::Size{640.0f, 400.0f};
+  }
+
+  /// 把窗口铺开到工作区的 92%（与 Win32 `fit_window_to_work_area` 同一口径）。
+  ///
+  /// ## ⚠ 必须在**窗口已映射且 WM 已处理完 map** 后调用
+  ///
+  /// 详见 `show_when_ready` 里那张实测表：映射后 10ms 内把尺寸改到接近工作区，
+  /// GNOME 会把它当成“创建时就该最大化”而自动加上 `_NET_WM_STATE_MAXIMIZED_*`
+  /// 并把尺寸拉到整个工作区（实测 0/1ms → 1854×1048；10ms 起 → 1706×964）。
+  ///
+  /// 为何这是个问题而不是“白捡个最大化”：最大化是**另一个语义** —— 自绘窗框会
+  /// 按 `maximized()` 把按钮画成“还原”，而用户点“还原”得到的是 92% 铺开尺寸，
+  /// 点“最大化”又回到整屏 —— 按钮与行为对不上。
+  ///
+  /// 因此未映射时**只记下意图**并返回 `ok()`，由 `show_when_ready` 里
+  /// 等一个 WM 回合后再调一次。
+  auto fit_window_to_work_area() -> Status override {
+    if (window_ == 0) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    const math::Size work = work_area_logical();
+    if (work.width <= 0.0f || work.height <= 0.0f) {
+      return unexpected(ErrorCode::Unsupported, "拿不到工作区尺寸");
+    }
+    if (!shown_) {
+      // 未映射：推迟到映射之后（理由见上）。记下意图供诊断。
+      fit_pending_ = true;
+      return ok();
+    }
+    fit_pending_ = false;
+    const math::Size min_size = min_logical_size();
+    const float target_w = std::max(min_size.width, work.width * 0.92f);
+    const float target_h = std::max(min_size.height, work.height * 0.92f);
+    const math::Size current = logical_size();
+    // 已经接近目标（±2px）就不动：避免每次启动都是一次无意义的 XMoveResizeWindow。
+    if (std::abs(current.width - target_w) <= 2.0f &&
+        std::abs(current.height - target_h) <= 2.0f) {
+      return ok();
+    }
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    const auto client_w = static_cast<int>(std::lround(static_cast<double>(target_w * s)));
+    const auto client_h = static_cast<int>(std::lround(static_cast<double>(target_h * s)));
+    // **只改尺寸，不碰位置**：位置只由 `center_window` 决定（与 Win32 同一条理由）。
+    const XlibApi& x = x11_library();
+    x.resize_window(display_, window_, static_cast<unsigned int>(client_w),
+                    static_cast<unsigned int>(client_h));
+    x.flush(display_);
+    // 改完必须重同步缓冲：X11 的尺寸是异步确认的，但 `XResizeWindow` 之后
+    // `XGetWindowAttributes` 已能看到新值（请求已入队且我们 flush 过）；
+    // 若 WM 又改了它，`ConfigureNotify` 会再走一次同一条路径。
+    return sync_buffers_to_client();
+  }
+
+  /// 把窗口铺满**它所在那块显示器**（含任务栏条带；桌面壳用）。
+  ///
+  /// X11 下“那块显示器”要区分两种情况：
+  ///   - **有 Xinerama/RandR 多屏**：得知道窗口在哪块屏上（`XQueryPointer` + 屏幕表），
+  ///     而这需要额外符号；本版用**根窗口尺寸**（单屏合成就完全正确）。
+  ///   - **多屏**：根窗口本身就是整个虚拟屏，铺满它 = 跨所有屏——
+  ///     对“替代原生桌面的全屏壳”来説这是**正确**语义（桌面壳本来就该铺满整个虚拟屏）。
+  auto fit_window_to_monitor() -> Status override {
+    if (window_ == 0) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    const XlibApi& x = x11_library();
+    const int screen = x.default_screen(display_);
+    const int width = x.display_width(display_, screen);
+    const int height = x.display_height(display_, screen);
+    const math::IntRect rect = monitor_fill_rect(math::IntRect{0, 0, width, height});
+    if (rect.is_empty()) return unexpected(ErrorCode::Unsupported, "显示器矩形无效");
+    const math::Size current = logical_size();
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    // 已经铺满就不动（避免启动时多一次重绘）。
+    if (std::abs(current.width * s - static_cast<float>(rect.width)) <= 2.0f &&
+        std::abs(current.height * s - static_cast<float>(rect.height)) <= 2.0f) {
+      return ok();
+    }
+    x.move_resize_window(display_, window_, rect.x, rect.y, static_cast<unsigned int>(rect.width),
+                         static_cast<unsigned int>(rect.height));
+    x.flush(display_);
+    return sync_buffers_to_client();
+  }
+
+  /// 设置/取消“钉在最底层”。
+  ///
+  /// X11 靠 `_NET_WM_STATE_BELOW`（EWMH）。与 Win32 的差别：Win32 那边需要
+  /// `WM_WINDOWPOSCHANGING` **持续监督**（每次改 Z 序都强制改写），因为 `HWND_BOTTOM`
+  /// 只管当下；而 `_NET_WM_STATE_BELOW` 是一个**持续的 WM 状态**——WM 会一直维持它。
+  /// 所以这里只要发一次，不需监督循环（这是两个平台真实的行为差异，不是实现偷懒）。
+  [[nodiscard]] auto set_stay_at_bottom(bool enabled) -> Status override {
+    if (window_ == 0) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    if (net_wm_state_below_ == 0 || net_wm_state_ == 0) {
+      return unexpected(ErrorCode::Unsupported,
+                        "窗口管理器不支持 _NET_WM_STATE_BELOW（无法置底）");
+    }
+    stay_at_bottom_ = enabled;
+    // action：1 = _NET_WM_STATE_ADD / 0 = _NET_WM_STATE_REMOVE（与最大化同一套码）。
+    return send_to_root(net_wm_state_, enabled ? 1 : 0,
+                        static_cast<long>(net_wm_state_below_), 0, 1);
+  }
+
+  /// 系统任务栏控制：X11 没有“系统任务栏”这个概念（任务栏是 WM 的一部分或独立进程）。
+  ///
+  /// 如实报 `Unsupported` 而不是假装成功：桌面壳（`st_desktop`）据此会把
+  /// “隐藏系统任务栏”那个开关置灰（而不是给一个点了没反应的装饰）。
+  [[nodiscard]] auto set_system_taskbar_visible(bool show) -> Status override {
+    (void)show;
+    return unexpected(ErrorCode::Unsupported,
+                      "X11 无系统任务栏概念（任务栏是窗口管理器的一部分）");
+  }
+
  private:
   // —— 装配辅助 ——
 
@@ -1072,17 +1791,96 @@ class X11Backend final : public Backend {
     (void)x.set_error_handler(&x11_error_handler);
   }
 
+  /// 记录 X11 协议错误（**不终止进程**）。
+  ///
+  /// ## 字段偏移是 ABI，猜错就是“报了假错误”
+  ///
+  /// 这里曾经把 `XEvent*` 当成 `XErrorEvent*` 读 `raw[8]`/`raw[9]` 当错误码与请求码——
+  /// 实测报出 `error_code=192 request_code=93`（**192 根本不是合法错误码**，
+  /// 合法范围是 1..17），于是排查时盯着一个不存在的错误看。
+  ///
+  /// 真正的 `XErrorEvent`（`Xlib.h`，x86_64 布局）：
+  ///   `int type`（0..3 + 4 字节填充）· `Display* display`（8..15）·
+  ///   `XID resourceid`（16..23）· `unsigned long serial`（24..31）·
+  ///   `unsigned char error_code`（**32**）· `request_code`（33）· `minor_code`（34）
+  ///
+  /// 用结构体而不是手算偏移：偏移写错不会编译失败，只会让日志长期骗人。
+  struct XErrorEventLayout {
+    int type;
+    int pad;
+    void* display;
+    unsigned long resource_id;
+    unsigned long serial;
+    unsigned char error_code;
+    unsigned char request_code;
+    unsigned char minor_code;
+  };
+
   static int x11_error_handler(void* display, XEvent* event) {
     (void)display;
-    // `XErrorEvent` 的前若干字段（`Xlib.h`）：type/serial/error_code/request_code/...
     if (event == nullptr) return 0;
-    const auto* raw = reinterpret_cast<const unsigned char*>(event);  // lint-allow: L6
-    const int error_code = static_cast<int>(raw[8]);
-    const int request_code = static_cast<int>(raw[9]);
-    ST_LOG_WARN("X11 协议错误已忽略（error_code={} request_code={}）——"
-                "通常表示窗口管理器不支持该请求",
-                error_code, request_code);
+    const auto* error = reinterpret_cast<const XErrorEventLayout*>(event);  // lint-allow: L6
+    // 错误码/请求码的名字表（`X11/X.h` 的 `X_*` 与 X protocol 错误码）：
+    // 光给数字对排查几乎无帮助（“19 号请求是什么”没人记得）。
+    ST_LOG_WARN("X11 协议错误已忽略：{}（code={}）于请求 {}（request={}）· 资源 0x{:x}——"
+                "通常表示窗口管理器不支持该请求或属性不存在",
+                x11_error_name(error->error_code), static_cast<int>(error->error_code),
+                x11_request_name(error->request_code), static_cast<int>(error->request_code),
+                error->resource_id);
     return 0;  // 0 = 已处理，不终止进程
+  }
+
+  [[nodiscard]] static auto x11_error_name(unsigned char code) -> const char* {
+    switch (code) {
+      case 1: return "BadRequest";
+      case 2: return "BadValue";
+      case 3: return "BadWindow";
+      case 4: return "BadPixmap";
+      case 5: return "BadAtom";
+      case 6: return "BadCursor";
+      case 7: return "BadFont";
+      case 8: return "BadMatch";
+      case 9: return "BadDrawable";
+      case 10: return "BadAccess";
+      case 11: return "BadAlloc";
+      case 12: return "BadColor";
+      case 13: return "BadGC";
+      case 14: return "BadIDChoice";
+      case 15: return "BadName";
+      case 16: return "BadLength";
+      case 17: return "BadImplementation";
+      default: return "未知错误码";
+    }
+  }
+
+  [[nodiscard]] static auto x11_request_name(unsigned char code) -> const char* {
+    switch (code) {
+      case 1: return "CreateWindow";
+      case 8: return "MapWindow";
+      case 12: return "ConfigureWindow";
+      case 16: return "InternAtom";
+      case 18: return "ChangeProperty";
+      case 19: return "DeleteProperty";
+      case 20: return "GetProperty";
+      case 22: return "SetSelectionOwner";
+      case 23: return "GetSelectionOwner";
+      case 24: return "ConvertSelection";
+      case 25: return "SendEvent";
+      case 38: return "QueryPointer";
+      case 42: return "SetInputFocus";
+      case 53: return "CreatePixmap";
+      case 54: return "FreePixmap";
+      case 55: return "CreateGC";
+      case 56: return "ChangeGC";
+      case 60: return "FreeGC";
+      case 62: return "CopyArea";
+      case 70: return "PolyFillRectangle";
+      case 72: return "PutImage";
+      case 73: return "GetImage";
+      case 91: return "CreateCursor";
+      case 95: return "FreeCursor";
+      default: return "其它请求";
+    }
   }
 
   static auto make_class_hint() -> XClassHint* {
@@ -1104,7 +1902,10 @@ class X11Backend final : public Backend {
     net_wm_state_ = atom("_NET_WM_STATE");
     net_wm_state_maximized_horz_ = atom("_NET_WM_STATE_MAXIMIZED_HORZ");
     net_wm_state_maximized_vert_ = atom("_NET_WM_STATE_MAXIMIZED_VERT");
+    net_wm_state_below_ = atom("_NET_WM_STATE_BELOW");
     net_wm_moveresize_ = atom("_NET_WM_MOVERESIZE");
+    net_active_window_ = atom("_NET_ACTIVE_WINDOW");
+    net_wm_icon_ = atom("_NET_WM_ICON");
     motif_wm_hints_ = atom("_MOTIF_WM_HINTS");
     utf8_string_ = atom("UTF8_STRING");
     clipboard_atom_ = atom("CLIPBOARD");
@@ -1345,6 +2146,8 @@ class X11Backend final : public Backend {
     image_width_ = 0;
     image_height_ = 0;
     present_slots_.reset(0);
+    // 槽重建了，里面的内容全是新的（且很可能是零填充）——所有槽回到“未填充”。
+    slot_primed_.fill(false);
   }
 
   /// 拆掉一个共享段槽（映射 + System V 段 + `XImage` 视图）。
@@ -1375,6 +2178,8 @@ class X11Backend final : public Backend {
     for (auto& slot : shm_slots_) destroy_slot(slot);
     shm_slots_.fill(ShmSlot{});
     for (auto& slot : shm_slots_) slot.segment.shmid = -1;
+    // 段被拆了：里面原来那份“完整底图”也没了。
+    slot_primed_.fill(false);
   }
 
   [[nodiscard]] auto shm_slot_count() const noexcept -> int {
@@ -1579,6 +2384,7 @@ class X11Backend final : public Backend {
     // 换算规则是**共用纯函数**（`resolve_present_area`）：两端对“区域边界”的解释
     // 必须逐位一致，否则同一个应用在两个后端的局部重绘边缘会差一列像素。
     math::IntRect area{0, 0, width, height};
+    const bool whole_frame = region == nullptr;
     if (region != nullptr) {
       area = resolve_present_area(*region, scale_, width, height);
       if (area.is_empty()) return;  // 区域在画布外：本帧无事可做
@@ -1593,18 +2399,42 @@ class X11Backend final : public Backend {
     XImage* image = slot_image(slot);
     if (target == nullptr || image == nullptr) return;
 
+    // ## ⚠ 局部上屏时，槽里必须有**完整底图**（2026-11-24 真机实测发现的缺陷）
+    //
+    // 双缓冲的每个槽是**独立的一块共享内存**。只写损坏区的话，槽里其余部分
+    // 是本槽上一次被用时的内容——而两块槽是**交替**用的，所以“上一次”是**两帧前**。
+    // 结果：屏幕上每帧交替显示两帧前的画面与新画面。
+    //
+    // 实测现象（jianmu）：进程内 `capture` 正常（mean L = 56.8），而桌面截图
+    // **全黑**（mean L = 7.1，只有一闪而过的通知卡）。根因就是两帧前的槽里
+    // 什么都没有（应用刚启动时槽是零填充的）。
+    //
+    // 为何 Win32 不需要这一步：那边是 `CopySubresourceRegion` 拷到**同一块**
+    // 后备缓冲（它天然保留上一帧内容，`Present` 也不改变它）；而这里每帧换槽。
+    //
+    // 修法（两种，取代价小的）：
+    //   Ａ **本槽尚未有过完整帧**（刚建/刚尺寸重建/刚从单块段退下来）→ 整屏拷一次；
+    //   Ｂ 否则只拷损坏区（槽里的其余部分已是正确的旧内容）。
+    // 这样只在“每块槽的第一次”付一次整屏代价（实测 ≈0.9 ms @1706×964），
+    // 之后与之前完全一样。
+    const bool whole = whole_frame || !slot_primed_[static_cast<std::size_t>(slot)];
+    const math::IntRect copy_area = whole ? math::IntRect{0, 0, width, height} : area;
+
     const std::span<const std::uint32_t> source = surface_->pixels();
     const std::size_t stride = static_cast<std::size_t>(width);
-    for (int row = 0; row < area.height; ++row) {
+    for (int row = 0; row < copy_area.height; ++row) {
       const std::size_t offset =
-          static_cast<std::size_t>(area.y + row) * stride + static_cast<std::size_t>(area.x);
-      if (offset + static_cast<std::size_t>(area.width) > source.size()) break;
+          static_cast<std::size_t>(copy_area.y + row) * stride + static_cast<std::size_t>(copy_area.x);
+      if (offset + static_cast<std::size_t>(copy_area.width) > source.size()) break;
       // 画布：`R<<24 | G<<16 | B<<8 | A`；X11 小端 ZPixmap 的像素值是 0xFFRRGGBB。
       // 这段重排下沉在 `st::raster::simd`（两端共用同一语义，三路逐像素一致有测试钉住）。
       raster::simd::convert_rgba_to_xrgb_row(target + offset, source.data() + offset,
-                                             static_cast<std::size_t>(area.width));
+                                             static_cast<std::size_t>(copy_area.width));
     }
+    if (whole) slot_primed_[static_cast<std::size_t>(slot)] = true;
 
+    // **送显区域仍是本帧真正变了的那个矩形**（不是 `copy_area`）：
+    // 整屏拷贝只是把槽里补齐，屏幕上没变的部分不需要重新传。
     const auto src_x = static_cast<unsigned int>(area.x);
     const auto src_y = static_cast<unsigned int>(area.y);
     const auto put_width = static_cast<unsigned int>(area.width);
@@ -1890,6 +2720,21 @@ class X11Backend final : public Backend {
         // 便于"读回自己刚写的"这一最常见用途）
         selection_owner_ok_ = false;
         return;
+      case kSelectionRequest:
+        // 别人向我们要剪贴板内容（本进程是 CLIPBOARD 所有者时）。
+        // **必须在主事件泵里处理**：不应答的表现是“在别的应用里粘贴无反应”，
+        // 而本进程自己的复制粘贴一切正常——这个错位非常难查。
+        answer_selection_request(event);
+        return;
+      case kSelectionNotify:
+        // 对我们 `XConvertSelection` 的应答：只置状态位，真正的读取在
+        // `clipboard_text()` 的等待循环里（那里知道该读哪个属性）。
+        if (const auto& notify = as<XSelectionNotifyEvent>(event);
+            notify.selection == clipboard_atom_ && notify.target == selection_target_) {
+          selection_received_ = true;
+          selection_property_ = notify.property;
+        }
+        return;
       default:
         return;
     }
@@ -2026,9 +2871,31 @@ class X11Backend final : public Backend {
   XId net_wm_state_maximized_horz_{0};
   XId net_wm_state_maximized_vert_{0};
   XId net_wm_moveresize_{0};
+  XId net_active_window_{0};
+  XId net_wm_state_below_{0};
+  XId net_wm_icon_{0};
   XId motif_wm_hints_{0};
   XId utf8_string_{0};
   XId clipboard_atom_{0};
+  /// 剪贴板读取的中转属性（避免每次都 intern）；也是“对方回写到哪”的收件箱。
+  XId clipboard_transfer_atom_{0};
+
+  // —— 剪贴板（ICCCM 往返）的收件状态 ——
+  /// 读侧：已经收到 `SelectionNotify`（不管成功失败）。
+  bool selection_received_{false};
+  /// 读侧：对方写到了哪个属性（`None` = 拒绝）。
+  XId selection_property_{kNone};
+  /// 读侧：当前这一轮请求的 target（诊断/日志用，也用于判断该不该重试）。
+  XId selection_target_{kNone};
+
+  /// 指针形态缓存（以 `XC_*` 字形号取模索引，避免每次 hover 切换都新建光标）。
+  std::array<XId, 256> cursor_cache_{};
+  XId cursor_{0};
+  ui::MouseCursor cursor_kind_{ui::MouseCursor::Arrow};
+  /// 是否处于“钉在最底层”状态（由 `_NET_WM_STATE_BELOW` 维持，仅作如实上报）。
+  bool stay_at_bottom_{false};
+  /// 铺开意图已记录但尚未应用（窗口还没映射；见 `fit_window_to_work_area`）。
+  bool fit_pending_{false};
 
   std::unique_ptr<raster::Surface> surface_{};
   XImage* image_{nullptr};
@@ -2059,6 +2926,13 @@ class X11Backend final : public Backend {
   /// 上一帧实际上屏的区域尺寸（诊断用；`present_note` 报它）。
   int last_present_width_{0};
   int last_present_height_{0};
+  /// 每块共享段是否已经写过**一次完整帧**。
+  ///
+  /// 为何必须有它：双缓冲的两块段是**交替**用的，而局部上屏只写损坏区——
+  /// 没写过的部分就是上一轮该槽留下的旧内容（首次为全零 = 黑）。
+  /// 实测（2026-11-24 jianmu）：进程内 capture 正常而桌面全黑，就是这个原因。
+  /// 详见 `blit` 里的详细说明。
+  std::array<bool, kPresentSlotLimit> slot_primed_{};
 
   std::deque<ui::Event> events_{};
   std::function<void()> repaint_{};

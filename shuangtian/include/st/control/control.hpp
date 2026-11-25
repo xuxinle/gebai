@@ -22,6 +22,9 @@
 #include "st/raster/canvas.hpp"
 #include "st/ui/script_host.hpp"
 #include "st/ui/ui_root.hpp"
+// `window_control()` 的返回类型：`ui::WindowControl` 是**可选**能力端口，
+// 与 `ui::UiRoot` / `ui::ScriptHost` 同一层（不进 `app` 层，否则控制通道要反向依赖）。
+#include "st/ui/window_control.hpp"
 
 namespace st::control {
 
@@ -282,6 +285,20 @@ class Host {
   /// 由宿主注入而不是 Server 自建：JS 环境必须是**唯一一份**——否则协议里的 `script` 与
   /// 应用内部的事件/定时器会落在两个互不可见的 JS 世界里，脚本绑的事件永远收不到 UI 事件。
   [[nodiscard]] virtual auto script() -> ui::ScriptHost* { return nullptr; }
+
+  /// 窗口控制端口（**宿主应用拥有**；不提供的应用返回 `nullptr`）。
+  ///
+  /// ## 为何单独一个访问器，而不是把 window_* 直接加进 Host
+  ///
+  /// `Host` 是控制通道对宿主的**最小**接口面（tree/get/set/metrics…），
+  /// 而窗口控制属于 `ui::WindowControl`（窗框组件用的那一份）。两者刻意分开：
+  /// 每往 `Host` 里加一个纯虚函数，所有 Host 实现（含测试里的假宿主）都要跟改；
+  /// 而窗口控制是**可选**能力（无头后端没有，测试假宿主也不需要）。
+  ///
+  /// 为何自动化需要它：窗口语义（最大化/置底/铺开/恢复）是**写给窗口管理器的状态**，
+  /// 进程内属性面看不到。要从外部验证“真生效了”，必须能触发它们——
+  /// `tools/linux_window_semantics_check.py` 就靠这条路。
+  [[nodiscard]] virtual auto window_control() -> ui::WindowControl* { return nullptr; }
 };
 
 class Server {

@@ -24,6 +24,37 @@
 
 namespace {
 
+/// 可执行产物在清单工程里的路径（**跨平台**，不要写死 `.exe`）。
+///
+/// ## 为何必须有这个助手（真缺陷，非环境问题）
+///
+/// 两条用例原先写的是 `bin/<name>.exe`——那是 **Windows 假设**：Linux/macOS 上
+/// 可执行产物**没有后缀**，于是 `is_regular_file` 恒为 false，用例在非 Windows 上
+/// **必红**（而它们在 Windows 上一直是绿的，所以从未被发现）。
+///
+/// 正确的后缀源是工具链本身（`ResolvedToolchain::executable_suffix`，Windows 才填
+/// `.exe`）。那个类型不对外，所以这里按**宿主平台**推：与
+/// `src/pkg/build.cpp` 的 `resolve_toolchain` 同一判据（空工具链名 = 本机默认）。
+///
+/// ⚠ 不要把这两条用例改成“非 Windows 就跳过”：它们验的是**合成目标与失败隔离**
+///（`group` 的成员逐个建、一个失败不拖死其余），这两件事在 Linux 上是**一样有
+/// 语义的**——跳过等于把 Linux 上的功能裸奔。
+[[nodiscard]] auto host_executable_suffix() -> std::string_view {
+#if defined(_WIN32)
+  return ".exe";
+#else
+  return {};
+#endif
+}
+
+/// 清单工程的 `build/<profile>/bin/<name>` 产物路径。
+[[nodiscard]] auto executable_artifact(const std::string& project_root, std::string_view name)
+    -> std::string {
+  return st::fs::join(
+      st::fs::join(st::fs::join(st::fs::join(project_root, "build"), "dev"), "bin"),
+      std::format("{}{}", name, host_executable_suffix()));
+}
+
 /// 临时目录，析构时整个删掉（与 `pkg_deps_hash_test` 的 `TempFile` 同一套设施）。
 struct TempDir {
   std::string dir;
@@ -349,7 +380,7 @@ ST_TEST(group_builds_every_member) {
   ST_CHECK(stats->units_total >= 2);
   // 每个成员的产物都存在且能跑
   for (const auto& name : {std::string("a"), std::string("b")}) {
-    const std::string exe = st::fs::join(st::fs::join(st::fs::join(st::fs::join(root, "build"), "dev"), "bin"), name + ".exe");
+    const std::string exe = executable_artifact(root, name);
     ST_CHECK(st::fs::is_regular_file(exe));
     const auto run = st::process::run(exe, {});
     ST_REQUIRE(run.has_value());
@@ -416,15 +447,13 @@ ST_TEST(group_skips_failed_member_and_builds_rest) {
   ST_CHECK_EQ(stats->skipped_members[0].first, std::string("bad"));
   ST_CHECK(!stats->skipped_members[0].second.empty());
   // ① 好成员照常出了产物且有能跑
-  const std::string good_exe =
-      st::fs::join(st::fs::join(st::fs::join(st::fs::join(root, "build"), "dev"), "bin"), "good.exe");
+  const std::string good_exe = executable_artifact(root, "good");
   ST_CHECK(st::fs::is_regular_file(good_exe));
   const auto run = st::process::run(good_exe, {});
   ST_REQUIRE(run.has_value());
   ST_CHECK_EQ(run->exit_code, 0);
   ST_CHECK(run->stdout_text.find("good-ok") != std::string::npos);
   // 坏成员没有产物（不能“跳过”成“也建了个空壳”那种假成功）
-  const std::string bad_exe =
-      st::fs::join(st::fs::join(st::fs::join(st::fs::join(root, "build"), "dev"), "bin"), "bad.exe");
+  const std::string bad_exe = executable_artifact(root, "bad");
   ST_CHECK(!st::fs::is_regular_file(bad_exe));
 }

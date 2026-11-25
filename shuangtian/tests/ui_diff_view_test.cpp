@@ -225,14 +225,27 @@ ST_TEST(diff_view_disabled_lines_keep_alignment) {
 
 ST_TEST(diff_view_scroll_syncs_between_panes) {
   Fixture fx;
-  if (!fx.has_font()) return;
+  if (!fx.has_font()) {
+    ST_SKIP("系统无可用字体（无法量行高，滚动无从谈起）");
+    return;
+  }
   std::string old_text;
   std::string new_text;
   for (int i = 0; i < 200; ++i) {
     old_text += "line" + std::to_string(i) + "\n";
     new_text += i == 100 ? "line" + std::to_string(i) + "x\n" : "line" + std::to_string(i) + "\n";
   }
-  fx.view.set_texts(old_text, new_text);
+  // ## 为何必须用 `set_full_texts`（整文件模式）而不是 `set_texts`（差异块模式）
+  //
+  // 旧写法用 `set_texts`，然后断言 `goto_hunk` 后 `scroll_offset().y > 0`——
+  // 那个断言在**差异块模式**下前提就不成立：差异块模式**只显示差异块内部**
+  // （200 行里只有第 100 行前后几行，实测 `line_count = 8`），整份内容连
+  // 视口高（174px / 行高 18.9 ≈ 9 行）都装不满 ⇒ `max_scroll_y() = 0`，
+  // 再怎么滚也是 0。断言红是因为**测试与实现语义不符**，不是联动坏了。
+  //
+  // 本用例要验的是“滚左栏 → 右栏跟着走”（两栏纵向联动），那需要一个
+  // **真的能滚**的视图 —— 那正是整文件模式（`set_full_texts`）。
+  fx.view.set_full_texts(old_text, new_text, "probe.txt");
   fx.layout(900.0f, 200.0f);
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(900, 200, 1.0f);
   canvas.clear(st::math::Color::rgb(255, 255, 255));
@@ -242,6 +255,12 @@ ST_TEST(diff_view_scroll_syncs_between_panes) {
   st::ui::CodeEditor* right = fx.view.right_editor();
   ST_REQUIRE(left != nullptr);
   ST_REQUIRE(right != nullptr);
+  // 前置：这个视图必须**真的能滚**（否则下面的 `y > 0` 又会变成“测了个 0”）。
+  {
+    const float line_h = std::stof(left->get_property("line_height").value_or("0"));
+    ST_REQUIRE(line_h > 0.0f);
+    ST_REQUIRE(static_cast<float>(left->line_count()) * line_h > left->bounds().height);
+  }
   // 滚左栏 → 右栏跟随（两栏内容等行，纵向必须一起走）。
   ST_CHECK(fx.view.invoke_action("goto_hunk", "0"));
   const float y = left->scroll_offset().y;
@@ -458,4 +477,3 @@ ST_TEST(diff_view_edit_commit_keeps_other_side_untouched) {
   ST_CHECK_EQ(left->text(), std::string("base"));
   ST_CHECK(fx.property("logical_left") == "base");
 }
-

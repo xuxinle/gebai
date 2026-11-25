@@ -793,6 +793,12 @@ auto Application::script() -> ui::ScriptHost* {
 #endif
 }
 
+auto Application::window_control() -> ui::WindowControl* {
+  // ��是宿主自己的能力面（`Application` 继承自 `ui::WindowControl`）：
+  // 无头模式下各动作会自己如实拒绝（`window_control_available()` 为 false）。
+  return this;
+}
+
 // —— ui::WindowControl：窗框动作 → 后端（**只做转发**，平台差异全在 `platform_*`）——
 //
 // 为什么不在这里分平台：`CONVENTIONS.md` §10 第 1 条要求平台差异只能出现在 `platform_*`；
@@ -866,6 +872,22 @@ auto Application::script() -> ui::ScriptHost* {
     (void)root_.set_focus(nullptr);
     root_.clear_hover();
     return status.has_value();
+  }
+
+  [[nodiscard]] auto Application::window_fit_to_work_area() -> bool {
+    if (impl_->backend == nullptr) return false;
+    if (auto status = impl_->backend->fit_window_to_work_area(); !status) {
+      ST_LOG_WARN("工作区铺开失败：{}", status.error().message);
+      return false;
+    }
+    // 尺寸变了，布局要跟上（与 `set_window_size` 同一口径）。
+    root_.set_viewport(impl_->backend->logical_size());
+    root_.mark_dirty_all();
+    return true;
+  }
+
+  [[nodiscard]] auto Application::window_stay_at_bottom(bool enabled) -> bool {
+    return set_stay_at_bottom(enabled).has_value();
   }
 
 auto Application::set_window_size(int width_logical, int height_logical) -> Status {
@@ -2337,6 +2359,22 @@ auto Application::start() -> Status {
   // 右下/底部一大块黑**（实测 0.6s 后自愈）。放在首帧之后：用户看到的第一眼
   // 就是一个完整界面，没有中间态。
   impl_->backend->show_when_ready();
+  // ## 显窗之后**必须再来一帧**（2026-11-24 真机实测发现的缺陷）
+  //
+  // 为何：`show_when_ready` 之前那一帧是为**启动卡尺寸**画的。而那时窗口还在
+  // 卡尺寸（或刚被 `resize_hidden_for_startup` 改过），后端在 `show_when_ready`
+  // 里才把画布/段同步到真实客户区——之后画布内容是**新的空白**，需要重新画一次。
+  //
+  // 而“要不要画”由 `impl_->repaint || root_.dirty()` 决定。上一帧刚画完，两者
+  // 都是 false → 主循环不再画 → 屏幕上永远停在空白（或启动卡内容）。
+  //
+  // 实测（jianmu）：桌面截图全黑（mean L = 7.1），而进程内 `capture` 正常
+  //（它读画布，不依赖“有没人画”）；日志里从映射到 6 秒后才有第一次真实 present。
+  //
+  // 为何不是只修后端：这是**应用层与后端的时序契约**——后端负责“窗口与画布一致”，
+  // 应用负责“窗口变了就要重画”。两者各自都对，合起来才不丢帧。
+  root_.mark_dirty_all();
+  impl_->repaint = true;
   // ## 启动卡自适应：量“卡在屏上”的真实时长（2026-11-08）
   //
   // 口径：从 `show_early()`（卡开始露在屏上）到 `show_when_ready()`（完整界面就位）。
@@ -2371,12 +2409,27 @@ auto Application::start() -> Status {
   }
   // 显示之后是否**再画一帧**：
   //
-  // 必要性（小窗档**没有**）：`ShowWindow` 之前做的 present 发生在窗口被合成器
-  // 映射之前，DXGI 不会把它送上屏——所以要先把窗口显出来、再重画一次。
-  // 但启动期小窗档里，窗口是**先拉回真实尺寸、再画、再显**的，而软件路径的
-  // `present` 本就是 GDI 直写（不依赖 DXGI 映射），所以那一帧已经在屏幕上。
-  // 再画一次只是白花 ~1ms；真正的风险是它会把刚显示的完整界面闪一下。
-  if (!splash_shrunk) render_frame();
+  // ## 为何在无头之外必须再画（2026-11-24 真机实测修正）
+  //
+  // 旧注释的理由是“启动期小窗档里，窗口是先拉回真实尺寸、再画、再显的，而
+  // 软件路径的 present 本就是 GDI 直写（不依赖 DXGI 映射），所以那一帧已经在屏幕上”。
+  //
+  // **那个前提只在 Win32 + 软件路径下成立**。实测（X11 + MIT-SHM，jianmu）：
+  //   - 桌面截图**全黑**（mean L = 7.1），而进程内 `capture` 正常（mean L = 56.8）；
+  //   - 日志显示 `show_when_ready` 里那次 `blit` 用的是**卡尺寸 340x322** 的画布，
+  //     而窗口已经是 1706x964；之后 6 秒内一次 present 都没发生。
+  //
+  // 两个原因叠在一起：
+  //   ① `XMapWindow` 之后 WM 才把窗口映射，**映射前**的 `XShmPutImage` 写的像素
+  //      会被 WM 的背景填充盖掉（X11 的映射是异步的，与 Win32 的 `ShowWindow` 不同）；
+  //   ② 画布在那之后会被尺寸同步重建（内容变空白），而“要不要再画”两处都判为
+  //      false（上一帧刚画完）——于是屏幕上永远停在空白。
+  //
+  // 所以现在**无条件再画一帧**（包括小窗档），并显式标脏。代价是一次
+  // ~12ms 的重绘（实测），换来“窗口一露就是完整界面”。
+  root_.mark_dirty_all();
+  impl_->repaint = true;
+  render_frame();
   return ok();
 }
 

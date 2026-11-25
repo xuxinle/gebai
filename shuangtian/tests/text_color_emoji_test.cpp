@@ -148,11 +148,32 @@ ST_TEST(text_emoji_sequence_with_modifier_is_one_glyph_wide) {
   // 不合字时后者是两倍。这条与 `font_ccmp_*` 是**不同层**的断言：
   // 那条钉字体解析，这条钉"整形流程真的用上了它"（接线漏了就只有后者会红）。
   const auto stack = FontStack::system_default();
-  if (!stack) return;
+  if (!stack) {
+    ST_SKIP("系统无可用字体（无字体环境）");
+    return;
+  }
   const TextRenderer renderer(*stack);
   const float plain = renderer.measure_width("\xF0\x9F\x91\x8D", 32.0f);
   const float toned = renderer.measure_width("\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD", 32.0f);
-  ST_CHECK(plain > 0.0f);
+  // ## 守卫：“**真的找到了 emoji 字形**”是前提，不是结论
+  //
+  // 本用例验的是“**有 emoji 字形时**，肤色修饰符必须与基字形合成一个”。
+  //
+  // ⚠ **不能用 `plain > 0` 当守卫**（实测踩到）：缺字时渲染器会回退到
+  // **tofu 宽度**（本机实测 `plain = 16.0`、`toned = 32.0`），宽度非零！
+  // 于是旧守卫放行，然后两条断言全红——而那两条红的真实原因是
+  // “这台机器的 emoji 字体加载不了”（`find_face` 回 **null**），不是合字坏了。
+  //
+  // 根因：本机 `/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf` 是**位图彩色**
+  //（只有 CBDT/CBLC，无 glyf/CFF 轮廓），`FontFace::load` 直接回 `Unsupported`。
+  // 这是**引擎能力边界**（不支持位图 emoji），不是本用例的验收对象。
+  //
+  // 正确守卫：**这个码点真的解析到了一个 face**（而不是 tofu 回退）。
+  const auto* emoji_face = stack->find_face(static_cast<char32_t>(0x1F44D), FontRole::Proportional);
+  if (emoji_face == nullptr) {
+    ST_SKIP("本机无轮廓型 emoji 字体（位图彩色 emoji 不可加载）→ 合字无从谈起");
+    return;   // `ST_SKIP` 只标记、不转移控制流
+  }
   // 宽度必须相同（合字成功 = 一个字形宽；不合字 = 两倍），这里**不给"平台没合字"
   // 的豁免**：emoji 字体带 GSUB 却合不出字，那就是缺陷（曾经就是——`ccmp` 的
   // featureOffset 被当成特性下标，整表没进内存，而用例当时静默跳过报了 PASS）。

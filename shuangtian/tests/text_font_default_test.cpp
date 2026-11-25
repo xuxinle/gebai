@@ -18,7 +18,9 @@
 #include "st/core/font_platform.hpp"
 #include "st/test/test.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <format>
 #include <memory>
 #include <string>
 #include <thread>
@@ -103,7 +105,10 @@ ST_TEST(font_stack_load_is_cached_across_calls) {
   //    因为**耗时这个量分不清“缓存没命中”与“机器很忙”**。
   //
   // 改成数**确定量**：热调用必须零新增读盘/解析。与机器快慢无关，且直接量的是契约本身。
-  if (!st::text::FontStack::system_default()) return;   // 无字体环境：本用例不适用
+  if (!st::text::FontStack::system_default()) {
+    ST_SKIP("系统无可用字体（无字体环境）");
+    return;   // `ST_SKIP` 只标记、**不转移控制流**，必须自己 return
+  }
 
   // 第一次（预热）：把系统字体链装进缓存
   auto warm = st::text::FontStack::system_default();
@@ -139,7 +144,10 @@ ST_TEST(font_face_loading_uses_memory_mapping_not_whole_file_reads) {
   // 反向验证：把 `FontFace::load` 里的 `MappedFile::open` 分支删掉（回到无条件
   // `read_bytes`），本条的两个断言同时变红。
   auto stack = st::text::FontStack::system_default();
-  if (!stack) return;   // 无字体环境：不适用
+  if (!stack) {
+    ST_SKIP("系统无可用字体（无字体环境）");
+    return;
+  }
 
   const auto stats = st::text::font_cache_stats();
   ST_CHECK(stats.face_loads > 0);                            // 确实加载过（否则下面无意义）
@@ -161,7 +169,10 @@ ST_TEST(font_face_cache_is_process_wide_not_thread_local) {
   //
   // 为何用 `FontStack::system_default()` 而不是直接调 `FontFace::load`：前者走的才是
   // **缓存层**（`load_face` → `load_face_cached`）；后者是裸加载，本来就该真读。
-  if (!st::text::FontStack::system_default()) return;
+  if (!st::text::FontStack::system_default()) {
+    ST_SKIP("系统无可用字体（无字体环境）");
+    return;
+  }
   const auto warm = st::text::font_cache_stats();
 
   std::atomic<std::size_t> loads_seen_in_worker{0};
@@ -214,7 +225,10 @@ ST_TEST(font_default_text_uses_one_family_for_latin_and_han) {
   return;
 #else
   Fixture fixture;
-  if (!fixture.ok) return;
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（Fixture 未装配）");
+    return;
+  }
   const auto* ascii = fixture.stack->find_face(U'A', FontRole::Proportional);
   const auto* han = fixture.stack->find_face(U'霜', FontRole::Proportional);
   ST_CHECK(ascii != nullptr);
@@ -227,7 +241,10 @@ ST_TEST(font_default_text_uses_one_family_for_latin_and_han) {
 
 ST_TEST(font_default_text_is_the_platform_primary) {
   Fixture fixture;
-  if (!fixture.ok) return;
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（Fixture 未装配）");
+    return;
+  }
   const char* want = primary_text_file();
   if (*want == '\0') return;   // 非 Windows：无特定取向
   const auto* ascii = fixture.stack->find_face(U'A', FontRole::Proportional);
@@ -244,7 +261,10 @@ ST_TEST(font_default_text_is_the_platform_primary) {
 
 ST_TEST(font_default_mono_is_the_platform_primary) {
   Fixture fixture;
-  if (!fixture.ok) return;
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（Fixture 未装配）");
+    return;
+  }
   if (!fixture.stack->has_monospace()) return;   // 没探到等宽库：本用例无意义
   const char* want = primary_mono_file();
   if (*want == '\0') return;
@@ -264,7 +284,10 @@ ST_TEST(font_default_mono_is_the_platform_primary) {
 
 ST_TEST(font_default_bold_resolves_to_the_primary_bold_face) {
   Fixture fixture;
-  if (!fixture.ok) return;
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（Fixture 未装配）");
+    return;
+  }
   const char* want = primary_text_bold_file();
   if (*want == '\0') return;
   // 中英文粗体都必须落在首选粗体面（否则两条链的下标没对齐）
@@ -279,7 +302,10 @@ ST_TEST(font_default_symbols_still_fall_back) {
   // 符号回退不能因为换了首选字体而失效：✓(U+2713)/✗(U+2717) 在雅黑与 Consolas
   // 里都没有，必须仍能被某档覆盖——缺字的表现为"该字符整块空白"。
   Fixture fixture;
-  if (!fixture.ok) return;
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（Fixture 未装配）");
+    return;
+  }
   for (const char32_t codepoint : {U'\u2713', U'\u2717'}) {
     const auto* face = fixture.stack->find_face(codepoint, FontRole::Proportional);
     ST_CHECK(face != nullptr);
@@ -296,15 +322,54 @@ ST_TEST(font_default_emoji_prefer_emoji_face_over_symbol_face) {
   // 判据取**文件归属**：emoji 码点必须落到 emoji 字体面，而不是符号字体面。
   // 这是一条纯属性面断言，不需要截图——换字体的错在文本层就能钉住。
   Fixture fixture;
-  if (!fixture.ok) return;
-  // 平台没有 emoji 字体（精瘦的 Linux 容器）时无从谈起，跳过而不是判红。
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（无字体环境，本用例不适用）");
+    return;
+  }
+  // ## 守卫必须是“**这个 face 能被本引擎加载**”，而不只是“链里有它”
+  //
+  // 旧守卫只看链里有没有 emoji 文件。那在 Linux 上必红：发行版的 emoji 字体普遍是
+  // **位图彩色**（`NotoColorEmoji.ttf` 只有 CBDT/CBLC，**无 glyf/CFF 轮廓表**），
+  // 而本引擎的 `FontFace::load` 明确拒绝“无轮廓表”的字体
+  //（`parse_glyf`: “字体既无 glyf/loca 也无 CFF 轮廓表”）。
+  // 于是 `find_face` 回空 → `ST_REQUIRE` 红。
+  //
+  // 这不是环境缺失，也不是本用例要验的东西：它验的是“**有 emoji 面时，emoji 码点
+  // 不能被符号字体接管**”（选字顺序），而不是“引擎支不支持位图 emoji”（那是字号/
+  // 轮廓能力议题）。后者不成立时本用例的前提不存在——应当**如实跳过**。
   const auto chain = st::platform::preferred_text_fonts();
   const auto bold_chain = st::platform::preferred_text_fonts_bold();
+  const char* emoji_file = emoji_face_file();
   bool has_emoji_face = false;
   for (const auto& entry : chain) {
-    if (emoji_face_file() != nullptr && entry.path.ends_with(emoji_face_file())) has_emoji_face = true;
+    if (emoji_file != nullptr && entry.path.ends_with(emoji_file)) has_emoji_face = true;
   }
-  if (!has_emoji_face) return;
+  if (!has_emoji_face) {
+    ST_SKIP("本机无 emoji 字体面（无字体环境的容器/精简安装）");
+    return;
+  }
+  // 探一次“**emoji 码点到底落到了哪个面**”。
+  //
+  // ⚠ `find_face != nullptr` **不能**当守卫：符号字体（`NotoSansSymbols` 等）也覆盖
+  // emoji 码点，位图 emoji 字体加载不了时它们会接手——于是 `find_face` 非空，
+  // 但拿到的**不是 emoji 字体面**。那正是本用例要报红的情形……**在 emoji 面本来
+  // 可用时**。
+  //
+  // 所以守卫要问的是“**emoji 字体面是否真的能加载**”，与“码点有没有人接”无关：
+  // 先把 emoji 文件直接丢给引擎试加载，能加载才算前提成立。
+  const auto emoji_probe = [&]() -> bool {
+    for (const auto& entry : chain) {
+      if (emoji_file == nullptr || !entry.path.ends_with(emoji_file)) continue;
+      if (st::text::FontFace::load(entry.path, 0).has_value()) return true;
+    }
+    return false;
+  };
+  if (!emoji_probe()) {
+    ST_SKIP(std::format(
+        "emoji 字体 {} 无轮廓表（位图彩色字体），引擎不支持 → 本用例前提不存在",
+        emoji_file != nullptr ? emoji_file : "?"));
+    return;
+  }
   for (const char32_t codepoint : {U'\U0001F600', U'\U0001F4C1'}) {
     const auto* regular = fixture.stack->find_face(codepoint, FontRole::Proportional);
     // **必须用 `ST_REQUIRE`**：`ST_CHECK` 失败不中止，下一行会解引用空指针

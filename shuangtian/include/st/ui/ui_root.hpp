@@ -283,6 +283,17 @@ class UiRoot : public HostFocus {
   void set_clipboard_write_provider(std::function<bool(std::string_view)> provider) {
     clipboard_write_provider_ = std::move(provider);
   }
+  /// 剪贴板**能力位**：是否装了读/写 provider。
+  ///
+  /// 为何需要单独一个位：`host_clipboard_text()` 在“没装 provider”与
+  /// “装了但剪贴板为空”两种情况下**都返回空串**。验证脚本必须能分辨这两件事——
+  /// 否则“这个后端根本没有剪贴板”会被当成“剪贴板刚好是空的”而静默通过。
+  [[nodiscard]] auto clipboard_available() const noexcept -> bool {
+    return clipboard_provider_ != nullptr;
+  }
+  [[nodiscard]] auto clipboard_writable() const noexcept -> bool {
+    return clipboard_write_provider_ != nullptr;
+  }
 
   // ── 原生子窗口嵌入：转给 provider（`Application` 装的）──
   //

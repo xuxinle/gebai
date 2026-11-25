@@ -168,18 +168,48 @@ struct FontCandidate {
   struct Cache {
     std::mutex mutex{};
     std::unordered_map<std::string, FontFace> entries{};
+    /// **负缓存**：加载**失败**过的 key（含失败原因）。
+    ///
+    /// ## 为何必须有它（2026-11-24 真机实测发现的真缺陷）
+    ///
+    /// 旧码是 `if (!face) return face;`——失败不缓存（原注释的理由是“字体可能被装上/卸下”）。
+    /// 后果在**系统链里有“能探到但加载不了”的字体**时暴露：
+    /// 本机 `/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf` 是**位图彩色 emoji**
+    /// （只有 CBDT/CBLC，无 glyf/CFF 轮廓），而本引擎只支持轮廓字体 → `FontFace::load`
+    /// 恒回 `Unsupported`。而它**每次**重建字体栈都会被再试一遍（探到 → 尝试 → 失败），
+    /// 于是“热调用零新增加载”这个契约被打破（实测 `face_loads` 17 → 19）。
+    ///
+    /// 刷新的代价不是纳秒级：失败前它已经把 10 MB 字体文件的目录读完了。
+    /// 在 Tasks 池八个线程上就是八倍。
+    ///
+    /// ## 为何负缓存可以安全（与“字体可能被装上/卸下”不矛盾）
+    ///
+    /// 负缓存同样**有界且随进程生命期**：真发生“装上字体”时，用户新装的字体路径
+    /// 不在旧链里（候选链是每次重拼的），而**同一路径换内容**（发行版热更新字体包）
+    /// 才需要失效——那种情况下进程重启本来也是唯一可靠的手段（已加载的 face 已经
+    /// 持有旧内容了，只失效负缓存帮不了忙）。两张表用**同一个作用域**，语义一致。
+    std::unordered_map<std::string, Error> failures{};
   };
   static Cache cache;
-  std::string key = std::format("{}#{}", path, face_index);
+  std::string key = std::format("{}\\#{}", path, face_index);
   {
     const std::scoped_lock guard(cache.mutex);
     if (const auto found = cache.entries.find(key); found != cache.entries.end()) {
       note_face_hit();
       return found->second;   // `FontFace` 拷贝廉价（共享 `shared_ptr<Data>`）
     }
+    // 失败也命中缓存：**不再重付一次读盘 + 解析 + 必然失败**。
+    if (const auto failed = cache.failures.find(key); failed != cache.failures.end()) {
+      note_face_hit();
+      return unexpected(failed->second);
+    }
   }
   auto face = FontFace::load(path, face_index);
-  if (!face) return face;   // 失败不进缓存（见上）
+  if (!face) {
+    const std::scoped_lock guard(cache.mutex);
+    cache.failures.emplace(std::move(key), face.error());
+    return face;
+  }
   {
     const std::scoped_lock guard(cache.mutex);
     // 双检：锁外加载期间可能已有别的线程写入同一 key（用那份，避免后面的线程

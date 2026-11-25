@@ -1205,8 +1205,19 @@ auto read_content_at(const std::string& cwd, const DiffEndpoint& end, const std:
     // 工作区：直接读磁盘（不经过 git：未跟踪文件也该能当“另一侧”看）。
     auto text = st::fs::read_text(st::fs::join(cwd, path));
     if (!text.has_value()) {
+      // ## “缺文件”与“真失败”必须一致地分开（2026-11-24 真机发现的不一致）
+      //
+      // 下面的 git 分支已经做对了：`missing = true` 且 **`error` 清空**
+      //（“那一侧没有这个文件”是正常业务状态：新增/删除就是这样）。
+      // 而这一支原先写了 `error = "文件不存在或读不到"`——同一个语义在两个
+      // 分支上给出不同的 `error`，调用方按 `error.empty()` 判“真失败”时，
+      // **工作区那一侧的新增/删除会被当成错误**。
+      //
+      // 三种“读不到”（不存在 / 是目录 / 无权限）对“另一侧内容为空”是同一结论：
+      // 不是错误。真正的 I/O 失败（磁盘坏、路径过长）在该接口上无法与它区分，
+      // 但“缺失”是绝对主导的一种，选一致性而不是留一个偶发的弹窗。
       result.missing = true;
-      result.error = "文件不存在或读不到";
+      result.error.clear();
       return result;
     }
     result.text = std::move(*text);

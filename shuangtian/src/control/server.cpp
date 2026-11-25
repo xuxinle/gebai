@@ -769,6 +769,17 @@ struct Server::Impl {
                        bool& deferred) -> Result<Json>;
   [[nodiscard]] auto handle_app(Client& client, std::uint64_t id, const Json& params,
                        bool& deferred) -> Result<Json>;
+  /// 剪贴板（`clipboard`）：`get`（默认）/ `set`。
+  ///
+  /// ## 为何需要一个独立方法（而不是靠 `script`）
+  ///
+  /// 剪贴板是**跨进程**能力，而两个平台后端都存在“进程内闭环看起来对、跟别的应用
+  /// 不通”的失败模式（X11 需 ICCCM 往返、Wayland 需 data_source 协商）。
+  /// 验证这类能力必须能从**外部驱动两侧**：本方法让外部进程能读/写应用侧剪贴板，
+  /// 与另一侧（`tools/linux_clipboard_check.py` 直调 X11）双向对要么。
+  /// 而 `script` 默认关（进程内执行代码），拿它做验收等于要求验收环境开一个危险开关。
+  [[nodiscard]] auto handle_clipboard(Client& client, std::uint64_t id, const Json& params,
+                                      bool& deferred) -> Result<Json>;
   [[nodiscard]] auto handle_shutdown(Client& client, std::uint64_t id, const Json& params,
                        bool& deferred) -> Result<Json>;
 
@@ -815,6 +826,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
   if (method == "theme") { return handle_theme(client, id, params, deferred); }
   if (method == "wait") { return handle_wait(client, id, params, deferred); }
   if (method == "app") { return handle_app(client, id, params, deferred); }
+  if (method == "clipboard") { return handle_clipboard(client, id, params, deferred); }
   if (method == "shutdown") { return handle_shutdown(client, id, params, deferred); }
 return unexpected(ErrorCode::Unsupported, std::format("未知方法: {}", method));
 
@@ -853,7 +865,7 @@ Json capabilities = Json::array();
   for (const auto name : {"tree", "find", "get", "set", "invoke", "ui.create", "ui.remove",
                          "input.mouse", "input.key", "input.text", "capture", "capture.hash",
                          "visual", "visual.diff", "wait", "metrics", "perf", "events", "theme",
-                         "app"}) {
+                         "app", "clipboard"}) {
     capabilities.push_back(Json(name));
   }
 // `script` 只在真正启用时上报：能力清单是"这个进程能做什么"的事实说明，
@@ -1992,6 +2004,59 @@ if (action == "focus") {
   result["ok"] = true;
   return result;
 }
+// —— 窗口控制（自绘窗框的那组能力；测试与自动化要能从外部驱动）——
+//
+// 为何需要这些动作：窗口语义（最大化/最小化/置底/铺满/尺寸）全都是**写给
+// 窗口管理器的状态**，进程内属性面看不到。`tools/linux_window_semantics_check.py`
+// 从 X 服务器侧读证据，但**得先有个办法把它们触发**——就是这几条动作。
+// 不支持的后端（headless）会如实返回 `Unsupported`，而不是假装成功。
+//
+// 为何走 `root.window_control()` 而不是 `host.window_*`：`control::Host` 是控制通道
+// 对宿主的**最小**接口面（tree/get/set/metrics…），窗口控制属于 `ui::WindowControl`
+// （窗框组件用的那一份）。两者刻意分开——控制通道不该为了几个窗口动作就把
+// `Host` 接口撑大（每多一个纯虚函数，所有 Host 实现都要跟改）。
+ui::WindowControl* window_control = host.window_control();
+if (window_control == nullptr) {
+  return unexpected(ErrorCode::Unsupported, "本应用未提供窗口控制（WindowControl）");
+}
+if (action == "toggle_maximize" || action == "maximize") {
+  if (!window_control->window_toggle_maximize()) {
+    return unexpected(ErrorCode::Unsupported, "该后端/窗口管理器不支持最大化切换");
+  }
+  Json result = Json::object();
+  result["ok"] = true;
+  result["maximized"] = window_control->window_maximized();
+  return result;
+}
+if (action == "stay_at_bottom") {
+  const bool enabled = json_get_bool(params, "enabled", true);
+  if (!window_control->window_stay_at_bottom(enabled)) {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持窗口置底");
+  }
+  Json result = Json::object();
+  result["ok"] = true;
+  result["enabled"] = enabled;
+  return result;
+}
+if (action == "fit_work_area") {
+  if (!window_control->window_fit_to_work_area()) {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持工作区铺开");
+  }
+  Json result = Json::object();
+  result["ok"] = true;
+  const math::Size size = host.viewport();
+  result["width"] = static_cast<double>(size.width);
+  result["height"] = static_cast<double>(size.height);
+  return result;
+}
+if (action == "restore") {
+  if (!window_control->window_restore()) {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持恢复窗口");
+  }
+  Json result = Json::object();
+  result["ok"] = true;
+  return result;
+}
 return unexpected(ErrorCode::Unsupported, std::format("未知 app 动作: {}", action));
   
 }
@@ -2048,6 +2113,37 @@ auto Server::Impl::handle_perf([[maybe_unused]] Client& client, [[maybe_unused]]
     return result;
   }
   return unexpected(ErrorCode::Unsupported, std::format("未知 perf 动作: {}", action));
+}
+
+auto Server::Impl::handle_clipboard([[maybe_unused]] Client& client, [[maybe_unused]] std::uint64_t id,
+                                    [[maybe_unused]] const Json& params,
+                                    [[maybe_unused]] bool& deferred) -> Result<Json> {
+  const std::string action = json_get_string(params, "action");
+  Json result = Json::object();
+  if (action.empty() || action == "get") {
+    // 读：把后端结果**原样**区分“空”与“不支持”。
+    //
+    // 为何不能把失败折成空串：验证脚本必须能分辨“剪贴板真的空”与“这个后端
+    // 根本读不了”（后者是真缺陷）。两者合起来会让“跨进程剪贴板坏了”彻底隐形。
+    const std::string text = host.root().host_clipboard_text();
+    result["text"] = text;
+    result["available"] = host.root().clipboard_available();
+    if (!host.root().clipboard_available()) {
+      return unexpected(ErrorCode::Unsupported, "该后端的剪贴板不可用（未装 provider）");
+    }
+    return result;
+  }
+  if (action == "set") {
+    const std::string text = json_get_string(params, "text");
+    const bool written = host.root().host_set_clipboard_text(text);
+    result["ok"] = written;
+    result["writable"] = host.root().clipboard_writable();
+    result["length"] = static_cast<std::uint64_t>(text.size());
+    if (!written) return unexpected(ErrorCode::Unsupported, "该后端的剪贴板不可写");
+    return result;
+  }
+  return unexpected(ErrorCode::Invalid,
+                    std::format("clipboard 的 action 只接受 get / set，收到「{}」", action));
 }
 
 auto Server::Impl::handle_shutdown([[maybe_unused]] Client& client, [[maybe_unused]] std::uint64_t id,                                   [[maybe_unused]] const Json& params,

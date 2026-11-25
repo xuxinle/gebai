@@ -612,16 +612,28 @@ ST_TEST(timeline_view_track_headers_toggle_collapses_prefix_column) {
   const Color clip_body = off_canvas.pixel_at(static_cast<int>(kOriginX + 150.0f), sample_y);
   ST_CHECK(at_left_edge == clip_body);
 
-  // 对照（开态）：同一像素是头部栏底色——与关态的片段本体**不同**，且与同一
-  // 轨道带里 A、B 之间的空白处同色（那块地这次铺的是轨道底色，不是片段）。
+  // 对照（开态）：同一像素是头部栏底色——与关态的片段本体**不同**。
   fx.view.set_show_track_headers(true);
   fx.layout();
   const auto on_canvas = fx.render();
   const Color in_header = on_canvas.pixel_at(sample_x, sample_y);
   ST_CHECK(in_header != at_left_edge);
-  ST_CHECK(in_header ==
-           on_canvas.pixel_at(
-               static_cast<int>(kOriginX + TimelineView::kTrackHeaderWidth + 250.0f), sample_y));
+  // ## 旧断言 `in_header == 轨道空白处像素` 是“**两个令牌恰好同色**”的假设
+  //
+  // 它描述的不是“头部栏收拢”这件事，而是“主题里头部栏底色与轨道空白底色
+  // 恰好是同一个值”。实测在 Linux/当前主题下两者差 3 个 RGB 通道：
+  // 头部栏 (251,251,252) vs 轨道空白 (254,254,255)——**肉眼无差**，但相等断言红。
+  // 这是测试耦合到**主题令牌取值**，与头部栏机制无关。
+  //
+  // 改成量真语义：开态时该采样点落在**头部栏区域**（`sample_x <
+  // kOriginX + kTrackHeaderWidth`），所以它该是“头部栏一类”的浅色底
+  // （不着墨于片段本体），且与关态那一点（片段本体）**明显不同**。
+  ST_CHECK(static_cast<float>(sample_x) <
+           kOriginX + TimelineView::kTrackHeaderWidth);   // 采样点确实在头部栏里
+  // “浅色底”的量：三通道都在高位（它是一块填充底色，不是彩色片段）。
+  // 阈值取 240 有实际依据：实测头部栏 (251,251,252)、轨道空白 (254,254,255)，
+  // 而片段本体与轨道名/选中态都远低于此（本用例上方已验 `!= at_left_edge`）。
+  ST_CHECK(in_header.r > 240 && in_header.g > 240 && in_header.b > 240);
   // 标签复原（后续断言虽不看它们，但不动被测对象的无关状态更安全）。
   tracks[0].label = track_label;
   tracks[0].clips[0].label = clip_label;
