@@ -603,11 +603,17 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
 }
 
 /// 构造一次库级嵌入请求（单个贡献方）。
+///
+/// `production` = 生产档（release）：不携带构建机绝对路径、关闭热重载。
+/// **它必须由调用方传入**——`EmbedRequest` 的缺省值是 false，而该字段在
+/// `embed.cpp` 的 `render_header` 里是被读的：漏传的后果是发布产物里永远带着
+/// 开发期的热重载路径（体积与信息泄露两头都中），且完全静默、不影响构建结果。
 [[nodiscard]] auto library_embed_request(std::string_view owner_name, std::string_view owner_directory,
                                         const std::vector<std::string>& patterns,
                                         std::string_view build_subdir,
                                         std::string_view template_directory,
-                                        std::string_view runtime_source, bool with_runtime)
+                                        std::string_view runtime_source, bool with_runtime,
+                                        bool production)
     -> EmbedRequest {
   EmbedRequest request;
   request.work_directory = std::string(owner_directory);
@@ -616,6 +622,7 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
   request.build_subdir = std::string(build_subdir);
   request.scope = "lib";
   request.with_runtime = with_runtime;
+  request.production = production;
   if (!patterns.empty()) {
     EmbedContribution contribution;
     contribution.base_directory = std::string(owner_directory);
@@ -3508,6 +3515,9 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     return forward_error(status.error());
   }
   const std::string subdir = profile_directory(options.profile, *toolchain);
+  // 生产档：嵌入产物不携带构建机绝对路径、关闭热重载（见 `embed.cpp` 的 `render_header`）。
+  // 只认 `release`：`dev`/`debug`/`quick`/`san` 都属于开发期，需要磁盘优先 + 监看。
+  const bool embed_production = options.profile == "release";
   const std::string object_dir = fs::join(root, std::format("build/{}/obj", subdir));
   const std::string bin_dir = fs::join(
       root, std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
@@ -3644,7 +3654,8 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   {
     auto request = library_embed_request(manifest.name, manifest.directory, manifest.embed, subdir,
                                          embed_support, embed_runtime,
-                                         /*with_runtime=*/!framework_owns_runtime);
+                                         /*with_runtime=*/!framework_owns_runtime,
+                                         /*production=*/embed_production);
     if (auto status = attach_embeds(request, library_sources, library_sources, third_party_paths,
                                     library_includes);
         !status) {
@@ -3667,7 +3678,8 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     // ③ 框架自己的嵌入：只下发给**框架单元**（否则与工程的同名头在命令行上撞车）
     auto request = library_embed_request(framework->name, framework->directory, framework->embed,
                                          subdir, embed_support, embed_runtime,
-                                         /*with_runtime=*/framework_owns_runtime);
+                                         /*with_runtime=*/framework_owns_runtime,
+                                         /*production=*/embed_production);
     if (auto status = attach_embeds(request, framework->sources, library_sources, third_party_paths,
                                     library_includes);
         !status) {
@@ -3993,6 +4005,8 @@ if (target->kind == "group") {
       request.runtime_source = embed_runtime;
       request.build_subdir = subdir;
       request.scope = options.target;
+      // 与库级嵌入同一口径：生产档不携带构建机绝对路径、关闭热重载。
+      request.production = embed_production;
       request.with_runtime = !framework_owns_runtime && manifest.embed.empty();
       // 必顶资源与可选资源分**两个贡献方**：只有后者带 `optional`。
       // 分开而不是合一，是因为语义不同：必顶资源缺了就该报错（路径写错的典型形态），
@@ -4482,6 +4496,8 @@ namespace {
     return forward_error(status.error());
   }
   const std::string subdir = profile_directory(options.profile, *toolchain);
+  // 与 `build()` 同一口径：只有 `release` 算生产档。
+  const bool embed_production = options.profile == "release";
   const std::string object_dir = fs::join(root, std::format("build/{}/obj", subdir));
   const std::string bin_dir = fs::join(
       root, std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
@@ -4516,7 +4532,8 @@ namespace {
   {
     auto request = library_embed_request(manifest.name, manifest.directory, manifest.embed, subdir,
                                          embed_support, embed_runtime,
-                                         /*with_runtime=*/!framework_owns_runtime);
+                                         /*with_runtime=*/!framework_owns_runtime,
+                                         /*production=*/embed_production);
     if (auto status = attach_embeds(request, library_sources, library_sources, third_party_paths,
                                     test_includes);
         !status) {
@@ -4537,7 +4554,8 @@ namespace {
     }
     auto request = library_embed_request(framework->name, framework->directory, framework->embed,
                                          subdir, embed_support, embed_runtime,
-                                         /*with_runtime=*/framework_owns_runtime);
+                                         /*with_runtime=*/framework_owns_runtime,
+                                         /*production=*/embed_production);
     if (auto status = attach_embeds(request, framework->sources, library_sources, third_party_paths,
                                     test_includes);
         !status) {

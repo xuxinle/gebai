@@ -9,7 +9,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <array>
-#include <fstream>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -111,7 +110,7 @@ namespace {
                     std::string(what).append(" '").append(path).append("': ").append(ec.message()));
 }
 
-/// stdio 句柄 RAII（字节精确读写用；文本读写走 ifstream）。
+/// stdio 句柄 RAII（**全部**字节与文本读写都走它）。
 ///
 /// ## 为何不能直接 `std::fopen(path.c_str(), mode)`（真缺陷，实测）
 ///
@@ -212,17 +211,21 @@ class FileHandle {
 }  // namespace
 
 auto read_text(std::string_view path) -> Result<std::string> {
-  std::ifstream stream(to_std_path(path), std::ios::binary);
-  if (!stream) return unexpected(ErrorCode::NotFound, std::string("read failed '").append(path).append("'"));
+  auto handle = FileHandle::open(path, "rb");
+  if (!handle) {
+    return unexpected(ErrorCode::NotFound,
+                      std::string("read failed '").append(path).append("'"));
+  }
   std::string content;
-  // **读到 EOF，不用 `seekg/tellg` 定长读**：`/proc`、`/sys`、cgroup 的虚拟文件报出的 size 是 0
-  // （内容却非空），按 size 读会静默得到空字符串——而"读系统状态"恰好是这些文件的唯一用途。
-  // 实测后果：cgroup 内存上限探测永远拿到 0，使"按内存推导编译并发"失效。
+  // **读到 EOF，不用 `fseek/ftell` 定长读**：`/proc`、`/sys`、cgroup 的虚拟文件报出的
+  // size 是 0（内容却非空），按 size 读会静默得到空字符串——而"读系统状态"恰好是
+  // 这些文件的唯一用途。实测后果：cgroup 内存上限探测永远拿到 0，使"按内存推导
+  // 编译并发"失效。
   std::array<char, 16 * 1024> buffer{};
-  while (stream) {
-    stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-    const std::streamsize taken = stream.gcount();
-    if (taken > 0) content.append(buffer.data(), static_cast<std::size_t>(taken));
+  while (true) {
+    const std::size_t taken = std::fread(buffer.data(), 1, buffer.size(), handle->raw());
+    if (taken > 0) content.append(buffer.data(), taken);
+    if (taken < buffer.size()) break;  // 短读 = 到 EOF（或读错，两者都该停）
   }
   // **剥 UTF-8 BOM**（EF BB BF）：编辑器不该把不可见的 U+FEFF 当一个字符。
   //
@@ -243,19 +246,27 @@ auto read_text(std::string_view path) -> Result<std::string> {
 
 auto write_text(std::string_view path, std::string_view content) -> Status {
   if (auto status = ensure_parent(path); !status) return status;
-  std::ofstream stream(to_std_path(path), std::ios::binary | std::ios::trunc);
-  if (!stream) return unexpected(ErrorCode::Io, std::string("write failed '").append(path).append("'"));
-  stream.write(content.data(), static_cast<std::streamsize>(content.size()));
-  if (!stream) return unexpected(ErrorCode::Io, std::string("write incomplete '").append(path).append("'"));
+  auto handle = FileHandle::open(path, "wb");
+  if (!handle) return unexpected(ErrorCode::Io, std::string("write failed '").append(path).append("'"));
+  if (!content.empty()) {
+    const std::size_t written = std::fwrite(content.data(), 1, content.size(), handle->raw());
+    if (written != content.size()) {
+      return unexpected(ErrorCode::Io, std::string("write incomplete '").append(path).append("'"));
+    }
+  }
   return ok();
 }
 
 auto append_text(std::string_view path, std::string_view content) -> Status {
   if (auto status = ensure_parent(path); !status) return status;
-  std::ofstream stream(to_std_path(path), std::ios::binary | std::ios::app);
-  if (!stream) return unexpected(ErrorCode::Io, std::string("append failed '").append(path).append("'"));
-  stream.write(content.data(), static_cast<std::streamsize>(content.size()));
-  if (!stream) return unexpected(ErrorCode::Io, std::string("append incomplete '").append(path).append("'"));
+  auto handle = FileHandle::open(path, "ab");
+  if (!handle) return unexpected(ErrorCode::Io, std::string("append failed '").append(path).append("'"));
+  if (!content.empty()) {
+    const std::size_t written = std::fwrite(content.data(), 1, content.size(), handle->raw());
+    if (written != content.size()) {
+      return unexpected(ErrorCode::Io, std::string("append incomplete '").append(path).append("'"));
+    }
+  }
   return ok();
 }
 
