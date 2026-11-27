@@ -304,6 +304,24 @@ auto FormRow::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"label", "hint", "error", "required", "label_width", "stacked"});
 }
 
+auto FormRow::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "label", .type = PropertyType::Text, .summary = "字段名"},
+      {.name = "hint", .type = PropertyType::Text, .summary = "提示文字"},
+      {.name = "error", .type = PropertyType::Text, .summary = "错误信息（非空则整行进错误态）"},
+      {.name = "required", .type = PropertyType::Boolean, .summary = "是否显示必填标记"},
+      {.name = "label_width",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 400.0f,
+       .step = 4.0f,
+       .summary = "标签列宽（px；0 = 按内容）"},
+      {.name = "stacked", .type = PropertyType::Boolean, .summary = "标签是否换行到内容上方"},
+  };
+  return kDescs;
+}
+
+
 auto FormRow::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"effective_label_width"});
 }

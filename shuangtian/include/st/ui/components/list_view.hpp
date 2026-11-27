@@ -106,6 +106,8 @@ class List : public Element {
   // —— 列表类通用视口契约（与 `Tree` 同口径，见 tree.hpp 的说明）——
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   /// 视口能整行容纳的项数（至少 1）。
   [[nodiscard]] auto visible_item_count() const noexcept -> std::size_t;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;

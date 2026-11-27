@@ -89,6 +89,8 @@ class Text : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   /// 只读属性（`selection`）：`get` 能读、`set` 不生效。
   [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
   /// `copy`：把文本内容写进宿主剪贴板（2026-10-12——文本标签此前完全无法复制：

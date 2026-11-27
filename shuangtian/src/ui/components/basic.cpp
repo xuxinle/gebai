@@ -552,6 +552,29 @@ auto Text::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"text", "content", "multiline", "font_size", "selectable", "tone"});
 }
 
+auto Text::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "text", .type = PropertyType::Multiline, .summary = "文本内容（与 content 同义）"},
+      {.name = "font_size",
+       .type = PropertyType::Number,
+       .min_value = 6.0f,
+       .max_value = 96.0f,
+       .step = 1.0f,
+       .summary = "字号（px）"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色（跟主题走；切主题不串色）",
+       .choices = kTones},
+      {.name = "multiline", .type = PropertyType::Boolean, .summary = "是否按多行排版"},
+      {.name = "selectable", .type = PropertyType::Boolean, .summary = "是否允许选中文本"},
+  };
+  return kDescs;
+}
+
+
 auto Text::readonly_property_names() const -> std::vector<std::string_view> {
   // `selection` 只读（`get` 能读、`set` 不生效），与其他文本组件同一组名字。
   return Element::with_universal_readonly({"selection"});
@@ -701,6 +724,23 @@ auto Heading::property_names() const -> std::vector<std::string_view> {
   return names;
 }
 
+auto Heading::property_schema() const -> std::span<const PropertyDesc> {
+  // 继承 Text 的全部描述（标题也是文本），再加 'level'。
+  // **必须真拼 Text 的表**而不是抄一遍：抄一份就有两处真相，Text 加了描述这里会漏。
+  static thread_local std::vector<PropertyDesc> merged;
+  merged.assign(Text::property_schema().begin(), Text::property_schema().end());
+  static constexpr PropertyDesc kLevel = {
+      .name = "level",
+      .type = PropertyType::Integer,
+      .min_value = 1.0f,
+      .max_value = 6.0f,
+      .step = 1.0f,
+      .summary = "标题层级（1~6，决定字号与字重）"};
+  merged.push_back(kLevel);
+  return merged;
+}
+
+
 // —— IconView ——
 
 IconView::IconView(std::string name, float size) : icon_(std::move(name)), size_(size) {}
@@ -762,6 +802,32 @@ auto IconView::property_names() const -> std::vector<std::string_view> {
   // 要查那些就取它的父元素，或看可视化树。
   return {"icon", "diameter", "tone"};
 }
+
+auto IconView::property_schema() const -> std::span<const PropertyDesc> {
+  // 只有 icon 与 diameter：图标是矢量路径，**没有**字号/字重（它与 Text 的边界见
+  // property_names() 的注释与 ui_icon_diameter_is_not_font_size）。
+  //
+  // 名字必须与 property_names()、set_property **逐字一致**（`icon` 而非 `name`、
+  // `diameter` 而非 `size`）——第一版写成 name/size，守卫用例当场报了两个孤儿。
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "icon", .type = PropertyType::Text, .summary = "图标名（内置图标表；写错不占位也不报错）"},
+      {.name = "diameter",
+       .type = PropertyType::Number,
+       .min_value = 8.0f,
+       .max_value = 256.0f,
+       .step = 1.0f,
+       .summary = "直径（px，不是字号）"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+  };
+  return kDescs;
+}
+
 
 auto IconView::set_property(std::string_view name, std::string_view value) -> bool {
   if (name == "icon") {
@@ -1384,6 +1450,41 @@ auto Button::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"label", "text", "icon", "variant", "scale", "hint", "tone",
                                   "label_wrap"});
 }
+
+auto Button::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  // 候选必须与 `variant_name()` 的枚举名逐字一致——面板列一个"选了不生效"的名字
+  // 比不列更糟（用户会反复试那个不存在的档）。
+  static constexpr std::string_view kVariants[] = {"plain",   "neutral", "primary", "accent",
+                                                   "success", "warning", "danger",  "ghost",
+                                                   "soft"};
+  static constexpr std::string_view kScales[] = {"small", "medium", "large"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "label", .type = PropertyType::Text, .summary = "按钮文字（与 text 同义）"},
+      {.name = "icon", .type = PropertyType::Text, .summary = "前置图标名（内置图标表）"},
+      {.name = "variant",
+       .type = PropertyType::Choice,
+       .summary = "外观变体（写的是声明 Appearance，不是组件成员）",
+       .choices = kVariants},
+      {.name = "scale",
+       .type = PropertyType::Choice,
+       .summary = "尺寸档位（与 Text 的 font_size 不同义）",
+       .choices = kScales},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+      // 注意：**不写 enabled**。它是 `Element` 的通用名字，而 `Button` 的
+      // `property_names()` 没把它列进可写表——给描述里加它就变成“面板有控件、
+      // 控制通道读不到”的孤儿。这条正是守卫用例
+      // `component_property_schema_matches_its_name_tables` 当场抓到的。
+      {.name = "hint", .type = PropertyType::Text, .summary = "悬停提示（进 UiRoot 的 hint-bubble）"},
+  };
+  return kDescs;
+}
+
 
 auto Button::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "click" || action == "activate") {

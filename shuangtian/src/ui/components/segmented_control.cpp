@@ -501,6 +501,30 @@ auto SegmentedControl::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"options", "index", "stretch", "orientation"});
 }
 
+auto SegmentedControl::property_schema() const -> std::span<const PropertyDesc> {
+  // `index` 的上界随 `options` 变，而 `PropertyDesc` 是**静态表**（不能每帧重算）——
+  // 所以给一个宽区间，真正的越界拒绝在 `set_property` 里。这是本契约的已知局限
+  // （描述表达不了"依赖另一个属性"），如实写在这里而不是装作没有。
+  static constexpr std::string_view kOrientations[] = {"row", "column"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "options",
+       .type = PropertyType::Text,
+       .summary = "分段标签（用 | 分隔，如 紧凑|标准|宽松）"},
+      {.name = "index",
+       .type = PropertyType::Integer,
+       .min_value = -1.0f,
+       .max_value = 32.0f,
+       .step = 1.0f,
+       .summary = "当前选中段（-1 = 无；上限随 options 变，越界由 set_property 拒绝）"},
+      {.name = "stretch", .type = PropertyType::Boolean, .summary = "等宽分段（吃满可用宽）"},
+      {.name = "orientation",
+       .type = PropertyType::Choice,
+       .summary = "排列方向",
+       .choices = kOrientations},
+  };
+  return kDescs;
+}
+
 auto SegmentedControl::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "select" || action == "set") {
     // 参数可以是序号，也可以是标签名。

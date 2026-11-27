@@ -506,6 +506,19 @@ auto ScrollView::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal(names);
 }
 
+auto ScrollView::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "scroll",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1000000.0f,
+       .step = 1.0f,
+       .summary = "滚动偏移（px；越界夹到 max_scroll）"},
+  };
+  return kDescs;
+}
+
+
 }  // namespace st::ui
 
 // ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────

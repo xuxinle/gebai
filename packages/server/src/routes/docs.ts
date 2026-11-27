@@ -33,6 +33,13 @@ const SUMMARIES: Record<string, Record<string, string>> = {
   "/api/v1/sessions/{id}/truncate": { post: "截断会话消息" },
   "/api/v1/sessions/{id}/env": { get: "会话环境变量", put: "设置会话环境变量" },
   "/api/v1/sessions/{id}/todos": { get: "会话待办清单" },
+  "/api/v1/groups": { get: "我参与的多人会话（群）列表", post: "创建群（可选进入口令；创建者即群主）" },
+  "/api/v1/groups/{id}": { get: "群详情（成员表/邀请码/我的群内身份；非成员 404）", patch: "群主：改群名 / 设置或清除进入口令", delete: "群主：解散群（群目录整体删除）" },
+  "/api/v1/groups/join": { post: "加入群（邀请码 + 可选口令 + 群内名称/角色）" },
+  "/api/v1/groups/{id}/me": { patch: "修改我在本群的名称与角色（不动账号）" },
+  "/api/v1/groups/{id}/leave": { post: "退出群（群主需先转让或解散）" },
+  "/api/v1/groups/{id}/transfer": { post: "群主：转让群主" },
+  "/api/v1/groups/{id}/session": { get: "群会话信息（会话本体走 /sessions/:id，访问权由成员资格裁定）" },
   "/api/v1/sessions/{id}/files": { get: "会话临时文件列表" },
   "/api/v1/sessions/{id}/files/content": { get: "读取文件内容" },
   "/api/v1/sessions/{id}/files/download": { get: "下载单文件", post: "多选打包下载（zip）" },
@@ -121,6 +128,10 @@ const SUMMARIES: Record<string, Record<string, string>> = {
   },
   "/api/v1/triage/jobs/{id}": { get: "研判任务进度/汇总" },
   "/api/v1/triage/jobs/{id}/results": { get: "研判任务逐条结论（可按层/成败过滤）" },
+  "/api/v1/apps": { get: "托管应用清单（来源层/后端状态/警告）" },
+  "/api/v1/apps/refresh": { post: "重扫托管应用目录（目录变动立即生效，无需重启）" },
+  "/api/apps/{id}": { get: "调用应用后端模块（应用自己定义的方法与路径）", post: "调用应用后端模块" },
+  "/api/apps/{id}/*": { get: "调用应用后端模块（子路径）" },
 }
 
 /** Hono 路由的路径参数形态 `:id` → OpenAPI 的 `{id}`；根路径保持 `/`。 */

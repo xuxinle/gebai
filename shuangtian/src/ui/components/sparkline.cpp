@@ -329,6 +329,38 @@ auto Sparkline::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"values", "shape", "tone", "baseline", "emphasis_tail", "min", "max"});
 }
 
+auto Sparkline::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr std::string_view kShapes[] = {"line", "bar"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "shape",
+       .type = PropertyType::Choice,
+       .summary = "折线还是柱",
+       .choices = kShapes},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+      {.name = "min",
+       .type = PropertyType::Number,
+       .min_value = -1000000.0f,
+       .max_value = 1000000.0f,
+       .step = 1.0f,
+       .summary = "纵轴下界（0 且 auto_scale 时按数据自适应）"},
+      {.name = "max",
+       .type = PropertyType::Number,
+       .min_value = -1000000.0f,
+       .max_value = 1000000.0f,
+       .step = 1.0f,
+       .summary = "纵轴上界（同上）"},
+      {.name = "emphasis_tail", .type = PropertyType::Boolean, .summary = "末点是否加粗强调"},
+  };
+  return kDescs;
+}
+
+
 auto Sparkline::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"count", "data_min", "data_max"});
 }

@@ -425,6 +425,17 @@ auto Input::property_names() const -> std::vector<std::string_view> {
        "visible", "dropdown", "dropdown_open", "dropdown_options"});
 }
 
+auto Input::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "value", .type = PropertyType::Text, .summary = "当前文本"},
+      {.name = "placeholder", .type = PropertyType::Text, .summary = "空值时显示的占位提示"},
+      {.name = "password", .type = PropertyType::Boolean, .summary = "是否按密码遮蔽"},
+      {.name = "enabled", .type = PropertyType::Boolean, .summary = "是否接受输入"},
+  };
+  return kDescs;
+}
+
+
 auto Input::readonly_property_names() const -> std::vector<std::string_view> {
   // `selection` 只读（`get` 能读、`set` 不应生效）——与 TextArea / Terminal /
   // CodeEditor 同一组名字，自动化可用同一个判据。

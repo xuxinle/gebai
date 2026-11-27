@@ -683,6 +683,38 @@ auto SplitView::property_names() const -> std::vector<std::string_view> {
           "first_hidden", "second_hidden", "handle_size"});
 }
 
+auto SplitView::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kOrientations[] = {"horizontal", "vertical"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "ratio",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1.0f,
+       .step = 0.01f,
+       .summary = "分栏比例（0~1）"},
+      {.name = "min_ratio",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1.0f,
+       .step = 0.01f,
+       .summary = "任一侧的最小占比（夹取边界）"},
+      {.name = "step",
+       .type = PropertyType::Number,
+       .min_value = 0.001f,
+       .max_value = 1.0f,
+       .step = 0.005f,
+       .summary = "键盘微调步长"},
+      {.name = "orientation",
+       .type = PropertyType::Choice,
+       .summary = "分栏方向",
+       .choices = kOrientations},
+      {.name = "first_hidden", .type = PropertyType::Boolean, .summary = "第一侧是否收起"},
+      {.name = "second_hidden", .type = PropertyType::Boolean, .summary = "第二侧是否收起"},
+  };
+  return kDescs;
+}
+
+
 auto SplitView::invoke_action(std::string_view action, std::string_view argument) -> bool {
   // 面板显隐的快捷动作（无参数 = 切换；"true"/"false" = 显式设置）。
   if (action == "toggle_first") {

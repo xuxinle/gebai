@@ -1,0 +1,210 @@
+/* 多人会话（群）面板：右侧抽屉（底座复用 .settings-overlay / .settings-panel）。
+   左列「我的群」列表 + 右列详情；窄屏（<720px）改为上下堆叠，列表在上。 */
+
+.groups-panel { width: min(680px, 94vw); }
+
+.groups-wrap {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.groups-list { display: flex; flex-direction: column; gap: 6px; }
+
+.groups-row {
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.groups-row:hover { background: var(--bg-hover); }
+.groups-row.active { background: var(--accent-soft); border-color: var(--accent); }
+
+.groups-row-title { display: flex; align-items: center; gap: 6px; }
+.groups-ico { flex: none; font-size: 13px; opacity: 0.85; }
+.groups-name {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 「当前」角标：这个群会话正是当前打开的会话 */
+.groups-now {
+  flex: none;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+.groups-row-meta {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.groups-empty {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  padding: 10px 2px;
+}
+
+.groups-detail {
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
+}
+.groups-detail-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 12px;
+}
+.groups-detail-name { font-size: 15px; font-weight: 700; color: var(--text); }
+
+.groups-field { margin-bottom: 12px; }
+.groups-field > label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.groups-input {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-input, var(--bg));
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+.groups-input:focus { outline: none; border-color: var(--accent); }
+
+.groups-inline { display: flex; gap: 6px; align-items: center; }
+.groups-inline .groups-input { flex: 1 1 auto; min-width: 0; }
+
+/* 邀请码：等宽字体 + 字距，手抄看得清 */
+.groups-code {
+  display: flex; align-items: center; gap: 8px;
+}
+.groups-code code {
+  flex: 1 1 auto;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: var(--bg-hover);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 14px;
+  letter-spacing: 2px;
+  color: var(--text);
+  user-select: all;
+}
+
+.groups-hint { font-size: 11.5px; line-height: 1.6; color: var(--text-muted); margin: -4px 0 12px; }
+
+.groups-members {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 220px; overflow-y: auto;
+}
+.groups-member {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  font-size: 12.5px;
+}
+.groups-member-name { color: var(--text); font-weight: 600; }
+.groups-member-role { color: var(--text-muted); }
+.groups-badge {
+  margin-left: auto;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+}
+
+.groups-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
+.groups-btn {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.groups-btn:hover:not(:disabled) { border-color: var(--accent); }
+.groups-btn:disabled { opacity: 0.55; cursor: default; }
+.groups-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.groups-btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+.groups-btn.danger { color: var(--danger, #dc2626); border-color: var(--danger, #dc2626); background: transparent; }
+
+.groups-form { display: flex; flex-direction: column; }
+.groups-form > .groups-btn { align-self: flex-start; margin-top: 4px; }
+
+@media (max-width: 720px) {
+  .groups-wrap { grid-template-columns: 1fr; }
+  .groups-detail { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 12px; }
+}
+
+/* 会话列表里的群标识（「群」角标）：与置顶标识同列，一眼分出「这是多人会话」。
+   行首用字面角标而不是 emoji：`.session-ico` 在列表里是 `display:none` 的占位，
+   在那里换 emoji 看不到任何东西（实际效果是「群会话与单人会话长得一样」）。 */
+.session-group-tag {
+  flex: none;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+#session-list li.active .session-group-tag { border-color: var(--accent); color: var(--accent); }
+/* 群内身份行（会话标题栏下方的小字）：让「我现在以什么身份在说话」始终可见。
+   位置在 main 内（不是 #app 直接子元素）：main 是 flex 列，这一行自然落在消息区之上。 */
+#group-identity {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  min-width: 0;
+}
+#group-identity[hidden] { display: none; }
+#group-identity .gi-who {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#group-identity .gi-code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+#group-identity button {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+#group-identity button:hover { border-color: var(--accent); color: var(--text); }

@@ -3091,6 +3091,37 @@ auto CodeEditor::property_names() const -> std::vector<std::string_view> {
     "hover_diagnostic", "end_annotations"});
 }
 
+auto CodeEditor::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "text", .type = PropertyType::Multiline, .summary = "编辑内容"},
+      {.name = "language", .type = PropertyType::Text, .summary = "语法高亮语言（cpp/js/…）"},
+      {.name = "read_only", .type = PropertyType::Boolean, .summary = "只读（仍可选中/滚动）"},
+      {.name = "show_line_numbers", .type = PropertyType::Boolean, .summary = "是否显示行号槽"},
+      {.name = "tab_width",
+       .type = PropertyType::Integer,
+       .min_value = 1.0f,
+       .max_value = 16.0f,
+       .step = 1.0f,
+       .summary = "Tab 展开宽度（空格数）"},
+      {.name = "indent_guides", .type = PropertyType::Boolean, .summary = "是否画缩进对齐线"},
+      {.name = "auto_pairs", .type = PropertyType::Boolean, .summary = "自动配对括号/引号"},
+      {.name = "font_scale",
+       .type = PropertyType::Number,
+       .min_value = 0.5f,
+       .max_value = 3.0f,
+       .step = 0.05f,
+       .summary = "字号缩放（相对主题基准）"},
+      {.name = "scroll",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1000000.0f,
+       .step = 1.0f,
+       .summary = "纵向滚动偏移（px）"},
+  };
+  return kDescs;
+}
+
+
 // —— 查找与替换 ——
 
 auto CodeEditor::set_find(std::string needle, FindOptions options) -> std::size_t {

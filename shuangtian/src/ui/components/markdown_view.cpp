@@ -756,6 +756,34 @@ auto MarkdownView::property_names() const -> std::vector<std::string_view> {
           "painted_groups"});
 }
 
+auto MarkdownView::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "markdown", .type = PropertyType::Multiline, .summary = "Markdown 源（与 text 同义）"},
+      {.name = "base_font_size",
+       .type = PropertyType::Number,
+       .min_value = 8.0f,
+       .max_value = 48.0f,
+       .step = 1.0f,
+       .summary = "正文字号（代码块字号按比例跟随）"},
+      {.name = "max_width",
+       .type = PropertyType::Number,
+       .min_value = 200.0f,
+       .max_value = 4000.0f,
+       .step = 10.0f,
+       .summary = "正文最大宽度（超宽居中留白）"},
+      {.name = "scroll",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1000000.0f,
+       .step = 1.0f,
+       .summary = "纵向滚动偏移（px）"},
+      {.name = "selectable", .type = PropertyType::Boolean, .summary = "是否允许选中文本"},
+      {.name = "stick_to_bottom", .type = PropertyType::Boolean, .summary = "贴底跟随（流式输出用）"},
+  };
+  return kDescs;
+}
+
+
 auto MarkdownView::readonly_property_names() const -> std::vector<std::string_view> {
   // `type_scale`：整套派生字号的快照（h1..h6/inline_code/code/table/language）。
   // 它是**观测面**：让“各格式字号差多少”可被控制通道与自动化直接断言，

@@ -854,6 +854,8 @@ function appendSessionLi(s: SessionInfo, groupKey = "", localWaiting?: Map<strin
   if (batchMode && selected.has(s.id)) li.classList.add("selected")
   li.dataset.sid = s.id
   if (groupKey) li.dataset.group = groupKey
+  // 群会话：列表顺序仍是“谁参与谁看见”（成员资格已由服务端裁过），但行首加「群」角标区分，
+  // 避免与单人会话混淆——两者的消息协议一样，但可见范围完全不同（session-ico 是隐藏占位，不用它）
   const ico = el("span", "session-ico", "💬")
   const body = el("div", "session-body")
   // 重命名：双击/右键菜单触发 → 内联编辑（回车/失焦保存，Esc 取消）
@@ -863,6 +865,12 @@ function appendSessionLi(s: SessionInfo, groupKey = "", localWaiting?: Map<strin
   box.type = "checkbox"
   box.checked = batchMode && selected.has(s.id)
   body.append(nameEl)
+  // 群标识（多人会话）：行首角标，不参与重命名内联编辑
+  if (s.group) {
+    const tag = el("span", "session-group-tag", "群")
+    tag.title = `多人会话「${s.group.name}」· 我在本群：${s.group.role || "成员"}·${s.group.memberName || "未设"}`
+    li.append(tag)
+  }
   // 置顶标识（独立于 .session-name，不受重命名内联编辑替换影响；session-ico 为隐藏的 💬 占位）
   if (s.pinned) li.append(el("span", "session-pin", "📌"))
   // 运行态角标：后台会话也在跑/在等人（快照 runtime 基线 + 事件增量）——不标出则「哪个会话在等我」无从看出

@@ -361,6 +361,11 @@ class ThreeView : public Element {
   OrbitCameraState orbit_{};
   OrbitCameraState home_{};
   bool has_home_{false};
+  /// 装载发生在拿到真实尺寸之前：第一次 `arrange` 后要补算一次取景。
+  ///
+  /// 为何必须有它：`frame_scene()` 的横向约束读 `bounds_` 的宽高比，而创建期它还是 0。
+  /// 缺这一步的症状是“物体只占画面底部一小块”，而物体数/网格/帧数全部正常。
+  bool frame_pending_{false};
 
   math::Color background_{0x0E, 0x12, 0x1A, 0xFF};
   std::optional<math::Color> highlight_override_{};

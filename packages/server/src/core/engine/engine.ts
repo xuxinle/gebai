@@ -67,6 +67,22 @@ import {
 /** 参数解析失败回传的模型原始片段上限：片段只用于让模型定位自己写错的位置（首个语法破绽），
  *  全量回吐会让一次失败吃掉上千字符上下文（且下一轮模型会重写整段）。 */
 const ARGS_ERROR_CLIP = 300
+
+/**
+ * 多人会话的消息前缀：`【角色·名称】正文`（角色缺省时只写名称）。
+ *
+ * 为何前缀写进消息正文而不是只挂字段：模型看到的是消息内容，字段到不了它眼前——
+ * 前缀是模型区分“谁在说”的**唯一渠道**；落盘保留同样文本，历史回放与会话压缩后也不丢发言归属。
+ * 前缀只加在最前面（开头空行一并去掉），不碰正文其余部分。
+ */
+export function prefixSpeaker(text: string, speaker: { name: string; role?: string }): string {
+  const name = speaker.name.trim()
+  if (!name) return text
+  const role = (speaker.role ?? "").trim()
+  const head = role ? `【${role}·${name}】` : `【${name}】`
+  const body = text.replace(/^\s+/, "")
+  return `${head}${body}`
+}
 function clipArgsError(s: string | undefined): string {
   const t = (s ?? "").replace(/\s+/g, " ").trim()
   if (!t) return "（无）"
@@ -320,6 +336,9 @@ export interface AgentEngineOptions {
   retryBackoffMs?: number
   /** 统一任务调度器（GEBAI_TASKS_ENABLED=true 时注入，task_* 工具经 ToolContext 绑定）。 */
   tasks?: import("../schedule/tasks").TaskManager
+  /** 多人会话（群）存储：群会话的用户消息前缀与系统提示词注记、事件受众均从它取。
+   *  未注入时所有会话按普通单人会话处理（单机/单测不受影响）。 */
+  groups?: import("../session/groups").GroupStore
   /** page_capture 等待前端捕获回传的超时（毫秒，默认 30 秒；测试可注入短超时）。 */
   captureTimeoutMs?: number
   /** 工具执行超时兜底（毫秒，默认 9 分钟；测试可注入短超时验证超时返回给模型）。 */
@@ -448,6 +467,7 @@ export class AgentEngine {
       sandbox: opts.sandbox,
       subAgents: opts.subAgents,
       channelNote: (id) => this.tasks.get(id)?.channelNote,
+      groupNote: (id) => this.opts.groups?.noteFor(id, this.tasks.get(id)?.user),
       resolveSubAgentProject: (user, env, name) => this.resolveSubAgentProject(user, env, name),
       presetProjectsFor: (user, env, name) => this.presetProjectsFor(user, env, name),
       loadProjectAgentsMd: (projectRoot) => this.loadProjectAgentsMd(projectRoot),
@@ -1274,12 +1294,17 @@ private activeSchemas(sessionId: string) {
       // 超长用户输入落盘（DESIGN「上下文保护」预防策略）：全文写入会话 tmp/user_inputs/（原文不丢），
       // 消息正文保留头尾 + 文件引用，避免大段粘贴撑爆上下文；未超阈值原样不变
       const userContent = await spillLongUserInput(prompt, this.opts.store.getTmpDir(sessionId, user))
+      // 多人会话：用户消息自动拼接「角色·名称」前缀（群内身份，不是账号名）——
+      // 落盘与回显都用带前缀的文本：模型看到谁在说话，UI 也直接展示为发言气泡
+      const speaker = this.opts.groups?.speakerOf(sessionId, user) ?? null
+      if (speaker) userContent.content = prefixSpeaker(userContent.content, speaker)
       const userCreatedAt = Date.now()
       await this.opts.store.appendMessage(sessionId, {
         id: messageId,
         role: "user",
         content: userContent.content,
         attachments: attachmentRefs,
+        ...(speaker ? { speaker: { name: speaker.name, role: speaker.role, userId: user } } : {}),
         createdAt: userCreatedAt,
       }, user)
       // 用户消息实时事件（回显通道）：本条已落盘，向所有连接广播——发起页乐观上屏的那条按
@@ -1291,6 +1316,7 @@ private activeSchemas(sessionId: string) {
         messageId,
         text: userContent.content,
         ...(attachmentRefs?.length ? { attachments: attachmentRefs } : {}),
+        ...(speaker ? { speaker: { name: speaker.name, role: speaker.role, userId: user } } : {}),
         createdAt: userCreatedAt,
       })
       // 任务开始事件（DESIGN「运行中会话恢复」）：任务并非总由本页发起——重启续跑/飞书桥接/定时任务/

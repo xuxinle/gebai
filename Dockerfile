@@ -190,12 +190,13 @@ RUN set -a && . /tmp/gebai-plan.env && set +a \
     fi \
  && bun run packages/server/scripts/build-web-bundle.ts
 
-# 内嵌产物与注册表：Web UI bundle / 子Agent / 全局工具 / D2.js / tree-sitter wasm /
+# 内嵌产物与注册表：Web UI bundle / 子Agent / 全局工具 / 托管应用 / D2.js / tree-sitter wasm /
 # playwright 驱动与 pwcore / CV 驱动 / 内置 ripgrep（grep 工具在二进制形态下无系统依赖）。
 # 各脚本读同一个计划：被裁剪项写空产物，且空产物在运行期走「本构建未内嵌 X」的如实降级。
 RUN set -a && . /tmp/gebai-plan.env && set +a \
  && bun run packages/server/scripts/build-subagents.ts \
  && bun run packages/server/scripts/build-tools.ts \
+ && bun run packages/server/scripts/build-apps-bundle.ts \
  && bun run packages/server/scripts/build-d2js.ts \
  && bun run packages/server/scripts/build-analyzer-wasm.ts \
  && bun run packages/server/scripts/build-driver-embed.ts \
@@ -206,12 +207,14 @@ RUN set -a && . /tmp/gebai-plan.env && set +a \
  && bun run packages/server/scripts/build-cv-embed.ts
 # 本地 CV（PP-OCR 模型 + onnxruntime-web）：模型缺失时脚本写空清单并告警、构建不失败
 # （运行期降级为「本地 OCR 不可用」，并在工具输出里给出 GEBAI_CV_MODELS_DIR 配置指引）。
+# 注：build-apps-bundle 的 `--restore` **必须放在下面的 --compile 之后**（编译期要把真内嵌表打进去）。
 
 # 单文件可执行（--external 排除 d2：二进制模式从内嵌产物物化，dev/dist 形态才 import 包）
 RUN mkdir -p /out \
  && bun build packages/server/src/index.ts --compile ${BUN_TARGET:+--target=$BUN_TARGET} \
       --outfile=/out/gebai --external @terrastruct/d2 \
- && ls -lh /out/gebai
+ && ls -lh /out/gebai \
+ && bun run packages/server/scripts/build-apps-bundle.ts --restore
 
 # 可选：playwright 浏览器（由计划 PLAN_WITH_BROWSER 决定），三条供给通道（见 docker/README.md「离线浏览器」）：
 #   local    ——把预置目录（PLAYWRIGHT_DIR，缺省 docker/browsers）拷入（零网络；离线/内网主通道）

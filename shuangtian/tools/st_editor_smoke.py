@@ -90,7 +90,8 @@ class Client:
         self.sock.close()
 
 
-def start(app: str, shots: pathlib.Path) -> tuple[subprocess.Popen, Client]:
+def start(app: str, shots: pathlib.Path,
+          extra_args: list[str] | None = None) -> tuple[subprocess.Popen, Client]:
     control = shots / f"editor-smoke-{app}-control.json"
     control.unlink(missing_ok=True)
     # Windows 产物带 .exe 后缀（此前只拼无后缀路径，Windows 上永远报「未找到」）
@@ -102,7 +103,7 @@ def start(app: str, shots: pathlib.Path) -> tuple[subprocess.Popen, Client]:
     log = open(shots / f"editor-smoke-{app}.log", "wb")
     process = subprocess.Popen(
         [str(executable), "--headless", "--control-port", "0", "--control-file", str(control),
-         "--shots", str(shots)],
+         "--shots", str(shots), *(extra_args or [])],
         stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True,
     )
     for _ in range(120):
@@ -127,8 +128,22 @@ def stop(process: subprocess.Popen) -> None:
 
 def smoke_gbcode(shots: pathlib.Path) -> None:
     print("[gbcode] 焦点链路 + 文本送达", flush=True)
-    process, client = start("gbcode", shots)
+    # ⚠ **必须先给一个要打开的文件**：gbcode 的编辑器是**条件渲染**的——
+    # 没有活动标签时编辑区只有 `empty-hint`（「打开一个文件或文件夹开始」），
+    # `#editor` 根本不在树上。旧版这里直接 `get editor`，在空态会话下必然是
+    # “未找到元素: editor”（既不是回归，也不是环境问题，而是**前提没造**）。
+    #
+    # 用自己的临时文件而不是仓里的某个源文件：被测断言会往里插一个 `Z` 再退格，
+    # 拿真文件当夹具就等于“跑一次冒烟往工作区写一笔”。
+    workspace = shots / "gbcode-smoke-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    sample = workspace / "smoke-sample.cpp"
+    sample.write_text("int main() {\n  return 0;\n}\n", encoding="utf-8")
+    process, client = start("gbcode", shots, ["--workspace", str(workspace),
+                                             "--open", str(sample)])
     try:
+        # 启动即开文件 → 编辑器要等标签建好才上树；按界面条件等，不拍 sleep。
+        wait_for(client, "#editor", "编辑器")
         state = client.ok("get", {"id": "editor"})
         props = state.get("props", {})
         # 示例启动即 `root->set_focus(editor_ptr)`：初始应当是已聚焦
@@ -170,11 +185,52 @@ def smoke_gbcode(shots: pathlib.Path) -> None:
         stop(process)
 
 
+def wait_for(client: Client, selector: str, what: str, tries: int = 60) -> None:
+    """按**界面条件**等待元素出现（不靠拍脑袋的 sleep 值）。
+
+    切页/切分类会重建子树，而控制通道的 `invoke` 在回调里就返回了——新页的节点
+    可能还没挂上去。轮询 `find` 是唯一稳定的判据（`count > 0`），
+    而固定 sleep 在慢构建档或忙的机器上就会间歇失败。
+    """
+    for _ in range(tries):
+        found = client.ok("find", {"selector": selector, "limit": 1})
+        if found.get("count", len(found.get("matches", []))) > 0:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"{what}未出现（等待 {selector} 超时）")
+
+
 def smoke_gallery(shots: pathlib.Path) -> None:
     print("[gallery] 模态浮层（FillViewport）+ Esc 关闭", flush=True)
     process, client = start("gallery", shots)
     try:
         screen = client.screen
+        # 画廊已改成**分区多页**（概览/组件/属性面/自检台/…），而对话框展位在
+        # 「组件 → 下拉与浮层」分类里。步骤必须按**用户路径**走完这两跳：
+        # 不切页/不切分类时卡片虽然还在树上，但 `visible=false`，
+        # 点它不会有回调——症状是「invoke 成功但对话框没出现」。
+        client.ok("invoke", {"id": "nav-components", "action": "click"})
+        # 切页是**重建页面**（声明式/手搭都一样）：`nav-components` 返回时新页的
+        # 子树可能还没挂完，立刻 invoke 分类按钮会 not_found。所以按界面条件等，
+        # 不靠 sleep 的拍脑袋值（同一套脚本在慢构建档上就能稳定）。
+        wait_for(client, "#exhibit-tab-select", "组件页分类栏")
+        # ⚠ 这一段守的是一个**已经真实发生过的崩溃**，不能只点一次。
+        #
+        # 分类按钮的 `on_click` 里要读「当前分类」与「全部按钮指针」，而这两样原本是
+        # `build_components()` 的局部变量、被 lambda 按引用捕获——函数返回后全是悬垂引用，
+        # 点一下就是 `0xC0000005`（debug 档抓到的栈是 `pages.cpp` 的 `set_variant`）。
+        #
+        # 所以多切几类：一次可能只是踩到"回收后还没被覆盖"的旧内存，看起来还正常
+        # （dev 档就表现为「点了没反应」），连切几轮才能把真问题露出来。
+        for section in ("select", "toggle", "data", "advanced", "basic"):
+            client.ok("invoke", {"id": f"exhibit-tab-{section}", "action": "click"})
+        counts = client.ok("get", {"id": "exhibit-search-state"})
+        # `get` 的顶层字段就是 `text`（`Text` 类元素没有 `value`——`value` 是
+        # Input/Slider 那一族的）。读错字段名拿到空串，断言会“假红”而不是报错。
+        count_text = counts.get("text", "")
+        check("4 个展示位" in count_text,
+              f"连切五类后回到「基础与文字」（应回 4 个展示位，实为「{count_text}」）")
+        client.ok("invoke", {"id": "exhibit-tab-select", "action": "click"})
         client.ok("invoke", {"id": "btn-open-dialog", "action": "click"})
         dialog = client.ok("get", {"id": "demo-dialog"})
         bounds = dialog.get("bounds", {})

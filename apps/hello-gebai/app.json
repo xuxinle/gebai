@@ -1,0 +1,11 @@
+{
+  "title": "你好，歌白",
+  "description": "托管应用示例：静态页面 + 同进程后端（server.js）。改文件刷新即生效，无需重启。",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "spa": true,
+  "backend": "server.js",
+  "env": {
+    "DEMO_GREETING": "你好"
+  }
+}

@@ -262,6 +262,15 @@ auto Checkbox::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"checked", "value", "label"});
 }
 
+auto Checkbox::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "checked", .type = PropertyType::Boolean, .summary = "是否勾选"},
+      {.name = "label", .type = PropertyType::Text, .summary = "右侧标签文字"},
+  };
+  return kDescs;
+}
+
+
 // ————————————————— Radio —————————————————
 
 Radio::Radio(std::string label) : label_(std::move(label)) { set_focusable(true); }
@@ -407,6 +416,15 @@ auto Radio::set_property(std::string_view name, std::string_view value) -> bool 
 auto Radio::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"checked", "value", "label"});
 }
+
+auto Radio::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "checked", .type = PropertyType::Boolean, .summary = "是否选中（同组单选由 RadioGroup 管）"},
+      {.name = "label", .type = PropertyType::Text, .summary = "右侧标签文字"},
+  };
+  return kDescs;
+}
+
 
 // ————————————————— Switch —————————————————
 
@@ -597,6 +615,16 @@ auto Switch::set_property(std::string_view name, std::string_view value) -> bool
 
 auto Switch::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"checked", "value", "label"});
+}
+
+auto Switch::property_schema() const -> std::span<const PropertyDesc> {
+  // `value` 是 `checked` 的别名（`set_property` 两者都认），所以描述里也只写
+  // 主名 `checked`——两写会在面板上生成两个联动的开关（用户看到“同一个量有两行”）。
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "checked", .type = PropertyType::Boolean, .summary = "是否打开"},
+      {.name = "label", .type = PropertyType::Text, .summary = "右侧标签文字"},
+  };
+  return kDescs;
 }
 
 }  // namespace st::ui

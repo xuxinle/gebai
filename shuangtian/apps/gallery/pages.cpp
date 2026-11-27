@@ -1,5 +1,6 @@
 #include "pages.hpp"
 
+#include "audit.hpp"
 #include "native_host_page.hpp"
 
 #include <algorithm>
@@ -674,9 +675,140 @@ namespace {
 // 组件页：控件全集（此前一半组件从未被人看过）
 // ————————————————————————————————————————————————————————————————————————————
 
+/// 一个组件展示位（分类视图里的一行）。
+struct ExhibitSlot {
+  std::string section{};
+  std::string title{};
+  std::string names{};      ///< 逗号分隔的注册名（搜索命中用）
+  Element* card{nullptr};   ///< 卡片容器（分类切换时切它的 visible）
+};
+
 [[nodiscard]] auto build_components(const PageHooks& hooks) -> std::unique_ptr<Panel> {
   auto page = make_page("components", "组件",
-                        "选择控件 · 滑块 · 标签页 · 下拉 · 导航定位（面包屑/分页/步骤/分段）· 反馈徽标 · 图标 · 文字 · 浮层 · 多行文本 · 禁用态 · 树 · 提示气泡 · 取色器 · 缩放视口 · 代码编辑器 · 差异视图 · 补全弹层 · 命令面板 · 时间轴 · 三方合并 · 菜单栏 · 右键菜单 · 文件对话框 · 终端");
+                        "组件浏览器：左侧按分类筛选（或输入关键字搜索），右侧只显示命中的卡。"
+                        "全部卡片始终在树上——分类只是切 visible，所以树自检与元素状态保留都不受影响。");
+
+  // —— 分类桶 ——
+  //
+  // 为什么"全部卡都在树上、只切 visible"而不是按分类动态建卡：
+  // ① 框架在 measure/arrange/paint/hit_test/semantics/visual 六处尊重 visible，
+  //    隐藏子树零布局零绘制，成本与"没建"几乎等同；
+  // ② **状态不丢**（编辑器里的文本、表格选中行、滑块位置切回来原样还在）——
+  //    销毁重建会让质检时"改了一半切走再回来全没了"，那是最扫兴的体验；
+  // ③ 启动树自检（audit.cpp / main.cpp）要求每个非懒组件都真的在树上，
+  //    动态建卡会让它随分类而变红。
+  // —— 分类 / 搜索的**共享状态** ——
+  //
+  // ⚠ 必须用 `shared_ptr` 持有，不能是 `build_components()` 的局部变量。
+  // 本函数返回后页面仍会响应点击，而回调里要读「当前分类」与卡片清单——
+  // 按引用捕获局部量 = 返回后全是悬垂引用。实测代价：点分类按钮直接
+  // **0xC0000005 访问违例**（debug 档 `pages.cpp:2765` 的 `set_variant`，
+  // 因为读到的 `Button*` 是回收过的内存），而 dev 档可能只是“点了没反应”——
+  // 后者更难归因，因为看起来像“回调没接上”。
+  //
+  // 用 `shared_ptr` 而不是 `unique_ptr`：状态被 N 个回调共同持有，生命周期
+  // 跟着"还有谁在用"走，不需要额外定义"页面什么时候销毁"。
+  auto slots = std::make_shared<std::vector<ExhibitSlot>>();
+  slots->reserve(64);
+  // 当前选中的分类（空 = 全部）
+  auto active_section = std::make_shared<std::string>();
+  // 分类容器：每类一个 Panel，卡片挂在自己那一组下，切组 = 切这一组的 visible。
+  auto group_ptrs = std::make_shared<std::array<Panel*, gallery::kExhibitSections.size()>>();
+  auto groups_column = std::make_unique<Panel>(FlexDirection::Column);
+  groups_column->set_id("exhibit-groups");
+  groups_column->style().gap = 16.0f;
+  for (std::size_t index = 0; index < gallery::kExhibitSections.size(); ++index) {
+    auto group = std::make_unique<Panel>(FlexDirection::Column);
+    group->set_id("exhibit-group-" + std::string(gallery::kExhibitSections[index].id));
+    group->style().gap = 16.0f;
+    group_ptrs->at(index) = group.get();
+    groups_column->add_child(std::move(group));
+  }
+
+  // —— 分类导航（左）与卡片区（右）——
+  auto browser = std::make_unique<Panel>(FlexDirection::Row);
+  browser->set_id("component-browser");
+  browser->style().gap = 20.0f;
+  browser->style().align_items = Align::Start;
+
+  auto side = std::make_unique<Panel>(FlexDirection::Column);
+  side->set_id("exhibit-sidebar");
+  side->style().width = 190.0f;
+  side->style().gap = 4.0f;
+  side->style().padding = Insets::all(10.0f);
+  side->set_surface(Element::Surface::Alt);
+  auto side_hint = std::make_unique<Text>("分类");
+  side_hint->set_tone(Tone::Faint);
+  side_hint->set_scale(Text::Scale::Xs2);
+  side->add_child(std::move(side_hint));
+
+  // 同样进 `shared_ptr`：回调要遍历它把选中态在各按钮间搬（见页尾接线处）。
+  auto section_buttons =
+      std::make_shared<std::array<Button*, gallery::kExhibitSections.size()>>();
+  std::array<Text*, gallery::kExhibitSections.size()> section_counters{};
+  for (std::size_t index = 0; index < gallery::kExhibitSections.size(); ++index) {
+    auto button = std::make_unique<Button>(std::string(gallery::kExhibitSections[index].title),
+                                           Button::Variant::Ghost, Button::Size::Small);
+    button->set_id("exhibit-tab-" + std::string(gallery::kExhibitSections[index].id));
+    button->style().justify = Justify::Start;
+    button->style().text_align = TextAlign::Start;
+    button->set_hint(std::string(gallery::kExhibitSections[index].hint));
+    section_buttons->at(index) = button.get();
+    side->add_child(std::move(button));
+    // 该类有多少个展示位（数字随卡片登记而变，装上时填）
+    auto count_text = std::make_unique<Text>("");
+    count_text->set_id("exhibit-count-" + std::string(gallery::kExhibitSections[index].id));
+    count_text->set_tone(Tone::Faint);
+    count_text->set_scale(Text::Scale::Xs2);
+    count_text->style().padding = Insets{0.0f, 0.0f, 0.0f, 12.0f};
+    section_counters[index] = count_text.get();
+    side->add_child(std::move(count_text));
+  }
+  // 分类说明（选中哪一类，这里显示那一类的"何时用"）
+  auto section_hint = std::make_unique<Text>(std::string(gallery::kExhibitSections[0].hint));
+  section_hint->set_id("exhibit-section-hint");
+  section_hint->set_tone(Tone::Muted);
+  section_hint->set_scale(Text::Scale::Xs);
+  side->add_child(std::move(section_hint));
+  browser->add_child(std::move(side));
+
+  auto card_area = std::make_unique<Panel>(FlexDirection::Column);
+  card_area->set_id("exhibit-card-area");
+  card_area->style().gap = 12.0f;
+  card_area->style().grow = true;
+  auto search_input = std::make_unique<Input>();
+  search_input->set_id("exhibit-search");
+  search_input->set_placeholder("搜索组件名（如 tree / editor / 按钮）…");
+  search_input->set_icon_prefix("search");
+  auto* search_ptr = search_input.get();
+  card_area->add_child(std::move(search_input));
+  auto search_state = std::make_unique<Text>("");
+  search_state->set_id("exhibit-search-state");
+  search_state->set_tone(Tone::Faint);
+  search_state->set_scale(Text::Scale::Xs);
+  auto* search_state_ptr = search_state.get();
+  card_area->add_child(std::move(search_state));
+  card_area->add_child(std::move(groups_column));
+  browser->add_child(std::move(card_area));
+  page->add_child(std::move(browser));
+
+  // 把一张卡挂进它所属的分类组（同时登记展示位）。
+  //
+  // 为什么收口成一个 lambda 而不是每张卡自己 page->add_child：分类归属、搜索索引、
+  // 展示位登记三件事必须**同时发生**，分三处写必然漂移（漏一处就出现"能搜到但不显示"
+  // 或"显示了却不受分类控制"）。
+  //
+  // 捕获用**值**（`slots`/`group_ptrs` 是 `shared_ptr`，值拷 = 共享所有权），
+  // 不能用引用——本函数返回后它仍会被调用，引用即悬垂。
+  const auto attach = [slots, group_ptrs](std::string_view section, std::unique_ptr<Card> card,
+                                          std::string_view title, std::string_view names) {
+    const std::size_t index = gallery::section_index(section);
+    if (index >= gallery::kExhibitSections.size()) return;   // 分类名写错（表是编译期常量，不会错）
+    ExhibitSlot slot{.section = std::string(section), .title = std::string(title),
+                     .names = std::string(names), .card = card.get()};
+    slots->push_back(std::move(slot));
+    group_ptrs->at(index)->add_child(std::move(card));
+  };
 
   // —— 选择控件 ——
   auto choice_card = make_card("card-choice", "选择控件");
@@ -720,7 +852,7 @@ namespace {
   }
   choice_row->add_child(std::move(switch_group));
   choice_card->add_child(std::move(choice_row));
-  page->add_child(std::move(choice_card));
+  attach("toggle", std::move(choice_card), "选择控件（Checkbox / Radio / Switch）", "Checkbox,Radio,Switch");
 
   // —— 滑块 ——
   auto slider_card = make_card("card-slider", "滑块");
@@ -732,7 +864,7 @@ namespace {
     slider->style().width = 420.0f;
     slider_card->add_child(std::move(slider));
   }
-  page->add_child(std::move(slider_card));
+  attach("input", std::move(slider_card), "滑块（Slider）", "Slider");
 
   // —— 标签页 ——
   auto tabs_card = make_card("card-tabs", "标签页");
@@ -759,7 +891,7 @@ namespace {
     tabs_body->add_child(std::move(text));
   }
   tabs_card->add_child(std::move(tabs_body));
-  page->add_child(std::move(tabs_card));
+  attach("nav", std::move(tabs_card), "标签页（Tabs）", "Tabs");
   tabs_ptr->on_change = [tab_texts, hooks](std::size_t index) {
     for (std::size_t each = 0; each < tab_texts.size(); ++each) {
       tab_texts[each]->set_visible(each == index);
@@ -787,7 +919,7 @@ namespace {
   select_state->set_scale(Text::Scale::Xs);
   auto* select_state_ptr = select_state.get();
   select_card->add_child(std::move(select_state));
-  page->add_child(std::move(select_card));
+  attach("select", std::move(select_card), "下拉选择（Select / SelectPanel）", "Select,SelectPanel");
 
   select_ptr->overlay_host = [hooks](std::unique_ptr<Element> panel) {
     hooks.add_overlay(std::move(panel));
@@ -813,7 +945,7 @@ namespace {
   theme_state->set_scale(Text::Scale::Xs);
   auto* theme_state_ptr = theme_state.get();
   theme_card->add_child(std::move(theme_state));
-  page->add_child(std::move(theme_card));
+  attach("advanced", std::move(theme_card), "主题选择（ThemePicker）", "ThemePicker");
 
   theme_picker_ptr->on_change = [theme_state_ptr, hooks](std::string_view name) {
     // 模态弹窗/真实切换由宿主契约自动接通（上树后 host_apply_theme 生效）；
@@ -878,7 +1010,7 @@ namespace {
     bar->style().width = 420.0f;
     feedback_card->add_child(std::move(bar));
   }
-  page->add_child(std::move(feedback_card));
+  attach("feedback", std::move(feedback_card), "反馈与徽标（Badge / Chip / Avatar / Spinner）", "Badge,Chip,Avatar,AvatarGroup,Spinner");
 
   // —— 窗框（自绘标题栏）——
   //
@@ -899,7 +1031,7 @@ namespace {
   titlebar_card->add_child(std::move(demo_bar));
   titlebar_card->add_child(make_caption(
       "注：真实窗口的窗框在应用最顶层（`gbcode` 示例）；此处是同一个组件在卡片里的一面"));
-  page->add_child(std::move(titlebar_card));
+  attach("advanced", std::move(titlebar_card), "窗框（TitleBar / WindowFrame）", "TitleBar,WindowFrame");
 
   // —— 图标全集（逐个核对描边完整性）——
   auto icons_card = make_card("card-icons", std::format("图标全集（{} 个：描边由线段四边形与顶点圆求并，"
@@ -937,17 +1069,17 @@ namespace {
     svg_grid->add_child(std::make_unique<SvgIconCell>(id));
   }
   svg_card->add_child(std::move(svg_grid));
-  page->add_child(std::move(svg_card));
+  attach("basic", std::move(svg_card), "SVG 图标集（矢量 sprite）", "Icon");
   {
     auto gl_card = make_card("card-gl", "三维视图（OpenGL）");
     auto view = std::make_unique<st::ui::SceneView>(st::ui::SceneShape::Cube);
     view->set_id("gl-view");
     view->set_preferred_height(200.0f);
     gl_card->add_child(std::move(view));
-    page->add_child(std::move(gl_card));
+  attach("advanced", std::move(gl_card), "三维视图（SceneView）", "");
   }
 
-  page->add_child(std::move(icons_card));
+  attach("basic", std::move(icons_card), "图标全集（内置矢量）", "Icon");
 
   // —— 文字样式 ——
   auto type_card = make_card("card-typography", "文字样式");
@@ -978,7 +1110,7 @@ namespace {
     tone_row->add_child(std::move(text));
   }
   type_card->add_child(std::move(tone_row));
-  page->add_child(std::move(type_card));
+  attach("basic", std::move(type_card), "文字样式（Text / Heading）", "Text,Heading");
 
   // —— 分栏（SplitView；v0.1.5 补全：由「示例级自绘升为框架组件」）——
   auto split_card = make_card("card-split", "可拖拽分栏（SplitView）");
@@ -1048,7 +1180,7 @@ namespace {
   split_actions->add_child(std::move(vertical_button));
   split_card->add_child(std::move(split_actions));
   split_card->add_child(std::move(split_demo));
-  page->add_child(std::move(split_card));
+  attach("nav", std::move(split_card), "可拖拽分栏（SplitView）", "SplitView");
 
   // —— 导航与定位（2026-11-08 补全：此前这四类控件在画廊零出现）——
   auto nav_card = make_card("card-nav", "导航与定位");
@@ -1135,7 +1267,7 @@ namespace {
         std::format("当前：{}（序号 {}）", segmented_ptr->selected_label(), index));
     hooks.set_status(std::format("分段切到「{}」", segmented_ptr->selected_label()));
   };
-  page->add_child(std::move(nav_card));
+  attach("nav", std::move(nav_card), "导航与定位（面包屑 / 分页 / 步骤 / 分段）", "Breadcrumb,Pagination,Steps,SegmentedControl");
 
   // —— HTML 预览（自研排版 + 基础 CSS 子集）——
   auto html_card = make_card("card-html", "HTML 预览（基础 CSS）");
@@ -1176,7 +1308,7 @@ namespace {
   html_view_ptr->on_link_click = [hooks](std::string_view url) {
     hooks.set_status(std::format("点了链接：{}", url));
   };
-  page->add_child(std::move(html_card));
+  attach("editor", std::move(html_card), "HTML 预览（HtmlView）", "HtmlView");
 
   // —— 反馈与状态（补全包二：EmptyState / Banner / Skeleton / StatusDot / AvatarGroup）——
   auto status_showcase_card = make_card("card-status-showcase", "反馈与状态（空态 / 通知条 / 骨架屏 / 状态点 / 头像组）");
@@ -1261,7 +1393,7 @@ namespace {
   feedback_state->set_scale(Text::Scale::Xs);
   auto* feedback_state_ptr = feedback_state.get();
   status_showcase_card->add_child(std::move(feedback_state));
-  page->add_child(std::move(status_showcase_card));
+  attach("feedback", std::move(status_showcase_card), "反馈与状态（空态 / 通知条 / 骨架 / 状态点 / 头像组）", "EmptyState,Banner,Skeleton,StatusDot,AvatarGroup");
 
   // 回调要在卡片挂上之后再接（否则钩子里的 status 写不到已存在的控件上）。
   empty_ptr->on_action = [hooks, feedback_state_ptr] {
@@ -1346,7 +1478,7 @@ namespace {
   form_state->set_scale(Text::Scale::Xs);
   auto* form_state_ptr = form_state.get();
   input_form_card->add_child(std::move(form_state));
-  page->add_child(std::move(input_form_card));
+  attach("input", std::move(input_form_card), "输入与表单（数值 / 搜索 / 表单行 / 单选组 / 标签）", "NumberInput,SearchBox,FormRow,RadioGroup,TagInput");
 
   // —— 结构与容器（补全包四：DividerLabel / Accordion / Toolbar / StatusBar）——
   auto structure_card = make_card("card-structure", "结构与容器（分隔标题 / 折叠面板 / 工具条 / 状态栏）");
@@ -1419,7 +1551,7 @@ namespace {
   structure_state->set_scale(Text::Scale::Xs);
   auto* structure_state_ptr = structure_state.get();
   structure_card->add_child(std::move(structure_state));
-  page->add_child(std::move(structure_card));
+  attach("nav", std::move(structure_card), "结构与容器（分隔标题 / 折叠 / 工具条 / 状态栏）", "DividerLabel,Accordion,Toolbar,StatusBar");
 
   // —— 展示微件（补全包五：Sparkline / ProgressRing / Rating / Kbd / Link）——
   auto widget_card = make_card("card-widgets", "展示微件（迷你趋势 / 环形进度 / 评分 / 键帽 / 链接）");
@@ -1497,7 +1629,7 @@ namespace {
   widget_state->set_scale(Text::Scale::Xs);
   auto* widget_state_ptr = widget_state.get();
   widget_card->add_child(std::move(widget_state));
-  page->add_child(std::move(widget_card));
+  attach("feedback", std::move(widget_card), "展示微件（迷你趋势 / 环形进度 / 评分 / 键帽 / 链接）", "Sparkline,ProgressRing,Rating,Kbd,Link");
 
   // —— 连线（Connector：三种路由 + 箭头 + 虚线 + 跟随元素）——
   //
@@ -1619,7 +1751,7 @@ namespace {
     connector_stage->add_child(std::move(cell));
   }
   connector_card->add_child(std::move(connector_stage));
-  page->add_child(std::move(connector_card));
+  attach("data", std::move(connector_card), "连线（Connector）", "Connector");
 
   rating_ptr->on_change = [hooks, widget_state_ptr](float value) {
     widget_state_ptr->set_content(std::format("评分改成：{}", value));
@@ -1667,7 +1799,7 @@ namespace {
   overlay_state->set_scale(Text::Scale::Xs);
   auto* overlay_state_ptr = overlay_state.get();
   overlay_card->add_child(std::move(overlay_state));
-  page->add_child(std::move(overlay_card));
+  attach("select", std::move(overlay_card), "浮层与反馈（对话框 / 轻提示 / 提示气泡）", "Dialog,Toast,Tooltip");
 
   // —— 多行文本（TextArea：折行 / 光标 / 内部滚动；此前画廊零覆盖） ——
   auto multiline_card = make_card("card-multiline", "多行文本（TextArea）");
@@ -1685,7 +1817,7 @@ namespace {
   textarea_state->set_scale(Text::Scale::Xs);
   auto* textarea_state_ptr = textarea_state.get();
   multiline_card->add_child(std::move(textarea_state));
-  page->add_child(std::move(multiline_card));
+  attach("input", std::move(multiline_card), "多行文本（TextArea）", "TextArea");
 
   // —— 禁用态（Button/Input：控件全状态的最后一环） ——
   auto disabled_card = make_card("card-disabled", "禁用态");
@@ -1703,7 +1835,7 @@ namespace {
   disabled_card->add_child(std::move(disabled_row));
   disabled_card->add_child(make_caption(
       "语义树可见 disabled 标记；点击/键盘均不响应（选择器 `Button:disabled` 可命中）"));
-  page->add_child(std::move(disabled_card));
+  attach("basic", std::move(disabled_card), "禁用态（全控件族）", "");
 
   // —— 树（Tree）：无子元素、扁平数组驱动；展开/选中状态由调用方数据表达 ——
   auto tree_card = make_card("card-tree", "树（Tree）");
@@ -1723,7 +1855,7 @@ namespace {
   auto* tree_state_ptr = tree_state.get();
   tree_card->add_child(std::move(tree_demo));
   tree_card->add_child(std::move(tree_state));
-  page->add_child(std::move(tree_card));
+  attach("nav", std::move(tree_card), "树（Tree）", "Tree");
 
   // —— 提示气泡（Tooltip）——
   auto tooltip_card = make_card("card-tooltip", "提示气泡（Tooltip）");
@@ -1751,7 +1883,7 @@ namespace {
   tooltip_state->set_scale(Text::Scale::Xs);
   auto* tooltip_state_ptr = tooltip_state.get();
   tooltip_card->add_child(std::move(tooltip_state));
-  page->add_child(std::move(tooltip_card));
+  attach("feedback", std::move(tooltip_card), "提示气泡（Tooltip）", "Tooltip");
 
   // —— 取色器（ColorPicker）：HSV 交互、RGB 真值 ——
   auto color_card = make_card("card-color", "取色器（ColorPicker）");
@@ -1777,7 +1909,7 @@ namespace {
   picker_swatch->add_child(make_caption("拖 SV 块/色相条或改十六进制，色板与回显实时联动"));
   picker_row->add_child(std::move(picker_swatch));
   color_card->add_child(std::move(picker_row));
-  page->add_child(std::move(color_card));
+  attach("input", std::move(color_card), "取色器（ColorPicker）", "ColorPicker");
 
   // —— 日期与时间（CalendarPanel / DatePicker / TimePicker / DateTimeField）——
   //
@@ -1840,7 +1972,7 @@ namespace {
   };
   datetime_card->add_child(std::move(datetime_row));
   datetime_card->add_child(std::move(datetime_state));
-  page->add_child(std::move(datetime_card));
+  attach("input", std::move(datetime_card), "日期与时间（日历 / 日期 / 时间 / 组合）", "CalendarPanel,DatePicker,TimePicker,DateTimeField");
 
   // —— 视口（Viewport）：二维缩放/平移，与 ScrollView 的一维滚动分工 ——
   auto viewport_card = make_card("card-viewport", "缩放视口（Viewport）");
@@ -1864,7 +1996,7 @@ namespace {
   viewport_state->set_scale(Text::Scale::Xs);
   auto* viewport_state_ptr = viewport_state.get();
   viewport_card->add_child(std::move(viewport_state));
-  page->add_child(std::move(viewport_card));
+  attach("advanced", std::move(viewport_card), "缩放视口（Viewport）", "Viewport");
 
   // —— 代码编辑器（CodeEditor）：语法高亮 + 查找高亮 + 只读切换 ——
   // 四卡第二包（编辑器族；对账兑现见 tests/support/gallery_exhibits.hpp）：四组件
@@ -1904,7 +2036,7 @@ namespace {
   editor_state->set_scale(Text::Scale::Xs);
   auto* editor_state_ptr = editor_state.get();
   editor_card->add_child(std::move(editor_state));
-  page->add_child(std::move(editor_card));
+  attach("editor", std::move(editor_card), "代码编辑器（CodeEditor）", "CodeEditor");
 
   // —— 差异视图（DiffView）：两段文本 → 高亮差异 + hunk 导航 + 布局切换 ——
   auto diff_card = make_card("card-diff", "差异视图（DiffView）");
@@ -1940,7 +2072,7 @@ namespace {
   diff_state->set_scale(Text::Scale::Xs);
   auto* diff_state_ptr = diff_state.get();
   diff_card->add_child(std::move(diff_state));
-  page->add_child(std::move(diff_card));
+  attach("editor", std::move(diff_card), "差异视图（DiffView）", "DiffView");
 
   // —— 补全弹层（CompletionPopup）：候选列表 + 键盘导航 + 选中回显 ——
   // 浮层组件：按钮触发时才构造并挂叠加层（锚点 = 触发按钮实时 bounds）；
@@ -1961,7 +2093,7 @@ namespace {
   completion_state->set_scale(Text::Scale::Xs);
   auto* completion_state_ptr = completion_state.get();
   completion_card->add_child(std::move(completion_state));
-  page->add_child(std::move(completion_card));
+  attach("editor", std::move(completion_card), "补全弹层（CompletionPopup）", "CompletionPopup");
 
   // —— 命令面板（CommandPalette）：Ctrl+Shift+P 形态的命令入口 ——
   auto palette_card = make_card("card-palette", "命令面板（CommandPalette）");
@@ -1979,7 +2111,7 @@ namespace {
   palette_state->set_scale(Text::Scale::Xs);
   auto* palette_state_ptr = palette_state.get();
   palette_card->add_child(std::move(palette_state));
-  page->add_child(std::move(palette_card));
+  attach("nav", std::move(palette_card), "命令面板（CommandPalette）", "CommandPalette");
 
   // —— 时间轴（TimelineView）：标尺 + 轨道 + 片段块 + 播放头，几何层为
   // timeline::Model（与 caiyun 几何层回流同一套数据层）。
@@ -2026,7 +2158,7 @@ namespace {
   timeline_state->set_scale(Text::Scale::Xs);
   auto* timeline_state_ptr = timeline_state.get();
   timeline_card->add_child(std::move(timeline_state));
-  page->add_child(std::move(timeline_card));
+  attach("data", std::move(timeline_card), "时间轴（TimelineView）", "TimelineView");
 
   // —— 三方合并（MergeView）：base/ours/theirs 三栏并列，冲突段逐段取舍 ——
   auto merge_card = make_card("card-merge", "三方合并（MergeView）");
@@ -2069,7 +2201,7 @@ namespace {
   merge_state->set_scale(Text::Scale::Xs);
   auto* merge_state_ptr = merge_state.get();
   merge_card->add_child(std::move(merge_state));
-  page->add_child(std::move(merge_card));
+  attach("editor", std::move(merge_card), "三方合并（MergeView）", "MergeView");
 
   // —— 菜单栏（MenuBar）：顶部标题条 + 下拉面板（overlay；锚点惰性跟标题）——
   auto menubar_card = make_card("card-menubar", "菜单栏（MenuBar）");
@@ -2107,7 +2239,7 @@ namespace {
   menubar_state->set_scale(Text::Scale::Xs);
   auto* menubar_state_ptr = menubar_state.get();
   menubar_card->add_child(std::move(menubar_state));
-  page->add_child(std::move(menubar_card));
+  attach("nav", std::move(menubar_card), "菜单栏（MenuBar）", "MenuBar,MenuPanel");
 
   // —— 右键菜单（ContextMenu）：按钮触发 + dismiss barrier（点外/Esc 关闭）——
   auto context_card = make_card("card-context", "右键菜单（ContextMenu）");
@@ -2127,7 +2259,7 @@ namespace {
   context_state->set_scale(Text::Scale::Xs);
   auto* context_state_ptr = context_state.get();
   context_card->add_child(std::move(context_state));
-  page->add_child(std::move(context_card));
+  attach("select", std::move(context_card), "右键菜单（ContextMenu）", "ContextMenu");
 
   // —— 文件对话框（FileDialog）：打开模式，真实目录浏览 ——
   auto filedialog_card = make_card("card-filedialog", "文件对话框（FileDialog）");
@@ -2147,7 +2279,7 @@ namespace {
   filedialog_state->set_scale(Text::Scale::Xs);
   auto* filedialog_state_ptr = filedialog_state.get();
   filedialog_card->add_child(std::move(filedialog_state));
-  page->add_child(std::move(filedialog_card));
+  attach("editor", std::move(filedialog_card), "文件对话框（FileDialog）", "FileDialog");
 
   // —— 终端（Terminal）：行模式静态回显 + 按钮注入（真 PTY 形态见 gbcode）——
   auto terminal_card = make_card("card-terminal", "终端（Terminal）");
@@ -2180,7 +2312,7 @@ namespace {
   terminal_state->set_scale(Text::Scale::Xs);
   auto* terminal_state_ptr = terminal_state.get();
   terminal_card->add_child(std::move(terminal_state));
-  page->add_child(std::move(terminal_card));
+  attach("editor", std::move(terminal_card), "终端（Terminal）", "Terminal");
 
   // —— 浮层交互逻辑（Dialog / Toast：面板挂 UiRoot 叠加层，摘除经 hooks） ——
   dialog_button_ptr->on_click = [hooks, overlay_state_ptr]() {
@@ -2600,6 +2732,91 @@ namespace {
   refresh_timeline_state();
   refresh_merge_state();
 
+  // ——————————————————————————————————————————————————————————————————————————
+  // 分类 / 搜索的接线（页尾收口：此时 slots 已全部登记）
+  // ——————————————————————————————————————————————————————————————————————————
+
+  const auto refresh_visibility = [slots, group_ptrs, active_section, search_state_ptr](
+                                      std::string_view query) {
+    // 归一化：小写 + 去空白（组件名与标题都可能是英文/中文混排）
+    std::string needle(st::ascii_lower(std::string(query)));
+    while (!needle.empty() && (needle.back() == ' ' || needle.back() == '\t')) needle.pop_back();
+    std::size_t shown = 0;
+    std::array<std::size_t, gallery::kExhibitSections.size()> per_section{};
+    for (const ExhibitSlot& slot : *slots) {
+      const std::size_t index = gallery::section_index(slot.section);
+      if (index >= gallery::kExhibitSections.size()) continue;
+      const bool section_ok = active_section->empty() || *active_section == slot.section;
+      bool query_ok = true;
+      if (!needle.empty()) {
+        std::string haystack = st::ascii_lower(slot.title + " " + slot.names);
+        query_ok = haystack.find(needle) != std::string::npos;
+      }
+      const bool visible = section_ok && query_ok;
+      slot.card->set_visible(visible);
+      if (visible) {
+        ++shown;
+        ++per_section[index];
+      }
+    }
+    // 空分类的组整块隐藏（否则切到某类时下面留着几条空组，看着像"卡没建出来"）
+    for (std::size_t index = 0; index < gallery::kExhibitSections.size(); ++index) {
+      group_ptrs->at(index)->set_visible(per_section[index] > 0);
+    }
+    if (search_state_ptr != nullptr) {
+      // 显示**标题**而不是 id：id 是给选择器/自动化用的（`select`），而人是读中文的。
+      std::string section_title;
+      if (!active_section->empty()) {
+        const std::size_t active = gallery::section_index(*active_section);
+        section_title = active < gallery::kExhibitSections.size()
+                            ? std::string(gallery::kExhibitSections[active].title)
+                            : *active_section;
+      }
+      search_state_ptr->set_content(
+          needle.empty()
+              ? std::format("共 {} 个展示位（当前分类：{}）", shown,
+                            section_title.empty() ? std::string("全部") : section_title)
+              : std::format("搜索「{}」命中 {} 个展示位", query, shown));
+    }
+  };
+
+  for (std::size_t index = 0; index < gallery::kExhibitSections.size(); ++index) {
+    const std::string section_id(gallery::kExhibitSections[index].id);
+    Text* hint_ptr = section_hint.get();
+    section_buttons->at(index)->on_click = [active_section, section_buttons, hint_ptr,
+                                           refresh_visibility, search_ptr, section_id,
+                                           index]() {
+      *active_section = section_id;
+      for (std::size_t each = 0; each < gallery::kExhibitSections.size(); ++each) {
+        section_buttons->at(each)->set_variant(each == index ? Button::Variant::Soft
+                                                             : Button::Variant::Ghost);
+      }
+      if (hint_ptr != nullptr) {
+        hint_ptr->set_content(std::string(gallery::kExhibitSections[index].hint));
+      }
+      refresh_visibility(search_ptr != nullptr ? search_ptr->value() : std::string());
+    };
+  }
+  section_buttons->front()->set_variant(Button::Variant::Soft);   // 初始选中第一类
+  if (search_ptr != nullptr) {
+    search_ptr->on_change = [refresh_visibility](std::string_view value) {
+      refresh_visibility(value);
+    };
+  }
+  // 各分类展示位计数（写进左栏的小字；数量变了一看就知道）
+  std::array<std::size_t, gallery::kExhibitSections.size()> totals{};
+  for (const ExhibitSlot& slot : *slots) {
+    const std::size_t index = gallery::section_index(slot.section);
+    if (index < gallery::kExhibitSections.size()) ++totals[index];
+  }
+  for (std::size_t index = 0; index < gallery::kExhibitSections.size(); ++index) {
+    if (section_counters[index] != nullptr) {
+      section_counters[index]->set_content(std::format("{} 个展示位", totals[index]));
+    }
+  }
+  refresh_visibility(std::string());
+
+  (void)hooks;
   return page;
 }
 
@@ -3271,44 +3488,27 @@ struct DeclarativePage : st::ui::dsl::Component {
   return std::make_shared<DeclarativePage>();
 }
 
-auto page_specs() -> const std::array<PageSpec, kPageCount>& {
-  static const std::array<PageSpec, kPageCount> specs{{
-      {.id = "overview", .icon = "grid", .label = "概览",
-       .subtitle = "框架能力一览"},
-      {.id = "components", .icon = "layers", .label = "组件",
-       .subtitle = "控件全集"},
-      {.id = "motion", .icon = "sparkles", .label = "动效",
-       .subtitle = "CSS 式动画（transition / keyframes）"},
-      {.id = "data", .icon = "database", .label = "数据",
-       .subtitle = "表格 / 列表 / 键值"},
-      {.id = "declarative", .icon = "sparkles", .label = "声明式",
-       .subtitle = "状态驱动（Compose / ArkTS 风）"},
-      {.id = "control", .icon = "cpu", .label = "控制通道",
-       .subtitle = "远程可驱动"},
-      {.id = "native-host", .icon = "layers", .label = "原生嵌入",
-       .subtitle = "外部程序窗口嵌进界面（不进 framebuffer）"},
-      {.id = "webview", .icon = "globe", .label = "嵌入浏览器",
-       .subtitle = "可编程控制：URL / 内嵌资源包 / 执行 JS"},
-      {.id = "about", .icon = "info", .label = "关于",
-       .subtitle = "版本与分层"},
-  }};
-  return specs;
-}
+auto page_specs() -> const std::array<PageSpec, kPageCount>& { return kPages; }
 
 auto build_page(std::size_t index, const PageHooks& hooks) -> std::unique_ptr<Element> {
-  switch (index) {
-    case 0: return build_overview(hooks);
-    case 1: return build_components(hooks);
-    case 2: return build_motion(hooks);
-    case 3: return build_data(hooks);
-    // 声明式页：页壳（标题/说明卡）手搭，内容区交给声明式子树（应用侧 mount_into 挂）——
-    // 两者边界清楚：页面模块管「页里有什么」，应用管「声明式宿主接在哪」。
-    case 4: return build_declarative_shell(hooks);
-    case 5: return build_control(hooks);
-    case 6: return gallery::build_native_host_page(hooks.native_host_source);
-    case 7: return gallery::build_webview_page();
-    default: return build_about(hooks);
-  }
+  // 按**页 id** 分派而不是按数字：页序会随重构变动，而 id 是自动化契约。
+  // 数字分派的旧写法在插页时静默错位（第 3 页的内容跑到第 4 页，测试按 nav-id
+  // 点击时看到的是另一页）——这类错“程序不报错、只是到处不对”。
+  const std::string_view id = index < kPageCount ? kPages[index].id : std::string_view{};
+  if (id == "overview") return build_overview(hooks);
+  if (id == "components") return build_components(hooks);
+  if (id == "properties") return gallery::build_properties_page(hooks);
+  if (id == "audit") return gallery::build_audit_page(hooks);
+  if (id == "motion") return build_motion(hooks);
+  if (id == "data") return build_data(hooks);
+  // 声明式页：页壳（标题/说明卡）手搭，内容区交给声明式子树（应用侧 mount_into 挂）——
+  // 两者边界清楚：页面模块管「页里有什么」，应用管「声明式宿主接在哪」。
+  if (id == "declarative") return build_declarative_shell(hooks);
+  if (id == "control") return build_control(hooks);
+  if (id == "native-host") return gallery::build_native_host_page(hooks.native_host_source);
+  if (id == "webview") return gallery::build_webview_page();
+  if (id == "capabilities") return gallery::build_capabilities_page(hooks);
+  return build_about(hooks);
 }
 
 }  // namespace gallery

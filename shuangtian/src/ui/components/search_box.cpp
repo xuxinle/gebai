@@ -359,6 +359,22 @@ auto SearchBox::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"value", "placeholder", "count", "clearable"});
 }
 
+auto SearchBox::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "value", .type = PropertyType::Text, .summary = "搜索词"},
+      {.name = "placeholder", .type = PropertyType::Text, .summary = "空值时显示的占位提示"},
+      {.name = "count",
+       .type = PropertyType::Integer,
+       .min_value = -1.0f,
+       .max_value = 1000000.0f,
+       .step = 1.0f,
+       .summary = "命中数（-1 = 不显示）"},
+      {.name = "clearable", .type = PropertyType::Boolean, .summary = "有内容时是否显示清除钮"},
+  };
+  return kDescs;
+}
+
+
 auto SearchBox::readonly_property_names() const -> std::vector<std::string_view> { return Element::with_universal_readonly({}); }
 
 auto SearchBox::invoke_action(std::string_view action, std::string_view argument) -> bool {

@@ -33,6 +33,11 @@
 /// - 非注册的框架组件：SceneView（gallery 直接 new，但不在 `ST_COMPONENT_LIST`，
 ///   无展示义务；且它未 override `type()`，树上以基类默认「Element」露面——
 ///   放行名单按树上真名登记，不按类名想当然）；
+///   **ThreeView / GraphView / LabelOverlay**（2026-11-27，能力矩阵页）同理：
+///   三者都是框架组件但未进 `ST_COMPONENT_LIST`，所以不在对账域内。
+///   注意 GraphView / LabelOverlay 是**复合件**——GraphView 内部就 new 一个
+///   ThreeView 与一个 LabelOverlay，所以「能力矩阵」页一张卡会同时让三个 type 上树；
+///   ThreeView 自己另有独立展位（三维视口卡）。
 /// - gallery 自绘演示类：ProgressRow / IconCell / SvgIconCell（pages.cpp 本地类）；
 ///   SwatchCell 是已无实例化点的死类（不上树），不需放行；
 /// - 交互时懒创建：Dialog/Toast/ContextMenu/FileDialog/CompletionPopup 见

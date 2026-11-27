@@ -436,6 +436,32 @@ auto Pagination::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"page", "page_count", "sibling_count", "show_edges"});
 }
 
+auto Pagination::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "page",
+       .type = PropertyType::Integer,
+       .min_value = 1.0f,
+       .max_value = 100000.0f,
+       .step = 1.0f,
+       .summary = "当前页（1 起）"},
+      {.name = "page_count",
+       .type = PropertyType::Integer,
+       .min_value = 0.0f,
+       .max_value = 100000.0f,
+       .step = 1.0f,
+       .summary = "总页数"},
+      {.name = "sibling_count",
+       .type = PropertyType::Integer,
+       .min_value = 0.0f,
+       .max_value = 8.0f,
+       .step = 1.0f,
+       .summary = "当前页两侧各显示几个页码"},
+      {.name = "show_edges", .type = PropertyType::Boolean, .summary = "是否始终显示首页/末页"},
+  };
+  return kDescs;
+}
+
+
 auto Pagination::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"count", "items"});
 }

@@ -477,6 +477,27 @@ auto Steps::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"current", "steps", "orientation"});
 }
 
+auto Steps::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kOrientations[] = {"horizontal", "vertical"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "current",
+       .type = PropertyType::Integer,
+       .min_value = 0.0f,
+       .max_value = 64.0f,
+       .step = 1.0f,
+       .summary = "当前步（0 起）"},
+      {.name = "steps",
+       .type = PropertyType::Text,
+       .summary = "步骤标题（用 | 分隔）"},
+      {.name = "orientation",
+       .type = PropertyType::Choice,
+       .summary = "排列方向",
+       .choices = kOrientations},
+  };
+  return kDescs;
+}
+
+
 auto Steps::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"count", "all_done", "states"});
 }

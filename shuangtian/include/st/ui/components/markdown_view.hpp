@@ -172,6 +172,8 @@ class MarkdownView : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   /// 只读诊断属性：目前只有 `type_scale`（派生字号的快照）。
   ///
   /// 为何进只读表而不进可写表：可写表的契约是“`set` 必须生效”，而整套字号

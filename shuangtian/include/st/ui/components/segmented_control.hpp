@@ -98,6 +98,8 @@ class SegmentedControl : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；`index` 的上界随 `options` 变，见实现处说明）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
       -> bool override;
 

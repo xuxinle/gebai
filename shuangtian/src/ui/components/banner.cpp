@@ -352,6 +352,25 @@ auto Banner::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"title", "description", "tone", "icon", "action", "closable"});
 }
 
+auto Banner::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "title", .type = PropertyType::Text, .summary = "标题"},
+      {.name = "description", .type = PropertyType::Text, .summary = "补充说明"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调（决定底色与图标色）",
+       .choices = kTones},
+      {.name = "icon", .type = PropertyType::Text, .summary = "图标名（空 = 按 tone 取默认）"},
+      {.name = "action", .type = PropertyType::Text, .summary = "行动按钮文字（空 = 不显示）"},
+      {.name = "closable", .type = PropertyType::Boolean, .summary = "是否显示关闭钮"},
+  };
+  return kDescs;
+}
+
+
 auto Banner::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"visible"});
 }

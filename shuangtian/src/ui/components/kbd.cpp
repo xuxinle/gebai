@@ -257,6 +257,20 @@ auto Kbd::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"keys", "separator", "platform"});
 }
 
+auto Kbd::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kPlatforms[] = {"auto", "windows", "mac", "linux"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "keys", .type = PropertyType::Text, .summary = "按键序列（用 + 连接，如 ctrl+shift+p）"},
+      {.name = "separator", .type = PropertyType::Text, .summary = "键帽之间的分隔符"},
+      {.name = "platform",
+       .type = PropertyType::Choice,
+       .summary = "修饰键显示风格（auto = 跟随宿主平台）",
+       .choices = kPlatforms},
+  };
+  return kDescs;
+}
+
+
 }  // namespace st::ui
 
 // ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────

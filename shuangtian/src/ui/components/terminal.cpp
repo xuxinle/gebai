@@ -2122,6 +2122,34 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal(names);
 }
 
+auto Terminal::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "active_session",
+       .type = PropertyType::Integer,
+       .min_value = 0.0f,
+       .max_value = 64.0f,
+       .step = 1.0f,
+       .summary = "活动会话下标"},
+      {.name = "session_title", .type = PropertyType::Text, .summary = "活动会话的标签名"},
+      {.name = "tabs_visible", .type = PropertyType::Boolean, .summary = "是否显示标签栏"},
+      {.name = "add_button", .type = PropertyType::Boolean, .summary = "标签栏是否带“+”"},
+      {.name = "font_scale",
+       .type = PropertyType::Number,
+       .min_value = 0.5f,
+       .max_value = 3.0f,
+       .step = 0.05f,
+       .summary = "字号缩放（相对等宽基准）"},
+      {.name = "scroll",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1000000.0f,
+       .step = 1.0f,
+       .summary = "回滚偏移（0 = 贴底）"},
+      {.name = "cursor_shape", .type = PropertyType::Text, .summary = "光标形状（block/bar/underline）"},
+  };
+  return kDescs;
+}
+
 auto Terminal::readonly_property_names() const -> std::vector<std::string_view> {
   // `selection` 只读（`get` 能读、`set` 不生效）。
   return Element::with_universal_readonly({"selection"});

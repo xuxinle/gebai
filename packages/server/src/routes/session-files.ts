@@ -34,16 +34,34 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
   const { app, d } = rc
   const userOf = rc.userOf
 
+  /** 会话文件面访问失败（群会话非成员/会话不存在）统一 404：不泄露“这个会话存在但你没权”。 */
+  const fileLookup = (run: () => string, c: Context): Response | string => {
+    try {
+      return run()
+    } catch (err) {
+      const msg = String((err as Error).message || err)
+      if (msg.startsWith("session not found")) return c.json({ error: "not found" }, 404)
+      throw err
+    }
+  }
+
   app.get("/api/v1/sessions/:id/files", async (c) => {
     const user = await userOf(c)
-    const files: FileEntry[] = await d.store.listSessionFiles(c.req.param("id"), user.id)
+    let files: FileEntry[]
+    try {
+      files = await d.store.listSessionFiles(c.req.param("id"), user.id)
+    } catch (err) {
+      if (String((err as Error).message).startsWith("session not found")) return c.json({ error: "not found" }, 404)
+      throw err
+    }
     return c.json(files)
   })
   app.get("/api/v1/sessions/:id/files/content", async (c) => {
     const user = await userOf(c)
     const path = c.req.query("path") || ""
     // 文件接口以会话 tmp/ 为根（DESIGN：文件操作严格限定在会话 tmp/ 内），兼容 tmp/ 前缀路径
-    const safe = d.store.resolveSessionTmpFile(c.req.param("id"), user.id, path, d.sandbox.enforcedFor(user.id))
+    const safe = fileLookup(() => d.store.resolveSessionTmpFile(c.req.param("id"), user.id, path, d.sandbox.enforcedFor(user.id)), c)
+    if (typeof safe !== "string") return safe
     // 原始字节流式返回（Bun.file 自动按扩展名设置 Content-Type，如 image/png）：
     // 图片等二进制经 text() 会被 UTF-8 解码损坏，前端 <img> 将无法解码显示。
     // 缓存走 fileResponse（no-cache + ETag）——同路径覆写后必须能被看到新内容。
@@ -52,7 +70,8 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
   app.get("/api/v1/sessions/:id/files/download", async (c) => {
     const user = await userOf(c)
     const path = c.req.query("path") || ""
-    const safe = d.store.resolveSessionTmpFile(c.req.param("id"), user.id, path, d.sandbox.enforcedFor(user.id))
+    const safe = fileLookup(() => d.store.resolveSessionTmpFile(c.req.param("id"), user.id, path, d.sandbox.enforcedFor(user.id)), c)
+    if (typeof safe !== "string") return safe
     const file = Bun.file(safe)
     return new Response(file.stream(), { headers: { "Content-Disposition": `attachment; filename="${encodeURIComponent(path)}"` } })
   })
@@ -62,7 +81,8 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
     const body = (await c.req.json().catch(() => ({}))) as { paths?: string[] }
     const files: Array<{ name: string; data: Uint8Array }> = []
     for (const p of body.paths ?? []) {
-      const safe = d.store.resolveSessionTmpFile(c.req.param("id"), user.id, p, d.sandbox.enforcedFor(user.id))
+      const safe = fileLookup(() => d.store.resolveSessionTmpFile(c.req.param("id"), user.id, p, d.sandbox.enforcedFor(user.id)), c)
+      if (typeof safe !== "string") return safe
       if (!existsSync(safe)) return c.json({ error: `file not found: ${p}` }, 404)
       const buf = await Bun.file(safe).arrayBuffer()
       files.push({ name: p, data: new Uint8Array(buf) })
@@ -83,7 +103,9 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
     try {
       safe = d.store.resolvePreviewFile(c.req.param("id"), user.id, path, d.sandbox.enforcedFor(user.id))
     } catch (err) {
-      return c.json({ error: String((err as Error).message || err) }, 403)
+      const msg = String((err as Error).message || err)
+      // 群会话非成员与路径越界同属“取不到”：前者 404（不泄露会话存在性）、后者 403（路径明确越界）
+      return c.json({ error: msg }, msg.startsWith("session not found") ? 404 : 403)
     }
     let isFile = false
     try {

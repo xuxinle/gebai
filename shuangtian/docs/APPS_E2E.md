@@ -16,7 +16,7 @@
 | 脚本（tools/ 下） | 应用 | 覆盖面 | 跑法 |
 |---|---|---|---|
 | `st_visual_check.py` | gallery + gbcode | dev + san 双档完整交互序列：查询/操作/输入/DPI 切换/主题切换，截图落盘供人眼核验 | `py -3 tools/st_visual_check.py` |
-| `st_editor_smoke.py` | gbcode / gallery | 编辑器形态三断言：点击即聚焦、文本送达焦点元素、模态浮层铺满视口——组件级单测证明不了，只有真实控制通道往返能证明 | `py -3 tools/st_editor_smoke.py [gbcode\|gallery\|all]` |
+| `st_editor_smoke.py` | gbcode / gallery | 编辑器形态三断言：点击即聚焦、文本送达焦点元素、模态浮层铺满视口——组件级单测证明不了，只有真实控制通道往返能证明；gallery 侧另含**组件页分类连切五轮**（守一个真实发生过的 use-after-free 崩溃：回调按引用捕获了已返回函数的局部变量） | `py -3 tools/st_editor_smoke.py [gbcode\|gallery\|all]` |
 | `gallery_declarative_e2e.py` | gallery | 「声明式」页：`mount_into` 锚点语义/状态驱动传播/key 对齐列表/异步 resource（⚠ 默认取 `build/debug` 档二进制，非 dev 档） | `py -3 tools/gallery_declarative_e2e.py` |
 | `gbcode_e2e.py` | gbcode | **主全量走查，29 组**：五层骨架/多标签/底部面板互切/编辑撤销/查找替换/搜索/菜单下拉/命令面板/分栏/主题 + 崩溃栈符号化（需 `crash_probe`，未构建则该步自动跳过） | `py -3 tools/gbcode_e2e.py` |
 | `gbcode_e2e_session.py` | gbcode | 会话恢复：MRU → 关窗保存 → 重启恢复（工作区/标签/活动项/光标）→ 菜单与命令面板的「最近」入口 | `py -3 tools/gbcode_e2e_session.py` |

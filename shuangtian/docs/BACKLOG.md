@@ -7279,9 +7279,33 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 真终端里 `Ctrl+C` 在这个窗口内同样会被吞——所以优先级低，但**“静默”不对**：
 至少该在 `interrupt_foreground()` 返回 false 时告知“没找到可中止的命令”。
 
-## P2
+## P2（2026-11-27 已完成）
 
+- [x] **内置组件大面积未声明 `property_schema()` —— 已补到 44 个 / 177 项**
+  原先只有 4 个（Slider / Switch / ProgressBar / SegmentedControl，12 项）。
+  本轮把「有运行时语义可调量」的组件逐个体检并补描述：
+  Text/Heading/Button/Input/TextArea/Table/Tree/Tabs/List/ScrollView/CodeEditor/
+  MarkdownView/Accordion/SplitView/Terminal + 反馈族（Spinner/Badge/Chip/Avatar/Tooltip/
+  Rating/Sparkline/Skeleton/StatusDot/Banner/EmptyState）+ 导航与表单族（Steps/Pagination/
+  Breadcrumb/SearchBox/NumberInput/TagInput/Kbd/Link/FormRow/DividerLabel/StatusBar/Toolbar）等。
+  当前 44 个组件共 177 项描述，孤儿 0 / 不自洽 0（守卫用例
+  `component_property_schema_matches_its_name_tables` 按注册表遍历）。
+
+  **刻意留白**（不是缺口）：构造参数型（WindowFrame / TitleBar）、纯注入型
+  （ListItem / ScrollBar / MenuPanel / SelectPanel），以及语义仍在收敛的少数组件。
+
+- [x] **`find` 的 `[id*=…]` 包含匹配不生效 —— 已修（两处根因）**
+  ① `match_attribute()` 里**根本没有 `*=` 分支**，`op` 落到末尾 `return false`，
+  任何 `[id*=...]` 静默零命中；② 操作符候选表里也漏了 `*=`，且 `=` 排在前面会把
+  `[id*=x]` 拆成 name=`id*` + op=`=`（属性名不存在，匹配恒假、同样不报错）。
+  修法：补 `*=` 分支 + 候选表按**长操作符优先**排列（`~= ^= $= *= != =`）。
+  回归用例 `find_attribute_operators_all_match_with_their_documented_semantics`
+  对五种操作符各配正例与反例（只写反例会被"恒零命中"的实现全部通过）；
+  两处修复**分别**做过回退验证，都会变红。
+
+## P2
 - [ ] **`dsl_convenience.cpp` 的注释量与源体量倒挂**（2026-11-21）
+
   拆分时为了记下“为何不能住在一起”，该文件头写了较长理由；`dsl.cpp` 里
   `ensure_builtin_components_imported` 也留了两份注释。事实无误、但
   “注释比代码长”会诱使下一个人删掉。方向：把理由集中到 `DESIGN.md` §7.5.2，

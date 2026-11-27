@@ -190,6 +190,26 @@ auto StatusDot::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"state", "label", "pulse", "dot_size"});
 }
 
+auto StatusDot::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kStates[] = {"ok", "warn", "error", "idle", "busy"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "state",
+       .type = PropertyType::Choice,
+       .summary = "状态（决定颜色与是否脉动）",
+       .choices = kStates},
+      {.name = "label", .type = PropertyType::Text, .summary = "右侧文字"},
+      {.name = "pulse", .type = PropertyType::Boolean, .summary = "是否脉动"},
+      {.name = "dot_size",
+       .type = PropertyType::Number,
+       .min_value = 4.0f,
+       .max_value = 32.0f,
+       .step = 1.0f,
+       .summary = "圆点直径（px）"},
+  };
+  return kDescs;
+}
+
+
 }  // namespace st::ui
 
 // ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────

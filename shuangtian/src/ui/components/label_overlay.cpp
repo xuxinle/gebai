@@ -75,6 +75,9 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
   const float width = bounds_.width;
   const float height = bounds_.height;
   if (width < 8.0f || height < 8.0f) return;
+  // 本层在画布上的窗口（绝对坐标）。下面的过滤/夹取全部在这个窗口里做。
+  const float win_x = bounds_.x;
+  const float win_y = bounds_.y;
 
   struct Placed {
     const LabelAnchor* anchor;
@@ -103,6 +106,16 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
       ScreenPoint p;
       if (!projector_) return p;
       const auto [xy, depth] = projector_(label.x, label.y, label.z);
+      // ## 投影器给的是**绝对**坐标，本层的过滤/夹取却按**局部** 0..width 写的
+      //
+      // `ThreeView::project_to_screen()` 返回的是画布**绝对**像素（`box.x + …`），
+      // 而本层原本拿它直接跟 `width` / `height`（都是**局部**尺寸）比：视口越靠右/下，
+      // 越多标签被当成“屏幕外”丢掉。绘制用的是 `port.draw(canvas, …, Point{tx,ty})`，
+      // 而画布坐标系就是绝对坐标（见 `Element::paint_content` 的约定），
+      // 所以**坐标本身不用改**，错的是选围。
+      //
+      // 实测（gallery 能力矩阵页，7 节点图）：`painted` 恒为 **3/7**，
+      // 而三维连线正常、属性面全对——只有看图才发现字不全。
       p.x = xy.first;
       p.y = xy.second;
       p.depth = depth;
@@ -110,7 +123,9 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
       return p;
     }();
     if (!at.visible) continue;
-    if (at.x < -200.0f || at.x > width + 200.0f || at.y < -120.0f || at.y > height + 120.0f) {
+    // 过滤与限制全部在**绝对**坐标系里做（win_* 是本层的窗口）。
+    if (at.x < win_x - 200.0f || at.x > win_x + width + 200.0f || at.y < win_y - 120.0f ||
+        at.y > win_y + height + 120.0f) {
       continue;  // 屏幕外不画（省掉无用计算）
     }
     const float font_size = base_font * (0.88f + 0.34f * std::clamp(label.weight, 0.0f, 1.0f));
@@ -151,8 +166,9 @@ void LabelOverlay::paint_content(const RenderContext& context, raster::Surface& 
     for (const auto& candidate : kCandidates) {
       const float tx = candidate.left ? (item.at.x - item.text_w - pad) : (item.at.x + pad);
       float ty = item.at.y - item.line_h * 0.5F + candidate.dy * item.line_h;
-      ty = std::clamp(ty, 2.0F, height - item.line_h - 2.0F);
-      if (tx < 2.0F || tx + item.text_w > width - 2.0F) continue;  // 越界不算候选
+      // 夹取与越界判定都在**绝对**坐标里做（与上面的过滤同口径）。
+      ty = std::clamp(ty, win_y + 2.0F, win_y + height - item.line_h - 2.0F);
+      if (tx < win_x + 2.0F || tx + item.text_w > win_x + width - 2.0F) continue;  // 越界不算候选
       const math::Rect box{tx - 2.0F, ty - 1.0F, item.text_w + 4.0F, item.line_h + 2.0F};
       const bool clash = std::any_of(occupied.begin(), occupied.end(),
                                      [&box](const math::Rect& other) {

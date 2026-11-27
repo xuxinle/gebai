@@ -54,6 +54,12 @@ GEBAI_HOME/
 ├── agents/                # 用户自建客卿（放置即发现；同名覆盖内置，见「客卿」）
 │   └── {name}/            # agent.json + 任意语言驱动脚本 + PROMPT.md
 ├── vendor/keqing/  # 内置客卿源（仅二进制形态：安装包预置物化；源码/dist 形态用仓库根目录）
+├── groups/                # 多人会话（群）目录：**不属于任何用户**，与 users/ 平级
+│   └── {group_id}/        # 一个群一个目录（groupId 为 32 位小写 hex）
+│       ├── group.json     # 群档案：群名/群主/成员表（群内名称·角色）/邀请码/口令加盐哈希
+│       ├── chat.json      # 群会话正文（与单人会话同构；含 group 归属标记）
+│       ├── meta.json      # 列表元信息缓存（可重建）
+│       └── tmp/           # 该群的临时文件工作区（附件、产物、脚本沙箱根）
 └── users/                 # 用户数据目录（多用户安全隔离）
     ├── registry.json      # 用户注册表（服务模式）：用户名 → 加盐哈希/角色/状态
     └── {user}/            # 每个用户独立的数据目录
@@ -90,6 +96,7 @@ GEBAI_HOME/
 
 - 每层分片基数 256（16×16），单目录满约 16K 子目录/文件时自动感知；层级可按需加深（`{s2}`、`{h2}` 等）
 - 会话 ID、反馈 ID 分片均为纯函数映射，天然支持 O(1) 定位（无需扫描）
+- **`groups/` 不分片**：群数量远小于会话数量（一个群一个常驻会话），单目录规模可控；群会话的 `sessionPath` 由进程内注册表接管（见「多人会话（群）」）
 - 分片仅影响存储布局，路径由服务端内部解析，上层（模型/前端/API）感知的仍是逻辑路径
 
 > 本地模式使用固定默认用户 **admin**（用户名/用户 id 均为 `admin`），目录结构完全一致，核心代码单一路径。**admin 为特权用户（超级权限）**：`role: "admin"` 管理员角色，且**本地模式下豁免路径沙箱**（绝对路径/`../` 越界放行、脚本环境不剔除敏感变量、桌面控制/私网访问不限制）。**豁免仅本地模式生效**（`isExempt: (u) => u === "admin" && config.auth === "local"`）——服务端部署（沙箱启用）下 admin 与普通用户同等受沙箱约束，多租户边界一致。旧版本地模式数据目录 `users/default/` 在启动时自动迁移为 `users/admin/`。
@@ -120,7 +127,7 @@ Monorepo 采用 Bun workspaces + Turborepo：
 | `@gebai/server` | `packages/server/` | 服务端核心：Hono 服务、Agent 引擎、会话管理、子Agent 装载/子会话运行、REST/WebSocket/Webhook 对外接口；**代码分层**——核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具等）位于 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）位于 `src/` 根。TS 子Agent 已抽包 @gebai/agents（依赖单向 sdk ← agents ← server） |
 | `@gebai/agents` | `packages/agents/` | TS 子代理包，**双域分居**：`src/agents/`（纯子代理定义——扫描域，目录内全是子代理，基建/定义物理分域即排除，无需排除清单）+ `src/core/`（依赖组件基建：`analyzer/` tree-sitter 符号分析、`browser/` 浏览器桥接、`cv/` CV 全家、`code-tools.ts` 域工具、`shared/` 公共件：vision 工厂/fetch-guard/ip/tls/image-resize/cv-analysis/page-capture/feedback/sub-agent-md/config）。发现注册全自动（dev 目录扫描 / 构建期 bundle 生成，包入口零子代理清单——新增子代理 = 在 src/agents/ 放定义文件即注册，新增基建 = src/core/ 下放目录即隔离）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk，node 工具值导入走 `@gebai/sdk/node` |
 | `custom/`（二开域） | `custom/` | **二次开发专属目录（与 packages/ 平级，上游更新不触碰）**：`custom/agents/`（二开子代理定义，同内置域布局）+ `custom/core/`（二开依赖组件）+ `tsconfig.json`（paths 指上游包）。**双域扫描自动合并**：dev 发现（subagents.ts）与构建打包（build-subagents.ts）均内置域先扫、custom 后扫，同名 custom 胜出（二开覆盖内置）；域缺失零条目零告警；热加载同机制（新增/修改/删除即生效）。**迁移 = 复制文件夹**：上游版本更新时整个 `custom/` 拷到新仓库根即完成。typecheck：`bun run typecheck:custom`。**self_optimize 可写**（子Agent 扩展面之一，与内置域/客卿域并列） |
-| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约、**页面基准解析**（`app-base.ts`：`appBase`/`appPath`/`appWsUrl` 由页面 URL 推出 REST/WS/资源前缀，反向代理子路径挂载免配置，见「反向代理支持」）、**路径→语言唯一真相**（`file-language.ts`：文件工作台的编辑器/差异视图与服务端 fs 共用一份映射表，见「文件工作台·路径→语言」）。**双入口**（DESIGN「SDK 双入口」）：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建，web 构建可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths）独立子路径 `@gebai/sdk/node`（server/agents 的 node 侧值导入专用；package.json exports 映射 `.` / `./node` / `./package.json`，主入口混入 node 内建会致 web 构建（vite treeshake:false）解析 `__vite-browser-external` 具名导出崩溃） |
+| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约、**页面基准解析**（`app-base.ts`：`appBase`/`appPath`/`appWsUrl` 由页面 URL 推出 REST/WS/资源前缀，反向代理子路径挂载免配置，见「反向代理支持」）、**路径→语言唯一真相**（`file-language.ts`：文件工作台的编辑器/差异视图与服务端 fs 共用一份映射表，见「文件工作台·路径→语言」）、**托管应用作者契约**（`hosted-app.ts`：`InlineApp`/`AppBackendContext`/`AppManifest`——写应用的人只依赖这一份，不 import server 内核，见「托管应用」）。**双入口**（DESIGN「SDK 双入口」）：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建，web 构建可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths）独立子路径 `@gebai/sdk/node`（server/agents 的 node 侧值导入专用；package.json exports 映射 `.` / `./node` / `./package.json`，主入口混入 node 内建会致 web 构建（vite treeshake:false）解析 `__vite-browser-external` 具名导出崩溃） |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端。**多入口**：`index.html`（聊天页）+ `files.html`（**文件工作台** `/files`，源码 `src/files/{main,explorer,editor,viewers,git,git-graph,compare,ui,api,changes,merge,merge-view,git-shared,url-state,deeplink}.ts` + `src/files-entry.ts` 标题栏入口按钮）；**按钮轮盘共用原语** `src/wheel-core.ts`（**按空间自动分圈 + 角窗口内均布**的扇形几何 + hover 保持区 + 开合时序，样式 `css/wheel.css`）——聊天页标题栏入口（`src/wheel.ts`）与工作台编辑器动作区（`files/main.ts` 的 `tabActions`）共用；Monaco 经 `public/vendor/monaco` 静态伺服（同 diagram 引擎惯例，不进 vite 打包）；xterm.js 同径（`public/vendor/xterm`，终端面板内核，运行时 ESM 动态 import） |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ 霜天原生宿主 `shuangtian/apps/gebai_desktop/`（自绘窗口 + 整窗 WebView2，服务端二进制由 pack-desktop.ts 挂尾打包为 `dist/gebai-desktop.exe`；开发期可 `--server-exe` 指现成侧车） |
 

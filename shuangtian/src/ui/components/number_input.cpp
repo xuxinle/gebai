@@ -502,6 +502,44 @@ auto NumberInput::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"value", "text", "min", "max", "step", "precision", "suffix"});
 }
 
+auto NumberInput::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "value",
+       .type = PropertyType::Number,
+       .min_value = -1000000000.0f,
+       .max_value = 1000000000.0f,
+       .step = 1.0f,
+       .summary = "当前数值（受 min/max 夹取）"},
+      {.name = "min",
+       .type = PropertyType::Number,
+       .min_value = -1000000000.0f,
+       .max_value = 1000000000.0f,
+       .step = 1.0f,
+       .summary = "下界"},
+      {.name = "max",
+       .type = PropertyType::Number,
+       .min_value = -1000000000.0f,
+       .max_value = 1000000000.0f,
+       .step = 1.0f,
+       .summary = "上界"},
+      {.name = "step",
+       .type = PropertyType::Number,
+       .min_value = 0.0001f,
+       .max_value = 1000.0f,
+       .step = 0.1f,
+       .summary = "加减按钮与键盘步进量"},
+      {.name = "precision",
+       .type = PropertyType::Integer,
+       .min_value = 0.0f,
+       .max_value = 8.0f,
+       .step = 1.0f,
+       .summary = "小数位数"},
+      {.name = "suffix", .type = PropertyType::Text, .summary = "后缀单位（如 px / %）"},
+  };
+  return kDescs;
+}
+
+
 auto NumberInput::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({});
 }

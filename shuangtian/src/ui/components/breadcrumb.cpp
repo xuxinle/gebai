@@ -448,6 +448,22 @@ auto Breadcrumb::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"segments", "current", "separator", "last_clickable"});
 }
 
+auto Breadcrumb::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "segments", .type = PropertyType::Text, .summary = "层级（用 | 分隔）"},
+      {.name = "current",
+       .type = PropertyType::Integer,
+       .min_value = -1.0f,
+       .max_value = 256.0f,
+       .step = 1.0f,
+       .summary = "当前项下标（-1 = 最后一项）"},
+      {.name = "separator", .type = PropertyType::Text, .summary = "分隔符文字"},
+      {.name = "last_clickable", .type = PropertyType::Boolean, .summary = "最后一项是否可点"},
+  };
+  return kDescs;
+}
+
+
 auto Breadcrumb::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"count"});
 }

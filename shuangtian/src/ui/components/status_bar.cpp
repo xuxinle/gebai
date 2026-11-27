@@ -356,6 +356,16 @@ auto StatusBar::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"left", "right", "separators"});
 }
 
+auto StatusBar::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "left", .type = PropertyType::Text, .summary = "左段文字（用 | 分段）"},
+      {.name = "right", .type = PropertyType::Text, .summary = "右段文字（用 | 分段）"},
+      {.name = "separators", .type = PropertyType::Boolean, .summary = "段之间是否画分隔线"},
+  };
+  return kDescs;
+}
+
+
 auto StatusBar::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"text", "height"});
 }

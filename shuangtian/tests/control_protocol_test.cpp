@@ -1744,6 +1744,68 @@ ST_TEST(find_hash_selector_matches_id_containing_dots) {
   }
 }
 
+/// **四个属性操作符的完整矩阵**（`=` / `~=` / `^=` / `$=` / `*=`）。
+///
+/// ## 守的是什么（实测缺陷）
+///
+/// `match_attribute` 里 `*=`（子串包含）的分支**根本不存在**：
+/// `op` 落到函数末尾的 `return false`，于是任何 `[id*=...]` 都**静默零命中**——
+/// 不报“未知操作符”，也不当解析错误，只是什么也匹配不到。
+/// 而协议文档与工具描述里三种通配（`^=` / `$=` / `*=`）一直并列写着。
+///
+/// 代价：按“id 里含某段”定位动态列表项（`tasks/ListItem@task-42` 这类）时，
+/// 智能体会先写 `[id*=…]` 拿到 0 命中，然后**误判为“元素不存在”**去走别的路（或报找不到），
+/// 而实际元素就在那儿。
+///
+/// ## 判据
+///
+/// 同一个 id 上五种操作符各断言一次：命中/不命中都必须**是操作符语义的结果**，
+/// 而不是“所有人都零命中”。所以每个操作符都配一条**应当命中的**正例——
+/// 只写反例会被“恒零命中”的实现全部通过。
+ST_TEST(find_attribute_operators_all_match_with_their_documented_semantics) {
+  ServerFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 一段“带前缀 + 带中间段 + 带后缀”的 id，四个操作符各有明确答案。
+  {
+    Json create = Json::object();
+    create["type"] = "Button";
+    create["id"] = "tasks/ListItem@task-42";
+    Json props = Json::object();
+    props["label"] = "任务 42";
+    create["props"] = props;
+    ST_REQUIRE(probe.call("ui.create", create).value("ok", false));
+  }
+
+  const auto total_for = [&probe](std::string_view selector) -> std::uint64_t {
+    Json params = Json::object();
+    params["selector"] = std::string(selector);
+    params["limit"] = 50;
+    const Json reply = probe.call("find", params);
+    if (!reply.value("ok", false)) return 999U;   // 解析失败也归为“不对劲”
+    return reply["result"].value("total", std::uint64_t{0});
+  };
+
+  // 正例（分母）：每个操作符都必须能命中这一个元素。
+  ST_CHECK_EQ(total_for("[id=tasks/ListItem@task-42]"), 1U);           // 精确
+  ST_CHECK_EQ(total_for("[id^=tasks/ListItem]"), 1U);                  // 前缀
+  ST_CHECK_EQ(total_for("[id$=@task-42]"), 1U);                        // 后缀
+  ST_CHECK_EQ(total_for("[id*=ListItem]"), 1U);   // ← 修复前这里恒为 0（缺陷本体）
+  ST_CHECK_EQ(total_for("[id*=task-42]"), 1U);    // ← 同上，后缀位置也要能中
+  ST_CHECK_EQ(total_for("[id~=ListItem]"), 1U);   // 本实现里 `~=` 与 `*=` 同义（见实现注释）
+
+  // 反例：语义不符就不许命中（防“所有操作符都退化成包含”这种反向错法）
+  ST_CHECK_EQ(total_for("[id^=ListItem]"), 0U);   // ListItem 在中间，不是前缀
+  ST_CHECK_EQ(total_for("[id$=tasks]"), 0U);      // tasks 在前，不是后缀
+  ST_CHECK_EQ(total_for("[id*=nonexistent]"), 0U);
+  // `!=` 是“id 不等于它”：命中个数 = 全树元素数 − 1。不写死数字（夹具改了会碎），
+  // 只断言“比精确相等多”——它证明 `!=` 真的在用比较而不是退化成了包含。
+  const std::uint64_t exact = total_for("[id=tasks/ListItem@task-42]");
+  ST_CHECK_EQ(exact, 1U);
+  ST_CHECK(total_for("[id!=tasks/ListItem@task-42]") > exact);
+}
+
 ST_TEST(invoke_activate_item_reaches_menu_panel_by_id) {
   // MenuPanel 动作面端到端（BACKLOG 3800）：`invoke("activate_item", item_id)`
   // ——e2e 原本只能 `bounds.y + 16 + i*32` 数行序点击，菜单动态化（最近打开）后

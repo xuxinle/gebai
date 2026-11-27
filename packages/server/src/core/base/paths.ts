@@ -36,8 +36,53 @@ export function isValidSessionId(id: string): boolean {
   return /^[0-9a-f]{32}$/.test(id)
 }
 
+/** 多人会话（群）ID 格式白名单：与会话 ID 同规则（32 位小写 hex）。 */
+export function isValidGroupId(id: string): boolean {
+  return /^[0-9a-f]{32}$/.test(id)
+}
+
+/**
+ * 群会话目录注册表：多人会话**不属于任何用户**，单独一棵目录 `{GEBAI_HOME}/groups/{groupId}/`
+ * （会话正文/附件/脚本环境与普通会话同构，只是落点不同）。
+ *
+ * 为何用注册表而不是改 `sessionPath` 的签名：目录定位被引擎、沙箱、文件工作台、产物回传、
+ * 剪断产物等十余处共用，签名只有 `(home, user, sessionId)`；把「这个会话属于哪个群」做成
+ * 进程内映射，所有既有调用点零改动地拿到正确目录（多租户隔离防线不变——仍然只认服务端注册的映射）。
+ *
+ * 键含 home：同一进程可挂多个 GEBAI_HOME（测试/多实例），互不可见。
+ */
+const groupSessionDirs = new Map<string, string>()
+
+/** 注册群会话目录（群存储加载/创建/加入时调用；重复注册幂等）。 */
+export function registerGroupSessionDir(home: string, groupId: string, sessionId: string): string {
+  if (!isValidGroupId(groupId)) throw new Error(`invalid group id: ${groupId}`)
+  if (!isValidSessionId(sessionId)) throw new Error(`invalid session id: ${sessionId}`)
+  const dir = join(home, "groups", groupId)
+  groupSessionDirs.set(`${home}|${sessionId}`, dir)
+  return dir
+}
+
+/** 群会话目录（未注册返回 null）。 */
+export function groupSessionDirOf(home: string, sessionId: string): string | null {
+  return groupSessionDirs.get(`${home}|${sessionId}`) ?? null
+}
+
+/** 注销群会话目录（解散群时调用；之后 sessionPath 回到用户分片路径）。 */
+export function unregisterGroupSessionDir(home: string, sessionId: string): void {
+  groupSessionDirs.delete(`${home}|${sessionId}`)
+}
+
+/** 群目录（会话正文、群元信息、tmp/ 同级）。 */
+export function groupDir(home: string, groupId: string): string {
+  if (!isValidGroupId(groupId)) throw new Error(`invalid group id: ${groupId}`)
+  return join(home, "groups", groupId)
+}
+
+/** 会话目录：群会话 → `{home}/groups/{groupId}`；普通会话 → `{home}/users/{user}/sessions/{s0}/{s1}/{id}`。 */
 export function sessionPath(home: string, user: string, sessionId: string): string {
   if (!isValidSessionId(sessionId)) throw new Error(`invalid session id: ${sessionId}`)
+  const group = groupSessionDirOf(home, sessionId)
+  if (group) return group
   const [s0, s1] = idPrefixShards(sessionId)
   return join(home, "users", user, "sessions", s0, s1, sessionId)
 }

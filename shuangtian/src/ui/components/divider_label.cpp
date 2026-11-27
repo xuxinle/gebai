@@ -277,6 +277,21 @@ auto DividerLabel::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"text", "action", "align", "line"});
 }
 
+auto DividerLabel::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kAligns[] = {"left", "center", "right"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "text", .type = PropertyType::Text, .summary = "中间文字"},
+      {.name = "action", .type = PropertyType::Text, .summary = "右侧动作文字（空 = 不显示）"},
+      {.name = "align",
+       .type = PropertyType::Choice,
+       .summary = "文字在行内的对齐",
+       .choices = kAligns},
+      {.name = "line", .type = PropertyType::Boolean, .summary = "是否画两侧的线"},
+  };
+  return kDescs;
+}
+
+
 auto DividerLabel::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "activate" || action == "click") {
     if (action_.empty()) return false;

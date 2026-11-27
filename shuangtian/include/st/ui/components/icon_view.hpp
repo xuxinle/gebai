@@ -41,6 +41,8 @@ class IconView : public Element {
   // **这条路永远命不中它**——`set {icon: …}` 会静默什么都不做。
   // 实测：`<Icon name="search"/>` 走 XML 建树时报“值没被接受”，根因就在这里。
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
 
  private:
   std::string icon_{};

@@ -78,6 +78,8 @@ class StatusDot : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
 
   /// 状态短名（稳定；属性面与日志共用）。
   [[nodiscard]] static constexpr auto state_name(State state) noexcept -> std::string_view {

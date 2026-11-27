@@ -365,6 +365,22 @@ auto EmptyState::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"title", "description", "icon", "action", "size"});
 }
 
+auto EmptyState::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kSizes[] = {"small", "medium", "large"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "title", .type = PropertyType::Text, .summary = "主标题"},
+      {.name = "description", .type = PropertyType::Text, .summary = "补充说明"},
+      {.name = "icon", .type = PropertyType::Text, .summary = "图标名（内置图标表）"},
+      {.name = "action", .type = PropertyType::Text, .summary = "行动按钮文字（空 = 不显示）"},
+      {.name = "size",
+       .type = PropertyType::Choice,
+       .summary = "尺寸档",
+       .choices = kSizes},
+  };
+  return kDescs;
+}
+
+
 auto EmptyState::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "activate" || action == "click") {
     if (action_.empty()) return false;

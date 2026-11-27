@@ -275,6 +275,29 @@ auto Slider::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"value", "step", "label"});
 }
 
+auto Slider::property_schema() const -> std::span<const PropertyDesc> {
+  // 范围/步进与 `set_value`（夹到 [0,1]）、`set_step`（夹到 (0,1]）同源。
+  //
+  // 为何 `label` 也入表：它是可写名字（`property_names` 里有），而"能写却没法在
+  // 自动面板上调"正是这套机制要消除的漂移。文字类属性在面板上是输入框。
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "value",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1.0f,
+       .step = 0.01f,
+       .summary = "当前取值（0~1；夹取到该区间）"},
+      {.name = "step",
+       .type = PropertyType::Number,
+       .min_value = 0.001f,
+       .max_value = 0.5f,
+       .step = 0.001f,
+       .summary = "键盘/按钮步进量（夹取到 (0,1]）"},
+      {.name = "label", .type = PropertyType::Text, .summary = "无障碍名称（不绘制）"},
+  };
+  return kDescs;
+}
+
 auto Slider::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "increment" || action == "increase" || action == "next") {
     nudge(step_, true);

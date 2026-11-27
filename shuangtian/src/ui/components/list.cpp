@@ -536,6 +536,22 @@ auto List::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal(names);
 }
 
+auto List::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "items",
+       .type = PropertyType::Text,
+       .summary = "条目（用 | 分隔标签；批量设置走 sync_items 才能保住业务 key）"},
+      {.name = "selected",
+       .type = PropertyType::Integer,
+       .min_value = -1.0f,
+       .max_value = 100000.0f,
+       .step = 1.0f,
+       .summary = "选中项下标（-1 = 无）"},
+  };
+  return kDescs;
+}
+
+
 }  // namespace st::ui
 
 // ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────

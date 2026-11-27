@@ -222,6 +222,15 @@ auto ThreeView::adopt_scene(Result<raster::ThreeScene> loaded,
     frame_scene();
     home_ = orbit_;
     has_home_ = true;
+    // ## 构建期取景是**不完整**的：宽高比未知，必须等 arrange 后再算一次
+    //
+    // `frame_scene()` 的横向约束要算 `bounds_.width / bounds_.height`，而建卡那一刻
+    // 元素还没 arrange（两者都是 0，aspect 退回 1.0）——于是只有一个方向的约束生效，
+    // 距离算出来偏大。实测：三物体场景（横向 3.0）在 862×320 的框里被算出距离 5.05，
+    // 而正确值约 2.8——画面上物体只占底部一小块，上方大片空白。
+    //
+    // 症状难猜：物体数/网格/帧数全部正常，看起来像“场景太小”而不是“相机太远”。
+    frame_pending_ = true;
   }
   mark_dirty();
   return true;
@@ -493,6 +502,18 @@ void ThreeView::measure(const RenderContext& context, const Constraints& constra
 void ThreeView::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
   (void)context;
+  // 装载发生在 arrange 之前时，取景缺宽高比（见 `adopt_scene` 里的说明）——
+  // 在**第一次拿到真实尺寸**时补算一次，并把这份结果记为“初始视角”，
+  // 这样“双击/复位”回到的是正确的那一份，而不是构建期那份错的。
+  //
+  // 只做一次（`frame_pending_` 置假）：之后的每次重排都不能动相机，
+  // 否则用户用手拖/滚出来的视角会被布局夺回去。
+  if (frame_pending_ && rect.width > 0.5f && rect.height > 0.5f) {
+    frame_pending_ = false;
+    frame_scene();
+    home_ = orbit_;
+    has_home_ = true;
+  }
 }
 
 void ThreeView::render_into(const RenderContext& context, raster::Surface& canvas,

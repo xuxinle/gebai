@@ -14,10 +14,18 @@
 
 #include "st/ui/property_schema.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <format>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
+#include "st/ui/component_registry.hpp"
+#include "st/ui/components/all.hpp"
 
 namespace {
 
@@ -174,4 +182,61 @@ ST_TEST(property_schema_json_shape_is_stable) {
 ST_TEST(property_find_desc_returns_null_for_unknown) {
   ST_CHECK(st::ui::find_property_desc(kGoodDescs, "nonexistent") == nullptr);
   ST_CHECK(st::ui::find_property_desc(kGoodDescs, "value") != nullptr);
+}
+
+/// **内置组件的描述必须落在它的名字表里**（否则面板生成了控件但控制通道读不到）。
+///
+/// ## 守的是什么
+///
+/// `property_schema()` 与 `property_names()` / `readonly_property_names()` 是
+/// **两份真相**：一份给自动面板，一份给 `get`/`set`。任何一边多写一个名字，
+/// 症状都是“控件在、但拖它不生效”或“能设但界面上没有”——两种都只表现为
+/// “这个参数好像没什么用”，不崩不报错。
+///
+/// 这条测试对**每个登记过的内置组件**做两件事：
+/// ① 描述里的每个名字都在两张名字表之一（不是孤儿）；
+/// ② 描述自洽（`validate_property_schema`：重名 / 范围反向 / step 越界）。
+///
+/// 覆盖是**按注册表遍历**的，所以将来新加描述立刻进这条判据，不用改测试。
+ST_TEST(component_property_schema_matches_its_name_tables) {
+  const std::vector<std::string> names = st::ui::component_registry::names();
+  ST_CHECK(names.size() > 10U);   // 注册表没被裁空（自检基线）
+  std::vector<std::string> orphans;
+  std::vector<std::string> invalid;
+  std::size_t with_schema = 0;
+  std::size_t described = 0;
+  for (const std::string& name : names) {
+    std::unique_ptr<st::ui::Element> element = st::ui::component_registry::create(name);
+    if (element == nullptr) continue;
+    const std::span<const PropertyDesc> descs = element->property_schema();
+    if (descs.empty()) continue;
+    ++with_schema;
+    described += descs.size();
+    if (const auto problem = st::ui::validate_property_schema(descs); problem.has_value()) {
+      invalid.push_back(std::format("{}: {}", name, *problem));
+    }
+    const std::vector<std::string_view> writable = element->property_names();
+    const std::vector<std::string_view> readonly = element->readonly_property_names();
+    for (const PropertyDesc& desc : descs) {
+      const bool listed = std::ranges::find(writable, desc.name) != writable.end() ||
+                          std::ranges::find(readonly, desc.name) != readonly.end();
+      if (!listed) orphans.push_back(std::format("{}.{}", name, desc.name));
+    }
+  }
+  st::log::out("[property-schema] {} 个组件声明了描述，共 {} 项；孤儿 {} 处，不自洽 {} 处\n",
+               with_schema, described, orphans.size(), invalid.size());
+  for (const std::string& item : orphans) st::log::out("  孤儿: {}\n", item);
+  for (const std::string& item : invalid) st::log::out("  不自洽: {}\n", item);
+  ST_CHECK(orphans.empty());
+  ST_CHECK(invalid.empty());
+  // 渐进采用的下限护栏（**进度尺**，不是正确性判据）：防止有人批量删描述。
+  //
+  // 2026-11-27 从 4 抬到 44：画廊重写那轮把「有运行时语义可调量」的组件
+  // （Text/Button/Input/Table/Tree/Tabs/List/CodeEditor/MarkdownView/反馈族/导航族…）
+  // 逐个体检并补上描述，覆盖 177 项。
+  //
+  // 仍未声明的是**刻意留白**：构造参数型（WindowFrame / TitleBar）、
+  // 纯注入型（ListItem / ScrollBar / MenuPanel），以及语义还在收敛的少数组件。
+  // 加描述时把这里抬上去；降下来必须有理由（比如组件被删）。
+  ST_CHECK(with_schema >= 44U);
 }

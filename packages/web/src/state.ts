@@ -365,7 +365,67 @@ const BRAND_TITLE = ((window as { __GEBAI_TITLE__?: string }).__GEBAI_TITLE__ ||
 export function updateTitle() {
   document.title = BRAND_TITLE
   if (headerTitleEl) headerTitleEl.textContent = currentSession ? currentSession.name : ""
+  renderGroupIdentity()
   renderHeaderCtx()
+}
+
+/**
+ * 多人会话身份条（标题栏下方）：当前会话是群时显示「我以什么身份发言」+ 邀请码。
+ *
+ * 为何要一直看得见：群里的发言按「角色·名称」署名，一不留神就会以为自己在用账号名说话；
+ * 邀请码放在这里则是为了“随手拉人”——拉人最高频的时刻就是聊到一半想把第三个人叫进来。
+ */
+function renderGroupIdentity(): void {
+  const host = document.getElementById("group-identity")
+  if (!host) return
+  const g = currentSession?.group
+  if (!g) {
+    host.hidden = true
+    host.textContent = ""
+    return
+  }
+  host.hidden = false
+  host.textContent = ""
+  const who = g.memberName ? `${g.role || "成员"}·${g.memberName}` : "（未设群内身份）"
+  host.append(el("span", "gi-who", `多人会话「${g.name}」· 我是 ${who}`))
+  host.append(el("span", "gi-code", `邀请码 ${groupJoinCodeHint()}`))
+  const copy = el("button", "", "复制邀请码") as HTMLButtonElement
+  copy.type = "button"
+  copy.addEventListener("click", async () => {
+    const code = groupJoinCodeHint()
+    if (!code) return
+    try {
+      await navigator.clipboard.writeText(code)
+    } catch {
+      /* 非安全上下文：静默（用户可手抄屏幕上的码） */
+    }
+  })
+  host.append(copy)
+}
+
+/** 邀请码缓存（会话列表不携带邀请码：那是群存储的事实；由群列表拉取后回填）。 */
+const groupCodes = new Map<string, string>()
+
+/**
+ * 当前会话的发言前缀（`【角色·名称】`）：多人会话里服务端会把每个用户消息标上说话人，
+ * 本地乐观上屏必须用同一文本——否则同一条消息发送时一种正文、刷新后又变成另一种。
+ * 非群会话/未设身份返回空串。
+ */
+export function speakerPrefix(): string {
+  const g = currentSession?.group
+  if (!g || !g.memberName) return ""
+  return g.role ? `【${g.role}·${g.memberName}】` : `【${g.memberName}】`
+}
+
+/** 记一个群的邀请码（groups.ts 拉取列表后调用）。 */
+export function noteGroupJoinCode(groupId: string, code: string): void {
+  groupCodes.set(groupId, code)
+}
+
+function groupJoinCodeHint(): string {
+  const g = currentSession?.group
+  if (!g) return ""
+  return groupCodes.get(g.id) ?? "（在「多人会话」面板查看）"
 }
 
 /** 复制文本到剪贴板（非安全上下文 http/file 回退 execCommand）；返回是否成功（会话右键菜单「复制会话 ID」等用）。 */

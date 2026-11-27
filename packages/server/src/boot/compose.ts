@@ -11,6 +11,7 @@ import { isolationConfigConflict, loadConfig } from "../core/base/config"
 import { SessionStore } from "../core/session/store"
 import { SessionInputQueue } from "../core/session/input-queue"
 import { reportInterruptedRuns } from "../core/session/run-marker"
+import { GroupStore } from "../core/session/groups"
 import { ToolRegistry } from "../core/base/registry"
 import { createGlobalTools } from "../core/tools"
 import { Sandbox } from "../core/security/sandbox"
@@ -42,6 +43,10 @@ import { UserPrefsManager } from "../core/schedule/prefs"
 import { createPrimaryGate } from "../core/schedule/primary"
 import { isFeishuChatId, validateNotifyChannel } from "../core/schedule/notify"
 import { createApp, type AppDeps } from "../app"
+import { AppsStore } from "../core/apps/sources"
+import { AppBackendLoader } from "../core/apps/backend"
+import { loadInlineApps, SOURCE_APPS_DIRNAME } from "../core/apps/scan"
+import { BUNDLED_APPS } from "../core/apps.bundle.generated"
 import { DevReloadManager, webRootOf } from "../dev-reload"
 import { WsStateService } from "../ws-state"
 import { FeishuBot } from "../feishu-bot/bot"
@@ -334,7 +339,27 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     if (trust.applied) log.warn(`[gebai] ${trust.message}`)
   }
 
-  const store = new SessionStore({ home: config.gebaiHome })
+  /** 多人会话（群）存储：群档案与成员表（会话正文仍由 store 管）。 */
+  const groups = new GroupStore(config.gebaiHome)
+  const store = new SessionStore({
+    home: config.gebaiHome,
+    // 群会话访问判定（多租户隔离防线）：成员资格是唯一判据。
+    // 回调而不是直引 GroupStore：两者互相需要（群存储建会话、会话存储判成员），用函数解开环
+    groupAccess: (sessionId, userId) => {
+      const g = groups.groupOfSession(sessionId)
+      const m = g?.members.find((x) => x.userId === userId)
+      return g && m ? { groupId: g.id, groupName: g.name, memberName: m.name, role: m.role } : null
+    },
+  })
+  // 启动期加载群档案（幂等）：群会话的目录定位靠它重建映射，否则重启后群会话正文找不回来
+  await groups.init()
+  groups.attach({
+    createGroupSession: (groupId, owner, name) => store.createGroupSession(groupId, owner, name),
+    rename: (sessionId, name, userId) => store.rename(sessionId, name, userId),
+    register: (sessionId, group) => store.registerGroupSession(sessionId, group),
+    unregister: (sessionId) => store.unregisterGroupSession(sessionId),
+    evict: (sessionId) => store.evict(sessionId),
+  })
 
   // 模型配置：首选清单（GEBAI_LLM_MODELS，默认用第一条），未配置时回退旧的多变量写法。
   // 清单模式下把进程级旧散项从环境里摘掉——节点环境变量会随任务 env 合并到模型解析面，
@@ -993,6 +1018,8 @@ const inputQueue = new SessionInputQueue()
     events,
     config,
     subAgents,
+    // 多人会话（群）：用户消息角色·名称前缀与系统提示词注记从它取
+    groups,
     // 对外动作渠道（act/observe）：进程级单例，父子会话/子代理共用
     channels,
     authMode: config.auth,
@@ -1045,10 +1072,13 @@ const inputQueue = new SessionInputQueue()
     runner: async (item) => {
       // 执行即上屏：本页（及其他已连页面）据此实时渲染这条用户消息（与其后任务流的时机一致）；
       // 未连页面由历史回放兜底。再走引擎——与直接发送零差异。
+      // 多人会话：排队条上屏同样带发言前缀（引擎落盘时也会拼，这里用同一身份与同一格式）
+      const speaker = groups.speakerOf(item.sessionId, item.userId)
+      const prefix = speaker ? (speaker.role ? `【${speaker.role}·${speaker.name}】` : `【${speaker.name}】`) : ""
       events.publish({
         type: "event.queue.dequeued",
         sessionId: item.sessionId,
-        payload: { sessionId: item.sessionId, id: item.id, messageId: item.messageId, text: item.text, attachments: item.attachments, createdAt: item.createdAt },
+        payload: { sessionId: item.sessionId, id: item.id, messageId: item.messageId, text: prefix + item.text, attachments: item.attachments, createdAt: item.createdAt },
         timestamp: Date.now(),
       })
       await engine.run(item.sessionId, item.userId, item.text, {
@@ -2039,6 +2069,7 @@ const inputQueue = new SessionInputQueue()
     subAgents,
     webhooks,
     inputQueue,
+    groups,
     externalAuth,
     credentialSources,
     tasks,
@@ -2082,9 +2113,45 @@ const inputQueue = new SessionInputQueue()
     }),
     // 终端 PTY（ConPTY）：真伪控制台会话；驱动由系统自带 csc.exe 编译为临时 exe（启动后预热）
       terminalPty: new PtySessionService({}),
-  // 语言服务器（DESIGN「文件工作台·语言服务器」）：有则用、没有不影响——按文件语言探测本机服务器
-  lsp: new LspService({ overrides: config.lspServers, idleMs: config.lspIdleMs, maxSessions: config.lspMaxSessions }),
-}
+      // 语言服务器（DESIGN「文件工作台·语言服务器」）：有则用、没有不影响——按文件语言探测本机服务器
+    lsp: new LspService({ overrides: config.lspServers, idleMs: config.lspIdleMs, maxSessions: config.lspMaxSessions }),
+  }
+  // 托管应用（DESIGN「托管应用」）：三层来源——运行时磁盘（改文件刷新即生效）、源码内联（
+  // `{仓库根}/apps/*.ts`，重启生效）、构建内嵌（`apps.bundle.generated`，二进制形态自带）。
+  // 后端开关在这里落定：auto = 仅本地模式且非安全模式时加载（多用户部署不让第三方应用后端跑在共享进程里）。
+  if (config.appsEnabled !== false) {
+    const backendMode = config.appsBackend === "auto" ? (config.auth === "local" && !config.safeMode ? "on" : "off") : config.appsBackend
+    const backendDisabledReason =
+      backendMode === "on"
+        ? undefined
+        : config.appsBackend === "off"
+          ? "托管应用后端已显式关闭（GEBAI_APPS_BACKEND=off）"
+          : config.safeMode
+            ? "安全模式（GEBAI_SAFE_MODE=true）下不加载应用后端模块"
+            : "服务模式（多用户部署）默认不加载应用后端模块：需显式 GEBAI_APPS_BACKEND=on（部署方整体担责）"
+    // 源码内联层与构建内嵌层：
+    // - dev（非二进制）：`apps/*.ts` 现扫源码；内嵌表为空态（提交版就是空表）
+    // - 二进制：无源码树，内联应用只能来自构建期扫描结果（BUNDLED_APPS.inline）
+    const inlineRes = config.binaryMode ? { apps: BUNDLED_APPS.inline, errors: BUNDLED_APPS.errors } : await loadInlineApps(join(config.gebaiHome, SOURCE_APPS_DIRNAME))
+    for (const e of inlineRes.errors) log.warn(`[apps] 内联应用加载失败：${e}`)
+    const appsStore = new AppsStore({
+      home: config.gebaiHome,
+      dirs: (config.appsDirs ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+      inline: inlineRes.apps,
+      embedded: BUNDLED_APPS.files,
+      maxFileBytes: config.appsMaxFile,
+    })
+    baseDeps.apps = appsStore
+    baseDeps.appBackend = new AppBackendLoader({ enabled: backendMode === "on", ...(backendDisabledReason ? { reason: backendDisabledReason } : {}) })
+    const scanned = appsStore.list(true)
+    if (scanned.length) {
+      log.info(
+        `[gebai] 托管应用 ${scanned.length} 个：${scanned.map((a) => `${a.manifest.id}(${a.layer}${a.hasBackend && backendMode === "on" ? "+后端" : ""})`).join("、")}` +
+          `（入口 /apps；后端${backendMode === "on" ? "已启用" : "未启用"}）`,
+      )
+    }
+    for (const w of appsStore.inlineErrors()) log.warn(`[apps] ${w}`)
+  }
   const state = new WsStateService(config.gebaiHome, baseDeps)
   const deps: AppDeps = { ...baseDeps, state, personaCredentials }
   const app = createApp(deps)

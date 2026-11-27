@@ -14,12 +14,16 @@
 #include "st/test/test.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "st/core/log.hpp"
+#include "st/raster/canvas.hpp"
+
+#include "tests/support/text_port_fixtures.hpp"
 #include "st/math/geometry.hpp"
 #include "st/ui/components/table.hpp"
 #include "st/ui/theme.hpp"
@@ -124,4 +128,70 @@ ST_TEST(table_toggling_header_relayouts_rows) {
   // 内容总高也少掉一个表头高。
   ST_CHECK_NEAR(table->content_height(),
                 24.0f * 8.0f, 0.5f);
+}
+
+/// **表头文字必须真的被画出来**（像素判据，不是几何判据）。
+///
+/// ## 守的是什么（实测缺陷）
+///
+/// 表头底与分隔线一直在画，而它的**文字**被行区裁剪吃掉了：`paint_content` 里
+/// 表头底座那段先 `pop_clip()` 画完，随后 `push_clip_rect(bounds_)` +
+/// `push_clip_rect(body_clip)` 压回 **body_clip**（表头之下），之后才画表头文字——
+/// 于是 `header_cell_rect()` 的盒子与裁剪区**零交叠**，`draw_cell_text` 画进裁剪区外，
+/// 一个像素都不落。
+///
+/// 症状极像“本来就这样”：表格顶上一道深色带子，看着像设计上就没有列名。
+/// 而所有既有测试都是**几何**判据（`header_rect().height == kHeaderHeight`、
+/// `header_cell_rect(1).x == 120`）——它们全绿。
+///
+/// ## 判据
+///
+/// 画到画布上后，在**表头带内**数“非底色”像素：有列名就必然有一批字形像素。
+/// 用 4 倍 DPI 画（文字才有足够笔画落在像素中心），与真实窗口同口径。
+ST_TEST(table_header_text_is_painted_not_clipped_away) {
+  const st::ui::Theme theme = st::ui::Theme::dark();
+  auto table = make_table(true, 6);
+  const Rect box{0.0f, 0.0f, 400.0f, 300.0f};
+  // 必须用**会落像素**的文本端口：定宽桩的 `draw` 是 no-op，用它量"字画上了没有"
+  // 只会量到表头底色与圆角（实测 6 个像素），测不到被裁掉的真问题。
+  st::test::ProportionalTextPort port;
+  st::ui::RenderContext context{theme, &port, 0.0};
+  table->apply_theme(theme);
+  table->arrange(context, box);
+
+  constexpr float kScale = 2.0f;
+  st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(400, 300, kScale);
+  table->paint_content(context, canvas);
+
+  // 表头底色 = `surface_alt`；文字色 = `text_muted`。判据是“与底色差异明显”的像素数。
+  const st::math::Color header_fill = theme.colors().surface_alt;
+  const auto pixels = canvas.pixels();
+  const int width = canvas.physical_width();
+  const auto at = [&](int x, int y) -> std::uint32_t {
+    const std::size_t offset = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                               static_cast<std::size_t>(x);
+    return offset < pixels.size() ? pixels[offset] : 0U;
+  };
+  // 只在表头带内、避开圆角与外框的内缩区域取样（与 `kCellPadding` 同量级）。
+  const int top = static_cast<int>((2.0f) * kScale);
+  const int bottom = static_cast<int>((Table::kHeaderHeight - 6.0f) * kScale);
+  const int left = static_cast<int>(4.0f * kScale);
+  const int right = std::min(width, static_cast<int>(400.0f * kScale) - 4);
+  std::size_t contrast = 0;
+  for (int y = top; y < bottom; ++y) {
+    for (int x = left; x < right; ++x) {
+      const std::uint32_t rgba = at(x, y);
+      const int r = static_cast<int>((rgba >> 24) & 0xFFU);
+      const int g = static_cast<int>((rgba >> 16) & 0xFFU);
+      const int b = static_cast<int>((rgba >> 8) & 0xFFU);
+      const int dr = std::abs(r - static_cast<int>(header_fill.r));
+      const int dg = std::abs(g - static_cast<int>(header_fill.g));
+      const int db = std::abs(b - static_cast<int>(header_fill.b));
+      if (dr + dg + db > 90) ++contrast;   // 与表头底色明显不同 = 字形像素
+    }
+  }
+  st::log::out("[table] 表头带内高对比像素 = {}\n", contrast);
+  // 两个列名（“提交信息”4 字 + “作者”2 字）在 2× 下至少上百个字形像素；
+  // 阈值取 60 只是为了排除抗锯齿噪点——被裁掉时这里是 **0**。
+  ST_CHECK(contrast > 60U);
 }

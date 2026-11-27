@@ -41,6 +41,8 @@ class Switch : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围与布尔语义与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
 
   /// 开关状态变化回调。
   std::function<void(bool)> on_change{};

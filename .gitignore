@@ -71,7 +71,13 @@ gebai.log
 
 # 运行时数据（GEBAI_HOME when script-debug at repo root）
 users/
+# 多人会话（群）会话目录（{GEBAI_HOME}/groups/）：与 users/ 平级、同样不属于任何用户，
+# 内含会话正文与附件（可能含成员粘贴的隐私材料），一律不入库。
+groups/
 tmp/
+# WS 连接状态（{GEBAI_HOME}/conn-state.json：每用户当前会话等）：脚本调试形态下 GEBAI_HOME 就是仓库根，
+# 它会在仓库里长出来——是运行时状态，不是项目文件。
+conn-state.json
 # 运行时数据根（拟人模式/相期/册府等统一收在这里，见 packages/sdk/src/data-dir.ts）。
 # ⚠ **必须根锛定 `/data/`，不能写裸模式 `data/`**：裸模式匹配路径任意一段，
 # 会连 `packages/xxx/src/data/` 这类源码目录一起忽略，导致文件静默不入库

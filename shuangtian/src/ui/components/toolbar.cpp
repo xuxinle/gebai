@@ -368,6 +368,16 @@ auto Toolbar::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"overflow_label"});
 }
 
+auto Toolbar::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "overflow_label",
+       .type = PropertyType::Text,
+       .summary = "溢出菜单的标题（空间不够时右侧项折叠进这个菜单）"},
+  };
+  return kDescs;
+}
+
+
 auto Toolbar::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"items", "count", "collapsed"});
 }

@@ -1,7 +1,8 @@
 import { mkdir, writeFile, readFile, rm, readdir, stat, unlink, rename } from "node:fs/promises"
 import { join, resolve, sep, isAbsolute, relative, dirname } from "node:path"
 import type { FileEntry, Message, SessionImportData, SessionInfo, TodoItem } from "@gebai/sdk"
-import { assertNoSymlinkEscape, isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "../base/paths"
+import { assertNoSymlinkEscape, isValidSessionId, resolveInSandbox, sessionPath, walkDir, registerGroupSessionDir } from "../base/paths"
+import { log } from "@gebai/sdk/node"
 import { randomUUID } from "node:crypto"
 
 /** 会话消息持久化上限（条）——**纯存储安全网**，不参与压缩判定（上下文保护只认 token 水位口径，见 DESIGN「上下文保护」）。
@@ -21,6 +22,9 @@ const MAX_ENV_CACHE_SESSIONS = 256
 
 export interface SessionStoreOptions {
   home: string
+  /** 群会话访问判定（多人会话）：返回非 null = 该会话是群会话且此用户是其成员（带回请求者的群内身份）；
+   *  null = 非群会话或非成员。未注入时所有会话按普通用户会话处理（单机/测试不受影响）。 */
+  groupAccess?: (sessionId: string, userId: string) => { groupId: string; groupName: string; memberName: string; role: string } | null
 }
 
 export interface SessionFile {
@@ -85,6 +89,12 @@ export interface SessionData {
     /** 绑定建立时间（ms）：同键有多个会话时取最早的（见 `SessionResolver`）。 */
     boundAt: number
   }
+  /**
+   * 多人会话（群）归属（chat.json 持久化）：本会话属于哪个群。
+   * 群会话不属于任何用户（`userId` = 群主，仅作“谁建的”留念与内部排序），**访问权只看群成员资格**。
+   * 未定义 = 普通用户会话（旧数据天然兼容）。
+   */
+  group?: { groupId: string; name: string }
 }
 
 /** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。
@@ -101,6 +111,8 @@ export function toSessionInfo(s: SessionData): SessionInfo {
     ctxCachedTokens: s.ctxCachedTokens,
     pinned: s.pinned ?? false,
     ...(s.modelConfig ? { modelConfig: s.modelConfig } : {}),
+    // 群会话（多人会话）：id/名称 + 请求者在群内的身份（名称与角色不在列表层推断）
+    ...(s.group ? { group: { id: s.group.groupId, name: s.group.name, memberName: "", role: "" } } : {}),
   }
 }
 
@@ -341,16 +353,46 @@ export class SessionStore {
    *  不会把已删/已归档会话连同数据整体重建；新建会话（新 id 不复用）、回收站恢复与主动重建
    *  （`recreateSession`——确定性会话 id 的通道在会话消失后重新开始）会清除该标记。 */
   private removed = new Map<string, RemovalReason>()
+  /** 群会话归属（会话 id → { 群 id, 群名 }）：文件系统映射在 paths.registerGroupSessionDir，
+   *  这里额外保留一份内存索引（列表/事件受众元信息）——两者自同一来源装配，不各自推断。 */
+  private groupOf = new Map<string, { groupId: string; name: string }>()
 
   constructor(private opts: SessionStoreOptions) {}
+
+  private async ensureDir(p: string) {
+    await mkdir(p, { recursive: true })
+  }
 
   private dir(user: string, id: string) {
     // 防御纵深：即使调用方漏校验，sessionPath 的格式白名单也会拒绝穿越串
     return sessionPath(this.opts.home, user, id)
   }
 
-  private async ensureDir(p: string) {
-    await mkdir(p, { recursive: true })
+  /** 群会话归属（非群会话/未加载返回 null）。 */
+  groupOfSession(sessionId: string): { groupId: string; name: string } | null {
+    const local = this.groupOf.get(sessionId)
+    if (local) return local
+    return this.cache.get(sessionId)?.group ?? null
+  }
+
+  /** 登记群会话归属（群存储创建/加载时调用）：同时保证后续 load 不再按用户目录找它。 */
+  registerGroupSession(sessionId: string, group: { groupId: string; name: string }): void {
+    this.groupOf.set(sessionId, group)
+    const idx = this.cache.get(sessionId)
+    if (idx) idx.group = group
+  }
+
+  /** 注销群会话归属（解散群）。 */
+  unregisterGroupSession(sessionId: string): void {
+    this.groupOf.delete(sessionId)
+    this.removed.delete(sessionId)
+    this.evict(sessionId)
+  }
+
+  /** 群会话的文件定位键：群会话不属于任何用户，目录拼接待定串只用会话 id（会话映射已覆写定位）。
+   *  这里仍返回群 id——`sessionPath` 命中群映射后首参不参与拼接，语义上“归属的是群而非人”也更直白。 */
+  private ownerKeyOf(session: { userId: string; id: string; group?: { groupId: string } }): string {
+    return session.group ? session.group.groupId : session.userId
   }
 
   async createSession(userId: string, name?: string): Promise<SessionData> {
@@ -367,6 +409,32 @@ export class SessionStore {
     }
     const dir = this.dir(userId, id)
     await this.ensureDir(join(dir, "tmp"))
+    await this.save(session)
+    return session
+  }
+
+  /**
+   * 建群会话（多人会话）：正文落在 `{GEBAI_HOME}/groups/{groupId}/`，不属于任何用户。
+   * `userId` 记群主（chat.json 的 userId 仅作来源信息，访问权由群成员资格裁定）。
+   */
+  async createGroupSession(groupId: string, owner: string, name: string): Promise<SessionData> {
+    const id = randomUUID().replace(/-/g, "")
+    const now = Date.now()
+    const session: SessionData = {
+      id,
+      name: name || "多人会话",
+      userId: owner,
+      messages: [],
+      todos: [],
+      createdAt: now,
+      updatedAt: now,
+      group: { groupId, name: name || "多人会话" },
+    }
+    this.registerGroupSession(id, session.group!)
+    // 目录映射必须**先于首次落盘**：chat.json 的落点由 sessionPath 根据该映射裁定，
+    // 晚一步就会写进 users/{群主}/sessions/ 分片（本应在 groups/{groupId}/ 下）
+    registerGroupSessionDir(this.opts.home, groupId, id)
+    await this.ensureDir(join(this.dir(groupId, id), "tmp"))
     await this.save(session)
     return session
   }
@@ -429,6 +497,24 @@ export class SessionStore {
 
   async load(id: string, user?: string): Promise<SessionData | null> {
     if (!isValidSessionId(id)) return null // 格式白名单：穿越串/畸形 id 一律视为不存在
+    // 群会话：**访问权只看群成员资格**（不是会话目录所属人）——非成员一律视为不存在（不泄露存在性）
+    const g = this.groupOfSession(id)
+    if (g) {
+      if (!user) return null // 无用户上下文：群会话不可匿名装载（ownerOf 也不回群主）
+      if (!this.opts.groupAccess?.(id, user)) return null
+      const cachedG = this.cache.get(id)
+      if (cachedG) {
+        this.touchCache(cachedG)
+        return cachedG
+      }
+      const dir = this.dir(g.groupId, id)
+      const s = await this.readFileByPath(join(dir, "chat.json"))
+      if (s) {
+        s.group = g
+        this.touchCache(s)
+      }
+      return s
+    }
     const cached = this.cache.get(id)
     if (cached) {
       // 缓存命中仍须校验归属：session id 可能被跨用户猜中/引用，
@@ -484,7 +570,7 @@ export class SessionStore {
       if (!p.endsWith("chat.json")) return
       try {
         const session = JSON.parse(await readFile(p, "utf8")) as SessionData
-        if (session.id && (session.userId === userId || !session.userId)) {
+        if (session.id && !session.group && (session.userId === userId || !session.userId)) {
           out.push(session)
           index.push(p)
         }
@@ -493,13 +579,20 @@ export class SessionStore {
       }
     })
     this.indexedPathsByUser.set(userId, index)
+    // 群会话（多人会话）：目录不在用户下，只列本用户参与的群
+    for (const [sid, g] of this.groupOf) {
+      if (!this.opts.groupAccess?.(sid, userId)) continue
+      const s = await this.load(sid, userId)
+      if (s) out.push(s)
+      else log.warn(`[store] 群会话正文缺失：${g.groupId}`)
+    }
     // 置顶优先，组内按更新时间倒序
     return out.sort((a, b) => Number(b.pinned ?? false) - Number(a.pinned ?? false) || b.updatedAt - a.updatedAt)
   }
 
   /**
    * 会话列表（元信息）：列表消费方（UI 列表/快照/目录选择/机器人命令）只需标题与时间，
-   * 本方法优先读 meta.json（小文件），仅在缓存缺失/陈旧时回退解析 chat.json 并就地刷新缓存——
+   * 本方法优先读 meta.json（小文件），仅在缓存缺失/陈旧时回退解析 chat.json 并就地刷行缓存——
    * 避免为拿元信息而解析全部会话正文（会话越长越多，列表开销越大）。
    */
   async listSessionInfos(userId: string): Promise<SessionInfo[]> {
@@ -513,13 +606,16 @@ export class SessionStore {
         const st = await stat(p)
         const meta = await this.readMeta(join(dir, META_FILE), st)
         if (meta && meta.id && (meta.userId === userId || !meta.userId)) {
-          out.push({ info: toSessionInfo(metaToSession(meta)), pinned: meta.pinned === true, updatedAt: meta.updatedAt })
-          index.push(p)
-          return
+          // 群会话正文不会出现在用户目录下，此处不会命中群会话；防御性排除（手工移动目录的情形）
+          if (!this.groupOfSession(meta.id)) {
+            out.push({ info: toSessionInfo(metaToSession(meta)), pinned: meta.pinned === true, updatedAt: meta.updatedAt })
+            index.push(p)
+            return
+          }
         }
         // 元信息缺失/陈旧（存量会话、外部编辑、旧版本写入）：回退读正文并建立缓存
         const session = JSON.parse(await readFile(p, "utf8")) as SessionData
-        if (session.id && (session.userId === userId || !session.userId)) {
+        if (session.id && !session.group && (session.userId === userId || !session.userId)) {
           out.push({ info: toSessionInfo(session), pinned: session.pinned === true, updatedAt: session.updatedAt })
           index.push(p)
           await this.writeMeta(session, dir, { size: st.size, mtimeMs: st.mtimeMs })
@@ -529,6 +625,19 @@ export class SessionStore {
       }
     })
     this.indexedPathsByUser.set(userId, index)
+    // 群会话（多人会话）：不属于任何用户，只列本用户参与的群；元信息带群归属与群内身份（前端据此渲染标识）
+    for (const [sid, g] of this.groupOf) {
+      const access = this.opts.groupAccess?.(sid, userId)
+      if (!access) continue
+      const s = await this.load(sid, userId)
+      if (!s) continue
+      out.push({
+        info: { ...toSessionInfo(s), group: { id: g.groupId, name: g.name, memberName: access.memberName, role: access.role } },
+        pinned: s.pinned === true,
+        updatedAt: s.updatedAt,
+      })
+      // 群会话不进用户路径索引（load 的群分支不经索引）
+    }
     // 置顶优先，组内按更新时间倒序
     out.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
     return out.map((x) => x.info)
@@ -567,6 +676,9 @@ export class SessionStore {
    * 或最近加载/创建记录；未命中返回 null（表示归属未知，调用方按未过滤处理）。
    */
   ownerOf(sessionId: string): string | null {
+    // 群会话**没有单一所有人**：返回群主会把事件只投给一个人（其余成员永远收不到流）——
+    // 受众由 groups.audienceOf 给出，此处如实返回 null（调用方据此走广播/受众路由）。
+    if (this.groupOfSession(sessionId)) return null
     const cached = this.cache.get(sessionId)
     if (cached?.userId) return cached.userId
     return this.owners.get(sessionId) ?? null
@@ -596,7 +708,7 @@ export class SessionStore {
     const reason = this.removed.get(session.id)
     if (reason) throw new Error(`session ${reason}: ${session.id}（已从存储移除，不再落盘）`)
     if (opts.touch !== false) session.updatedAt = Date.now()
-    const dir = this.dir(session.userId, session.id)
+    const dir = this.dir(this.ownerKeyOf(session), session.id)
     await this.ensureDir(dir)
     // 原子写（tmp + rename）：每条消息都全量重写 chat.json，进程崩溃/断电/磁盘满中断在写入中途
     // 会留下截断 JSON——装载侧 parse 失败被静默吞掉（会话「消失」且无法自愈）。先写临时文件、
@@ -644,7 +756,8 @@ export class SessionStore {
     stats: { ctxTokens: number; ctxCachedTokens?: number; ctxInputTokens?: number; ctxAtMessage?: number },
   ): Promise<void> {
     const session = this.cache.get(sessionId)
-    if (!session || session.userId !== userId) return // 未缓存（无运行中任务）：真值到达前无需落盘
+    // 归属判定：普通会话仅本人；群会话任一成员（ctx 统计是会话级事实，与哪个成员触发无关）
+    if (!session || (session.group ? !this.opts.groupAccess?.(sessionId, userId) : session.userId !== userId)) return
     if (this.removed.has(sessionId)) return
     session.ctxTokens = stats.ctxTokens
     session.ctxCachedTokens = stats.ctxCachedTokens
@@ -839,6 +952,11 @@ export class SessionStore {
       this.evict(sessionId)
       return
     }
+    if (session.group) {
+      // 群会话不能从会话列表里删掉：它是全群的共同上下文，不属于单个成员。
+      // 要清空上下文请用截断/压缩，要彻底结束请走群解散（group.dissolve，仅群主）
+      throw new Error("多人会话不能单独删除：请让群主解散该群（或改用截断/压缩清理上下文）")
+    }
     await rm(this.dir(session.userId, sessionId), { recursive: true, force: true })
     this.markRemoved(sessionId, "deleted")
   }
@@ -848,7 +966,7 @@ export class SessionStore {
    *  隐式落盘」（运行中任务收尾/压缩/任务结果写回），主动重建由调用方经本方法显式声明。
    *  clean: true 先删除旧目录（连同 tmp 附件），即「清空上下文重建」。 */
   async recreateSession(session: SessionData, opts: { clean?: boolean } = {}): Promise<void> {
-    if (opts.clean) await rm(this.dir(session.userId, session.id), { recursive: true, force: true })
+    if (opts.clean) await rm(this.dir(this.ownerKeyOf(session), session.id), { recursive: true, force: true })
     this.clearRemoved(session.id)
     await this.save(session)
   }
@@ -869,7 +987,16 @@ export class SessionStore {
     this.removed.delete(sessionId)
   }
 
+  /** 群会话访问断言（按会话寻址的存储方法统一入口）：群会话只有成员可读写——
+   *  报错而不是返回空：调用方（REST 文件接口/沙箱）本应先用会话访问权判定，
+   *  到了这里才发现不是成员属于调用路径漏判，静默返回空会把越权写成“文件不存在”。 */
+  private assertGroupAccess(sessionId: string, userId: string): void {
+    if (!this.groupOfSession(sessionId)) return
+    if (!this.opts.groupAccess?.(sessionId, userId)) throw new Error(`session not found: ${sessionId}`)
+  }
+
   getTmpDir(sessionId: string, userId: string): string {
+    this.assertGroupAccess(sessionId, userId)
     return join(this.dir(userId, sessionId), "tmp")
   }
 
@@ -879,14 +1006,16 @@ export class SessionStore {
     this.envCache.delete(sessionId)
   }
 
-  /** 会话根目录（工具产物与附件统一以它为基准）。 */
+  /** 会话根目录（工具产物与附件统一以它为基准）。群会话只取 id（目录由群映射决定）。 */
   getSessionDir(sessionId: string, userId: string): string {
+    this.assertGroupAccess(sessionId, userId)
     return this.dir(userId, sessionId)
   }
 
   /** 会话 tmp/ 子树文件列表（DESIGN「会话临时文件查看与下载」：文件操作严格限定在会话 tmp/ 内，
    *  chat.json/env.json/todo.json 等会话数据文件不暴露）；保留 `tmp/` 前缀与既有路径语义一致。 */
   async listSessionFiles(sessionId: string, userId: string): Promise<FileEntry[]> {
+    this.assertGroupAccess(sessionId, userId)
     const root = join(this.dir(userId, sessionId), "tmp")
     const out: FileEntry[] = []
     await this.walkFiles(root, "tmp", out)
@@ -896,6 +1025,7 @@ export class SessionStore {
   /** 文件接口路径解析：以会话 tmp/ 为根（仅所有者可访问，配合沙箱拒绝 ../、绝对路径、符号链接）；
    *  兼容 `tmp/` 前缀路径（旧附件/截断引用路径）。返回安全绝对路径。 */
   resolveSessionTmpFile(sessionId: string, userId: string, path: string, sandboxEnabled: boolean): string {
+    this.assertGroupAccess(sessionId, userId)
     const tmp = join(this.dir(userId, sessionId), "tmp")
     const p = path.startsWith("tmp/") ? path.slice(4) : path
     if (sandboxEnabled) return resolveInSandbox(tmp, p)
@@ -908,12 +1038,16 @@ export class SessionStore {
    *  resolveInSandbox(root=users/{user}) 的可达范围一致，含符号链接逃逸检查），非沙箱（本地模式操作者
    *  本人，与文件工具能力对齐）放开绝对路径。 */
   resolvePreviewFile(sessionId: string, userId: string, path: string, sandboxEnabled: boolean): string {
+    // 群会话的文件面同样只看成员资格（会话目录与用户目录无关，不能靠路径拼接做隐性隔离）
+    const group = this.groupOfSession(sessionId)
+    this.assertGroupAccess(sessionId, userId)
     if (isAbsolute(path)) {
       const abs = resolve(path)
       if (!sandboxEnabled) return abs
-      const userRoot = join(this.opts.home, "users", userId)
+      // 群会话的绝对路径产物只能落在本群目录内（群目录不属于任何用户，不能拿用户目录当边界）
+      const userRoot = group ? join(this.opts.home, "groups", group.groupId) : join(this.opts.home, "users", userId)
       const rel = relative(userRoot, abs)
-      if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`path outside user data: ${path}`)
+      if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`path outside ${group ? "group data" : "user data"}: ${path}`)
       assertNoSymlinkEscape(userRoot, abs, path)
       return abs
     }

@@ -554,6 +554,8 @@ class CodeEditor : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   auto invoke_action(std::string_view action, std::string_view argument) -> bool override;
 
   // —— 静态信息（UI 语言选择器/控制通道枚举用）——

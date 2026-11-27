@@ -165,6 +165,8 @@ class Input : public Element {
 -> std::optional<std::string> override;
 auto set_property(std::string_view name, std::string_view value) -> bool override;
 [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   /// 只读属性（`selection`）：`get` 能读、`set` 不生效。
   [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
 /// 动作面（与 `TextArea` 对齐；此前单行 Input 缺这一面——DESIGN §8.1.1 反推的

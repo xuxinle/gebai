@@ -407,6 +407,8 @@ class Terminal : public Element {
   /// 光标形状的**可读名**（属性面用；`block`/`underline`/`bar`）。
   [[nodiscard]] static auto cursor_shape_name(st::text::AnsiCursorShape shape) -> std::string_view;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   /// 只读属性（`selection`）：`get` 能读、`set` 不生效。
   [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
   [[nodiscard]] auto get_property(std::string_view name) const

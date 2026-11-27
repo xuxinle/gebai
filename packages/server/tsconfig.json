@@ -11,6 +11,6 @@
       "@gebai/server/credential-sources": ["./credential-sources.ts"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "../../apps"]
 }
 

@@ -15,6 +15,14 @@ namespace {
   if (op == "~=") return actual.find(expected) != std::string_view::npos;
   if (op == "^=") return actual.starts_with(expected);
   if (op == "$=") return actual.ends_with(expected);
+  // `*=` = **子串包含**。协议文档与工具描述一直列着它，而这里漏了分支——
+  // `op` 落到末尾 `return false`，于是任何 `[id*=...]` 都**静默零命中**
+  // （不报错、不当成非法操作符，就是什么也匹配不到）。
+  //
+  // 为何不顺手把 `~=` 改成 CSS 的“空白分词”语义：`~=` 在既有脚本与本仓工具里
+  // 已经被当子串包含在用（`Button[text~=保存]`），改语义会静默弄坏它们。
+  // 两个操作符在本实现里**同义**（CSS 里它们不同），这个不一致是有意的，写在这里。
+  if (op == "*=") return actual.find(expected) != std::string_view::npos;
   return false;
 }
 
@@ -150,7 +158,11 @@ auto Selector::parse(std::string_view text) -> Result<Selector> {
         const std::string inner = body.substr(cursor + 1, close - cursor - 1);
         std::size_t op_position = std::string::npos;
         std::string op;
-        for (const auto candidate : {"~=", "^=", "$=", "!=", "="}) {
+        // ⚠ **长操作符必须先试**：`*=` 的后半是 `=`，若把 `=` 排在它前面，
+        // `[id*=x]` 会被拆成 name=`id*` + op=`=` + value=`x`——之后匹配恒假，
+        // 而且**不报错**（属性名 `id*` 根本不存在，`element_attribute` 返回空串，
+        // 空串 == "x" 不成立）。所以候选表里两字符的操作符都在前。
+        for (const auto candidate : {"~=", "^=", "$=", "*=", "!=", "="}) {
           const std::size_t found = inner.find(candidate);
           if (found != std::string::npos &&
               (op_position == std::string::npos || found < op_position)) {

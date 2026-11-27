@@ -69,6 +69,8 @@ class ScrollView : public Element {
   /// 语义：超过 `max_scroll` 夹到底（不是拒绝）；负值夹到 0。
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 属性**描述**（数据驱动面板用；范围/步进必须与 `set_property` 同源）。
+  [[nodiscard]] auto property_schema() const -> std::span<const PropertyDesc> override;
   /// 动作面：`scroll_to`（参数 = 偏移）/ `scroll_by`（参数 = 增量）/ `scroll_to_end`。
   ///
   /// 为何除了 `set offset` 还要动作：一次性动作（"滚到底"）写成属性太隐。

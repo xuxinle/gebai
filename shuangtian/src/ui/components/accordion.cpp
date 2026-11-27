@@ -517,6 +517,26 @@ auto Accordion::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"items", "open", "mode", "allow_collapse", "separated"});
 }
 
+auto Accordion::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kModes[] = {"single", "multi"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "open",
+       .type = PropertyType::Integer,
+       .min_value = -1.0f,
+       .max_value = 256.0f,
+       .step = 1.0f,
+       .summary = "展开项下标（-1 = 全收起）"},
+      {.name = "mode",
+       .type = PropertyType::Choice,
+       .summary = "单选还是可多开",
+       .choices = kModes},
+      {.name = "allow_collapse", .type = PropertyType::Boolean, .summary = "单选模式下是否允许全收起"},
+      {.name = "separated", .type = PropertyType::Boolean, .summary = "各项是否分成独立卡片"},
+  };
+  return kDescs;
+}
+
+
 auto Accordion::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"count"});
 }

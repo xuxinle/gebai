@@ -176,6 +176,7 @@ bun run e2e:term:all     # 三者依次跑；失败现场截图落 /tmp/gebai-e2
 - **依赖单向**：`base` ← `support`/`security` ← 各领域 ← `engine` ← 传输层 ← `boot`；`core/` 内部模块**禁止 import `core/tools` 聚合 barrel**（其目录扫描顶层 await 会因反向依赖成环产生未初始化绑定）——共用能力直引 `core/support/*`、`core/security/*` 叶子模块。
 - **全局工具零注册**：新增全局工具 = 在 `packages/server/src/core/tools/` 新建导出 `export const globalTools: GlobalToolEntry[]` 的文件（契约见 `tools/shared.ts`），不改任何中央注册表——与子 Agent 同款「丢文件即注册」扩展模型。
 - **REST 路由 / WS 处理器按域新增**：新路由域在 `routes/` 新建 `register{Domain}Routes`（经 `routes/context.ts` 的 RouteCtx）并在 `app.ts` 装配；新 WS 消息类型在 `ws-handlers/` 对应域文件加 handler（入口守卫在 `ws.ts` 统一）。
+- **托管应用（`apps/` 与 `{GEBAI_HOME}/data/apps/`）不是“往仓库里堆文件”，而是一条有契约的机制**：新增一个应用只需丢目录（含 `index.html` + 可选 `app.json`/`server.js`）或丢一个 `apps/*.ts` 内联定义，**不改任何注册表**（与子 Agent/全局工具同模型）。应用后端跑在**宿主进程内**，所以默认只在本地模式且非安全模式下开启（`GEBAI_APPS_BACKEND=auto`）——给应用后端加“访问工具”这类需求时，先想清楚这是在打破多用户隔离（见 DESIGN「托管应用」）。
 
 ### 命名与命名空间
 

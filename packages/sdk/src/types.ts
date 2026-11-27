@@ -99,6 +99,14 @@ export interface Message {
    * 应该按普通消息展示，只是它的来历需要标注。两者语义不同，不能合用一个字段。
    */
   contextOnly?: { kind: "self" | "owner" | "other"; reason?: string }
+  /**
+   * 多人会话（群）里的说话人身份（role=user 消息携带）：群内名称与角色。
+   *
+   * 与 `parentId`/account userId 的区别：这是**群内的脸**（同一个账号在不同群里可以是不同名字/角色），
+   * 落盘随消息保存——历史回放、模型上下文前缀、UI 气泡均以它为准，不靠当前群成员表反推
+   * （成员随时可改自己的群内名称，旧消息应保持当时的发言身份）。
+   */
+  speaker?: { name: string; role: string; userId: string }
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean
   /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */
@@ -304,6 +312,9 @@ export interface SessionInfo {
   /** 会话选中的模型配置名（`GEBAI_LLM_MODELS` 条目的 name；空/缺省 = 列表默认配置）。
    *  切换不刷新 updatedAt（配置操作不动排序基线）。 */
   modelConfig?: string
+  /** 多人会话（群）归属：非群会话缺省。`memberName/role` 是**当前列表请求者**在群内的身份
+   *  （会话列表按人渲染——“我”在各群里叫什么都不一样）。 */
+  group?: { id: string; name: string; memberName: string; role: string }
 }
 
 /** 一条可用模型配置的公开概要（`GET /api/v1/models`）：不含密钥，仅用于前端选择与展示。 */
@@ -332,6 +343,27 @@ export interface SessionDetail extends SessionInfo {
   todos?: TodoItem[]
   /** 已装载子Agent 名单（恢复历史会话时据此重新注册工具，见 DESIGN「会话管理」）。 */
   loadedSubAgents?: string[]
+}
+
+/**
+ * 多人会话（群）对外视图（WS `group.*` 应答 / REST 同源）：不含口令哈希。
+ * 邀请码对外可见——它就是发给别人的凭据；口令只回传“有没有设”。
+ */
+export interface GroupInfo {
+  id: string
+  name: string
+  /** 群会话 id（进会话就用它）。 */
+  sessionId: string
+  /** 群主账号 id。 */
+  owner: string
+  joinCode: string
+  hasPasscode: boolean
+  memberCount: number
+  /** 当前用户在群内的身份（非成员/匿名请求时缺省）。 */
+  me?: { name: string; role: string; userId: string; username: string }
+  members: Array<{ userId: string; username: string; name: string; role: string; joinedAt: number; owner: boolean }>
+  createdAt: number
+  updatedAt: number
 }
 
 /** 会话导入载荷（`session.import` / REST POST /sessions/import 请求体；导出文件的单会话条目同构）。

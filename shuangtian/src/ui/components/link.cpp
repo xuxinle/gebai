@@ -257,6 +257,24 @@ auto Link::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"text", "url", "external", "underline", "tone"});
 }
 
+auto Link::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "text", .type = PropertyType::Text, .summary = "显示文字"},
+      {.name = "url", .type = PropertyType::Text, .summary = "目标链接"},
+      {.name = "external", .type = PropertyType::Boolean, .summary = "是否按外链处理（带外链标记）"},
+      {.name = "underline", .type = PropertyType::Boolean, .summary = "是否画下划线"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+  };
+  return kDescs;
+}
+
+
 auto Link::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "click" || action == "activate") {
     activate();

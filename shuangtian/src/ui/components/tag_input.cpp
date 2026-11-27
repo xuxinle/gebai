@@ -476,6 +476,23 @@ auto TagInput::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"tags", "draft", "placeholder", "max", "addable"});
 }
 
+auto TagInput::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "tags", .type = PropertyType::Text, .summary = "已有标签（用 | 分隔）"},
+      {.name = "draft", .type = PropertyType::Text, .summary = "正在输入、尚未提交的那一段"},
+      {.name = "placeholder", .type = PropertyType::Text, .summary = "空值时显示的占位提示"},
+      {.name = "max",
+       .type = PropertyType::Integer,
+       .min_value = 0.0f,
+       .max_value = 1000.0f,
+       .step = 1.0f,
+       .summary = "标签上限（0 = 不限）"},
+      {.name = "addable", .type = PropertyType::Boolean, .summary = "是否允许新增"},
+  };
+  return kDescs;
+}
+
+
 auto TagInput::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"count"});
 }

@@ -815,6 +815,28 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   // 向上滚动时首行就画到 `bounds_.y` 之上（压在面板工具栏上）。而行的**底色**
   // 一直是受裁的（它在 body_clip 内画），于是只有文字越界，看上去像“字飘出去了”，
   // 比整行越界更难归因。
+  //
+  // —— 表头文字必须在**压这层之前**画 ——
+  //
+  // 踩过（实测）：表头底与分隔线在上段画完，这里一口气压回 `body_clip`（表头之下），
+  // 然后才画表头文字——`header_cell_rect()` 的盒子与裁剪区**零交叠**，
+  // `draw_cell_text` 一个像素也落不下。症状很像“本来就这样”：顶上一道深色带子，
+  // 看着像设计上就没有列名；而所有几何判据（`header_rect().height`、
+  // `header_cell_rect(1).x`）都全绿——只有像素能看见它。
+  //
+  // 顺序固定为：表头底 → **表头文字** → 压行区裁剪 → 行内容。
+  canvas.push_clip_rect(bounds_);
+  const float header_font = style_.font_size * (metrics.font_xs / metrics.font_base);
+  // 表头关掉时整段跳过（`header_cell_rect` 会返空矩形，但空矩形仍会走到
+  // `draw_cell_text` 里白算一次度量——直接短路更干净）。
+  for (std::size_t column = 0; show_header_ && column < columns_.size(); ++column) {
+    const math::Rect box = header_cell_rect(column);
+    if (box.right() <= clip_left || box.x >= clip_right) continue;
+    draw_cell_text(context, canvas, columns_[column].name, box, kCellPadding,
+                   columns_[column].align, header_font, colors.text_muted);
+  }
+  canvas.pop_clip();   // bounds_
+
   canvas.push_clip_rect(bounds_);
   canvas.push_clip_rect(body_clip);
 
@@ -848,18 +870,7 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
                      columns_[column].align, style_.font_size, cell_color);
     }
   }
-  // 表头文本（同样列剔除）。字号按既有比例跟随覆盖（表头/正文 = font_xs/font_base，
-  // 无覆盖时仍是 font_xs）：覆盖盖的是整体字号档位，表头略小的层级关系保留。
-  const float header_font =
-      style_.font_size * (metrics.font_xs / metrics.font_base);
-  // 表头关掉时整段跳过（`header_cell_rect` 会返空矩形，但空矩形仍会走到
-  // `draw_cell_text` 里白算一次度量——直接短路更干净）。
-  for (std::size_t column = 0; show_header_ && column < columns_.size(); ++column) {
-    const math::Rect box = header_cell_rect(column);
-    if (box.right() <= clip_left || box.x >= clip_right) continue;
-    draw_cell_text(context, canvas, columns_[column].name, box, kCellPadding,
-                   columns_[column].align, header_font, colors.text_muted);
-  }
+  // 表头文本**已在上段画完**（必须在压行区裁剪之前，见那里的说明）。
 
   // —— 行首连线图（图形分支线）——
   //
@@ -1129,6 +1140,33 @@ auto Table::property_names() const -> std::vector<std::string_view> {
                                   "scroll", "max_scroll", "scroll_y", "max_scroll_y",
                                   "selected_row", "value", "first_visible", "visible_rows"});
 }
+
+auto Table::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "row_height",
+       .type = PropertyType::Number,
+       .min_value = 12.0f,
+       .max_value = 80.0f,
+       .step = 1.0f,
+       .summary = "行高（px）"},
+      {.name = "zebra", .type = PropertyType::Boolean, .summary = "隔行底色"},
+      {.name = "show_header", .type = PropertyType::Boolean, .summary = "是否显示表头"},
+      {.name = "scroll_y",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 100000.0f,
+       .step = 1.0f,
+       .summary = "纵向滚动偏移（px；越界自动夹到 max_scroll_y）"},
+      {.name = "selected_row",
+       .type = PropertyType::Integer,
+       .min_value = -1.0f,
+       .max_value = 100000.0f,
+       .step = 1.0f,
+       .summary = "选中行（-1 = 无）"},
+  };
+  return kDescs;
+}
+
 
 /// 只读属性（不进 `property_names()`：那张表是“可读写”契约，`get` 在两处都查）。
 auto Table::readonly_property_names() const -> std::vector<std::string_view> {

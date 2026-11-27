@@ -881,6 +881,33 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **会话置顶**：`pinned` 字段（chat.json 持久化，未定义 = 未置顶，旧格式天然兼容）标记重要会话；列表查询置顶优先、组内按更新时间倒序；置顶/取消为元数据操作，**不刷新 `updatedAt`**（不动排序基线，旧会话置顶不会跳入时间分组）；前端「置顶」独立分组脱离时间分组展示
 - 支持会话级的审批跳过（`/approval-skip`）
 
+#### 多人会话（群）
+
+一个会话由**多人共同使用**：消息协议、引擎、工具、事件都与单人会话同构，差别只在「谁有权进、谁在说话、回复给谁看」。
+
+**目录体系：不属于任何用户**（`{GEBAI_HOME}/groups/{groupId}/`，与 `users/` 平级）
+
+群目录内是完整的会话目录形态：`chat.json`（会话正文，`SessionData.group = {groupId, name}` 落盘标记群归属）、`tmp/`（附件与脚本沙箱根）、`group.json`（群档案：群名/群主/成员表/邀请码/口令哈希）、`meta.json`（列表元信息缓存，同单人会话）。**为什么不放进 `users/{u}/sessions/`**：群是多人的共同财产，落在某人目录下就把它的生命周期、隔离边界与删除权都绑在那一个人身上（该用户被清理/迁移，群随之消失）。成员只是「有权进这间房间的人」。
+
+**目录定位单一入口**：`sessionPath(home, user, sessionId)` 被引擎、沙箱、文件工作台、产物回传、截断产物等十余处共用（签名只有 `(home, user, sessionId)`）。群会话由一个**进程内注册表** `groupSessionDirs`（`core/base/paths.ts`）接管——`registerGroupSessionDir(home, groupId, sessionId)` 在群创建/启动加载时登记，`sessionPath` 命中群映射即返回群目录，未命中走原用户分片路径。**收益**：既有调用点零改动地拿到正确目录，多租户隔离防线不变（只认服务端登记的映射，不由调用方传入决定）；`registerGroupSessionDir` 用 `home|sessionId` 作键，同一进程多 `GEBAI_HOME` 互不可见。启动期 `GroupStore.init()` 扫 `groups/*/group.json` 重建映射（重启后群会话正文照常定位），并**同时**向 `SessionStore` 登记群归属（`GroupSessionPort.register`）——两处不必分别推断：会话列表只列「会话存储记得的群」，只登记文件系统层会让**加入的群**（新进程从未 load 过其正文）在列表里静默消失。
+
+**访问权只看成员资格**：`SessionStore` 内的群会话分支**不看 `userId` 归属**——`load(id, user)` 对群会话要求 `groupAccess(id, user)` 命中成员表，否则一律视为不存在（`session.get` 与 `prompt` 同应答，不泄露会话存在性）；**无用户上下文（`load(id)`）的群会话同样拒绝**（不因「无人」而放行，`ownerOf` 对群会话返回 `null` 而非群主——否则事件只投给一个人）。文件面（`listSessionFiles`/`resolveSessionTmpFile`/`resolvePreviewFile`/`getTmpDir`/`getSessionDir`）走同一判据（`assertGroupAccess`），REST 侧非成员统一 404；群会话的绝对路径产物边界是**群目录**而不是某个用户目录。
+
+**群内身份（名称与角色不与账号绑定）**：`GroupMember = { userId, username, name, role, joinedAt }`——`userId/username` 只用于成员资格判定与事件投递，**`name/role` 是群内的脸**。同一个账号在不同群里可以是「张三·主持人」与「Alex·观察者」；改群内身份只改本群，不动账号。进入群时自设（`memberName`/`memberRole`），已是成员时再「加入」一次 = 更新称呼。
+
+**邀请码与进入口令**：`joinCode` 8 位、字母表去掉易混的 `0/O/1/I`（手抄口头相传不会错）、创建时生成且全库唯一、规范化（去空格/连字符、转大写）后可容错输入；**进入口令**（`passcode`）可选、由群主设置/清除，scrypt 加盐哈希落盘（与账号口令同口径），明文只在创建/设置那一次过内存，对外视图只暴露 `hasPasscode`。成员上限 200（防一个群把全站用户拉进来后事件扇出失控）。
+
+**用户消息自动拼接「角色·名称」前缀**：`engine.run` 落盘前按 `groups.speakerOf(sessionId, user)` 拼 `【角色·名称】正文`（角色缺省只写名称，开头空白一并去掉），落盘的 `Message` 同时带 `speaker: {name, role, userId}`。**为何写进正文而不只挂字段**：模型看到的是消息内容，前缀是它区分「谁在说」的唯一渠道；落盘保留同样文本使历史回放、上下文压缩后也不丢发言归属。历史消息不随后续改身份重写（保留当时的发言身份）。
+
+**系统提示词特别说明**（`group` 段，会话级、普通会话为空串，位置在 `subagent_catalog` 之前以保前缀缓存）：告知模型「这是多人会话、回复对全群可见、每条用户消息带 `【角色·名称】` 前缀、本次发起者是谁、成员（角色·名称）名单」，并写明协作约定：①成员可能提出相互冲突的要求——指出冲突并说明按谁的要求执行（发起者优先或询问决策者），不静默择一；②按群内角色匹配职责；③需要用户决定的事（ask 审批/选项/填值）全群都能作答，问题里写明要谁定；④不复述/推断成员未在群里说过的私人信息；⑤不重复向全群索要同一件事。
+
+**事件受众多播**：`WsStateService` 按 `groups.audienceOf(sessionId)`（群会话 → 全部成员账号；普通会话 → 归属人）把每个事件写入**每个成员各自的** `UserJournal` 并推送——各人的断线重放（`sync.request`）因此与在线流一致；文本增量合并按「会话 + 受众」建键（不同会话/不同受众的 delta 不互相合并），非增量事件到达时先冲刷**同会话**待合并增量以保序。
+
+**生命周期**：删除只能走「解散群」（群主）
+——`SessionStore.delete` 对群会话显式拒绝（它是全群的共同上下文，不属于单个成员；要清上下文请截断/压缩）。解散 = 删群目录（连同正文与附件）+ 注销目录映射与内存索引 + 释放引擎运行态与输入队列。成员退出后立刻失去访问权（会话本体留给其他人继续用）；**群主不能直接退群**（先转让群主，或解散）——自动转移会把权力随手塞给一个可能只想围观的人。
+
+**协议面**：WS `group.list/create/join/get/set_profile/rename/set_passcode/leave/dissolve`（`ws-handlers/group.ts`）+ REST `GET/POST /api/v1/groups`、`GET/PATCH/DELETE /api/v1/groups/:id`、`PATCH /api/v1/groups/:id/me`、`POST /api/v1/groups/:id/{join,leave,transfer}`、`GET /api/v1/groups/:id/session`（`routes/groups.ts`，同一 `GroupStore`）。**前端**：轮盘内圈「多人会话」入口 → 右侧抽屉（我的群 / 创建 / 加入）；创建/加入表单含群名、我在群里的名称与角色、可选进入口令；详情页展示邀请码（一键复制）、成员表与群主操作；会话列表用行首「群」角标区分（`.session-group-tag`；`.session-ico` 在列表里是 `display:none` 占位，不能在那里换 emoji），标题栏下方**身份条**（`#group-identity`，在 `main` 内而非 `#app` 直接子元素——后者会成为栅格格项并挤占一整行）常驻显示「我在这群叫什么」与邀请码复制（拉人最高频的时刻就是聊到一半想叫第三个人进来）。**用户消息上屏同口径**：本地乐观上屏用 `speakerPrefix()`（`state.ts`）拼同一前缀，排队项派发时的 `event.queue.dequeued` 也带前缀（`boot/compose.ts` 的队列 runner）——否则同一条消息发送时一种正文、刷新后又变成另一种。
+
 ### 用户反馈
 
 用户可对任意 Agent 回复（总Agent/子Agent 消息）提交反馈，用于质量追踪与改进：
@@ -1177,6 +1204,139 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
     > 消歧（本域曾出现过的两个名字）：**`tabSlotState` 与 `readOnlyHint` 并不是本仓导出**（对两个名字做过仓库内代码与设计文档的全历史搜索——`git log -S` 与 `git grep` 于 `packages/` / `docs/` / `DESIGN.md`，命中为零；仅出现在 `.evolve/` 台账与会话记录这类工作记录里）——模式格渲染规格现在的名字是 **`modeSlot`**（早期才叫 `readOnlyHint`，随那一轮实现一起改名后再未出现）；`tabSlotState` 则从未在代码/文档里存在过。写代码/写文档时以上表为准。
   **接线契约的稳定性加固（本轮复核）：把「断言长相」换成「断言数据流」**——复核 `style-contract.test.ts` 的接线用例时用变异测试验了一轮（11 个「把界面改回旧口径」的变异体 × 9 个「只改写法不改判据」的良性重构），暴露出旧写法的两个毛病：① **名字出现过 ≠ 真的接了**——旧用例只查字面片断与 `writabilityOf` 出现次数 ≥ 4，于是「把编辑按钮改回只判 `t.stat.editable`」「把徽标改回只看 `t.truncated`」这些变异体**全部存活**（计数由保存那行凑够了），而界面已经退回三处各说各话的旧样子；② **好代码误杀**——把取数口提成局部变量（`const w2 = writabilityOf(t); saveRefusal(w2)`）是常规重构，却会被字面片断碰红。改法：断言逐**调用点**看**实参的数据流**——解析 `modeSlot` / `editButton` / `saveItem` / `readOnlyReason` / `saveRefusal` 的每一处调用，取对象实参里 `readOnly` / `refusal` 的**值**（不是整段实参，否则 `{ readOnly: null }` 这种真的另拼输入的写法会被放过去），要求它来自 `writabilityOf` 或由它派生的变量（闭包上限 4 轮，容许提取/两跳/局部改名）；另加两条形态无关的硬检查：**消费点不得自己现拼** `statEditable` / `truncated` / `rootWritable`（现拼＝又在自己拼输入），且 `saveTab` 不得再直接读 `rootsResp.writable`。改后重跑同一矩阵：**15/15 变异体被杀死、9/9 良性重构照旧绿**。另：**不做「位置敏感性」断言**（“某调用第一个实参必须是 `writabilityOf(t)`”）——实测那类正则会把局部变量提取类重构全判红；而「把取数口拆开单传字段」这种退化会撞上 `WritabilityInput` 这个**具名结构类型**，`bun run typecheck` 直接拦下，不必再拿脆弱正则去重。回归测试的运行口径也一并钉死：`bun test packages/web/src/files/` **从仓库根跑会缺 web 的测试预置环境**（`packages/web/bunfig.toml` 的 `[test] preload` 不生效，localStorage / DOM 相关用例成片误报——本单实测 37 fail + 5 errors）——正确跑法是 `bun run --cwd packages/web test src/files/`（或 `cd packages/web && bun test`），全量基线 **536 pass / 0 fail**。
 - **判据矩阵（本域再一道闸门）：把「接线对不对」与「取值对不对」分开守**——接线契约（`style-contract.test.ts`）只能证明三处消费**调了**同一个取数口，证明不了「接上之后的每一格取值对不对」（比如给 `modeSlot` 加一支新分支，接线照旧、测试照绿）。故另建 **`files/status-matrix.test.ts`**：输入三轴（`statEditable` × `truncated` × `rootWritable`，含 `undefined`/`null` 两个「未知」哨兵）的**笛卡尔积 18 格 × 两个模式 = 36 格**，逐格断言**文案 / 配色 / 按钮 disabled / 拒绝文案**，并把「有哪些组合」显式写死——**缺行一眼可见**（行名自带三轴取值，与笛卡尔积对账；期望表是 `Record<判据枚举,…>`，加判据不同步加行则 `tsc` 报缺键）。实测：**34 用例 / 511 断言**；矩阵对 `status-core` 的**回归变异 21/21 全杀、良性重构 8/8 存活、类型化新分支被 `tsc` 拦下**；这组数已随变异台一并入库，**一条命令可复核**：`bun run mutate:status`（33 条变异体，约 20 秒，退出码 0 = 全符期望）。方法与教训（含「漏检 11 例」为何要改判数据流而非展示层接线断言、以及一道专治「运行期新分支」的字面量闭集机关与它已知的残余盲区）见「测试策略 → **变异验证**」。
+
+### 托管应用（`/apps`）
+
+把「HTML/JS 前后端应用」当作歌白的一等资源托管：一个应用 = 前端静态产物 + 可选后端模块，
+**两种机制并存**（源码内联 / 运行时动态载入），三层来源逐文件叠加。
+
+#### 为什么不是另起一个“静态文件服务器”
+
+歌白已有的 `fs/raw`、`preview_server` 回答的是「看一个文件」「把歌白自己起一份」。托管应用回答的是
+different 问题：**某些页面对用户是产品，不是文件**——它要一个稳定 URL（`/apps/{id}/`）、要自己能改（改文件刷新即生效）、
+要能带一个同源后端（否则前端拿不到任何数据），还要能被二进制产物带着走。四件事齐了才叫机制。
+
+#### 三层来源与优先级（逐文件叠加）
+
+| 层 | 来源 | 生效时机 | 回答什么 |
+|---|---|---|---|
+| `disk`（运行时动态载入） | `GEBAI_APPS_DIRS` → `{GEBAI_HOME}/data/apps` → `{GEBAI_HOME}/apps`（后者为出厂根） | 改文件**下一次请求即生效**；新增/删目录 ≤ 扫描 TTL（1s） | 部署方自己塞应用；改内置应用的页面 |
+| `inline`（源码内联） | 仓库根 `apps/*.ts|js` 的 `export const apps = [...]`（文件内容是字符串，后端是函数） | 进程启动扫一次（重启生效） | 几行字就是一个应用，不必建目录/文件 |
+| `embedded`（构建内嵌） | 构建期把 `apps/` 全量 base64 内嵌（`core/apps.bundle.generated.ts`） | 随产物分发 | 二进制单文件形态没有源码树，仍要自带应用 |
+
+**同一 id 出现在多层时不是并列两三个应用**，而是按文件叠加：任意文件「优先级高的层有就用它」，
+清单同理由最高优先级层给出。优先级 `disk > inline > embedded`。于是内置应用只要在
+`{GEBAI_HOME}/data/apps/{id}/` 放一个文件就能就地改掉（不必重构建），放一个 `server.js`（并在该 id 的磁盘
+`app.json` 声明 `backend`）就凭空长出后端。`AppEntry.layers` 字段把「这个 id 存在于哪几层」透出——
+「改了不生效」的第一诊断就是它。
+
+#### 一个应用目录长什么样（最小形态可以不写清单）
+
+```
+apps（任一应用根）/hello-gebai/
+  app.json      # 可省；省了则 id=目录名、entry=index.html、spa=true、无后端
+  index.html    # 唯一必需的（默认入口）
+  server.js     # 可省；清单声明 backend 时才加载
+  assets/...    # 任意静态产物，扩展名→MIME 走 core/fs/mime.ts 同一张表
+```
+
+```json
+{ "title": "你好", "description": "…", "version": "1.0.0",
+  "entry": "index.html", "spa": true, "backend": "server.js", "listed": true,
+  "env": { "DEMO_GREETING": "你好" } }
+```
+
+清单校验口径（`core/apps/manifest.ts`，纯函数 + 单测）：`id` 匹配 `[a-z0-9][a-z0-9_-]{0,63}`（它是 URL 段与
+目录名的**双重**键，白名单防路径穿越与大小写不敏感文件系统歧义）；`entry`/`backend` 走 `normalizeAppRelPath`
+（折叠空段与 `.`，拒绝绝对路径、`..`、盘符、NUL）；`backend` 扩展名限 `js/mjs/cjs/ts/mts`；`env` 逐键校验。
+清单写错**不抛错**：按默认清单处理 + `warnings` 如实带出（一个写坏的 `app.json` 不该让应用列表消失）。
+清单里的 `id` 与目录名不一致时**以目录名为准**（URL 与磁盘是一对天然真理来源）。
+
+#### URL 形态与鉴权位置（两个前缀，一套机制）
+
+| 路径 | 内容 | 鉴权姿态 |
+|---|---|---|
+| `GET /apps` | 索引页（服务端渲染，不改前端构建即存在） | 同 Web UI：非 `/api/` 一律免鉴权 |
+| `GET /apps/{id}[/...]` | 前端静态产物 | 同上 |
+| `ALL /api/apps/{id}[/...]` | 应用后端模块 | 同 REST：走完整凭证链与跨源校验 |
+| `GET /api/v1/apps` | 应用清单（层/后端状态/警告/目录） | 同 REST |
+| `POST /api/v1/apps/refresh` | 重扫目录（立即生效） | 同 REST |
+
+两个前缀的分工是**安全边界的位置**决定的：前端产物免鉴权（页面本身不是秘密，界面要数据得走 API；
+若静态层也要令牌，`<img src>`/`<script src>` 这类无法插 `Authorization` 头的请求全挂——同
+`credential-sources.ts` 的论证）；后端挂在 `/api/apps/` 是因为**鉴权中间件只认 `/api/*`**，
+挂到应用前缀下等于让后端模块跑在「无身份、无 CORS 校验」的位置。
+
+静态分发口径：`ETag` + `If-None-Match` → 304；文本类按 `Accept-Encoding` 协商 gzip；**缓存头一律 `no-cache`**
+（开发形态是「改文件→刷新」，强缓存会让改动看起来没生效，同 `fs/raw` 的教训）；SPA 回退只对**无扩展名**
+的路径生效（有扩展名却不存在 → 404；否则缺失的 `.js` 会拿到一份 HTML，浏览器报 MIME 不符）。入口缺失等
+致命问题的应用**照样列出**，访问时给 503 说明页并写明原因与目录（不假装可用、也不吞成 404）。
+
+#### 后端模块契约（`AppBackendContext`）
+
+**作者契约在 `@gebai/sdk`（`packages/sdk/src/hosted-app.ts`）**：`InlineApp` / `AppBackendContext` / `AppBackendHandler` / `AppManifest`
+的类型定义只有那一份（server 侧 `core/apps/*` 从它取类型）。写应用的人只依赖 `import type { InlineApp } from "@gebai/sdk"`，
+**不得**去 import server 内核路径（否则二进制形态无源码树时连类型都不存在，且内核与扩展的边界当场消失——与子 Agent 的纪律同源）。
+
+三种导出形态任选，**路由表 > fetch > default，且 default 兼任「路由表未命中」的兜底**：
+
+```js
+// ① 单函数
+export default async function (ctx) { return { ok: true } }
+// ② 命名 fetch（等价）
+export async function fetch(ctx) { return ctx.respond({ ok: 1 }, { status: 200 }) }
+// ③ 路由表（键 = "方法 应用内路径"，支持 "* /x" 与 "GET /x/*" 通配）
+export const routes = { "GET /health": (ctx) => ({ ok: true }), "POST /echo": async (ctx) => ctx.json() }
+export default (ctx) => ctx.respond({ miss: ctx.path }, { status: 404 })  // 未命中兜底
+```
+
+`ctx` 是**只读能力面**：`appId / method / path / query / header() / text() / json() / user{id,role} / env / respond()`。
+它**不含**引擎、工具注册表、会话存储——后端是部署方自己的代码（与 `custom/` 同级的二开面），
+能力边界靠「不给」而不是「拦住」：给引擎等于把智能体的手交给一个 HTTP 处理器。
+返回值：`Response` 原样发出，其余可 JSON 化值按 JSON 响应。失败分三段如实区分：`load`（模块不存在/语法错/
+无可识别导出）→ 503、`timeout`（默认 15s，可用清单 `env.GEBAI_APP_TIMEOUT_MS` 覆盖）→ 504、`run`（处理器抛错）→ 500；
+**不静默降级到静态**（那会让「后端没生效」看起来像「接口 404」）。
+
+#### 权力内守：后端为什么默认只在本地开
+
+后端模块**在本进程内执行**，等价于部署方在这台机器上写代码。因此 `GEBAI_APPS_BACKEND`（默认 `auto`）：
+- `auto` = **仅本地模式且非安全模式**时开启；
+- **服务模式（多用户共享进程）默认不加载**——一个应用的用户影响全部用户，这是多用户隔离的前提；
+- **`GEBAI_SAFE_MODE=true` 强制不加载**（安全模式的语义就是「不执行部署方代码」）；
+- `on` 为部署决策（部署方整体担责，与 `GEBAI_FEISHU_BOT_AUTO_APPROVE` 同类）；`off` 一律不加载。
+关闭时接口回 503 并写明原因（不是 404），索引页与 `/api/v1/apps` 同步展示该状态。
+
+#### 热重载的两个真相（都实测过）
+
+1. **文件型后端**（`server.js`）：删模块缓存 + `?v=<mtime>` 版本化 import 才真的换代码。
+   **只加 query 不够**——Bun 的 ESM 缓存归一化到文件路径，同一文件不同 query 仍返回旧实例（症状：改完
+   `server.js` 接口持续返回旧结果，看上去像“热重载没实现”）；`createRequire(...).cache` 与 ESM 缓存是同一张表，
+   删掉该路径条目后下一次 import 才真重读文件。两道一起上（`core/apps/backend.ts: purgeModuleCache`）。
+2. **源码内联应用**（`apps/*.ts`）：后端是**函数**，热替换意味着让旧闭包失效——只在进程启动扫一次，**重启生效**。
+   磁盘层与内联层的生效时机差异由 `AppEntry.layers` 与索引页徽标透出。
+
+#### 内嵌应用在二进制形态下怎么跑后端
+
+`bun --compile` 产物没有源码树，文件型后端无法 import。做法：首次真的要跑该应用后端时，把内嵌文件**幂等落地**到
+`{GEBAI_HOME}/data/apps-cache/{id}/` 再 import（`AppsStore.materialize`）。不落到 `data/apps` 是因为那是**用户地盘**——
+写进去会变成“用户既有磁盘应用覆盖内嵌固化”，想恢复内置版本反而要猜哪个文件是自己改的；缓存目录语义清楚：可删可重建。
+函数型后端（`backend: (ctx) => …`）**不进构建内嵌表**（不可序列化），`hasFunctionBackend` 标记该应用在二进制形态下缺后端——
+要它可用就改写成目录应用的 `server.js`。
+
+#### 配置
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `GEBAI_APPS` | `true` | 总开关；`false` 时 `/apps` 与 `/api/apps/*` 一条路由都不注册（全 404） |
+| `GEBAI_APPS_BACKEND` | `auto` | `auto`/`on`/`off`（判定见上「权力内守」） |
+| `GEBAI_APPS_DIRS` | 空 | 额外应用目录（逗号分隔，顺序即优先级，排在内置根之前） |
+| `GEBAI_APPS_MAX_FILE` | 16MB | 单应用文件读取上限（超限按“不存在”，防误把素材库当应用目录） |
+
+#### 已知边界
+
+不做：每个应用的进程/容器隔离（后端模块同进程执行——这是它便宜的原因，也是服务模式默认关闭的原因）；
+上传/安装应用包（应用目录由部署方或智能体自己用 `write`/`sh` 放好）；应用级权限（谁能看哪个应用由部署方在反代层做）；
+前端热更新（应用自己做 HMR；宿主只在文件层保证「刷新即最新」）。
 
 ### 日志系统
 - 日志级别：`debug`、`info`、`warn`、`error`

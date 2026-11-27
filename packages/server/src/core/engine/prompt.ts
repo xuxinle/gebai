@@ -16,6 +16,8 @@ export interface PromptDeps {
   subAgents: SubAgentManager
   /** 通道环境注记（任务态读取）。 */
   channelNote: (sessionId: string) => string | undefined
+  /** 多人会话（群）注记（会话态读取）：非群会话返回 undefined（段落不渲染）。 */
+  groupNote?: (sessionId: string) => string | undefined
   /** 子Agent 项目根解析（{AGENT}_PROJECT env / def.projectRoot 兜底）。 */
   resolveSubAgentProject: (user: string, env: Record<string, string>, name: string) => string | undefined
   /** 子Agent 预置项目清单（{AGENT}_PROJECTS env 解析）。 */
@@ -31,7 +33,7 @@ export interface PromptDeps {
  *  persona=身份与智体概念模型、workspace=会话工作目录与沙箱注记、channel=通道环境注记、safe_mode=安全模式注记、
  *  orchestration=脚本编排指引、batching=并行工具调用指引、planning=重大任务计划审批、artifact_naming=产物命名纪律、
  *  agent_routing=子Agent 用法路由、parallel_sessions=并行多路推进、project_bindings=子Agent 项目绑定、
- *  builtin_projects=内置项目、subagent_catalog=可选子Agent 清单。 */
+ *  builtin_projects=内置项目、group=多人会话注记、subagent_catalog=可选子Agent 清单。 */
 export const PROMPT_SECTION_KEYS = [
   "persona",
   "workspace",
@@ -45,6 +47,7 @@ export const PROMPT_SECTION_KEYS = [
   "parallel_sessions",
   "project_bindings",
   "builtin_projects",
+  "group",
   "subagent_catalog",
 ] as const
 
@@ -75,7 +78,8 @@ export const PROMPT_SECTION_ORDER: readonly PromptSectionKey[] = [
   // ③ 任务级
   "channel",
   "project_bindings",
-  // ④ 会话级（必须最后）
+  // ④ 会话级（必须最后）：group 是群会话专属注记（普通会话为空串），与 subagent_catalog 同为会话级易变段
+  "group",
   "subagent_catalog",
   // 不并入主提示词（独立 system 消息）
   "workspace",
@@ -127,6 +131,9 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
       .map((p) => `内置项目「${p.name}」${p.aliases?.length ? `（别名 ${p.aliases.join("/")}）` : ""}：${p.path}（project 参数可按名寻址）`)
       .join("") },
     { key: "channel", text: deps.channelNote(sessionId) ?? "" },
+    // 多人会话注记（会话级）：群会话专属——谁在说话、回复给全群看、冲突与分工的处理约定。
+    // 位置与会话级易变段一致（subagent_catalog 之前）：普通会话此段为空串，不影响跨会话共享前缀
+    { key: "group", text: deps.groupNote?.(sessionId) ?? "" },
     // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
     // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
     { key: "project_bindings", text: subAgentProjectNote(deps, user, env) },

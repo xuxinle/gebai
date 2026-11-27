@@ -243,6 +243,31 @@ auto Skeleton::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"lines", "shape", "last_line_ratio", "pulse", "radius"});
 }
 
+auto Skeleton::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kShapes[] = {"line", "circle", "rect"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "lines",
+       .type = PropertyType::Integer,
+       .min_value = 1.0f,
+       .max_value = 20.0f,
+       .step = 1.0f,
+       .summary = "行数（line 形状）"},
+      {.name = "shape",
+       .type = PropertyType::Choice,
+       .summary = "占位形状",
+       .choices = kShapes},
+      {.name = "pulse", .type = PropertyType::Boolean, .summary = "是否呼吸动画"},
+      {.name = "radius",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 40.0f,
+       .step = 1.0f,
+       .summary = "圆角（px）"},
+  };
+  return kDescs;
+}
+
+
 auto Skeleton::readonly_property_names() const -> std::vector<std::string_view> {
   return Element::with_universal_readonly({"height"});
 }

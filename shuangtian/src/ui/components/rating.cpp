@@ -343,6 +343,35 @@ auto Rating::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"value", "max", "readonly", "allow_half", "allow_clear", "show_value", "star_size"});
 }
 
+auto Rating::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "value",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 5.0f,
+       .step = 0.5f,
+       .summary = "当前评分（0 = 未评）"},
+      {.name = "max",
+       .type = PropertyType::Integer,
+       .min_value = 1.0f,
+       .max_value = 10.0f,
+       .step = 1.0f,
+       .summary = "满星数"},
+      {.name = "readonly", .type = PropertyType::Boolean, .summary = "只读（只展示，不接受点击/键盘）"},
+      {.name = "allow_half", .type = PropertyType::Boolean, .summary = "是否允许半星"},
+      {.name = "allow_clear", .type = PropertyType::Boolean, .summary = "再点同一颗是否清零"},
+      {.name = "show_value", .type = PropertyType::Boolean, .summary = "右侧是否显示数值"},
+      {.name = "star_size",
+       .type = PropertyType::Number,
+       .min_value = 8.0f,
+       .max_value = 64.0f,
+       .step = 1.0f,
+       .summary = "单颗星的直径（px）"},
+  };
+  return kDescs;
+}
+
+
 auto Rating::readonly_property_names() const -> std::vector<std::string_view> { return Element::with_universal_readonly({}); }
 
 auto Rating::invoke_action(std::string_view action, std::string_view argument) -> bool {

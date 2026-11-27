@@ -23,6 +23,7 @@ import { registerPersonaRoutes } from "./routes/persona"
 import { registerUserRoutes } from "./routes/users"
 import { registerSessionRoutes } from "./routes/sessions"
 import { registerSessionFileRoutes } from "./routes/session-files"
+import { registerGroupRoutes } from "./routes/groups"
 import { registerToolRoutes } from "./routes/tools"
 import { registerTaskRoutes } from "./routes/tasks"
 import { registerTodoRoutes } from "./routes/todos"
@@ -39,6 +40,7 @@ import { registerTerminalRoutes } from "./routes/terminal"
 import { registerLspRoutes } from "./routes/lsp"
 import { registerTtsRoutes } from "./routes/tts"
 import { registerTriageRoutes } from "./routes/triage"
+import { registerAppRoutes } from "./routes/apps"
 
 export interface AppDeps {
   config: ServerConfig
@@ -53,6 +55,8 @@ export interface AppDeps {
   webhooks: WebhookManager
   /** 会话输入队列（服务端权威：任务运行期间的输入在此排队，收尾后自动按序执行）。 */
   inputQueue: import("./core/session/input-queue").SessionInputQueue
+  /** 多人会话（群）存储：群会话不属于任何用户，单独目录体系与成员表（见 core/session/groups.ts）。 */
+  groups?: import("./core/session/groups").GroupStore
   /** 统一任务调度器（GEBAI_TASKS_ENABLED=false 时不启动，为 null——REST 返回能力未启用）。 */
   tasks?: import("./core/schedule/tasks").TaskManager | null
   /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时不启动，为 null——REST 返回 503）。 */
@@ -108,6 +112,10 @@ export interface AppDeps {
   /** 可用模型配置清单（`GEBAI_LLM_MODELS` 已解析的条目，不含密钥——对外只暴露摘要）：
    *  前端模型选择器与会话切换的权威清单；未注入时为空（未配置清单 → 只用启动配置，选择器不出现）。 */
   modelConfigs?: () => import("./core/llm/llm").ModelConfigEntry[]
+  /** 托管应用文件来源（DESIGN「托管应用」；GEBAI_APPS=false 时不注入 → `/apps` 与应用后端路由全不注册）。 */
+  apps?: import("./core/apps/sources").AppsStore
+  /** 托管应用后端加载器（后端起开关判定见 core/apps/backend.ts；未注入或未启用时接口返 503）。 */
+  appBackend?: import("./core/apps/backend").AppBackendLoader
 }
 
 export type AppEnv = { Variables: { deps: AppDeps; user: AuthUser } }
@@ -250,6 +258,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     requireAdmin: rc.requireAdmin,
   })
   registerUserRoutes(rc)
+  // 多人会话（群）：群档案/成员/口语（会话本体仍走 /sessions，访问权由群成员资格裁定）
+  registerGroupRoutes(rc)
   registerSessionRoutes(rc)
   registerSessionFileRoutes(rc)
   registerToolRoutes(rc)
@@ -272,6 +282,10 @@ registerTtsRoutes(rc)
 // 两级研判（DESIGN「大小模型协同」）：批量数据入口——小模型粗筛 + 大模型引擎精审兜底
 registerTriageRoutes(rc)
   registerDocsRoutes(rc)
+  // 托管应用（DESIGN「托管应用」）：`/apps` 索引页 + `/apps/{id}/*` 静态产物 + `/api/apps/{id}/*` 后端模块。
+  // 注册位置在 static 之前：`/apps` 一级前缀不与 Web UI 的 `/`、`/assets`、`/files` 重叠；
+  // 但必须在 static 的通配中间件之前，否则请求会先落到“构建产物兜底”（404）。
+  if (d.config.appsEnabled !== false) registerAppRoutes(rc)
   registerStaticRoutes(rc)
 
   // 路由表自检（装配末尾，全部路由已注册）：把「注册成功但永远匹配不上」的路由

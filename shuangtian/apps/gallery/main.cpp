@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "pages.hpp"
+#include "audit.hpp"
 #include "st/app/icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
@@ -87,9 +88,11 @@ auto audit_gallery_tree(const st::ui::UiRoot& root) -> void {
       // 注入型（前三个建卡期即在场，见下方 injected 断言；MenuPanel 是菜单卡
       // 点击后 make_panel 才挂层的交互触发型——启动不在场，仅放行不要求在场）：
       "ListItem", "ScrollBar", "MenuPanel", "TitleBar",
-      // 非注册的框架组件（gallery 直接 new，无展示义务）：SceneView 未
-      // override type()，树上以基类默认「Element」露面（scene_view.hpp 无 type 重写）。
-      "Element",
+      // 非注册的框架组件（gallery 直接 new，无展示义务）：
+      // SceneView 未 override type()，树上以基类默认「Element」露面；
+      // 三维族（ThreeView / GraphView / LabelOverlay + 它们内建的 SceneView）
+      // **不进声明式注册表**（无头按名建三维没有意义），展示位在「能力矩阵」页。
+      "Element", "SceneView", "ThreeView", "GraphView", "LabelOverlay",
       // gallery 自绘演示类（pages.cpp 本地类）：
       "ProgressRow", "IconCell", "SvgIconCell",
       // 框架懒注入（交互触发，非登记实例）：
@@ -747,14 +750,34 @@ auto run_app(int argc, char** argv) -> int {
   nav_label->set_scale(Text::Scale::Xs2);
   sidebar->add_child(std::move(nav_label));
 
-  // 导航项与页面一一对应（清单来自 `page_specs()`，不在两处各写一遍）
-  const auto& specs = gallery::page_specs();
+  // 导航项与页面一一对应（清单来自 `gallery_model.hpp` 的 `kPages`，不在两处各写一遍）
+  //
+  // 分组渲染：12 页平铺会让侧栏读起来像“功能清单”，而它该回答“我想干什么”。
+  // 分组标题取自 `PageSection`，顺序即 `kPages` 里的顺序（组内按声明序）。
+  const auto& specs = gallery::kPages;
   std::array<Button*, gallery::kPageCount> nav_ptrs{};
-  for (std::size_t index = 0; index < gallery::kPageCount; ++index) {
-    auto item = make_nav_item(specs[index].icon, std::string(specs[index].label));
-    item->set_id(std::format("nav-{}", specs[index].id));
-    nav_ptrs[index] = item.get();
-    sidebar->add_child(std::move(item));
+  for (std::size_t section_index = 0;
+       section_index < static_cast<std::size_t>(gallery::PageSection::Count); ++section_index) {
+    const auto section = static_cast<gallery::PageSection>(section_index);
+    const std::array<std::size_t, gallery::kPageCount> members = gallery::pages_in_section(section);
+    if (members[0] >= gallery::kPageCount) continue;   // 空分区不画标题
+    auto section_row = std::make_unique<Panel>(FlexDirection::Row);
+    section_row->style().align_items = Align::Center;
+    section_row->style().gap = 6.0f;
+    section_row->style().padding = Insets{8.0f, 0.0f, 2.0f, 0.0f};
+    auto section_label = std::make_unique<Text>(std::string(gallery::section_label(section)));
+    section_label->set_tone(Tone::Faint);
+    section_label->set_scale(Text::Scale::Xs2);
+    section_row->add_child(std::move(section_label));
+    sidebar->add_child(std::move(section_row));
+    for (const std::size_t index : members) {
+      if (index >= gallery::kPageCount) break;
+      auto item = make_nav_item(specs[index].icon, std::string(specs[index].label));
+      item->set_id(std::format("nav-{}", specs[index].id));
+      item->set_hint(std::string(specs[index].hint));
+      nav_ptrs[index] = item.get();
+      sidebar->add_child(std::move(item));
+    }
   }
   auto sidebar_spacer = std::make_unique<Panel>(FlexDirection::Column);
   sidebar_spacer->style().grow = true;
@@ -805,6 +828,31 @@ auto run_app(int argc, char** argv) -> int {
   // 生命周期：比页面长——页面回调里会用到它，所以它得活到 run_app 结束。
   GalleryNativeHostSource native_host_source(app);
   hooks.native_host_source = &native_host_source;
+  // 自检通道：页面不认 `UiRoot`，所以由应用提供这一口。
+  //
+  // 为什么把报告存成 `shared_ptr` 而不是返回值：`std::function<AuditReport()>`
+  // 需要拷贝一份完整报告（含明细 vector），而自检台每跑一次就看一眼——
+  // 共享一个不可变快照更省，也让“报告只有一个真源”这件事写在类型上。
+  auto last_report = std::make_shared<gallery::AuditReport>();
+  hooks.run_self_audit = [app_ptr, last_report]() -> gallery::AuditReport {
+    gallery::AuditEnv env{};
+    const st::control::Metrics metrics = app_ptr->metrics();
+    env.backend = std::string(app_ptr->backend_name());
+    env.renderer = metrics.renderer;
+    env.text_renderer = metrics.text_renderer;
+    env.device_scale = app_ptr->device_scale();
+    const st::math::Size viewport = app_ptr->viewport();
+    env.logical_width = static_cast<int>(viewport.width);
+    env.logical_height = static_cast<int>(viewport.height);
+    env.physical_width = static_cast<int>(metrics.physical_width);
+    env.physical_height = static_cast<int>(metrics.physical_height);
+    env.nodes = metrics.nodes;
+    env.frames = metrics.frames;
+    env.frame_p50_ms = metrics.frame_p50_ms;
+    env.frame_p95_ms = metrics.frame_p95_ms;
+    *last_report = gallery::run_audit(app_ptr->root(), env);
+    return *last_report;
+  };
 
   for (std::size_t index = 0; index < gallery::kPageCount; ++index) {
     auto page = gallery::build_page(index, hooks);
@@ -873,7 +921,10 @@ auto run_app(int argc, char** argv) -> int {
         // 语义树节点数（与控制通道 tree 同源）：切页/主题/DPI 变化后都会不同
         setter(std::format("{}", metrics.nodes));
       } else if (field == "stat_port") {
-        setter(std::format("127.0.0.1:{}", app_ptr->control_port()));
+        // 只写**端口号**：这张卡的字号是 26px，`127.0.0.1:57668` 这种全地址会被
+        // 截断成 `127.0.0.1:60…`（实测）——一个"看起来被切了一半"的数字比只给
+        // 端口更糟。完整地址在状态栏与 `hello` 里都有，这里给能一眼认出的那一半。
+        setter(std::format("{}", app_ptr->control_port()));
       }
     }
     status_right_ptr->set_content(std::format("{} · DPI {:.1f} · {}x{} · 第 {} 帧",
@@ -969,6 +1020,23 @@ auto run_app(int argc, char** argv) -> int {
     decl_host = st::ui::dsl::mount_into(app.root(), *decl_anchor,
                                         gallery::make_declarative_component());
     if (decl_host == nullptr) st::log::out("声明式页挂载失败（该页将只显示壳）\n");
+  }
+  // —— 属性面页：检视器也是声明式子树（第二个 mount_into 宿主）——
+  //
+  // 与声明式页同一条通路，但演示的是**属性自省**：面板由 `property_schema()` 自动生成，
+  // 改动经 `set_property` 落到**本页靶子区那些真实元素**上（`UiRoot::find` 定位）。
+  // 这也顺手证明了“同一次启动可以挂多棵声明式子树”（每棵各自登记到 UiRoot）。
+  std::unique_ptr<st::ui::dsl::DeclarativeHost> prop_host{};
+  if (Element* prop_anchor = app.root().find("property-host"); prop_anchor != nullptr) {
+    prop_host = st::ui::dsl::mount_into(app.root(), *prop_anchor,
+                                        gallery::make_property_inspector_component(app.root()));
+    if (prop_host == nullptr) st::log::out("属性面检视器挂载失败（该页将只显示靶子区）\n");
+  }
+  // 自检台：建页时按钮还没接（那时页面尚未挂树），此时已挂完——按 id 接上并跑一次。
+  if (Element* audit_page = app.root().find("page-audit"); audit_page != nullptr) {
+    if (auto* panel = dynamic_cast<Panel*>(audit_page); panel != nullptr) {
+      gallery::wire_audit_page(*panel, hooks);
+    }
   }
   // 启动树自检（mount_into 之后：声明式子树也是被审计对象；39 轮未竟项②）。
   // 不达标不阻断启动（展示型自检），结论打印在启动日志；无头 e2e 可 grep 断言。

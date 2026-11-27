@@ -198,6 +198,8 @@ export interface WsSnapshot {
  * 各连接注册监听回调接收带 seq 的日志条目（在线推送 = 日志条目的实时投递）。
  */
 interface PendingDelta {
+  /** 该增量的受众（群会话多播：每个成员账号各得一份日志）。 */
+  audiences: string[]
   sessionId: string
   messageId?: string
   subSessionId?: string
@@ -262,17 +264,15 @@ export class WsStateService {
   }
 
   private async route(ev: AgentEvent): Promise<void> {
-    // 快速路径：内存缓存命中；慢路径：磁盘读取会话归属
-    let uid = this.d.store.ownerOf(ev.sessionId)
-    if (!uid) {
-      const s = await this.d.store.load(ev.sessionId)
-      uid = s?.userId ?? null
-    }
-    if (!uid) return
+    // 受众解析：群会话 → 全部成员（他们各自的日志各得一份，断线重连时各自重放）；
+    // 普通会话 → 会话归属人单播。
+    const audience = this.audienceOf(ev.sessionId)
+    if (!audience.length) return
     // 文本增量合并：同一消息的连续 delta 在窗口内合并为一条（下一个非增量事件先冲刷再入列，
     // 保证用户视角顺序不变）；其余事件直接入列
     if (ev.type === "event.message.delta") {
-      const cur = this.pendingDeltas.get(uid)
+      const key = `${ev.sessionId}|${audience.join(",")}`
+      const cur = this.pendingDeltas.get(key)
       const sameStream =
         cur &&
         cur.sessionId === ev.sessionId &&
@@ -283,38 +283,66 @@ export class WsStateService {
         cur.text = (cur.text + String(ev.payload.text ?? "")).slice(0, DELTA_MERGE_MAX_CHARS)
         return
       }
-      this.flushDelta(uid)
+      this.flushDelta(key)
       const pending: PendingDelta = {
+        audiences: audience,
         sessionId: ev.sessionId,
         messageId: ev.payload.messageId as string | undefined,
         subSessionId: ev.payload.subSessionId as string | undefined,
         subSessionMark: ev.payload.subSession === true,
         text: String(ev.payload.text ?? ""),
         timestamp: ev.timestamp,
-        timer: setTimeout(() => this.flushDelta(uid), DELTA_MERGE_MS),
+        timer: setTimeout(() => this.flushDelta(key), DELTA_MERGE_MS),
       }
-      this.pendingDeltas.set(uid, pending)
+      this.pendingDeltas.set(key, pending)
       return
     }
-    this.flushDelta(uid)
-    this.appendAndNotify(uid, ev)
+    this.flushSessionDeltas(ev.sessionId)
+    this.appendAndNotify(audience, ev)
   }
 
-  /** 冲刷合并中的文本增量（作为单条 delta 事件入日志并推送）。 */
-  private flushDelta(uid: string): void {
-    const pending = this.pendingDeltas.get(uid)
+  /**
+   * 事件受众：群会话 → 全部成员账号（多播）；普通会话 → 归属人生播（响应形态与旧版一致）。
+   * 受众为空（会话已删/无归属/非成员请求无上下文）返回空数组，调用方丢弃该事件。
+   */
+  private audienceOf(sessionId: string): string[] {
+    const members = this.d.groups?.audienceOf(sessionId)
+    if (members) return members
+    const uid = this.d.store.ownerOf(sessionId)
+    return uid ? [uid] : []
+  }
+
+  /** 冲刷指定受众的合并中增量（key = 会话 + 受众串）。 */
+  private flushDelta(key: string): void {
+    const pending = this.pendingDeltas.get(key)
     if (!pending) return
-    this.pendingDeltas.delete(uid)
+    this.pendingDeltas.delete(key)
     clearTimeout(pending.timer)
     if (!pending.text) return
     const payload: Record<string, unknown> = { text: pending.text }
     if (pending.messageId !== undefined) payload.messageId = pending.messageId
     if (pending.subSessionMark) payload.subSession = true
     if (pending.subSessionId !== undefined) payload.subSessionId = pending.subSessionId
-    this.appendAndNotify(uid, { type: "event.message.delta", sessionId: pending.sessionId, payload, timestamp: pending.timestamp })
+    this.appendAndNotify(pending.audiences, { type: "event.message.delta", sessionId: pending.sessionId, payload, timestamp: pending.timestamp })
   }
 
-  private appendAndNotify(uid: string, ev: AgentEvent): void {
+  /** 冲刷该会话待合并的增量（非增量事件到达时先落地，保证同一会话的事件顺序）。 */
+  private flushSessionDeltas(sessionId: string): void {
+    for (const [key, p] of [...this.pendingDeltas]) {
+      if (p.sessionId === sessionId) this.flushDelta(key)
+    }
+  }
+
+  /** 冲刷所有待合并增量（收尾/测试用）。 */
+  flushAllDeltas(): void {
+    for (const key of [...this.pendingDeltas.keys()]) this.flushDelta(key)
+  }
+
+  private appendAndNotify(audiences: string[], ev: AgentEvent): void {
+    for (const uid of audiences) this.appendTo(uid, ev)
+  }
+
+  private appendTo(uid: string, ev: AgentEvent): void {
     const entry = this.journal(uid).append(ev)
     const ls = this.listeners.get(uid)
     if (ls) {

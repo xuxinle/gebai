@@ -10,6 +10,8 @@
 /// `semantics`/`visual` 六处全部尊重 `visible`，因此**隐藏页完全不参与布局与绘制**
 /// （切页成本 = 标脏 + 重排当前页），比"销毁重建"简单得多，也不会让组件丢状态
 /// （输入框里的文字、表格选中行在切页后仍然保留）。
+///
+/// 页面清单与组件分类在 `gallery_model.hpp`（数据），本头只声明"怎么建页"。
 
 #include <array>
 #include <cstddef>
@@ -17,6 +19,8 @@
 #include <memory>
 #include <string>
 
+#include "audit.hpp"
+#include "gallery_model.hpp"
 #include "native_host_page.hpp"
 #include "webview_page.hpp"  // `NativeHostSource`（页面的外部窗口来源端口）
 #include "st/math/geometry.hpp"
@@ -54,30 +58,30 @@ struct PageHooks {
   /// `Application`/后端的存在（依赖方向），而"窗口动作"只有应用側做得了。
   st::ui::WindowControl* window_control{nullptr};
 
-  /// 原生子窗口嵌入的外部窗口来源（页面用它判断“能不能嵌” + 取窗口 + 读状态）。
+  /// 原生子窗口嵌入的外部窗口来源（页面用它判断"能不能嵌" + 取窗口 + 读状态）。
   ///
   /// 为何直接给一个接口指针而不散成几个 `std::function`：它有状态——一个长驻
-  /// 子进程、一个窗口句柄、“还在不在跑”的判定。散成回调后页面得自己拼
-  /// “进程死了但句柄还在”这种组合，很容易拼漏。
+  /// 子进程、一个窗口句柄、"还在不在跑"的判定。散成回调后页面得自己拼
+  /// "进程死了但句柄还在"这种组合，很容易拼漏。
   ///
   /// 为何不让页面直接问后端：与 `window_control` 同理——页面不该知道
   /// `Application`/`shell::Backend` 的存在（依赖方向）。而且这个能力在无头/
-  /// 未实现平台上是**不存在的**，页面必须能分辨“没能力”与“嵌失败”。
-  /// `nullptr` = 应用没提供（页面如实显示“没有可用的外部窗口来源”）。
+  /// 未实现平台上是**不存在的**，页面必须能分辨"没能力"与"嵌失败"。
+  /// `nullptr` = 应用没提供（页面如实显示"没有可用的外部窗口来源"）。
   NativeHostSource* native_host_source{nullptr};
+
+  /// 自检台用：跑一次全量自检并返回报告（应用侧实现——自检要遍历真值树，而页面
+  /// 对 `UiRoot` 只有只读能力；由应用把结果交给页面）。
+  ///
+  /// 返回**结构化报告**而不是一段文本：页面要按状态上色、按行展开明细，拿字符串
+  /// 就只能再解析一次（两处各自格式化同一份数据必然漂移）。
+  ///
+  /// `AuditReport` 在页面翻译单元里是**不完整类型**：页面只把它传给
+  /// `fill_audit_view`（实现在 audit_page.cpp，那里 include audit.hpp）。
+  std::function<AuditReport()> run_self_audit{};
+  /// 跳到另一页（页内快捷入口用；应用侧实现导航）。
+  std::function<void(std::string_view)> navigate{};
 };
-
-/// 页面清单（导航、切页、自动验证共用同一份，避免"两处各写一遍"走偏）。
-struct PageSpec {
-  std::string_view id{};        ///< 页面容器 id：`page-<id>`（语义树据此判断当前页）
-  std::string_view icon{};      ///< 导航图标名
-  std::string_view label{};     ///< 导航文字与页标题
-  std::string_view subtitle{};  ///< 页副标题
-};
-
-inline constexpr std::size_t kPageCount = 9;
-
-[[nodiscard]] auto page_specs() -> const std::array<PageSpec, kPageCount>&;
 
 /// 构建每个页面（返回 `Panel(Column)`，自带页标题与内边距）。
 [[nodiscard]] auto build_page(std::size_t index, const PageHooks& hooks)
@@ -90,5 +94,42 @@ inline constexpr std::size_t kPageCount = 9;
 /// 框架的 `mount()` 是**单根语义**（会替掉 `UiRoot::content()`），
 /// 而 gallery 是手搭壳 + 声明式页的混合形态。
 [[nodiscard]] auto make_declarative_component() -> std::shared_ptr<st::ui::dsl::Component>;
+
+/// 属性面页的检视器组件：由 `PropertyDesc` 自动生成面板（`build_property_panel`）。
+///
+/// 与声明式页同一个形态（`mount_into` 子树），但它演示的是**属性自省**这条通路：
+/// 组件声明 `property_schema()` → 面板自动出现对应控件 → 改动经 `set_property`
+/// 落到真实元素上。属性面有缺口时这一页会**看起来不对**（控件缺失/拖了不动），
+/// 这正是它作为质检点的价值。
+[[nodiscard]] auto make_property_inspector_component() -> std::shared_ptr<st::ui::dsl::Component>;
+
+/// 同上，但把“找靶子元素 / 读 / 写”接到指定的 UI 根上（应用侧建页后调用）。
+///
+/// 为何要单独一个重载：`make_property_inspector_component()` 不带参数（保持
+/// "页面工厂"的纯净形态），而检视器要真的读写树上的元素，必须拿到 `UiRoot`。
+[[nodiscard]] auto make_property_inspector_component(st::ui::UiRoot& root)
+    -> std::shared_ptr<st::ui::dsl::Component>;
+
+/// 把一份自检报告填进自检台页的表格与明细容器（`audit_page.cpp` 实现）。
+///
+/// 为什么不在 `build_page` 里就地填：自检要**随叫随跑**（按钮/控制通道都能触发），
+/// 而建页只发生一次。所以把"渲染报告"单独抽成一个函数，建立时跑一次、
+/// 之后每次跑完再调一次——同一段渲染逻辑，两个时机。
+void fill_audit_view(st::ui::Element& table, st::ui::Element& details,
+                     const AuditReport& report);
+
+/// 把自检台页的按钮与两个容器接上（建页后由应用调用）。
+void wire_audit_page(st::ui::Panel& page, const PageHooks& hooks);
+
+/// 构建「能力矩阵」页（三维 / 关系图 / 异步排版 / 通路型能力的展位与判据）。
+[[nodiscard]] auto build_capabilities_page(const PageHooks& hooks)
+    -> std::unique_ptr<st::ui::Panel>;
+
+/// 构建「自检台」页（结论表 + 明细 + 跑一次按钮）。
+[[nodiscard]] auto build_audit_page(const PageHooks& hooks) -> std::unique_ptr<st::ui::Panel>;
+
+/// 构建「属性面」页（含靶子区、检视器宿主 `#property-host`、说明卡）。
+[[nodiscard]] auto build_properties_page(const PageHooks& hooks)
+    -> std::unique_ptr<st::ui::Panel>;
 
 }  // namespace gallery

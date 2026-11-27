@@ -581,6 +581,25 @@ auto Tree::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal(names);
 }
 
+auto Tree::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "row_height",
+       .type = PropertyType::Number,
+       .min_value = 12.0f,
+       .max_value = 80.0f,
+       .step = 1.0f,
+       .summary = "行高（px；密度是场景属性，自动化也该能调）"},
+      {.name = "scroll",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 100000.0f,
+       .step = 1.0f,
+       .summary = "纵向滚动偏移（px）"},
+  };
+  return kDescs;
+}
+
+
 }  // namespace st::ui
 
 // ── 组件登记（`st/ui/component_registry.hpp`）────────────────────────

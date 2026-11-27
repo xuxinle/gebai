@@ -24,6 +24,8 @@
 #include "st/raster/pick.hpp"
 #include "st/raster/three_runtime.hpp"
 #include "st/test/test.hpp"
+#include "st/raster/canvas.hpp"
+#include "st/ui/components/label_overlay.hpp"
 #include "st/ui/components/three_view.hpp"
 
 using st::ui::OrbitCameraState;
@@ -643,4 +645,123 @@ ST_TEST(three_view_hud_chip_keeps_text_inside_box) {
   ST_CHECK(bottom_chip.text_origin.y >= bottom_chip.box.y);
   ST_CHECK(bottom_chip.text_origin.y + line_height <= bottom_chip.box.bottom() + 0.01f);
   ST_CHECK(bottom_chip.box.bottom() - (bottom_chip.text_origin.y + line_height) > 1.0f);
+}
+
+/// **装载发生在拿到真实尺寸之前**时，取景必须在第一次 arrange 后补算。
+///
+/// ## 守的是什么（实测缺陷）
+///
+/// `frame_scene()` 的横向约束要算 `bounds_.width / bounds_.height`。而应用的常规写法是
+/// 「先 `load_script` 再挂树」（gallery / 册府 / 裁云预览都这样）——装载那一刻
+/// 元素还没 arrange，两者都是 0，aspect 退回 1.0，于是**只有一个方向的约束生效**，
+/// 距离算出来偏大。
+///
+/// 实测（gallery「能力矩阵」页的三物体场景）：包围盒横向 3.0，视口 862×320（2.7:1），
+/// 取到的距离是 **5.05**，而正确值是 **2.8** 量级。画面上看是「物体缩在底部一小块、
+/// 上方大片空白」——而物体数 / 网格 / 帧数全部正常，看起来像"场景太小"。
+///
+/// 判据用**距离**：竖直约束（span_v / tan(half_fov_v)）与水平约束（span_h /
+/// tan(half_fov_h)）在宽视口下**不相等**，只有真按宽高比算过，距离才会落到小的那个。
+/// 用 1.0 的 aspect 算出来的距离必然贴着竖直约束那条线——与正确值的差距远超舍入。
+ST_TEST(three_view_frames_scene_after_layout_not_at_load_time) {
+  const auto context = st::ui::RenderContext{test_theme(), nullptr, 0.0, nullptr};
+
+  // 场景包围盒（kScene）：球(-0.7,0.68) r0.6、盒(0.8,0.46) 0.9、底座 2.9×1.4
+  // → x∈[-1.3,1.45]、y∈[0.01,1.28]、z∈[-0.7,0.7]；横向跨度 2.75。
+  auto wide = std::make_unique<ThreeView>();
+  ST_REQUIRE(wide->load_script(kScene, "wide.js"));   // 装载时没有 bounds
+  const float before = std::stof(wide->get_property("distance").value_or("0"));
+  // 宽视口 860×320 = 2.69:1：水平方向宽裕、竖直方向吃紧 → 距离由**竖直**定
+  wide->arrange(context, st::math::Rect{0.0f, 0.0f, 860.0f, 320.0f});
+  const float after_wide = std::stof(wide->get_property("distance").value_or("0"));
+
+  // 同样的场景放进**竖**视口 320×860：这次水平吃紧，距离必须显著变大。
+  // 若取景只在构建期算过一次（且用 1:1 的假宽高比），这两个距离会**相等**。
+  auto tall = std::make_unique<ThreeView>();
+  ST_REQUIRE(tall->load_script(kScene, "tall.js"));
+  tall->arrange(context, st::math::Rect{0.0f, 0.0f, 320.0f, 860.0f});
+  const float after_tall = std::stof(tall->get_property("distance").value_or("0"));
+
+  ST_CHECK(before > 0.0f);              // 构建期确实算了一份（不是没算）
+  ST_CHECK(after_tall > after_wide * 1.5f);
+  // 而且宽视口那份必须**比构建期更近**：构建期用 1:1 的假比，等于按竖视口算。
+  ST_CHECK(after_wide < before * 0.95f);
+}
+
+/// 补算只发生一次：之后用户拖动/缩放出来的视角不能被布局夺回去。
+ST_TEST(three_view_pending_frame_runs_only_once) {
+  const auto context = st::ui::RenderContext{test_theme(), nullptr, 0.0, nullptr};
+  auto view = std::make_unique<ThreeView>();
+  ST_REQUIRE(view->load_script(kScene, "once.js"));
+  view->arrange(context, st::math::Rect{0.0f, 0.0f, 860.0f, 320.0f});
+  const float framed = std::stof(view->get_property("distance").value_or("0"));
+
+  // 用户推远（模拟滚轮）：这是"用户意图"，后续重排不该把它拉回来。
+  ST_REQUIRE(view->set_property("distance", "9.0"));
+  view->arrange(context, st::math::Rect{0.0f, 0.0f, 700.0f, 320.0f});
+  const float after_relayout = std::stof(view->get_property("distance").value_or("0"));
+  ST_CHECK_NEAR(after_relayout, 9.0f, 0.001);
+  (void)framed;
+
+  // 但"切到另一个场景"仍应重新取景（那是新内容，用户的旧视角无意义）。
+  ST_REQUIRE(view->load_script(kScene, "other.js"));
+  view->arrange(context, st::math::Rect{0.0f, 0.0f, 860.0f, 320.0f});
+  const float after_switch = std::stof(view->get_property("distance").value_or("0"));
+  ST_CHECK(after_switch < 9.0f);
+}
+
+/// **绝对坐标 / 局部坐标混用**：标签层的选围与夹取必须按画布绝对坐标做。
+///
+/// ## 守的是什么（实测缺陷）
+///
+/// ThreeView::project_to_screen() 返回的是**画布绝对**像素（box.x + …），而
+/// LabelOverlay::paint_content 拿它直接跟 bounds_.width / bounds_.height（都是**局部**
+/// 尺寸）比：
+///
+///     if (at.x < -200 || at.x > width + 200 || ...) continue;   // 丢标签
+///     ty = std::clamp(ty, 2.0f, height - line_h - 2.0f);       // 夹到角上
+///
+/// 后果随视口位置变化：视口越靠右/下（绝对坐标越大），越多标签被当成屏幕外丢掉。
+/// 实测 gallery 能力矩阵页（视口 x=264）：7 个标签恒定只画出 3 个——三维连线正常、
+/// 属性面全对、label_count=7 也对，只有看图才发现字少了。
+///
+/// ## 判据
+///
+/// 造一个**平移过**的标签层（bounds.x/y 非零），投影器返回该视口内的绝对坐标；
+/// 断言 painted 等于标签数。用局部坐标系写过滤的实现会在这里掉一部分标签。
+ST_TEST(label_overlay_uses_absolute_canvas_coordinates) {
+  const auto context = st::ui::RenderContext{test_theme(), nullptr, 0.0, nullptr};
+
+  st::ui::LabelOverlay overlay;
+  overlay.set_id("labels");
+  // 视口在画布右下：绝对坐标带正偏移，正是**局部坐标系实现会判越界**的情形。
+  overlay.arrange(context, st::math::Rect{264.0f, 343.0f, 860.0f, 340.0f});
+
+  // 七个标签按 4×2 网格铺开（避免标签框互相碰撞被避让丢弃——那是另一回事）。
+  std::vector<st::ui::LabelAnchor> anchors;
+  for (int index = 0; index < 7; ++index) {
+    st::ui::LabelAnchor anchor;
+    anchor.id = std::format("n{}", index);
+    anchor.text = std::format("节点 {}", index);
+    anchor.weight = 0.5f;
+    anchor.x = static_cast<float>(index % 4);
+    anchor.y = static_cast<float>(index / 4);
+    anchors.push_back(std::move(anchor));
+  }
+  overlay.set_labels(std::move(anchors));
+  overlay.set_projector([](float x, float y, float z) {
+    (void)z;
+    // 世界坐标 → 视口内的**绝对**画布坐标（与 ThreeView::project_to_screen 同语义）。
+    //
+    // 横向故意铺到 1084（视口绝对范围 264..1124，仍在视口内）：
+    // 而**局部坐标系**的实现会拿 `width=860` 当上界，判它“屏幕外”而丢掉。
+    // 这就是判据：绝对坐标实现 7/7，局部坐标实现会少。
+    return std::make_pair(std::make_pair(264.0f + 40.0f + x * 260.0f, 343.0f + 40.0f + y * 90.0f),
+                          static_cast<float>(1.0));
+  });
+
+  // 画到一张足够大的画布上（绝对坐标落在这里面）。
+  st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(1400, 900, 1.0f);
+  overlay.paint_content(context, canvas);
+  ST_CHECK_EQ(overlay.painted_labels(), 7U);
 }

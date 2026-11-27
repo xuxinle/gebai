@@ -1047,6 +1047,26 @@ auto Tabs::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"active", "label", "options", "scroll", "show_add", "max_tab_width", "trailing"});
 }
 
+auto Tabs::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "active",
+       .type = PropertyType::Integer,
+       .min_value = -1.0f,
+       .max_value = 256.0f,
+       .step = 1.0f,
+       .summary = "活动页签下标（-1 = 无；写入会触发 on_change）"},
+      {.name = "show_add", .type = PropertyType::Boolean, .summary = "是否显示“+”按钮"},
+      {.name = "max_tab_width",
+       .type = PropertyType::Number,
+       .min_value = 40.0f,
+       .max_value = 600.0f,
+       .step = 4.0f,
+       .summary = "单个页签的最大宽度（超出则省略）"},
+  };
+  return kDescs;
+}
+
+
 auto Tabs::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "add") {
     // 「+」的键盘/自动化入口（不新造标签——只把意图交回调用方）。

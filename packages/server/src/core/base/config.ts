@@ -227,6 +227,17 @@ export interface ServerConfig {
   lspIdleMs: number
   /** LSP 并发语言服务器进程上限（GEBAI_LSP_MAX，默认 4）。 */
   lspMaxSessions: number
+  /** 托管应用总开关（GEBAI_APPS，默认 true）：关闭时 `/apps` 与应用后端路由一条都不注册（404）。 */
+  appsEnabled: boolean
+  /** 托管应用后端模块开关（GEBAI_APPS_BACKEND，默认 auto）：加载 `server.js` 一类后端模块——
+   *  在本进程内执行部署方代码。auto = 仅本地模式且非安全模式时开启；服务模式（多用户部署）与
+   *  安全模式（GEBAI_SAFE_MODE）下为 off；on/off 为部署决策（on 表示部署方整体担责）。 */
+  appsBackend: "auto" | "on" | "off"
+  /** 额外托管应用目录（GEBAI_APPS_DIRS，逗号分隔，顺序即优先级）：`{GEBAI_HOME}/data/apps` 与
+   *  `{GEBAI_HOME}/apps` 之外的运行时来源。 */
+  appsDirs?: string
+  /** 单应用文件读取上限（GEBAI_APPS_MAX_FILE 字节，默认 16MB）。 */
+  appsMaxFile: number
 }
 
 function env(name: string, fallback = ""): string {
@@ -496,6 +507,14 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     lspServers: env("GEBAI_LSP_SERVERS") || undefined,
     lspIdleMs: num("GEBAI_LSP_IDLE_MS", 10 * 60 * 1000),
     lspMaxSessions: num("GEBAI_LSP_MAX", 4),
+    // 托管应用（DESIGN「托管应用」）：静态产物总是可托管；后端模块默认只在本地非安全模式下加载
+    appsEnabled: bool("GEBAI_APPS", true),
+    appsBackend: (() => {
+      const v = env("GEBAI_APPS_BACKEND").trim().toLowerCase()
+      return v === "on" || v === "off" ? (v as "on" | "off") : "auto"
+    })(),
+    appsDirs: env("GEBAI_APPS_DIRS").trim() || undefined,
+    appsMaxFile: num("GEBAI_APPS_MAX_FILE", 16 * 1024 * 1024),
   }
   return { ...config, ...overrides }
 }

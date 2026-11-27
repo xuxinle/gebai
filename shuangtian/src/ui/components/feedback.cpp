@@ -148,6 +148,28 @@ auto ProgressBar::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"value", "tone", "text"});
 }
 
+auto ProgressBar::property_schema() const -> std::span<const PropertyDesc> {
+  // `value` 与 `set_value` 同源（夹到 [0,1]）；`tone` 的候选就是 `Tone` 的枚举名
+  // （`tone_from_name` 认的那一套）——写多了会让面板生成一个“选了不生效”的下拉。
+  static constexpr std::string_view kTones[] = {"default", "muted",  "faint", "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "value",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 1.0f,
+       .step = 0.01f,
+       .summary = "完成度（0~1）"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+      {.name = "text", .type = PropertyType::Text, .summary = "内联文字（空 = 只画条）"},
+  };
+  return kDescs;
+}
+
 auto ProgressBar::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "set_value") {
     const auto parsed = parse_progress(argument);
@@ -259,6 +281,26 @@ auto Spinner::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"size", "diameter", "tone"});
 }
 
+auto Spinner::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "diameter",
+       .type = PropertyType::Number,
+       .min_value = 8.0f,
+       .max_value = 96.0f,
+       .step = 1.0f,
+       .summary = "直径（px，不是字号）"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+  };
+  return kDescs;
+}
+
+
 // —— Badge ——
 
 Badge::Badge(std::string text, Tone tone) : text_(std::move(text)), tone_(tone) {
@@ -338,6 +380,21 @@ auto Badge::set_property(std::string_view name, std::string_view value) -> bool 
 auto Badge::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"text", "value", "tone"});
 }
+
+auto Badge::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "text", .type = PropertyType::Text, .summary = "文字（与 value 同义）"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+  };
+  return kDescs;
+}
+
 
 // —— Chip ——
 
@@ -494,6 +551,23 @@ auto Chip::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"text", "value", "tone", "dot", "closable"});
 }
 
+auto Chip::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr std::string_view kTones[] = {"default", "muted",   "faint",  "primary",
+                                               "accent",  "success", "warning", "danger",
+                                               "on_primary"};
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "text", .type = PropertyType::Text, .summary = "文字（与 value 同义）"},
+      {.name = "tone",
+       .type = PropertyType::Choice,
+       .summary = "语义色调",
+       .choices = kTones},
+      {.name = "dot", .type = PropertyType::Boolean, .summary = "前置状态圆点"},
+      {.name = "closable", .type = PropertyType::Boolean, .summary = "是否显示关闭按钮"},
+  };
+  return kDescs;
+}
+
+
 // —— Avatar ——
 
 Avatar::Avatar(std::string name, float size)
@@ -596,6 +670,20 @@ auto Avatar::set_property(std::string_view name, std::string_view value) -> bool
 auto Avatar::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"name", "text", "initials", "size"});
 }
+
+auto Avatar::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "name", .type = PropertyType::Text, .summary = "姓名（与 text 同义；取首字母/首字作头像字）"},
+      {.name = "size",
+       .type = PropertyType::Number,
+       .min_value = 16.0f,
+       .max_value = 128.0f,
+       .step = 1.0f,
+       .summary = "直径（px）"},
+  };
+  return kDescs;
+}
+
 
 // —— Tooltip ——
 
@@ -794,6 +882,18 @@ auto Tooltip::set_property(std::string_view name, std::string_view value) -> boo
 auto Tooltip::property_names() const -> std::vector<std::string_view> {
   return Element::with_universal({"text", "value", "active", "target"});
 }
+
+auto Tooltip::property_schema() const -> std::span<const PropertyDesc> {
+  static constexpr PropertyDesc kDescs[] = {
+      {.name = "text", .type = PropertyType::Text, .summary = "提示文字（与 value 同义）"},
+      {.name = "active", .type = PropertyType::Boolean, .summary = "是否显示"},
+      {.name = "target",
+       .type = PropertyType::Text,
+       .summary = "锚点矩形（x,y,w,h 四段逗号分隔；与 target_id 二选一）"},
+  };
+  return kDescs;
+}
+
 
 }  // namespace st::ui
 

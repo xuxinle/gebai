@@ -9,6 +9,7 @@ import "./css/composer.css"
 import "./css/persona-panel.css"
 import "./css/overlays.css"
 import "./css/wheel.css"
+import "./css/groups.css"
 import "./css/files-split.css"
 import { restoreToken, bindAuth, showLogin, syncTokenCookie, tryExternalAuth } from "./auth"
 import { bindApprovalSkip, applyApprovalSkip, syncApprovalSkipForRunning } from "./approval-skip"
@@ -19,6 +20,7 @@ import { bindShortcutSheet } from "./shortcut-sheet"
 import { bindTodoPop } from "./todo-pop"
 import { bindPersonaPop } from "./persona-pop"
 import { bindTasks } from "./tasks"
+import { bindGroups, setGroupSessionOpener, syncGroupJoinCodes } from "./groups"
 import { bindSubSessions } from "./subsessions"
 import { bindFilesSplit } from "./files-split"
 import { loadLocalEnv } from "./env-local"
@@ -44,7 +46,7 @@ import { noteMerge } from "./subsessions"
 import { lockToBottom, refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { bindMsgNav } from "./msg-nav"
 import { applyQueued, applyQueuedUpdate } from "./queue"
-import { client, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames } from "./state"
+import { client, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames, speakerPrefix } from "./state"
 import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onInteractionSettled, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
 import { consumeTaskStream } from "./stream"
 import { bindTooltips, showNoticeDialog, toast } from "./ui"
@@ -156,8 +158,10 @@ const submitOnce = createSubmitQueue(async () => {
   // 上屏包 try/catch：输入区已清空，此处抛错（渲染/附件预览异常）会让调用方（void submitOnce）
   // 变成未处理拒绝——输入没了、消息没发出去、界面无任何痕迹。
   const localFiles = pendingFiles.map((f) => ({ name: f.name, mime: f.mime, size: f.size, blob: f.blob }))
-  // 纯附件消息的正文与服务端落盘一致（同一默认提示词），否则刷新前后同一条消息两种正文
-  const shownText = text || (localFiles.length ? DEFAULT_ATTACH_PROMPT : "")
+  // 纯附件消息的正文与服务端落盘一致（同一默认提示词），否则刷新前后同一条消息两种正文；
+  // 多人会话再拼上发言前缀（与服务端落盘文本同一口径——发送时就上屏带前缀的文本）
+  const rawText = text || (localFiles.length ? DEFAULT_ATTACH_PROMPT : "")
+  const shownText = rawText ? speakerPrefix() + rawText : ""
   if (shownText || localFiles.length) {
     try {
       userMsgEl = appendMsg({ id: msgId, role: "user", content: shownText, createdAt: Date.now() })
@@ -312,6 +316,14 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
   bindPersonaPop() // 轮盘「拟人」按钮 → 拟人运行态浮层（未启用时按钮自行隐起）
   bindTasks() // 轮盘「任务」按钮 → 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列）
+  bindGroups() // 轮盘「多人会话」按钮 → 群面板（我的群 / 创建 / 加入）
+  // 群面板里的「进入会话」与会话列表点击同一条路径：载入消息 + 重绑随会话变化的 UI
+  setGroupSessionOpener(async (s) => {
+    setCurrentSession(s)
+    await enterSessionView(s.id)
+    await loadMessages(s.id)
+    void syncGroupJoinCodes()
+  })
   bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（消息流里只留一行入口）
   bindFilesSplit() // 文件工作台入口：主按钮 = 分屏并列，副按钮 = 全屏打开文件工作台（见 files-split.ts）
   restoreToken()

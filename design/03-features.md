@@ -429,6 +429,11 @@ WebSocket 消息格式（JSON）：
 | `session.rename` | 重命名会话 |
 | `session.pin` | 置顶/取消置顶会话（`pinned` 布尔；元数据操作不刷新 `updatedAt`） |
 | `session.model_config.set` | 切换会话使用的模型配置（`name` = `GEBAI_LLM_MODELS` 条目名；`null`/空串 = 回落清单默认配置）；未知名拒绝（不写入一个永远解析不到的配置名）；不刷新 `updatedAt` |
+| `group.list` / `group.get` | 列出我参与的多人会话（群）/ 单群详情（含成员表、邀请码、我的群内身份；非成员与不存在同应答） |
+| `group.create` / `group.join` | 创建群（`name` + `memberName`/`memberRole` + 可选 `passcode`）/ 加入群（`joinCode` + 可选 `passcode` + 群内身份）；应答带群视图与群会话信息，成功后连接级当前会话切到该群会话 |
+| `group.set_profile` | 修改我在本群的名称与角色（只影响本群，不动账号） |
+| `group.rename` / `group.set_passcode` / `group.dissolve` | 群主：改群名（会话标题同步）/ 设置或清除进入口令（`null`/空串 = 取消）/ 解散群（群目录整体删除，会话随之消失） |
+| `group.leave` | 退出群（立刻失去访问权；群主需先转让或解散） |
 | `session.switch` | 切换当前会话 |
 | `session.env.get` | 获取会话环境变量（内存态，含来源层级） |
 | `session.env.set` | 设置/覆盖/删除会话环境变量（内存写入，不落盘） |
@@ -538,6 +543,11 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/sessions/:id/files/download` | GET | 下载会话临时文件（`?path=`，二进制/文本原样下载，`Content-Disposition`） |
 | `/api/v1/sessions/:id/files/download` | POST | 多选打包下载（body 指定 paths 列表，返回 zip） |
 | `GET /files` | GET | **文件工作台页面**（独立 Vite 入口 `files.html`；`GEBAI_FS_ENABLED=false` 时 404） |
+| `GET /apps` | GET | **托管应用索引页**（服务端渲染，免鉴权同 Web UI）：列出应用（层/后端/警告）；`GEBAI_APPS=false` 时 404 |
+| `GET /apps/{id}[/...]` | GET | 托管应用前端静态产物（MIME 走 `core/fs/mime.ts`；ETag→304、文本类 gzip 协商、`no-cache`；SPA 回退仅对无扩展名路径） |
+| `/api/apps/{id}[/...]` | ALL | 调用托管应用后端模块（应用自己定义方法与路径；走完整凭证链与跨源校验；未启用时 503 并说明原因） |
+| `GET /api/v1/apps` | GET | 托管应用清单（层/后端状态/警告/目录） |
+| `POST /api/v1/apps/refresh` | POST | 重扫应用目录（目录变动立即生效，无需重启服务） |
 | `/api/v1/roots` | GET | 文件工作台根清单（`sess:` 会话工作区 / `proj:` 预置项目（含内置「歌白」）/ `user:` 用户目录 / `abs:` 白名单根）+ 能力开关（fsEnabled/fsWrite/gitEnabled/gitWrite/gitRemote/writable/sandboxed/上限）；每根附 Git 标记（`isRepo`/`branch`/`repoRoot`）——探测语义（去重 + 浅路径优先父仓库短路 + ≤8 并发 + 60s 缓存）见「文件工作台 → 根清单探测」 |
 | `/api/v1/roots/resolve` | GET | 单个根解析（?id=）——根可用性与真实路径校验 |
 | `/api/v1/fs/list` \| `/fs/tree` | GET | 目录列举（懒加载，?root&path&sort&order&showHidden）/ 树快照（?root&depth） |
@@ -1301,6 +1311,12 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | WS 发送缓冲上限 | 16MB | 单连接发送缓冲超限判定慢客户端并断开（走自动重连 + seq 重放收敛，`WS_MAX_BUFFERED`） |
 | 登录 IP 限流 | 60 突发/2每秒 + 10 突发/0.2每秒 | 登录/兑换端点全局桶与来源桶（`GEBAI_TRUST_PROXY=true` 按 X-Forwarded-For 区分来源） |
 | 附件大小上限 | 无强制上限 | 附件上传端点**未做尺寸判定**（原文「20MB」无对应实现；代码中仅飞书图片 20MB 与浏览器桥响应体 20MB 两处，属不同场景） |
+| 托管应用目录扫描 TTL | 1 秒 | 目录结构变化（新增/删除应用）的最大可见延迟（`SCAN_TTL_MS`）；**文件内容变化不受此限**（逐请求 stat）——改 `index.html`/`server.js` 刷新即生效 |
+| 托管应用单文件读取上限 | 16MB | `GEBAI_APPS_MAX_FILE`（`AppsStore.maxFileBytes`）：超限按“不存在”处理，防误把素材库当应用目录 |
+| 托管应用后端默认超时 | 15 秒 | 单次后端调用超时（`DEFAULT_TIMEOUT_MS`，清单 `env.GEBAI_APP_TIMEOUT_MS` 可覆盖）；超时→504、加载失败→503、运行抛错→500，三段如实区分 |
+| 托管应用 gzip 阈值 | 1400 字节 / 缓存 8MB | 低于阈值不压缩（编码与头部开销反超收益，`MIN_COMPRESS_BYTES`）；压缩结果按 ETag 缓存，总字节超限整体清空（`COMPRESS_CACHE_LIMIT`） |
+| 托管应用磁盘文件缓存 | 256 条 | 按「绝对路径 + size + mtime」入键的内存缓存（`diskCache`）：新增超过即整表清空（不设 LRU：应用静态资源量级小，清空比维护更便宜） |
+| 托管应用 id 形态 | `[a-z0-9][a-z0-9_-]{0,63}` | `APP_ID_RE`：既是 URL 段也是磁盘目录名，白名单防路径穿越与大小写不敏感文件系统歧义 |
 | 任务 tick 周期 | 30 秒 | 调度器检查周期（`TASK_TICK_INTERVAL_MS`：到期入队 + 队列推进） |
 | 任务并发额度 | 每用户 5 | `GEBAI_TASK_MAX_CONCURRENT` 可调（`TASK_MAX_CONCURRENT_DEFAULT`）；定时/普通任务并行上限，闲时任务另受「队列空闲 + 每用户仅 1 个」约束 |
 | 任务执行超时 | 脚本 5 分钟 / 提示词 30 分钟 / 闲时 3 小时 | 单次执行缺省上限（`TASK_SCRIPT_TIMEOUT_MS`/`TASK_PROMPT_TIMEOUT_MS`/`TASK_IDLE_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖，范围 1s~24h；提示词型到时 `engine.windDown`——先快速结束运行中的子会话拿结论，再取消会话任务） |

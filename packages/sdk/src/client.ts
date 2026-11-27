@@ -10,6 +10,7 @@ import type {
   FeedbackInfo,
   FeedbackInput,
   FileEntry,
+  GroupInfo,
   ModelConfigSummary,
   SessionDetail,
   SessionImportData,
@@ -978,6 +979,43 @@ getSignupConfig(): Promise<{ mode: "open" | "approval" | null; builtinAllowed: b
   /** 立即执行（排队条 ⚡）：条目置队首并中断当前任务，其收尾后立即执行该条。 */
   runQueuedPrompt(sessionId: string, itemId: string): Promise<QueuedPrompt[]> {
     return this.request<{ items: QueuedPrompt[] }>("session.queue.run", { id: sessionId, itemId }).then((r) => r.items ?? [])
+  }
+
+  // ---- 多人会话（群）----
+  /** 我参与的群列表（WS `group.list`）。 */
+  listGroups(): Promise<GroupInfo[]> {
+    return this.requestRead<{ groups: GroupInfo[] }>("group.list").then((r) => r.groups ?? [])
+  }
+  /** 创建群（创建者即群主，按提交的群内名称/角色入群；passcode 可选）。返回群视图与群会话信息。 */
+  createGroup(opts: { name: string; passcode?: string; memberName: string; memberRole?: string }): Promise<{ group: GroupInfo; session: SessionInfo | null }> {
+    return this.request<{ group: GroupInfo; session: SessionInfo | null }>("group.create", opts)
+  }
+  /** 加入群（邀请码 + 可选口令 + 群内名称/角色）：已是成员时按新身份改写。 */
+  joinGroup(opts: { joinCode: string; passcode?: string; memberName: string; memberRole?: string }): Promise<{ group: GroupInfo; session: SessionInfo | null }> {
+    return this.request<{ group: GroupInfo; session: SessionInfo | null }>("group.join", opts)
+  }
+  getGroup(id: string): Promise<GroupInfo> {
+    return this.requestRead<{ group: GroupInfo }>("group.get", { id }).then((r) => r.group)
+  }
+  /** 改自己在群内的名称/角色（只影响本群）。 */
+  setGroupProfile(id: string, memberName: string, memberRole: string): Promise<GroupInfo> {
+    return this.request<{ group: GroupInfo }>("group.set_profile", { id, memberName, memberRole }).then((r) => r.group)
+  }
+  /** 群主：改群名（会话标题同步）。 */
+  renameGroup(id: string, name: string): Promise<GroupInfo> {
+    return this.request<{ group: GroupInfo }>("group.rename", { id, name }).then((r) => r.group)
+  }
+  /** 群主：设置/清除进入口令（null/空串 = 取消）。 */
+  setGroupPasscode(id: string, passcode: string | null): Promise<GroupInfo> {
+    return this.request<{ group: GroupInfo }>("group.set_passcode", { id, passcode }).then((r) => r.group)
+  }
+  /** 退出群（群主需先转让或解散）。 */
+  leaveGroup(id: string): Promise<void> {
+    return this.request<void>("group.leave", { id })
+  }
+  /** 解散群（群主）：群目录整体删除，会话本体随之消失。 */
+  dissolveGroup(id: string): Promise<{ sessionId: string }> {
+    return this.request<{ sessionId: string }>("group.dissolve", { id })
   }
   decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<void> {
     return this.request<void>("approval.decide", { id: sessionId, toolCallId, approve })
