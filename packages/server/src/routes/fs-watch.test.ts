@@ -49,14 +49,17 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 describe("/api/v1/fs/watch", () => {
   test("闸门：fs 关闭时 404；GEBAI_FS_WATCH=false 时返回 enabled:false（前端据此退化轮询）", async () => {
+    // 根要真实存在：resolveRoot 在 fsWatch 分支之前就会因目录不存在报 404，
+    // 拿一个固定字面量路径（如 /tmp）当根会让本用例在无该目录的平台上测到别的东西
+    const root = tmpRepo()
     const off = app(makeDeps({ fsWatch: false }))
-    const res1 = await off.request("/api/v1/fs/watch?root=abs:/tmp&dirs=.", { method: "GET" })
+    const res1 = await off.request(`/api/v1/fs/watch?root=${encodeURIComponent(`abs:${root}`)}&dirs=.`, { method: "GET" })
     expect(res1.status).toBe(200)
     expect(((await res1.json()) as WatchBody).enabled).toBe(false)
 
     const deps = makeDeps()
     ;(deps.config as unknown as { fsEnabled: boolean }).fsEnabled = false
-    const res2 = await app(deps).request("/api/v1/fs/watch?root=abs:/tmp&dirs=.", { method: "GET" })
+    const res2 = await app(deps).request(`/api/v1/fs/watch?root=${encodeURIComponent(`abs:${root}`)}&dirs=.`, { method: "GET" })
     expect(res2.status).toBe(404)
   })
 

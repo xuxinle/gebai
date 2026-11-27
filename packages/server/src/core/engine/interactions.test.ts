@@ -1,4 +1,4 @@
-/** 交互等待机制：决策提交的失效语义（expired）与等待期心跳。 */
+/** 交互等待机制：决策提交的失效语义（expired）、等待期心跳，与交互了结事件的发布。 */
 import { describe, expect, test } from "bun:test"
 import {
   decideApproval,
@@ -8,6 +8,8 @@ import {
   decideEnvResult,
   markSettled,
   startInteractionAlive,
+  waitForChoice,
+  waitForEnv,
   type TaskState,
 } from "./interactions"
 
@@ -96,5 +98,50 @@ describe("交互等待心跳", () => {
     expect(seen[0]).toEqual({ sessionId: "s1", type: "event.interaction.alive", payload: { kind: "approval", id: "a1" } })
     await new Promise((r) => setTimeout(r, 30))
     expect(seen.length).toBe(n) // 停止后不再发布
+  })
+})
+
+describe("交互了结告知（多页面各自的卡片随之处置）", () => {
+  function collector() {
+    const seen: Array<{ type: string; payload: Record<string, unknown> }> = []
+    const publish = (_sessionId: string, type: string, payload: Record<string, unknown>) => void seen.push({ type, payload })
+    return { seen, publish }
+  }
+
+  test("选择被作答：发布 event.interaction.settled（kind=choice，id=choiceId）", async () => {
+    const task = fakeTask()
+    const { seen, publish } = collector()
+    const pending = waitForChoice("s1", task, publish, "选一个", ["A", "B"])
+    const choiceId = String(seen.find((e) => e.type === "event.choice.request")!.payload.choiceId)
+    expect(decideChoice(task, choiceId, "A")).toBe("ok")
+    expect(await pending).toEqual({ kind: "option", value: "A" })
+    expect(seen.filter((e) => e.type === "event.interaction.settled")).toEqual([
+      { type: "event.interaction.settled", payload: { kind: "choice", id: choiceId } },
+    ])
+  })
+
+  test("选择等待超时/取消：同样发布了结（别处留着的卡片据此处置）", async () => {
+    const task = fakeTask()
+    const { seen, publish } = collector()
+    const ac = new AbortController()
+    const pending = waitForChoice("s1", task, publish, "选一个", ["A"], undefined, ac.signal)
+    const choiceId = String(seen.find((e) => e.type === "event.choice.request")!.payload.choiceId)
+    ac.abort()
+    expect(await pending).toBeNull()
+    expect(seen.filter((e) => e.type === "event.interaction.settled")).toEqual([
+      { type: "event.interaction.settled", payload: { kind: "choice", id: choiceId } },
+    ])
+  })
+
+  test("填值被作答：发布 event.interaction.settled（kind=env，id=envId）", async () => {
+    const task = fakeTask()
+    const { seen, publish } = collector()
+    const pending = waitForEnv("s1", task, publish, () => true, "MY_KEY", "用途", false)
+    const envId = String(seen.find((e) => e.type === "event.env.request")!.payload.envId)
+    expect(decideEnvResult(task, envId, "v", () => true)).toBe("ok")
+    expect(await pending).toBe(true)
+    expect(seen.filter((e) => e.type === "event.interaction.settled")).toEqual([
+      { type: "event.interaction.settled", payload: { kind: "env", id: envId } },
+    ])
   })
 })

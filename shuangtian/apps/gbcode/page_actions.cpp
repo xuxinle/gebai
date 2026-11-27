@@ -50,8 +50,23 @@ namespace gbcode_ui {
 
   auto CodeEditorPage::restore_session(const gbcode::SessionState& state) -> bool {
     // 工作区：走既有链路（换树根/重置展开/LSP 根），与「打开文件夹」同一条路。
+    bool workspace_restored = false;
     if (!state.workspace.empty() && st::fs::is_directory(state.workspace)) {
       switch_workspace(state.workspace);
+      workspace_restored = true;
+    }
+    // 资源树展开状态：`switch_workspace` 会把它清空（新根：旧展开路径无意义），
+    // 所以必须在它**之后**回填。只收磁盘上仍在的目录（目录可能已被删/改名）——
+    // 否则树上只是多出一串永远不生效的 key。
+    if (workspace_restored && !state.expanded_dirs.empty()) {
+      std::vector<std::string> expanded;
+      expanded.reserve(state.expanded_dirs.size());
+      for (const std::string& rel : state.expanded_dirs) {
+        if (rel.empty()) continue;
+        const std::string full = st::fs::join(workspace_, rel);
+        if (st::fs::is_directory(full)) expanded.push_back(rel);
+      }
+      dir_expanded_.set(std::move(expanded));
     }
     // 标签：逐个打开（`open_path` 自带去重与读盘失败处理）；只收**磁盘上还在**的。
     std::size_t opened = 0;
@@ -84,14 +99,21 @@ namespace gbcode_ui {
     }
     recent_files_ = state.recent_files;
     recent_folders_ = state.recent_folders;
-    return !state.workspace.empty() || opened > 0;
+    // 返回值只报「真恢复了东西」：会话里记的目录可能已被删，那时工作区仍是空的。
+    return workspace_restored || opened > 0;
   }
 
   auto CodeEditorPage::save_session() -> void {
-    // 没有工作区就没有可恢复的磁盘身份，不存会话。
-    if (workspace_.empty()) return;
+    // 本进程无权改会话（如 `--open` 一次性查看）：保留用户原会话不动。
+    if (!session_writable_) {
+      st::log::out("会话未写（本次为命令行一次性查看）: {}\n", session_path_);
+      return;
+    }
     gbcode::SessionState state;
     state.workspace = workspace_;
+    // 资源树展开状态：存**相对工作区的路径**（与 `dir_expanded_` 自身口径一致）。
+    // 工作区为空时它们无意义（没有根可供相对），不存。
+    if (!workspace_.empty()) state.expanded_dirs = dir_expanded_.value();
     // 只存磁盘上的真文件标签；内存缓冲（untitled-N）没有路径，恢复不了。
     // 脏文件只存路径不存内容：内容以磁盘为准——用户若想要那些修改，应该在关窗前
     // 保存；静默替他落盘反而危险（可能写进不该写的版本）。
@@ -939,9 +961,12 @@ void CodeEditorPage::load_active_text() {
             const std::string child_rel = rel.empty() ? entry.name : rel + "/" + entry.name;
             if (entry.is_dir) {
               const bool open = std::find(expanded.begin(), expanded.end(), child_rel) != expanded.end();
+              // 目录行**不给行首图标**（只留展开箭头）：展开指示已经说明了“这是个容器”，
+              // 再配一枚文件夹图标是重复信息，窄侧栏里只会挤掉文件名。
+              // 视觉上也不会失衡：箭头占位（12 + space_xs）与文件行图标占位
+              // （≈16 + space_xs）同宽量级，两行的文字起点几乎对齐。
               nodes.push_back(TreeNodeData{.key = "dir:" + child_rel, .label = entry.name,
-                                           .expanded = open, .is_dir = true, .depth = depth,
-                                           .icon = open ? "folder-open" : "folder"});
+                                           .expanded = open, .is_dir = true, .depth = depth});
               if (open) flatten(child_rel, depth + 1);   // 同源递归：key 与路径同一规则
             } else {
               // 文件行的 key 就是**绝对路径**（与目录行的 `dir:<相对路径>` 不同）。

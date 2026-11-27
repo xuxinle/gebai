@@ -8,7 +8,7 @@ summary: Panel 的构造、属性面、动作面与源码位置。
 ## 头与实现
 
 - 头：`include/st/ui/components/panel.hpp`
-- 实现：`src/ui/components/menu.cpp`
+- 实现：`src/ui/components/calendar_panel.cpp`
 - 注册名（XML / `ui.create` / 声明式按名建）：`Panel`
 
 ```cpp

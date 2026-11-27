@@ -121,6 +121,7 @@
 | **量尺三坑** | 判据要自适应底色 / 取样区避开自己造的边界 / 多实例改善量应一致（各不一致 = 量法失效） | `CONVENTIONS.md` §9.1.1 |
 | **至少两个正交量同向才算更好** | "整体更锐"与"彼此更均匀"是**两个问题**，只看前者会把反向改动包装成进步 | `perceptual_changes.md` |
 | **结论与观感冲突时先怀疑尺子** | 本线的每一次"用户说更差"都对应一次**口径缺陷** | `perceptual_changes.md` |
+| **“量尺上改好了”而用户说更差：错在指标选型，不在量尺精度**〔观感〕 | 2026-11-27 实测：把 LCD 滤波默认核收窄（`{8,77,86,77,8}` → `{0,51,205,51,0}`），`mid/solid` 暗色 1.196→1.045、亮色 1.526→1.167（三个亮度口径同向、墨量不变——量尺自检全过），**用户看过后判定“效果不好”并回滚**。教训：`mid/solid` 量的是**过渡带宽窄**，它抓不到“边缘发彩、笔画变硬”这类**形态**变差；而这类改动若是**全局默认值**，代价面是“所有应用×所有字号”，收益面却只在代码编辑器。**判据**：① 形态类改动必须**真窗口目视**验收，指标只作辅证；② 先问能否做成**窄口径**（如按 `FontRole` 只影响代码行），而不是改全局默认值；③ 改全局默认前先给出“回滚成本 = 一行”的保证 | `docs/BACKLOG.md` 的 P1「过渡像素占比」条（含回滚记录）；实测 2026-11-27 |
 | **`with_alpha_f` 是覆盖，不是乘** | `border` 族令牌自带半透明 alpha（亚克力口径），想“在它基础上再调淡”必须用 **`scale_alpha`**；用 `with_alpha_f(1.0)` 会把 alpha **覆盖成 255** ⇒ 暗色卡片得到一道**不透明纯白 1px 边框**（实测对比 13.09:1），而 `with_alpha_f(0.55)` 是覆盖成 55% 黑（亮色 4.2:1）。两者都“看着像倍率”，**源色带 alpha 时二字面量恰好同形**——这是最容易误读的地方。判据：调用前问“源色的 `a` 是 255 吗”，不是就是乘 | `src/ui/components/basic.cpp` 的 `Card::apply_theme` 注释；实测 2026-10-27（暗色边框 255→83、亮色 113→235） |
 | **“边框刺眼/发脏”先量四条边，不要只看一条** | 同一张卡片的四边实测曾是 **255 / 199 / 137 / 252**（极差 6.77:1）——只看左边会得出“纯白”，只看右边会得出“差不多”，两边都不是全貌。四边不一致本身就是信号（说明是**消费端算错**而非令牌错），修好后极差降到 **0.39**（抗锯齿相位差）。 | 同上；实测 2026-10-27 |
 | **令牌有定义 ≠ 落地：应用侧没用就等于没有** | 侧栏/状态栏没声明 `set_surface()` 时直接透明露页面底，实测侧栏↔内容底 **1.008:1**（= 同一个色），而 `ui_theme_test` 锁的“相邻 ≥ 1.08”验的是**令牌之间**的关系，验不到“应用到底用没用”。改动后 1.146/1.337。**判据：看令牌表的层次结论时，同时看应用侧有没有把令牌用上** | `apps/gallery/main.cpp` 的 `sidebar` / `status-bar` 注释；实测 2026-10-27 |
@@ -148,6 +149,18 @@
 | **对标不只对“技法”，要对“编排”** | 抄了 clearing 的销点缩放，却把片排成“四段独立画面靠缩放硬串”——观众看到的是四个动画拼起来。它成立的前提是**同一个世界坐标里多层嵌套**（年→日→时段→事件，每层就是上一层的子矩形），以及**钻到位后停住让观众读**（实测参考片 13.1s→14.8s 几乎静止） | 实测于 1×→130× 尺度承接片（临时产物，不入库） |
 | **〔绝对定位的四边基准必须统一〕** | `left/top` 以**内容盒**（已扣 padding）为原点，而 `right/bottom` 以**边框盒**右缘为基准——两边基准不同，则“四边归零”不再是铺满。实测 112px 图标格、padding 6：拉伸结果宽 **106**（左边进 6、右边不进），一个“不左不右”的怪数，而视觉上像是“图标点不准”。拉伸时左/上也必须换到边框盒坐标 | `src/ui/element.cpp` · `place_absolute`；`tests/desktop_tile_hit_area_test.cpp` |
 | **〔流内子元素盖不住兄弟：覆盖层必须 absolute〕** | 想“让透明按钮盖在图标上”，直接 `add_child` 是把它当**下一个流内兄弟**排到下方（实测图标 y=82..150、可点区落在 y=182..216）——用户表现为“点图标没反应、点图标下方空白才启动”。任何“叠在上面”的东西都得 `absolute` + 四边归零 | `apps/st_desktop/main.cpp` · `make_app_tile` |
+
+## 场景 3.9：让后台线程能可控退出（阻塞等待 / 关闭句柄 / detach）
+
+> **总判据：关闭一个正在被等待的句柄，不是"叫醒它"，而是未定义行为。
+> 停一个阻塞线程唯一可靠的手段，是让它等的东西本身变成信号。**
+
+| 坑〔场景〕 | 现象 | 真因 / 判据 | 出处 |
+|---|---|---|---|
+| **`CloseHandle` 叫不醒 `WaitForSingleObject(INFINITE)`**〔线程〕 | 把等待线程改成"由对象持有 + 析构里关句柄后 join"，单测逐条跑都过，**但其中一条从此永不返回**（软超时 10s 才报 FAIL，看起来像"偶发慢"） | Win32 上关闭正在被等待的内核对象是 **undefined behavior**，实际表现是等待方不被唤醒。POSIX 的阻塞 `accept` 同理不可靠。判据：**停止必须是信号**（额外一个 stop 事件 / 管道），不能是"句柄消失" | `src/core/platform_instance.cpp` 的 `release()` 与 `wait_thread_main` |
+| **`detach` 是"假装没有生命周期问题"**〔线程〕 | 功能完全正常，直到对象析构后线程还在读已关闭的句柄 / 已释放的内存 | `detach` 之后线程的存活期与任何东西都无关了。**持有时才能给出确定的退出路径**：先发停止信号 → join → 再关句柄。L9 禁 `detach`/裸 `.lock()` 正是为此 | 同上（`wait_thread_` 字段注释） |
+| **移动赋值覆盖 joinable 的 `std::thread` 会 `std::terminate`**〔RAII〕 | 给持有线程的类加移动赋值，正常路径不崩，反复 acquire/release 时偶尔整个进程消失 | `std::thread` 的移动赋值对"目标仍 joinable"是 `std::terminate`（不是异常、不可捕获）。移动赋值必须**先按析构顺序收尾自己**，再接管对方的句柄 | 同上（`operator=(SingleInstance&&)`） |
+| **多路等待用错了等待对象的顺序**〔线程〕 | 加了 stop 事件后仍偶发不退出 | `WaitForMultipleObjects` 返回的是**索引**，`WAIT_OBJECT_0 + n` 对应数组第 n 个。数组顺序与判据顺序必须对齐，写反了就是"停止被当成激活"（表现为退出前多计数一次，看着无害） | 同上 |
 
 ## 场景 4：碰系统 API / 路径 / 入口（跨平台）
 
@@ -189,6 +202,8 @@
 | **含点 id 直接写 `#id` 会被 CSS 拆分** | 选择器把 `.` 当类型分隔符、`:` 当状态分隔符，而业务 id 常含这些字符（`git-file-<path>` 等）；`find` 对 `#xxx` 形态有整串优先容错，但脚本 `ui.query`/`$()` 没有——含特殊字符的 id 用属性写法 `[id=...]` 最稳（实测 2026-10-15：`#git-file-alpha.txt` 拆成 `Id: git-file-alpha + Type: txt`，count 恒 0） | `DESIGN.md` §6.3 含点 id 警示段 |
 | **“报成功”不等于文件在** | 自己写探针时，正则对中文尾注（如 `（区域 {…}`）会贪婪地吞进路径，于是“文件不存在”是探针的错、不是工具的错（已实测踩到）。判落盘用 `ls`/`find` 复核 | 实测 2026-10-13 |
 | **验证 UI 读组件自报的值** | 不要信旁路探针（截图/像素统计）——两者口径不同 | `CONVENTIONS.md` §7.5 |
+| **合成点击只发 `Click` 会盖掉“一次点击跑两遍”的缺陷**〔交互〕 | 真实后端一次点击是 `MouseDown → MouseUp → Click` 三事件；组件若把 `MouseDown` 与 `Click` 归在同一 `switch` 分支里，每次点击就**执行两遍**——互换型状态（Ctrl+多选进/出集合）净变化为零、上溯型动作（点 `..`）一次退两级。**只发单 `Click` 的用例永远绿**。判据：事件循环测试必须按真实序列派发 | `src/ui/components/file_dialog.cpp` 的 `on_event`（`MouseDown` 只吞不作）+ `tests/ui_file_dialog_test.cpp` 的 `file_dialog_real_click_sequence_toggles_multi_once` |
+| **“多选开关常开”的应用一挂就死：确认必须按「集合是否为空」分流**〔交互〕 | 多选回调与单路径回调的分流条件写成“开关是否开着”，就会让集合为空的确认**静默什么也不做**（点「打开」没反应、双击文件也不开，界面无提示，宿主回调一次都没跑）。正确口径：集合非空才走`on_confirm_multiple`，否则回落到 `on_confirm` | `src/ui/components/file_dialog.cpp` 的 `confirm`；`tests/ui_file_dialog_test.cpp` 的 `file_dialog_multi_on_still_confirms_single_file` |
 | **合成输入不一定触发交互态** | 下结论前先确认**前提状态成立**（悬浮/按下/焦点） | `CONVENTIONS.md` §7.6 |
 | **真窗口实测用 `tools/st_win_input.py`** | 别自己拼 PowerShell（三条注入通道各有适用范围） | `CONVENTIONS.md` §7.7.1 |
 | **先清掉自己留下的前台程序** | 否则被控应用的前台态判断会被上一个实例污染 | `CONVENTIONS.md` §7.7.3 |
@@ -234,6 +249,7 @@
 | **自绘组件不必与 `Element` 成员同名** | `hit_test`（返回 `bool`）已被基类占用；自己的命中判定要另起名字（`grab_at`） | `apps/caiyun/views.hpp` 注释 |
 | **一个条件分支里声明多个视图 = 切走即销毁** | 切换会丢掉滚动位置/输入内容/展开态。要「切回来还是原样」就用**常驻声明 + `set_visible(false)`**（框架在绘制/命中/布局三处都跳过不可见元素），并配“首次访问才声明”避免启动首帧白建全部 | `apps/gbcode/main.cpp` 的 `build_sidebar` 注释 + `tools/gbcode_sidebar_keepalive_e2e.py` |
 | **`RenderContext` 持 `const Theme&`——别绑临时对象** | `RenderContext{Theme::light(), …}` 绑的是**临时对象**，语句/函数结束后引用悬垂；读到的是被复用的栈内存（实测：接上 `Metrics::wheel_step` 后读到 **0**，滚动一次性跳到底）。主题必须比 context 活得长（`static` 或外层变量） | `include/st/ui/element.hpp` 的 `RenderContext`；`tests/ui_scroll_test.cpp` 的 `make_tall_scroll` |
+| **切页后“树是新页、屏上还是旧页”——先怀疑没人给腾出的像素登记 damage**〔重绘〕 | 移除整棵子树时，**没有任何存活元素**为腾空的区域负责：`mark_layout_dirty` 刻意不报 damage（它对“位置变了”成立，对“这里曾经有东西、现在没了”不成立），于是旧像素原封不动留在后备缓冲里。致命之处是**属性面与 `tree` 全对**——只有像素错了。判据：`damage_removed_subtree_is_repainted` 式的“局部帧与全量帧逐像素一致”。纪律：**不要用“给容器铺不透明底色/切页时 `mark_dirty_all`”绕过去**——那只是把缺陷推给“必须有东西盖着”，换个透明底的页就重现（已修：`remove_child`/`clear_children` 在摘除前先 `record_damage_rect(子树原 bounds)`） | `src/ui/element.cpp` 的 `remove_child` / `clear_children`；`tests/ui_damage_test.cpp` 的 `damage_removed_subtree_is_repainted` / `damage_cleared_children_are_repainted` |
 | **量宽与折行必须同口径** | `measure_width(整串)` 含字距调整/连字，**比逐码点累加小**；用它定列宽而用逐字累加判溢出，临界处差一两个字符（实测 `batterycenter/embed` → `embe\|d`）。另：`wrap` 把**空格也计入 `pen`**，按词扫描会丢掉它——保底宽要留余量 | `src/text/text.cpp` 的 `TextRenderer::wrap`；`markdown_view.cpp` 的 `word_floor_of` |
 | **图标描边要传 `0.0f`（随盒缩放）** | `Icon::draw` 的 `stroke_width` 默认 **2.0f 固定像素**；小盒（≤15px）里比声明值粗一大截、笔画糊成一团（实测 Tabs 尾部钮“图标太丑”）。`IconView`/`Button` 都传 `0.0f` = 按 `stroke/24 × 盒径` 缩放 | `include/st/ui/icon.hpp` 的 `draw`；`src/ui/components/tabs.cpp` 尾部钮 |
 | **视图“常驻”后，渲染期里那些只在“切过去那一帧”跑的代码会变成每帧跑** | 典型是渲染期同步起子进程（`process::run`）——它会踩坏声明式树。改为在构建函数里**置一个待办标记**、帧首泵消费 | `apps/gbcode/main.cpp` 的 `git_probe_wanted_` 注释 |
@@ -241,6 +257,7 @@
 | **调试布局“宽变了但内容不变”时先分开看两个量** | 控件宽（`bounds`）与**排版用的内容宽**是两回事。`MarkdownView` 有只读 `layout_width` 专供此用——实测就是靠它发现“排版宽恒为 608”（= 兑底常量），一步定位到是约束没传下来 | `DESIGN.md` §4.2.17f；`markdown_view.cpp` 的 `layout_width` 属性 |
 | **行/列容器的 `max_width` 是 `kUnbounded`，真可用宽在 `available_width`** | “铺满父级”的容器/内容型组件直接取 `max_width` 当尺寸，就会在 Row 里拿到 1e9→落回兑底常量（或按偏大的值分栏），而 `arrange` 给的是真实 rect——**排版宽 ≠ 控件宽**。用 `fill_width/fill_height`；内容型组件另在 `arrange` 里用真实矩形重排一次（`ScrollView` 内已内化此惯例） | `include/st/ui/element.hpp` 的 `fill_width`；`ScrollView::arrange` / `MarkdownView::arrange` |
 | **这类重排不能加“几何变了才做”的早退** | measure 阶段的粗口径宽**每帧**都会把子组件重排一次；只在 rect 变化时补救⇒第二帧起不再修正，最终停在错误宽度（实测：加了早退后 `layout_width` 仍为按 1280 算的 985.6，而控件宽是 982.4） | `src/ui/components/split_view.cpp` 的 `arrange` 注释 |
+| **`Divider` 放进行里会量出 1e9 宽，把后半行控件推到屏幕外**〔布局〕 | 行给子元素的**交叉轴上界是 `kUnbounded`（1e9）**，而旧 `Divider::measure` 无条件取 `constraints.max_width` ⇒ 一条水平线进工具行就量出 1e9，父行把整行撑爆：线后面每个兄弟的 `x` 变成 1e9、2e9……（每过一个分隔线翻一倍），而 `get bounds` 对线上的值“看着就是这个数”，没人会往 1e9 上想。**判据用兄弟位置而不是只看分隔线自己的尺寸**（缺陷的真实后果是“后面的东西跑掉”）。正确语义：**铺满“有上界”的那个方向**（列里的水平线→横向铺满；行里的水平线→横向只占线厚、纵向被 `align_items: Stretch` 拉到整行高，视觉上就是一道竖向分隔）。也不能用 `fill_width`（它在无界时退到 `available_*`，那正是行主轴空间全部，同样抢爆） | `src/ui/components/basic.cpp` 的 `Divider::measure`；`tests/ui_structure_components_test.cpp` 的 `divider_in_row_*` / `vertical_divider_in_row_*` |
 | **逆向验证时“回退半边修复”＝假绿** | 修复分在两层（measure 取宽 + arrange 重排）时，只回退一层，另一层照样把测试养绿。回退要**完整回到缺陷状态**，且回退文本要能编译过（保留 `(void)var;`） | `CONVENTIONS.md` §7.3；本行实测（`SplitView` 那条测试回退一层仍绿） |
 | **做文本选择：先扁平化，且命中/绘制必须同一基准** | ① 选择状态用 `{行, 字节偏移}`，行内备一份**扁平文本 + 每码点前缀宽**——在分片（Span/单元格）上各自算偏移会静默错位；② 命中侧鼠标 x 相对**控件左缘**，而行内 `text_x` 是**内容坐标**（还要加 `padding.left`）——两边不一致会让高亮多/少一个 `padding.left`（表现为行首多一段空白） | `DESIGN.md` §4.2.17g；`markdown_view.cpp` 的 `caret_at` / `paint_selection` |
 | **写字号用 `text_size`，不要用 `font_size`**（XML / 声明式均如此） | `font_size` 直接写 `Style::font_size`，而 `Text::apply_theme` 每次主题回放都用 `metrics().font_base` 重写它——于是“写了 28、上屏是 15”，而 `get font_size` 在**建树后立即**读还是 28（早读一次就得到假绿）。`text_size`（或样式串 `size 28`）→`set_text_size` 记成**显式覆盖**，主题回放末尾重新落位。量法：`tools/xml_font_size_probe.cpp`（三通道对照，只有 `text_size` 存活） | `include/st/ui/element.hpp` 的 `set_text_size`/`apply_text_overrides`；`tools/xml_font_size_probe.cpp` |
@@ -806,17 +823,51 @@
 ```
 py -3 tools/icon_consistency_check.py            # 全量检查（有问题退出码 1）
 py -3 tools/icon_consistency_check.py xiangqi    # 只查一个
+py -3 tools/icon_consistency_check.py --project D:/code/dev-tools
+                                                # 校验**外部工程**（可重复给多个）
+```
+
+⚠ **外部工程默认不在扫描范围**（它不在 `apps/` 下），而它恰恰最容易漏——
+交付独立工程时**必须**带上 `--project <工程根>`，否则“全部通过”不包含它。
+
+接入只需三行（公开头 `st/app/icon.hpp`，不要自己抰）：
+
+```cpp
+#include "st/app/icon.hpp"
+st::app::icon::attach_png(opts.window_icon_png, b::embed<"assets/x-icon.png">());
+st::app::icon::register_svg("x-logo", b::embed<"assets/x-logo.svg">());
+st::app::icon::apply_brand(frame->title_bar(), "x-logo");   // 首帧前
 ```
 
 | 坑〔场景〕 | 现象 | 真因 / 判据 | 出处 |
 |---|---|---|---|
 | **只改 SVG 不改 PNG ⇒ 一个应用两个图标**〔图标〕 | 标题栏是 A 形，任务栏/资源管理器是 B 形 | `apps/<app>/assets/` 下 `<app>-logo.svg`（标题栏）与 `<app>-icon.png`（窗口）+ `<app>.ico`（PE 资源）**三份必须同一记号**。相期的红/白/蓝三色条曾被改成深灰人像（`c018aee9`）而**只改了 SVG**，于是标题栏人像、任务栏三色条 | `tools/icon_consistency_check.py`（配色同源校验） |
-| **`set_icon("svg:X")` 却没注册 `X` ⇒ 图标静默不画**〔图标〕 | 标题栏那个格子是空的，**控制通道读 `icon` 属性一切正常**（就是那个字符串） | `Icon::draw` 查不到就什么都不画、也不报错。判据：`svg:` 后面的 id **必须**出现在 `register_svg`/`add_single` 的参数字符串里；且注册必须在首帧前 | `apps/app_icon.hpp` |
+| **`set_icon("svg:X")` 却没注册 `X` ⇒ 图标静默不画**〔图标〕 | 标题栏那个格子是空的，**控制通道读 `icon` 属性一切正常**（就是那个字符串） | `Icon::draw` 查不到就什么都不画、也不报错。判据：`svg:` 后面的 id **必须**出现在 `register_svg`/`add_single` 的参数字符串里；且注册必须在首帧前 | `include/st/app/icon.hpp` |
+| **256px 看着很好，缩到 16px 糊成一片**〔图标·量具〕 | 九宫格图标在 256 预览下清晰可辨（九个点分明），任务栏上是九个模糊圆斑 | 图标唯一真正的门槛是 **16px**，不是 256px。量法：把源图按**面积平均**缩到 16/32/48，再最近邻放大 8 倍看（`assets/preview_small.py`）。判据：**16px 下元素边界仍可分**。九个小点过不了（每点不到 1px），四格块能过（每格约 3px） | `tools/make_icons.py` 的风格约定；实测于 dev-tools 首版九宫格 |
+| **`apps/app_icon.hpp` 外部工程 include 不到**〔图标·工效〕 | 独立工程里写 `#include "../app_icon.hpp"` 必然找不到；自己抰一份又把三个隐约定重踩一遍 | 那三行（`attach_png`/`register_svg`/`apply_brand`）依赖三个**只在内仓可见**的约定：`uint8_t` vs `char`（直接 `reinterpret_cast` 违反 L6）、注册必须在首帧前、标题栏必须写 `svg:` 前缀。已提升为公开头 `st/app/icon.hpp`；`apps/app_icon.hpp` 仅作转发 | `include/st/app/icon.hpp` 文件头 |
+| **一致性检查器不扫外部工程**〔图标·验收〕 | 内置九个应用全绿，而外部工程那套四链路**一条都没被查** | 检查器只遍历 `ROOT/apps/<name>`。交付独立工程时必须显式 `--project <工程根>`（已支持，可重复给多个）。另一个易路：`--project` 的**值**会被当成应用名再查一遍（值是绝对路径，按“名字在 args 里”删不掉）——按“紧随 `--project` 之后”删 | `tools/icon_consistency_check.py` 的 `check_app(project=…)` |
 | **宽扁卡片上的对角线渐变 ⇒ 上下反相**〔绘制〕 | 想“上亮下暗”，实测 `top=181 / bottom=225`（下边更亮一倍） | 线性渐变按**画布绝对坐标**投影：卡片宽>高时梯度主要沿 x 走，上下两边的投影值几乎相等甚至反相。要“光从上来”就用**纯纵向**渐变 | `src/ui/element.cpp` 的 `paint_box` |
 | **用半透明白画“阴影” ⇒ 反而变亮**〔绘制〕 | 想要侧边暗线，实测侧边是 **+21/+42**（比卡内底色亮） | 任何 alpha 的白叠在灰底上都是“变亮”。阴影必须用**暗色**叠加。属性面看着 alpha 合理，只有量像素才知道方向反了 | 同上（`TopBottomShaded`） |
 | **渐变填充路径在 GPU 上退化成单色**〔绘制·两条腿〕 | 暗色主题气泡**四边都有浅色亮边**，配置明明是“上下两道”；同一份配置在**无头截图里完全正常** | `GpuCanvas::fill_path` 曾无条件取 `paint.color()`，而 `Paint::with_gradient` 把 `color_` 设成**第一个色标**。于是 `edge→透明` 的亮带取到满亮（整圈发亮）、`透明→暗→透明` 的侧边取到全透明（不画）。软件腿逐像素 `Paint::sample` 从不如此 ⇒ **只有真实窗口错、截图永远对**（这是它最难查的一点，见下条判据） | `src/raster/platform_d3d11.cpp` 的 `rasterize_path_gradient`；`tests/gpu_fill_path_gradient_test.cpp` |
 | **“截图对、桌面错” ⇒ 先查后端而不是先查配置**〔两条腿〕 | 用户报“桌面看着不对”，而自己截的图一切正常；越查越怀疑配置/主题/DPI | 无头走**软件光栅器**、真实窗口走**GPU(D3D11)**。判据：`metrics.renderer`（`software` / `gpu`）与 `metrics.headless`。**两者不同就先把同一条链路复现出来**（`run(action=start, window=true)` + 桌面截图），不要再在无头里调参数——那是在量另一条腿。GPU 侧能力缺口（渐变、模糊、遮罩）都可能只在一侧缺失 | 本轮实测：无头 20/27（正确） vs 桌面 98（错误），配置与主题全程无辜 |
 | **环带只有 1~2px 宽 ⇒ 固定点采样一左一右不对等**〔取证〕 | 完全对称的图，左边量到 242、右边只量到 181 | 亚像素环带在逐像素网格上常只占 1 格。**扫描整个环带厚度取极值**，再沿边取中位数；另：取“最亮”量不到暗线（会取到内侧底色），要取**偏离最大**的极值 | `tests/ui_highlight_edges_test.cpp` |
+
+## 场景 33：状态要在两个地方保持一致（选择器 / 开关 / 报表）
+
+它们的共同形状：**真值在一个地方，展示在另一个地方**，而展示侧有自己的初始默认值。
+没人“算错”——错在**两处没人同步**，而属性面看着完全自洽（只与真实状态不符）。
+
+| 坑〔场景〕 | 现象 | 真因 / 判据 | 出处 |
+|---|---|---|---|
+| **应用是暗色、主题选择器勾着亮色**〔同步〕 | 点标题栏主题按钮，色卡墙上打勾的是「亮色」；而整窗明明是暗色 | 两段都没接：① `ThemePicker` 构造时 `populate_builtins("light")`（写死的兵底）；② `TitleBar::apply_theme`（主题变更**唯一**会到达本组件的路径）从不把它交给选择器。已修：`Theme::name()` 在应用合成路径写入 + `TitleBar::apply_theme` 转发。判据：**上报值与展示值逐帧对齐**，且上电首帧就对齐 | `src/ui/components/title_bar.cpp` 的 `apply_theme`；`tests/app_theme_propagation_test.cpp` |
+| **`Theme::name()` 对内建主题恒为 `light`**〔同步·上报〕 | 应用明明是暗色，而控制通道 `theme` 命令报 `name="light"`（标题栏选择器也因此把所有暗色应用都当成亮色） | 只有 `theme_io.cpp` 从**主题文件**加载时写过 `name_`，**内置主题的合成路径没写**。`Theme::light()/dark()` 自己写了，但**应用合成路径**（`compose_theme_with`）没写——而后者才是实际生效的那一份 | `src/app/app.cpp` 的 `compose_theme_with` |
+| **测“谁把值传给谁”时，被测路径被短路**〔取证〕 | 先写的断言是 `builtin_theme("dark")->name() == "dark"`，**回退修复后仍全绿** | `builtin_theme()` 直接返回 `Theme::dark()`，而它自己就会写名字——真正的缺陷在那个被绕过的合成函数里。教训：断言必须走**用户实际经过的那条链**（应用级 `set_theme_name` + 推一帧），不能取同名的简化版 | `tests/app_theme_propagation_test.cpp`；`CONVENTIONS.md` §7.2 |
+| **“每帧同步”没做同值逃逸 ⇒ 每帧标脏**〔性能〕 | 功能看着完全正常，只是 CPU 烧着（持续全帧重绘） | `apply_theme` 是**每帧**跑的（主题到达组件的主路径）。在它里面对子组件 `set_current(...)` 而不做同值早退，就是每帧沿祖先链 `mark_dirty`。写法：`set_current` 首行 `if (current_ == name) return;` | `src/ui/components/theme_picker.cpp` 的 `set_current` |
+| **空态选择器点开日历停在 1970 年**〔同步·默认值〕 | 待办页的到期时间没填，点日历钮看到的是 **1970 年 1 月**（要逐月翻 56 年才到今天） | 两个独立原因叠在一起：① `DatePicker` 构造默认 `value_ = Date{}`，而 `open()` 直接拿它定初始视野；② 应用没注入“今天”（组件**故意**不读系统时钟，否则不可测、且无头/CI 时区不同会把高亮落到别处）。两半都要做：组件侧加 `has_explicit_value_`（`Date{}` 是**合法日期**，不能当哨兵）并在空态下用 `today_` 定视野；应用侧注入 `set_today` | `src/ui/components/date_picker.cpp` 的 `open()`；`tests/date_time_picker_test.cpp` |
+| **两道机制做同一件事 ⇒ 回归测试失去判别力**〔取证〕 | 给“空态开在今天”写的用例，**逐条回退修复都不变红**——看起来像“测试没用” | 当时同时留了两条路径：`initial` 按 today 选 + 再补一句 `show_month(today)`。回退任一条，另一条把它补上，所以恒绿。**删掉冗余那条**后回退立刻变红。判据：能用一条路径表达的就不要两条 | `src/ui/components/date_picker.cpp`（已删掉冗余 `show_month`） |
+| **`set_value` 的同值早退吞掉“首次设值”**〔同步〕 | 空态控件上调用 `set_value(1970-01-01)`（正好等于零值），返回后仍是“没值”状态 | 早退判据 `clamped == value_` 在空态下成立，而那次调用恰恰是“用户真的选了它”。**标志位要早于早退置位**，否则“选了零值”与“没选”永久混为一谈 | `DatePicker::set_value`：`has_explicit_value_ = true` 提到早退之前 |
+| **“逐条回退都绿”时先数一遍有几道机制**〔取证〕 | 逆向验证全绿，第一反应是“测试写错了” | 更常见的原因是**实现里有冗余路径**（每道都能独立满足断言）。先 grep 一遍实现里有没有第二处做同一件事，再判断测试 | 同上（本轮实测） |
+
 
 ## 怎么用这份速查
 

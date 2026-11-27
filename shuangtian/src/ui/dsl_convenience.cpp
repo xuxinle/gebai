@@ -220,6 +220,45 @@ auto divider(Composer& c, bool vertical) -> Element& {
   return *element;
 }
 
+// —— 日期/时间选择器 ——
+//
+// 三个入口都返回 `Element&` 以便链式设属性（`.set_id` / 样式），但**值的读写走
+// 属性面**（`set{"value": "2026-11-27"}`）而不是静态转型：声明式层不该携带
+// 组件的 C++ 类型信息——那会让“换个控件”变成改类型声明。
+// 需要强类型时，调用方自己 `custom<DatePicker>(c, config, props)`。
+
+auto date_picker(Composer& c, std::string value, const BoxProps& props) -> Element& {
+  Element* element = c.create_element("DatePicker", st::Json::object(), props.key);
+  if (element == nullptr) {
+    fail_missing_element_factory("DatePicker");
+  }
+  apply_box(*element, props);
+  // 初值经属性面写（与外部设值同一条路径：解析失败会如实拒绝而不是静默兜底）。
+  if (!value.empty()) (void)element->set_property("value", value);
+  return *element;
+}
+
+auto time_picker(Composer& c, std::string value, const BoxProps& props) -> Element& {
+  Element* element = c.create_element("TimePicker", st::Json::object(), props.key);
+  if (element == nullptr) {
+    fail_missing_element_factory("TimePicker");
+  }
+  apply_box(*element, props);
+  if (!value.empty()) (void)element->set_property("value", value);
+  return *element;
+}
+
+auto date_time_field(Composer& c, std::string value, const BoxProps& props) -> Element& {
+  Element* element = c.create_element("DateTimeField", st::Json::object(), props.key);
+  if (element == nullptr) {
+    fail_missing_element_factory("DateTimeField");
+  }
+  apply_box(*element, props);
+  // 空串 = 无值（空态是一等状态，不是哨兵：见 `date_time_field.hpp`）。
+  if (!value.empty()) (void)element->set_property("value", value);
+  return *element;
+}
+
 auto card(Composer& c, const BoxProps& props, std::function<void()> children) -> Element& {
   Element* element = c.create_element("Card", st::Json::object(), props.key);
   if (element == nullptr) {

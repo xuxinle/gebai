@@ -1,12 +1,13 @@
 #include "session_store.hpp"
 
-/// 会话持久化的实现。JSON 结构（键序稳定，人可读、可 diff）：
+/// 会话文件的实现。JSON 结构（键序稳定，人可读、可 diff）：
 ///
 /// ```json
 /// {
 ///   "workspace": "C:/work/proj",
 ///   "files":     [{"path": "C:/work/proj/a.cpp", "line": 3, "column": 7}],
 ///   "active":    0,
+///   "expanded_dirs": ["apps/gbcode", "tests"],
 ///   "recent_files":   ["C:/work/proj/a.cpp"],
 ///   "recent_folders": ["C:/work/proj"]
 /// }
@@ -68,6 +69,7 @@ auto load_session(const std::string& path) -> SessionState {
   }
   state.recent_files = st::json_get_string_array(doc, "recent_files");
   state.recent_folders = st::json_get_string_array(doc, "recent_folders");
+  state.expanded_dirs = st::json_get_string_array(doc, "expanded_dirs");
   return state;
 }
 
@@ -85,6 +87,9 @@ auto save_session(const std::string& path, const SessionState& state) -> bool {
   }
   doc["files"] = std::move(files);
   doc["active"] = static_cast<std::int64_t>(state.active);
+  st::Json expanded = st::Json::array();
+  for (const auto& item : state.expanded_dirs) expanded.push_back(item);
+  doc["expanded_dirs"] = std::move(expanded);
   st::Json recent_files = st::Json::array();
   for (const auto& item : state.recent_files) recent_files.push_back(item);
   doc["recent_files"] = std::move(recent_files);

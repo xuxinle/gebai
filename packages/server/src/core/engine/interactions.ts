@@ -169,6 +169,17 @@ export function startInteractionAlive(sessionId: string, publish: Publish, kind:
   return () => clearInterval(timer)
 }
 
+/** 带用户卡片的交互类型（审批/选择/填值）。画图与捕获同样阻塞等待，但等的是前端即时应答、
+ *  没有用户卡片——了结时无需告知页面。 */
+export type CardInteractionKind = "approval" | "choice" | "env"
+
+/** 交互了结（用户作答/等待超时/任务取消）统一告知：发布 `event.interaction.settled`（kind/id）。
+ *  同一会话可能同时开在多个页面（多标签、刷新前的旧页），交互只在**一处**被处理（某一页、飞书卡片、
+ *  接口层），其余页面凭此就地关掉那张卡——不留「点了才知道已失效」的死卡，角标也随之回运行态。 */
+export function notifyInteractionSettled(publish: Publish, sessionId: string, kind: CardInteractionKind, id: string): void {
+  publish(sessionId, "event.interaction.settled", { kind, id })
+}
+
 /** 决策提交结果：ok=已送达并解开等待；queued=先于注册到达（同任务内的正常竞态，已排队）；
  *  expired=该交互已了结（超时/已被处理/任务已结束）——调用方应如实告知用户，而不是假报成功。 */
 export type InteractionVerdict = "ok" | "queued" | "expired"
@@ -397,10 +408,14 @@ export async function waitForChoice(
   if (pre !== undefined) {
     task.pendingChoices.delete(choiceId)
     markSettled(task, choiceId)
+    notifyInteractionSettled(publish, sessionId, "choice", choiceId)
     return pre
   }
-  // 取消/超时信号：abort 立即以 null（等同超时）解开等待
-  if (signal?.aborted) return null
+  // 取消/超时信号：abort 立即以 null（等同超时）解开等待；卡片已发布，同样要告知了结
+  if (signal?.aborted) {
+    notifyInteractionSettled(publish, sessionId, "choice", choiceId)
+    return null
+  }
   return new Promise<ChoiceResult>((resolve) => {
     let timer: ReturnType<typeof setTimeout>
     let onAbort: () => void
@@ -411,6 +426,7 @@ export async function waitForChoice(
       signal?.removeEventListener("abort", onAbort)
       task.choices.delete(choiceId)
       markSettled(task, choiceId)
+      notifyInteractionSettled(publish, sessionId, "choice", choiceId)
       resolve(result)
     }
     onAbort = () => done(null)
@@ -472,14 +488,18 @@ export async function waitForEnv(
   if (pre !== undefined) {
     task.pendingEnvRequests.delete(envId)
     markSettled(task, envId)
+    notifyInteractionSettled(publish, sessionId, "env", envId)
     if (pre !== "") {
       task.env[name] = pre
       return true
     }
     return false
   }
-  // 取消/超时信号：abort 立即以 false（等同拒绝）解开等待
-  if (signal?.aborted) return false
+  // 取消/超时信号：abort 立即以 false（等同拒绝）解开等待；卡片已发布，同样要告知了结
+  if (signal?.aborted) {
+    notifyInteractionSettled(publish, sessionId, "env", envId)
+    return false
+  }
   return new Promise<boolean>((resolve) => {
     let timer: ReturnType<typeof setTimeout>
     let onAbort: () => void
@@ -490,6 +510,7 @@ export async function waitForEnv(
       signal?.removeEventListener("abort", onAbort)
       task.envRequests.delete(envId)
       markSettled(task, envId)
+      notifyInteractionSettled(publish, sessionId, "env", envId)
       resolve(ok)
     }
     onAbort = () => done(false)

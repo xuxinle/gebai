@@ -874,14 +874,13 @@ namespace gbcode_ui {
           open_path(path);
         };
         // 多选确认（打开模式）：整份清单**按序批量开标签**，活动标签自然落在
-        // 最后一个（`open_path` 每次都切活动项）。清单只有一条 = 与单选同效
-        // 开一个标签——「选一个开一个」不需要用户先关掉多选。
-        // 框架口径：multi 开着时确认**只**走这里（`FileDialog::confirm` 的
-        // 多选分支早退，集合空不触发也不回退 `on_confirm`），所以本回调是
-        // 打开模式下批量语义的唯一入口——不能只挂不实现。
+        // 最后一个（`open_path` 每次都切活动项）。
+        // 框架口径：只有**集合非空**时确认才走这里；集合空（用户在单个文件行
+        // 双击 / 在文件名行敲了名字）回落到 `on_confirm` 的单路径分支。两条路
+        // 都必须挂上，否则「点打开没反应」会静默出现（实测就是这个坑）。
         dialog.on_confirm_multiple = [this](const std::vector<std::string>& paths) {
           new_file_open_.set(false);
-          if (paths.empty()) return;   // 框架契约已挡空集；这里再守一道（防御式）
+          if (paths.empty()) return;   // 框架已不会空集调这里；守一道（防御式）
           const std::string& first = paths.front();
           // 记住这次所在的目录（下次打开从这起）——与 on_confirm 同一口径。
           dialog_start_dir_ = st::fs::parent(first).empty() ? std::string(".")

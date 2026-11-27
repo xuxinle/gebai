@@ -17,6 +17,7 @@
 #include "st/core/error.hpp"
 #include "st/perf/frame.hpp"
 #include "st/perf/report.hpp"
+#include "st/platform/instance.hpp"
 #include "st/shell/shell.hpp"
 #include "st/text/text.hpp"   // font_stack() 的返回类型（只读字体栈）
 #include "st/ui/ui_root.hpp"
@@ -400,6 +401,25 @@ struct AppOptions {
   /// 退出只能走托盘菜单（或显式 `request_quit`）。默认 `false`（关窗即退出）。
   /// 无托盘（未启用/后端不支持）时自动退化回“关窗即退出”。
   bool tray_minimize_on_close{false};
+  /// **单实例模式**：再次启动时**激活已有窗口**并退出，而不是再开一个。
+  ///
+  /// 为何默认关：只有“常驻/单文档”型应用才要它（工具集、聊天、笔记）。
+  /// 多窗口型应用（浏览器、编辑器多开）反而需要多个实例——把它默认打开会
+  /// 改掉它们的心智。
+  ///
+  /// 与托盘的搭配：`single_instance + tray_minimize_on_close` 是“常驻工具”的
+  /// 完整形态——关窗后进程还在托盘，用户再点图标时把那个窗口叫回来
+  /// （后台线程等激活信号 → 主循环每帧取走 → `window_restore()`）。
+  ///
+  /// 未拿到锁时：`start()` 返回 `Busy`，并已投递激活信号。应用应据此**以 0 退出**
+  /// （而不是报错退出）；`--headless` / `--max-frames` 等自检形态**不参与**单实例
+  /// （它们是“临时跑一下”，不该把用户的窗口叫出来）。
+  bool single_instance{false};
+  /// 单实例的锁名（缺省用应用名）。
+  ///
+  /// 何时需要自己给：同一台机器上跑**同一应用的不同配置**（如 dev-tools 正式版与
+  /// 开发调试版）时，它们该各自只能开一个，而不该互相抢。
+  std::string single_instance_key{};
   std::string theme_file{};
   std::string log_level{"info"};
   std::uint32_t max_frames{0};        ///< >0 时跑满即退出（无头冒烟/CI 用）
@@ -734,6 +754,11 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 切主题模式时若直接重建，用户改过的 token 会静默丢失（"切一下主题，我的配色又没了"）。
   ui::Theme custom_theme_{};
   bool started_{false};
+  /// 单实例守门（`options_.single_instance` 时持有；空 = 未参与单实例）。
+  ///
+  /// 它的行命就是锁的生命周期：析构即释放（进程退出时内核也会回收，
+  /// 但正常退出走析构才能让“立刻再启动”不撞上残余）。
+  platform::SingleInstance instance_{};
 };
 
 }  // namespace st::app

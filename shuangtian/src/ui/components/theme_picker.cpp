@@ -297,6 +297,15 @@ ThemePicker::ThemePicker() {
   set_focusable(true);
   set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = false,
                                .lift = false, .glow = false, .cursor = true});
+  // 这里的 `light` 只是**没上树/未接主题时的兵底值**，不是“当前主题”。
+  //
+  // 真实值必须由宿主告诉它：标题栏里那份由 `TitleBar::apply_theme` 每帧同步
+  // （那是主题变更唯一会到达本组件的路径）。独立使用（如置在一个页面里）时，
+  // 宿主应自己调 `set_current()`。
+  //
+  // 为何不能在这里“猜”当前主题：构造时它还没上树（`context.theme` 拿不到），
+  // 而把 `light` 当真值正是“应用暗色、选择器勾亮色”那个缺陷的起点——
+  // 它静默得难查（属性面自洽，只与真实主题不符）。
   populate_builtins("light");
 }
 
@@ -313,6 +322,9 @@ void ThemePicker::populate_builtins(std::string_view current) {
 }
 
 void ThemePicker::set_current(std::string_view name) {
+  // **同值逃逸**：`TitleBar::apply_theme` 每帧都会传一次主题名（那是它唯一能
+  // 收到主题变更的窗口），而 `mark_dirty` 会标整条祖先链——不逃逸就是每帧标脏。
+  if (current_ == name) return;
   current_ = std::string(name);
   if (panel_ != nullptr) panel_->set_current(current_);
   mark_dirty();

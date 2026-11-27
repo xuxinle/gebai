@@ -66,8 +66,11 @@ describe("缺口（overrun）后的全量重同步闭环", () => {
     const shared = src("pending-interactions.ts")
     expect(shared).toContain("export function renderPendingToolCalls")
     expect(shared).toContain("onToolCall({ sessionId, toolCallId: t.toolCallId")
+    // 两条入口（attach 与缺口重同步）共用同一快照应用函数：重建在途卡 + 收敛待决卡片
+    expect(shared).toContain("export function applyPendingSnapshot")
     expect(shared).toContain("renderPendingToolCalls(sessionId, snap?.tools)")
-    expect(src("attach.ts")).toContain("renderPendingToolCalls(sessionId, snap.tools)")
+    expect(src("attach.ts")).toContain("applyPendingSnapshot(sessionId, snap, before)")
+    expect(src("stream.ts")).toContain("resyncPendingInteractions(sessionId)")
   })
 })
 
@@ -164,6 +167,55 @@ describe("运行态可见性与列表角标", () => {
     const tc = src("tool-cards.ts")
     expect(tc).not.toContain('closest<HTMLElement>(".interaction-card")?.remove()')
     expect(tc).toContain('dropCard(bubble.closest(".interaction-card"))')
+  })
+})
+
+describe("交互在别处了结：本页卡片随之撤掉", () => {
+  test("服务端发布 event.interaction.settled，前端三类卡片各有撤卡入口", () => {
+    // 服务端：审批/选择/填值的等待结束（作答/超时/取消）统一发布，引擎侧一个都不漏
+    const srv = readFileSync(join(import.meta.dirname, "../../server/src/core/engine/interactions.ts"), "utf8")
+    expect(srv).toContain('publish(sessionId, "event.interaction.settled"')
+    const eng = readFileSync(join(import.meta.dirname, "../../server/src/core/engine/engine.ts"), "utf8")
+    // 审批等待在引擎侧（五类交互里唯一不在 interactions.ts 的）
+    expect(eng).toContain('notifyInteractionSettled(this.publishFn, sessionId, "approval", toolCallId)')
+    // 前端：事件分派到撤卡，两类 DOM（审批 .approval、交互 .interaction-card）都有入口
+    expect(src("main.ts")).toContain('ev.type === "event.interaction.settled"')
+    expect(src("events.ts")).toContain("export function onInteractionSettled")
+    expect(src("approvals.ts")).toContain("export function settleApproval")
+    expect(src("messages.ts")).toContain("export function settleInteractionCard")
+  })
+
+  test("快照收敛：本页有、快照已无的卡就地摘掉（错过事件时的兵底）", () => {
+    const shared = src("pending-interactions.ts")
+    expect(shared).toContain("export function pendingCardKeys")
+    expect(shared).toContain("export function applyPendingSnapshot")
+    // 只在「取快照前就在页面上」的卡里摘（请求期间新到的卡不在底名单里，不得误摘）
+    const fn = shared.slice(shared.indexOf("export function applyPendingSnapshot"), shared.indexOf("export function renderPendingToolCalls"))
+    expect(fn).toContain("before")
+    expect(fn).toContain("settleApproval(sessionId, id)")
+    expect(fn).toContain("settleInteractionCard(sessionId, id)")
+    // 拍底在 await 之前（顺序反了就会把请求期间新到的卡误摘）
+    const at = src("attach.ts")
+    expect(at.indexOf("pendingCardKeys(sessionId)")).toBeLessThan(at.indexOf("await client.attachSession(sessionId)"))
+  })
+
+  test("撤卡走既有通知路径（角标从「等你作答」收回）", () => {
+    // 静默 .remove() 会绕过 gebai:pending-change，会话列表角标停在 ⌛（同 dropCard 的约束）
+    const ap = src("approvals.ts")
+    const settle = ap.slice(ap.indexOf("export function settleApproval"), ap.indexOf("export function addApproval"))
+    expect(settle).toContain("notifyPendingChange()")
+    expect(settle).toContain("syncLock()") // 当前会话的卡被撕后要解锁输入
+    const msgs = src("messages.ts")
+    const fn = msgs.slice(msgs.indexOf("export function settleInteractionCard"), msgs.indexOf("export function settleInteractionCard") + 700)
+    expect(fn).toContain("notifyPendingChange()")
+  })
+
+  test("任务结束事件也收敛该会话残留卡片（它们再也不可能被服务端消费）", () => {
+    const s = src("main.ts")
+    const at = s.indexOf('ev.type === "event.task.done" || ev.type === "event.task.error"')
+    const branch = s.slice(at, at + 600)
+    expect(branch).toContain("clearApprovals(ev.sessionId)")
+    expect(branch).toContain("clearInteractionCards(ev.sessionId)")
   })
 })
 

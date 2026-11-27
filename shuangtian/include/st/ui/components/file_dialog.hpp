@@ -172,9 +172,12 @@ class FileDialog : public Element {
   [[nodiscard]] auto select_entry(std::size_t index) -> bool;
 
   /// 确认（按钮/Enter/双击文件）：文件名空则不触发。参数为「目录/文件名」拼好的全路径。
+  ///
+  /// 与 `multi_select` 的关系：多选开关**只在集合非空时**接管确认；集合空时回落到
+  /// 这里——所以多选常开的宿主仍然能「点一个文件」（或文件名行敲名字）后打开。
   std::function<void(const std::string& full_path)> on_confirm{};
   /// 确认（**多选**：Open + multi 且集合非空时走这里，替代 `on_confirm`）——
-  /// 参数是整份路径清单（注入顺序）。集合空则不触发（与"文件名空则不触发"同口径）。
+  /// 参数是整份路径清单（注入顺序）。集合空时**不调用**，确认回落到 `on_confirm`。
   std::function<void(const std::vector<std::string>& paths)> on_confirm_multiple{};
   /// 取消（Esc/按钮/遮罩点击）。
   std::function<void()> on_cancel{};

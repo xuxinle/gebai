@@ -3,7 +3,9 @@
 /// **定位（2026-10-18 起）**：从“框架演示”转为**正式可用的编辑器**。
 /// 因此去掉了全部演示壳：内置样例工作区（内存假文件）、启动自动打开样例、
 /// 内置 JS 逻辑（心跳/状态栏回显）。
-/// 现在工作区一律来自磁盘：`--workspace <dir>`，不传就是**当前目录**。
+/// 工作区与打开的文件一律来自磁盘：命令行 `--workspace <dir>` / `--open <file>`
+/// 优先；不传则**恢复上次会话**（工作区、标签、活动项、光标、资源树展开的目录）。
+/// 没有会话时新窗口是诚实的空态（不打开任何文件或目录，也不拿当前目录充数）。
 ///
 /// 布局五层（自上而下）：
 /// - 标题栏：文件名（脏标记）+ 应用名 + 装饰性窗口控制（— □ ×）
@@ -119,7 +121,7 @@ struct Options {
 
   // —— 以下是本应用特有（框架不认识也不该认识）——
   /// 工作区目录：资源管理器/打开/保存全部走 `st::fs` 真实读写。
-  /// 缺省 = 当前工作目录（正式形态：不再回退内存样例）。
+  /// **缺省为空 = 不打开任何文件夹**（有会话则从会话恢复，见 `run_app`）。
   std::string workspace{};
   /// `--open <path>`：启动即打开的文件。
   std::string open_path{};
@@ -144,7 +146,8 @@ struct Options {
 /// 本应用特有参数表（框架通用开关**不在这里**，别重复声明）。
 [[nodiscard]] auto gbcode_options() -> std::vector<st::app::AppOption> {
   return {
-      {.name = "--workspace", .value_count = 1, .help = "工作区目录（缺省 = 当前目录）"},
+      {.name = "--workspace", .value_count = 1,
+       .help = "工作区目录（缺省 = 不打开任何目录，恢复上次会话）"},
       {.name = "--open", .value_count = 1, .help = "启动即打开的文件"},
       {.name = "--tool-root", .value_count = 1,
        .help = "霜天仓根（PATH 无 st 时到它下面 build/bin/st 找）"},
@@ -175,7 +178,10 @@ struct Options {
   }
 
   Options options;
-  options.workspace = values.get("--workspace", ".");
+  // 缺省**空串** = 用户没指定工作区（=“按会话恢复”）。旧写法缺省 "." 把“没给”
+  // 伪装成“给了当前目录”：`explicit_workspace` 因此恒为 true，恢复分支永远
+  // 进不去（实测：无参数启动时上次的标签一个也不恢复）。
+  options.workspace = values.get("--workspace");
   options.open_path = values.get("--open");
   options.tool_root = values.get("--tool-root");
   if (const std::string language = values.get("--language"); !language.empty()) {
@@ -305,21 +311,16 @@ auto run_app(int argc, char** argv) -> int {
     }
     return number;
   };
-  // 工作区缺省 = **当前工作目录**（正式形态）。
+  // —— 工作区：**只有显式给了 `--workspace` 才有** ——
   //
-  // 为何不留在空串：空串在过去意味着“进内置样例模式”（内存假文件）。
-  // 样例表已删，空串现在只会得到一个空资源管理器——而“双击启动就站在
-  // 当前目录”是编辑器的正常预期（`code .` 同款语义）。
-  //
-  // ⚠ `explicit_workspace` 必须单独记：下面“是否恢复上次会话”依赖
-  // **用户有没有显式指定**，而不是“最终工作区是不是空的”。把两者混为一谈
-  // 会让“无参数启动”永远不恢复会话（那是没人要的行为）。
+  // 为何不兜底成“当前工作目录”：双单启动时 cwd 常是可执行文件目录（如
+  // `build/dev/bin`，几百 MB 的构建产物）或用户根本不关心的位置——把它当
+  // 工作区会让资源管理器一启动就扫一个大目录，`Ctrl+P`/搜索/重建索引全部
+  // 跟着变慢，而用户想要的是“上次那个项目”。现在：
+  //   · 给了 `--workspace` → 用它（命令行意图优先于上次会话）；
+  //   · 没给 → 不打开任何目录，等下面从会话文件恢复；恢复不到就是**空态**。
   const bool explicit_workspace = !options.workspace.empty();
   std::string workspace = options.workspace;
-  if (workspace.empty()) {
-    auto cwd = st::fs::current_dir();
-    if (cwd && !cwd->empty()) workspace = *cwd;
-  }
   float editor_font_scale = kEditorFontScale;
   if (options.editor_font_scale != "auto") {
     editor_font_scale = static_cast<float>(
@@ -347,8 +348,15 @@ auto run_app(int argc, char** argv) -> int {
   // ① 先从会话文件拿「最近清单」——它是跨会话记忆，无论哪种启动方式都该在；
   // ② 再把本次的 `--workspace` 头插进 recent_folders（命令行打开也算一次
   //    「打开文件夹」，switch_workspace 的埋点只覆盖 UI 对话框路径）。
-  // 标签/工作区恢复只在**无 --workspace 且无 --open** 时做（命令行意图优先于
-  // 上次会话——VSCode 同语义；恢复不动 UI，pending 在首帧后落地）。
+  //
+  // 「要不要恢复」与「能不能写回」是**两件事**：
+  //   · 无 `--workspace`、无 `--open` → 普通启动：恢复上次会话，也负责写回；
+  //   · 给了 `--workspace` → 用户在指定项目：不恢复（命令行意图优先），但要写回
+  //     （他接下去会在里面干活，关窗后下次该回到这里）；
+  //   · **只**给 `--open`（无 `--workspace`）→ 一次性查看（右键“用 gbcode 打开”/
+  //     脚本调用）：既不恢复也不写回，否则看完关窗就把用户的工程会话覆盖成
+  //     “无工作区 + 一个临时文件”。
+  page->session_writable_ = explicit_workspace || options.open_path.empty();
   {
     const gbcode::SessionState saved = gbcode::load_session(page->session_path_);
     page->recent_files_ = saved.recent_files;
@@ -356,8 +364,8 @@ auto run_app(int argc, char** argv) -> int {
     if (explicit_workspace) {
       gbcode::push_recent(page->recent_folders_, workspace);
     } else if (options.open_path.empty() && page->restore_session(saved)) {
-      st::log::out("已恢复上次会话（工作区 {}，{} 个标签）\n", saved.workspace,
-                saved.files.size());
+      st::log::out("已恢复上次会话（工作区 {}，{} 个标签，{} 个展开目录）\n", saved.workspace,
+                saved.files.size(), saved.expanded_dirs.size());
     }
   }
   // `--open <path>`：**不在构造期改状态**。

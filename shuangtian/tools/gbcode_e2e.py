@@ -633,10 +633,9 @@ def main():
             # —— 14c. 单选回归：协议关掉多选 → 单路径确认 → 开一个标签 ——
             #
             # gbcode 默认多选后，「打开一个文件开一个标签」的原路径必须仍绿：
-            # 协议 set multi_select=false（框架口径：multi 开着时确认只走
-            # on_confirm_multiple，关掉才回到 on_confirm 单路径）→ set pending_path
-            # 单路径 → confirm → 标签 +1。这同时钉住「应用侧没有把多选开关每帧顶回去」
-            #（若顶回去，multi_select 回读会是 true，下面第一条断言就拦住）。
+            # 协议 set multi_select=false（框架口径：集合空时确认回落到 on_confirm）→
+            # set pending_path 单路径 → confirm → 标签 +1。这同时钉住「应用侧没有把
+            # 多选开关每帧顶回去」（若顶回去，multi_select 回读会是 true，首条断言就拦住）。
             client.ok("input.key", {"key": "o", "ctrl": True, "kind": "press"})
             time.sleep(0.6)
             check(client.count("#file-dialog") == 1, "单选回归：Ctrl+O 未重新打开对话框")
@@ -661,6 +660,37 @@ def main():
             check(tabs_after.split("|")[int(active_tab)] == "notes.md",
                   f"单选确认后活动标签未切到目标文件: active={active_tab} tabs={tabs_after!r}")
             print(f"[14c] 单选回归：关多选 → 单路径确认仍开一个标签（{n_after} 个，活动→notes.md）")
+
+            # —— 14d. **多选常开时**单文件确认必须也能开标签（实测缺陷）——
+            #
+            # 应用侧打开模式的 `multi_select` 是常开的，而用户点一个文件再按「打开」
+            # 只写了 `filename_`、**不写多选集合**。旧框架 `confirm` 在「集合空」
+            # 处直接早退，于是整条「打开文件」链路静默失效（对话框不关、无提示）。
+            # 这条用真实默认配置（不关多选）跑一遍单文件路径——它才是用户日常走的那条。
+            client.ok("input.key", {"key": "o", "ctrl": True, "kind": "press"})
+            time.sleep(0.6)
+            check(client.count("#file-dialog") == 1, "14d：Ctrl+O 未重新打开对话框")
+            check(client.ok("get", {"id": "file-dialog"})["props"].get("multi_select") == "true",
+                  "14d：新开的对话框多选开关应为常开（gbcode 默认）")
+            single_path = str(multi_work / "single.md")
+            (multi_work / "single.md").write_text("single file open\n", encoding="utf-8")
+            tabs_before = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+            n_before = len([t for t in tabs_before.split("|") if t])
+            client.ok("set", {"id": "file-dialog", "props": {"pending_path": single_path}})
+            time.sleep(0.2)
+            check(client.ok("get", {"id": "file-dialog"})["props"].get("selected_paths", "") == "",
+                  "14d：单路径选路应让多选集合为空（两条子通道互斥）")
+            reply = client.ok("invoke", {"id": "file-dialog", "action": "confirm"})
+            check(reply.get("handled"), "14d：多选常开时单文件确认未被接住")
+            time.sleep(0.6)
+            check(client.count("#file-dialog") == 0,
+                  "14d：多选常开时单文件确认后对话框未关闭（打开文件静默失效）")
+            tabs_after = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+            n_after = len([t for t in tabs_after.split("|") if t])
+            check(n_after == n_before + 1,
+                  f"14d：多选常开时单文件确认未开新标签（{n_before} → {n_after}: {tabs_after!r}）")
+            check("single.md" in tabs_after, f"14d：新标签不是目标文件: {tabs_after!r}")
+            print(f"[14d] 多选常开 → 单文件确认开标签（{n_before}→{n_after}，single.md）")
         finally:
             # 临时目录不留垃圾（gbcode 不持有句柄，随时可删）。
             shutil.rmtree(multi_work, ignore_errors=True)

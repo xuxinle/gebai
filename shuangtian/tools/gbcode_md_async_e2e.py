@@ -100,6 +100,9 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="gbcode-md-async-"))
     ctl = work / ".st" / "ctl.json"
     (work / ".st").mkdir(parents=True, exist_ok=True)
+    # 不带 `--workspace` 的 `--open` 是“一次性查看”：既**不恢复也不写回**会话。
+    # ST_HOME 仍指到临时目录，避免任何回退路径（如后续改成写回）碰到真实用户数据。
+    os.environ["ST_HOME"] = str(Path(tempfile.mkdtemp(prefix="gbcode-md-async-home-")))
     proc = subprocess.Popen(
         [binary, "--headless", "--control-port", "0", "--control-file", str(ctl), "--open", str(big_md)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -107,7 +107,16 @@ describe("core/fs 路径防护（写操作的安全底线）", () => {
     writeFileSync(join(outside, "secret.txt"), "s")
     const root = tmpdirWith({ "a.txt": "a" })
     try {
-      symlinkSync(outside, join(root, "escape"), "dir")
+      // Windows 建真符号链接需管理员/开发者模式（EPERM）；junction 不需特权且同样经 realpath
+      // 解析到目标——逃逸检查这条路在两平台上被同一份断言真正走到
+      const link = join(root, "escape")
+      try {
+        symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir")
+      } catch (err) {
+        // 文件系统不支持链接（非 NTFS/FAT、容器只读挂载等）：如实跳过，不让环境差异伪装成缺陷
+        console.warn(`[fs] 跳过符号链接逃逸用例：本机无法创建目录链接（${(err as NodeJS.ErrnoException).code ?? String(err)}）`)
+        return
+      }
       // 词法上 escape/secret.txt 在根内，但 realpath 落在根外 → 直接拒绝
       expect(() => resolveInRoot(root, "escape/secret.txt")).toThrow(/symlink outside sandbox/)
       expect(() => resolveInRoot(root, "a.txt")).not.toThrow()

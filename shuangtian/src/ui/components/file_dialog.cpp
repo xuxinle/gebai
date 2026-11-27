@@ -189,6 +189,8 @@ auto FileDialog::set_pending_path(const std::string& path) -> bool {
   // 顺序不能反——`set_directory` 内部会清选中态。
   set_directory(st::fs::parent(path));
   filename_ = st::fs::file_name(path);
+  // 单路径选路 = “就看这一个”：与多选集合互斥（见 `confirm` 的回落分支）。
+  selected_paths_.clear();
   // 在列表里把那一项选中（让画面确实高亮它，与实际状态一致）——按**可见序号**找
   //（过滤可能把同名文件藏起来，找不到就保持未选中，文件名仍在）。
   for (std::size_t index = 0; index < visible_.size(); ++index) {
@@ -278,6 +280,7 @@ auto FileDialog::select_entry(std::size_t index) -> bool {
   } else {
     selected_ = index;
     filename_ = found->name;
+    selected_paths_.clear();   // 单击 = 单文件意图（与 confirm 的回落分支一致）
     ensure_selected_visible();
     mark_dirty();
   }
@@ -348,6 +351,8 @@ void FileDialog::activate_entry(std::size_t index) {
   }
   filename_ = entry.name;
   selected_ = index;
+  // 双击 = “打开这一个”：多选集合是别的手势留下的，不能把用户双击的文件盖掉。
+  selected_paths_.clear();
   confirm();
 }
 
@@ -371,10 +376,15 @@ void FileDialog::move_selection(int delta) {
 }
 
 void FileDialog::confirm() {
-  // 多选（Open + multi）：整份集合交给 `on_confirm_multiple`；集合空则不触发——
-  // 与单路径"文件名空则不触发"同一条诚实口径。
-  if (multi_select_ && mode_ == Mode::Open) {
-    if (!selected_paths_.empty() && on_confirm_multiple) {
+  // 多选（Open + multi）**且集合非空**：整份集合交给 `on_confirm_multiple`。
+  //
+  // 集合为空时**必须回落到下面的单路径分支**——那正是「用户在单个文件行上双击 /
+  // 在文件名行敲了名字后点打开」的路径（`set_pending_path`、`select_entry`、
+  // 单击文件行都只写 `filename_`，不写多选集合）。旧写法在集合空处就早退，于是
+  // 多选常开时「打开文件」整条链路静默失效：点「打开」没反应、双击文件也不开，
+  // 而界面上没有任何提示（宿主回调一次都没跑）。
+  if (multi_select_ && mode_ == Mode::Open && !selected_paths_.empty()) {
+    if (on_confirm_multiple) {
       on_confirm_multiple(selected_paths_);
     }
     mark_dirty();
@@ -905,7 +915,16 @@ auto FileDialog::on_event(const RenderContext& context, Event& event) -> bool {
       mark_dirty();
       return true;
     }
+    // **按下只吞不动作**：真实后端一次点击会派发 `MouseDown → MouseUp → Click`
+    // 三个事件（`control/server.cpp` 的 `input.mouse kind=click` 同构）。
+    // 旧写法把 `MouseDown` 与几种 `Click` 归在同一个分支里，于是凡是“每次点击
+    // 改一次状态”的动作都会**执行两次**——实测两条：Ctrl+单击文件行先进集合
+    // 再出集合（净变化为零，多选在真机上根本选不中）；点 `..` 行一次上溯两级。
+    // 单测只派发单个 `Click` 时这两种缺陷都隐形（典型“桩把差异抹平”）。
     case EventKind::MouseDown:
+      // 模态：按下时只吞掉指针（不穿透到下层），状态变更一律等 `Click`。
+      event.handled = true;
+      return true;
     case EventKind::Click:
     case EventKind::DoubleClick:
     case EventKind::TripleClick: {
@@ -974,6 +993,11 @@ auto FileDialog::on_event(const RenderContext& context, Event& event) -> bool {
               event.kind == EventKind::TripleClick) {
             activate_entry(index);  // 双击：目录进入/文件确认
           } else if (entry != nullptr && !entry->is_dir) {
+            // 单击文件行：选中 + 回填文件名。此处**清空多选集合**——它是“上一次
+            // Ctrl+多选手势”的产物；用户若接下来点「打开」，意图显然是刚点的
+            // 这一个文件。不清的话，集合非空时确认会整份交付旧集合，而用户刚点的
+            // 那个文件被静默忽略（界面上看不出为什么）。
+            selected_paths_.clear();
             filename_ = entry->name;
           }
           mark_dirty();

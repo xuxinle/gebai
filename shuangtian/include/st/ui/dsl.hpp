@@ -817,6 +817,15 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
              const BoxProps& props = {}) -> Element&;
 /// 分隔线。
 [[nodiscard]] auto divider(Composer& c, bool vertical = false) -> Element&;
+/// 日期选择器（`YYYY-MM-DD`）。`value` 为空 = 不改初值。
+[[nodiscard]] auto date_picker(Composer& c, std::string value = {},
+                               const BoxProps& props = {}) -> Element&;
+/// 时间选择器（`HH:MM`）。
+[[nodiscard]] auto time_picker(Composer& c, std::string value = {},
+                               const BoxProps& props = {}) -> Element&;
+/// 日期 + 时间（可空：`value` 空串 = 无值）。
+[[nodiscard]] auto date_time_field(Composer& c, std::string value = {},
+                                   const BoxProps& props = {}) -> Element&;
 /// 卡片容器。
 [[nodiscard]] auto card(Composer& c, const BoxProps& props, std::function<void()> children)
     -> Element&;

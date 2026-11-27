@@ -32,6 +32,7 @@ ST_TEST(gbcode_session_roundtrip_preserves_all_fields) {
   saved.workspace = "C:/work/proj";
   saved.files = {{"C:/work/proj/a.cpp", 3, 7}, {"C:/work/proj/中文 名.md", 12, 1}};
   saved.active = 1;
+  saved.expanded_dirs = {"apps/gbcode", "tests/support", "中文目录/子"};
   saved.recent_files = {"C:/work/proj/a.cpp", "C:/other/b.py"};
   saved.recent_folders = {"C:/work/proj", "C:/other"};
 
@@ -46,6 +47,8 @@ ST_TEST(gbcode_session_roundtrip_preserves_all_fields) {
   ST_CHECK_EQ(loaded.files[1].path, std::string("C:/work/proj/中文 名.md"));
   ST_CHECK_EQ(loaded.files[1].line, std::size_t{12});
   ST_CHECK_EQ(loaded.active, std::size_t{1});
+  // 展开目录往返（含层级分隔符与中文）：恢复侧靠它把资源树展开回原样。
+  ST_CHECK_LIST(loaded.expanded_dirs, saved.expanded_dirs);
   ST_CHECK_LIST(loaded.recent_files, saved.recent_files);
   ST_CHECK_LIST(loaded.recent_folders, saved.recent_folders);
 }
@@ -64,6 +67,7 @@ ST_TEST(gbcode_session_load_is_fail_safe) {
   state = gbcode::load_session(broken);
   ST_CHECK(state.workspace.empty());
   ST_CHECK(state.files.empty());
+  ST_CHECK(state.expanded_dirs.empty());
 
   // ③ 类型不符 / 缺字段 → 默认值（不抛、不喊；json_get_* 的失败安全语义）。
   // 注：`json_as_string` 的宽松语义会把数字/布尔也读成文本（配置友好）——

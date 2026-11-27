@@ -1480,11 +1480,36 @@ void Divider::apply_theme(const Theme& theme) {
 
 void Divider::measure(const RenderContext& context, const Constraints& constraints) {
   (void)context;
+  // 量法：**铺满“能有上界”的那个方向，另一个方向固定线厚**。
+  //
+  // 只有两条规则，而“哪个方向能铺满”完全由父容器给的约束形态决定：
+  //
+  // | 父容器的排布 | `max_width` | `max_height` |
+  // |---|---|---|
+  // | 列（主轴纵、交叉轴横） | 内容宽（**有限**） | `kUnbounded` |
+  // | 行（主轴横、交叉轴纵） | `kUnbounded` | 内容高（**有限**） |
+  //
+  // 于是：
+  // · **列里的水平线**——横向铺满（分隔两块上下内容）；
+  // · **行里的水平线**——横向无上界，退到线厚（横向只占一线）；而纵向有内容高，
+  //   flex 默认 `align_items = Stretch` 会把它拉到整行高 ⇒ **视觉上就是一道竖向分隔**。
+  //   这正是“行里想要一个分隔符”时想要的结果，也是 CSS 里 `border-left` 的效果。
+  //
+  // 为何不能无条件取 `constraints.max_width`（旧实现，实测代价）：行给子元素的
+  // 交叉轴上界是 `kUnbounded`（**1e9**），于是一条线进了工具行就量出 1e9 宽，父行把
+  // 整行撑爆：线后面每个兄弟的 x 变成 1e9、2e9……（每过一个分隔线翻一倍），整条
+  // 工具行只剩最前面两个控件看得见，而线的属性面尺寸“看着就是这个数”。
+  //
+  // 为何不用 `fill_width`：它在上界无界时会退到 `available_*`，而那是行主轴空间的
+  // 全部——同样抢爆整行。这里的语义是“无上界就不参与主轴竞争”。
+  const auto span = [](float max_extent) {
+    return max_extent < kUnbounded && max_extent > 0.0f ? max_extent : kLineThickness;
+  };
   if (vertical_) {
-    measured_ = math::Size{kLineThickness, constraints.max_height};
+    measured_ = math::Size{kLineThickness, span(constraints.max_height)};
     return;
   }
-  measured_ = math::Size{constraints.max_width, kLineThickness};
+  measured_ = math::Size{span(constraints.max_width), kLineThickness};
 }
 
 void Divider::paint_content(const RenderContext& context, raster::Surface& canvas) const {

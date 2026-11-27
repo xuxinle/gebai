@@ -1,9 +1,9 @@
 /** WS 事件处理器（自 main.ts 拆分）：审批/选择/填值/画图/捕获请求、工具调用/结果、待办与压缩事件。 */
 import type { ContentBlock, DiagramFormat, TodoItem } from "@gebai/sdk"
-import { addApproval } from "./approvals"
+import { addApproval, settleApproval } from "./approvals"
 import { capturePage } from "./capture"
 import { noteIncoming } from "./jump-bottom"
-import { appendCompactNotice, compactNoticeTitle, appendMsg, appendToolResult, appendTodoCard, renderChoiceCard, renderEnvRequestCard, scrollSessionSticky, sealBlockResultSegment, sealRunSegment, sealSegment, withPane } from "./messages"
+import { appendCompactNotice, compactNoticeTitle, appendMsg, appendToolResult, appendTodoCard, renderChoiceCard, renderEnvRequestCard, scrollSessionSticky, sealBlockResultSegment, sealRunSegment, sealSegment, settleInteractionCard, withPane } from "./messages"
 import { isBlockOnly, shortToolName } from "./tool-cards"
 import { renderDiagramSvg } from "./diagram"
 import { client, getCurrentSession, pendingTools, pendingToolsKey, runs, todoState } from "./state"
@@ -58,6 +58,13 @@ export function onEnvRequest(ev: { sessionId: string; envId: string; name: strin
   touchRunActivity(ev.sessionId)
   noteIncoming()
   renderEnvRequestCard(String(ev.name ?? ""), String(ev.description ?? ""), ev.secret === true, String(ev.envId ?? ""), ev.sessionId)
+}
+export function onInteractionSettled(ev: { sessionId: string; kind: string; id: string }) {
+  // 交互已在别处了结（另一页面/飞书卡片/接口层作答，或等待超时、任务取消）：本页那张卡直接撤掉。
+  // 决策只送达一次，没有这条事件时其余页面只能留着卡等用户点了才弹出「已失效」；
+  // 撤卡同时把会话列表角标从「等你作答」收回运行态（撤卡路径内部会发 pending-change）。
+  if (ev.kind === "approval") settleApproval(ev.sessionId, ev.id)
+  else if (ev.kind === "choice" || ev.kind === "env") settleInteractionCard(ev.sessionId, ev.id)
 }
 export function onDrawRender(ev: { sessionId: string; renderId: string; code: string; format?: string }) {
   // show 图表分支执行中：前端按图表语言实时渲染（纯计算，不依赖当前会话视图，后台会话同样执行），成功才回传 ok

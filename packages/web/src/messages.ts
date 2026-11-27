@@ -1065,6 +1065,19 @@ export function clearInteractionCards(sessionId: string): void {
   if (removed) notifyPendingChange()
 }
 
+/** 单个交互卡已在别处了结（另一页面/飞书卡片作答，或等待超时、任务取消）：撕掉本页那张卡。
+ *  同一会话可同时开在多个页面，而决策只送达一次——不撕则本页留着一张点了才知道失效的死卡。 */
+export function settleInteractionCard(sessionId: string, reqId: string): void {
+  const sid = CSS.escape(sessionId)
+  const rid = CSS.escape(reqId)
+  let removed = 0
+  for (const card of approvalsEl.querySelectorAll<HTMLElement>(`.interaction-card[data-session="${sid}"][data-req-id="${rid}"]`)) {
+    card.remove()
+    removed += 1
+  }
+  if (removed) notifyPendingChange()
+}
+
 /** 工具输出：短内容放带框代码块，长内容折叠。与参数区块同框样式。 */
 // 循环依赖兜底：addMetaActions 需要 loadMessages（sessions 模块），延迟注入
 import type { LoadMessagesFn } from "./sessions"

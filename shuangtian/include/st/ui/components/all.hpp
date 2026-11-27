@@ -104,8 +104,14 @@
 #include "st/ui/components/status_dot.hpp"
 
 // ── 复合控件 ──
+#include "st/ui/components/calendar_panel.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/color_picker.hpp"
+#include "st/ui/components/date_picker.hpp"
+#include "st/ui/components/date_picker_panel.hpp"
+#include "st/ui/components/date_time_field.hpp"
+#include "st/ui/components/time_picker.hpp"
+#include "st/ui/components/time_picker_panel.hpp"
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/completion_popup.hpp"
 #include "st/ui/components/diff_view.hpp"
@@ -172,9 +178,10 @@ inline void import_all_components() {
       // 反馈与状态
       EmptyState, Banner, Skeleton, StatusDot, AvatarGroup,
       // 复合控件
-      CodeEditor, ColorPicker, CommandPalette, CompletionPopup, DiffView, FileDialog,
+      CalendarPanel, CodeEditor, ColorPicker, CommandPalette, CompletionPopup,
+      DatePicker, DateTimeField, DiffView, FileDialog,
       MarkdownView, MenuBar, MenuPanel, ContextMenu, MergeView, SlowContent, Terminal,
-      ThemePicker, TimelineView, TitleBar, WindowFrame, HtmlView, NativeHost,
+      ThemePicker, TimePicker, TimelineView, TitleBar, WindowFrame, HtmlView, NativeHost,
       MermaidView, MindMapView>();
   // 三维族（ThreeView / LabelOverlay / SceneView / GraphView）**不在**导入列表里：
   // 它们不进声明式注册表（理由见各自头文件末尾）。它们的头仍被上面的 include 引入，

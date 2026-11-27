@@ -1,11 +1,11 @@
 ---
 title: Divider · 基础展示
-summary: 水平分隔线。
+summary: 水平分隔线（`vertical = true` 时为竖线）。
 ---
 
 # Divider
 
-水平分隔线。
+水平分隔线（`vertical = true` 时为竖线）。
 
 ## 头与实现
 
@@ -26,6 +26,12 @@ auto w = std::make_unique<st::ui::Divider>();
 ## 动作面（控制通道 `invoke`）
 
 本组件没有自定义动作。通用动作（`focus` 等）由 `Element` 提供。
+
+## 头注释里的逐条取舍（读源码前先看这里）
+
+- 「量法：铺满“有上界”的那个方向，另一个方向固定线厚」— `include/st/ui/components/divider.hpp:17`
+
+> 这些是**为什么这样做**的记录（多半是踩过的坑）。改行为之前逐条读，否则会重新踩一遍。
 
 ## 设计章节
 

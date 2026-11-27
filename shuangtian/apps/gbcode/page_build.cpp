@@ -939,13 +939,15 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         // 空状态要的是“留白里的一个安静提示”，不是一块面板。
         row(c, {.grow = true, .justify = Justify::Center, .align_items = Align::Center,
                 .id = "empty-hint"}, [&] {
-          column(c, {.gap = 14.0f, .padding = 32.0f, .align_items = Align::Center}, [&] {
-            (void)icon(c, "code", 56.0f);
-            (void)text(c, [] { return std::string("从左侧资源管理器打开一个文件"); },
-                       {.color = Tone::Muted, .size = 15.0f, .text_align = TextAlign::Center});
-            (void)text(c, [] { return std::string("或按 Ctrl+Shift+P 打开命令面板"); },
-                       {.color = Tone::Faint, .size = 12.5f, .text_align = TextAlign::Center});
-          });
+                column(c, {.gap = 14.0f, .padding = 32.0f, .align_items = Align::Center}, [&] {
+        (void)icon(c, "code", 56.0f);
+        (void)text(c, [] { return std::string("打开一个文件或文件夹开始"); },
+                   {.color = Tone::Muted, .size = 15.0f, .text_align = TextAlign::Center});
+        (void)text(c, [] { return std::string("Ctrl+O 打开文件 · Ctrl+Shift+O 打开文件夹"); },
+                   {.color = Tone::Faint, .size = 12.5f, .text_align = TextAlign::Center});
+        (void)text(c, [] { return std::string("Ctrl+Shift+P 打开命令面板"); },
+                   {.color = Tone::Faint, .size = 12.5f, .text_align = TextAlign::Center});
+      });
         });
         return;
       }

@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import statistics
@@ -39,6 +40,11 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXE = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
+
+# 会话隔离：无参数启动现在会恢复上次会话（工作区/标签），而本探针量的是
+# “启动到首帧”的固定成本——带上一个几百文件的真实工作区测量会把恢复耗时计进去。
+# 指一个专用 ST_HOME（空态）后，每次 Rund 的前提一致。
+os.environ["ST_HOME"] = str(ROOT / "build" / "artifacts" / "gbcode-startup-home")
 
 # 日志行里带 ISO 时间戳；用它算段间耗时，避开外部轮询的抖动。
 STAMP = re.compile(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})Z\]")

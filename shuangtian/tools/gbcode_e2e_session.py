@@ -127,29 +127,55 @@ def main():
         "\n".join(f"line {i} of a" for i in range(1, 41)) + "\n", encoding="utf-8")
     (workspace / "b.py").write_text(
         "\n".join(f"# line {i} of b" for i in range(1, 11)) + "\n", encoding="utf-8")
+    # 一个子目录：用来验「资源树展开的目录」也被记住（展开状态是用户的导航位置）。
+    sub = workspace / "pkg"
+    sub.mkdir()
+    (sub / "mod.py").write_text("# mod\n", encoding="utf-8")
     home = work / "home"          # ST_HOME（会话文件在这里）
     home.mkdir()
     shots = work / "shots"
     shots.mkdir()
     session_json = home / ".shuangtian" / "gbcode" / "session.json"
 
-    # —— 第一轮：打开两个文件、跳行、退出 ——
-    # `--open` 直接给 a.cpp（它走 `open_path`，MRU 埋点同一条路）；b.py 点资源树。
+    # —— 第 0 轮：**没有任何会话文件**时，裸启动必须是诚实的空态 ——
+    # 不打开任何文件或目录（旧行为是拿「当前工作目录」当工作区：双击启动时那可能是
+    # 可执行文件目录，几百 MB 的构建产物都会被扫一遍）。
+    proc, client, _ = start(binary, str(work), str(home), str(shots))
+    try:
+        client.ok("hello")
+        check(client.count("#workspace-tree") == 0, "无会话时：没有工作区树")
+        check(client.count("#explorer-empty") == 1, "无会话时：资源管理器显示空态")
+        check(client.count("#empty-hint") == 1, "无会话时：编辑区显示空态提示")
+        tabs = client.ok("get", {"id": "editor-tabs"})["props"].get("options", "")
+        check(tabs == "", f"无会话时：没有打开任何标签（{tabs!r}）")
+    finally:
+        quit_and_wait(proc, client)
+    print("[0] 无会话裸启动 → 空态（无目录、无标签）")
+
+    # —— 第一轮：打开两个文件、跳行、展开一个子目录、退出 ——
+    # `--open` 直接给 a.cpp（它走 `open_path`，MRU 埋点同一条路）；b.py 点资源树；
+    # `pkg/` 展开一次（验「资源树展开的目录」被记住）。
     proc, client, _ = start(binary, str(work), str(home), str(shots),
                             ["--workspace", str(workspace), "--open", str(workspace / "a.cpp")])
     try:
         client.ok("hello")
         check("a.cpp" in client.ok("get", {"id": "editor-tabs"})["props"].get("options", ""),
               "--open 已打开 a.cpp")
-        # b.py：点资源树。工作区树**没有根行**（直接从条目开始，字典序：
-        # a.cpp 第 1 行、b.py 第 2 行）。行高从树属性读（不硬编码）。
+        # 工作区树**没有根行**（直接从条目开始，字典序：pkg/ 在前、然后 a.cpp / b.py）。
         tree = client.ok("find", {"selector": "#workspace-tree"})["matches"]
         check(len(tree) == 1, "工作区树已出现")
         tree_box = tree[0]["bounds"]
-        row_h = float(client.ok("get", {"id": "workspace-tree"})["props"].get("row_height") or 26)
-        rows = int(client.ok("get", {"id": "workspace-tree"})["props"].get("rows") or 0)
-        check(rows >= 2, f"树有 {rows} 行（两个文件）")
-        client.click_at(tree_box["x"] + 60, tree_box["y"] + row_h * 1.5)   # 第 2 行 = b.py
+        tree_props = client.ok("get", {"id": "workspace-tree"})["props"]
+        row_h = float(tree_props.get("row_height") or 26)
+        labels = [l for l in (tree_props.get("labels") or "").split("\n") if l]
+        check("pkg" in labels and "b.py" in labels, f"树里能读到条目: {labels}")
+        # 目录在前：第 1 行 = pkg/（展开它）；b.py 的行号按 labels 反查。
+        client.click_at(tree_box["x"] + 60, tree_box["y"] + row_h * 0.5)   # 第 1 行 = pkg/
+        time.sleep(0.5)
+        labels = [l for l in (client.ok("get", {"id": "workspace-tree"})["props"].get("labels") or "").split("\n") if l]
+        check("mod.py" in labels, f"点目录已展开（{labels}）")
+        b_row = labels.index("b.py")
+        client.click_at(tree_box["x"] + 60, tree_box["y"] + row_h * (b_row + 0.5))
         tabs = client.ok("get", {"id": "editor-tabs"})["props"].get("options", "")
         check("b.py" in tabs, f"标签栏出现 b.py: {tabs}")
         # 活动标签切回 a.cpp：Ctrl+Tab 环绕。
@@ -168,7 +194,7 @@ def main():
         check(line_now >= 29, f"光标已到第 {line_now} 行（目标 30）")
     finally:
         quit_and_wait(proc, client)
-    print("[1] 第一轮：两文件打开、活动 a.cpp、光标 30 行 → 退出")
+    print("[1] 第一轮：两文件打开、活动 a.cpp、光标 30 行、pkg/ 展开 → 退出")
 
     # —— 会话文件校验 ——
     check(session_json.exists(), f"会话文件已落盘: {session_json}")
@@ -179,11 +205,14 @@ def main():
     check(any(p.endswith("b.py") for p in paths), f"b.py 在会话: {paths}")
     a_entry = next(f for f in doc.get("files", []) if f["path"].replace("\\", "/").endswith("a.cpp"))
     check(a_entry.get("line", 0) >= 29, f"光标行已存: {a_entry.get('line')}")
+    check("pkg" in doc.get("expanded_dirs", []),
+          f"展开的目录已存（相对路径）: {doc.get('expanded_dirs')}")
     check(any(p.replace("\\", "/").endswith("a.cpp") for p in doc.get("recent_files", [])),
           f"recent_files 含 a.cpp: {doc.get('recent_files')}")
     check(any(p.replace("\\", "/").lower().endswith("proj") for p in doc.get("recent_folders", [])),
           f"recent_folders 含工作区: {doc.get('recent_folders')}")
-    print(f"[2] session.json 字段齐（{len(paths)} 标签，recent {len(doc.get('recent_files', []))} 条）")
+    print(f"[2] session.json 字段齐（{len(paths)} 标签，{len(doc.get('expanded_dirs', []))} 展开目录，"
+          f"recent {len(doc.get('recent_files', []))} 条）")
 
     # —— 第二轮：无 --workspace/--open 启动 → 断言恢复 ——
     proc, client, _ = start(binary, str(work), str(home), str(shots))
@@ -193,6 +222,10 @@ def main():
         check(client.count("#workspace-tree") == 1, "工作区已恢复（资源树为工作区树）")
         tabs = client.ok("get", {"id": "editor-tabs"})["props"].get("options", "")
         check("a.cpp" in tabs and "b.py" in tabs, f"标签已恢复: {tabs}")
+        # 资源树的**展开状态**也恢复：pkg/ 展开着，它的子项 mod.py 直接可见
+        # （不靠“再点一次”——那正是本次要免掉的重复劳动）。
+        labels = [l for l in (client.ok("get", {"id": "workspace-tree"})["props"].get("labels") or "").split("\n") if l]
+        check("mod.py" in labels, f"展开的目录已恢复（树里直接有 mod.py）: {labels}")
         # 活动标签 + 光标。
         title = client.title("titlebar")
         check("a.cpp" in title, f"活动标签恢复为 a.cpp: {title!r}")
@@ -237,7 +270,26 @@ def main():
         time.sleep(0.4)
     finally:
         quit_and_wait(proc, client)
-    print("[3] 第二轮：无参数启动 → 工作区/标签/活动/光标全部恢复；菜单与命令面板「最近」入口可用")
+    print("[3] 第二轮：无参数启动 → 工作区/标签/活动/光标/展开目录全部恢复；菜单与命令面板「最近」入口可用")
+
+    # —— 第四轮：`--open` 一次性查看**不覆盖**用户会话（写权限规则）——
+    # 这是“看完一个临时文件，结果下次打开工程全没了”这个真实事故的防护线。
+    want = doc.get("files") or []
+    stray = work / "stray.txt"
+    stray.write_text("临时查看\n", encoding="utf-8")
+    proc, client, _ = start(binary, str(work), str(home), str(shots), ["--open", str(stray)])
+    try:
+        client.ok("hello")
+        check("stray.txt" in client.ok("get", {"id": "editor-tabs"})["props"].get("options", ""),
+              "--open 打开了临时文件")
+    finally:
+        quit_and_wait(proc, client)
+    after = json.loads(session_json.read_text(encoding="utf-8"))
+    check(after.get("workspace") == doc.get("workspace"),
+          f"一次性查看未改写会话工作区（{doc.get('workspace')!r} → {after.get('workspace')!r}）")
+    check([f["path"] for f in after.get("files", [])] == [f["path"] for f in want],
+          f"一次性查看未改写会话标签（{len(want)} 个仍原样）")
+    print("[4] `--open` 一次性查看：会话文件未被覆盖")
 
     print("\n[OK] gbcode 会话恢复端到端全部通过")
     return 0

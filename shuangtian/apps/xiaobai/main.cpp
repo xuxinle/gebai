@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-#include "../app_icon.hpp"
+#include "st/app/icon.hpp"
 #include "session_store.hpp"
 #include "tool_support.hpp"
 #include "st/app/app.hpp"

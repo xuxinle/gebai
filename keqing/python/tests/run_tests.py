@@ -37,6 +37,14 @@ def skip(reason: str) -> None:
     raise Skip(reason)
 
 
+# 作为脚本直接运行时（`python3 tests/run_tests.py`），本模块名是 `__main__`，而测试模块里的
+# `from tests.run_tests import Skip` 会再导入一份同名模块——两份 Skip 不是同一个类，
+# skip() 抛出的异常因此不被主流程的 `except Skip` 捕获，结果被记成 FAIL（现象是“明明写了跳过却红了”）。
+# 把自身登记为规范模块名，两种运行方式（直接跑 / 被 import 后调用 main）拿到同一个对象。
+if __name__ == "__main__":
+    sys.modules.setdefault("tests.run_tests", sys.modules[__name__])
+
+
 def load_module(path: str, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:

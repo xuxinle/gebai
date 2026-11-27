@@ -28,9 +28,11 @@ namespace {
 
 using st::ui::Accordion;
 using st::ui::Button;
+using st::ui::Divider;
 using st::ui::DividerLabel;
 using st::ui::Event;
 using st::ui::EventKind;
+using st::ui::Panel;
 using st::ui::StatusBar;
 using st::ui::Toolbar;
 
@@ -70,6 +72,69 @@ auto overlaps(st::math::Rect a, st::math::Rect b) -> bool {
 }
 
 }  // namespace
+
+// ————————————————————————————————————————————————————————————————————————————
+// Divider
+// ————————————————————————————————————————————————————————————————————————————
+
+/// **行里的水平分隔线不该抢夺整行宽度**，而应退成“一道竖向短线”。
+///
+/// 这条钉的是一个“量出的尺寸是天文数字”的缺陷：行布局给子元素的交叉轴上界是
+/// `kUnbounded`（1e9），而旧实现直接把它当自己的宽度 ⇒ 水平线量出 1e9 宽，
+/// 父行把整行撑爆：线后面每个兄弟的 x 变成 1e9、2e9……（每过一个分隔线翻一倍），
+/// 工具行只剩前两个控件看得见，而且**属性面全对**（线本身宽高都对不上“看得见”）。
+///
+/// 判据用**兄弟位置**而不是只查分隔线自己的尺寸：缺陷的真实后果是“后面的东西跑掉”。
+ST_TEST(divider_in_row_does_not_swallow_the_line) {
+  Fixture fixture;
+  Panel row(st::ui::FlexDirection::Row);
+  row.style().gap = 8.0f;
+  row.add_child(std::make_unique<Button>("左", Button::Variant::Neutral, Button::Size::Small));
+  auto divider = std::make_unique<Divider>();
+  Divider* divider_raw = divider.get();
+  row.add_child(std::move(divider));
+  row.add_child(std::make_unique<Button>("右", Button::Variant::Neutral, Button::Size::Small));
+  fixture.layout(row, 600.0f, 40.0f);
+
+  // ① 线本身：宽度绝不该是 1e9 量级（行主轴方向只占线厚）。
+  ST_CHECK(divider_raw->bounds().width < 600.0f);
+  ST_CHECK(std::abs(divider_raw->bounds().width - Divider::kLineThickness) < 0.01f);
+  // ② 交叉轴（纵向）铺满行高——行里它就是一道竖向分隔。
+  ST_CHECK(std::abs(divider_raw->bounds().height - 40.0f) < 0.01f);
+
+  // ③ 关键判据：后面的兄弟仍在可视区内（右侧按钮的右缘不超过容器宽）。
+  const st::ui::Element* right = row.child_at(2);
+  ST_REQUIRE(right != nullptr);
+  ST_CHECK(right->bounds().x < 600.0f);
+  ST_CHECK(right->bounds().right() <= 600.0f + 0.01f);
+  // ④ 而且它确实在分隔线**之后**（没被挤到线左边去）。
+  ST_CHECK(right->bounds().x >= divider_raw->bounds().right());
+}
+
+/// **列里的水平分隔线要铺满可用宽**（这是它最常见的用法，不能被上一条修坏）。
+ST_TEST(divider_in_column_fills_available_width) {
+  Fixture fixture;
+  Panel column(st::ui::FlexDirection::Column);
+  auto divider = std::make_unique<Divider>();
+  Divider* divider_raw = divider.get();
+  column.add_child(std::move(divider));
+  fixture.layout(column, 480.0f, 200.0f);
+  ST_CHECK(std::abs(divider_raw->bounds().width - 480.0f) < 0.01f);
+  // 线厚仍然是亚像素那一档（不被交叉轴 Stretch 拉高）。
+  ST_CHECK(std::abs(divider_raw->bounds().height - Divider::kLineThickness) < 0.01f);
+}
+
+/// 竖直分隔线在**行**里才铺满（两种朝向各自适配自己的父容器）。
+ST_TEST(vertical_divider_in_row_fills_height) {
+  Fixture fixture;
+  Panel row(st::ui::FlexDirection::Row);
+  auto divider = std::make_unique<Divider>(true);
+  Divider* divider_raw = divider.get();
+  row.add_child(std::move(divider));
+  fixture.layout(row, 600.0f, 90.0f);
+  ST_CHECK(std::abs(divider_raw->bounds().width - Divider::kLineThickness) < 0.01f);
+  ST_CHECK(std::abs(divider_raw->bounds().height - 90.0f) < 0.01f);
+}
 
 // ————————————————————————————————————————————————————————————————————————————
 // DividerLabel

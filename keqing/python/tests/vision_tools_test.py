@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests.run_tests import Skip, load_module  # noqa: E402
+from tests.run_tests import Skip, load_module, skip  # noqa: E402
 
 VISION_TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vision", "tools.py")
 tools = load_module(VISION_TOOLS, "keqing_vision_tools")
@@ -114,11 +114,11 @@ def test_resolve_ocr_dir_requires_model_files_and_prefers_new_layout():
 
 
 def test_crop_arr_clamps_out_of_range_region():
-    np = None
     try:
         import numpy  # noqa: PLC0415
     except ImportError:
         skip("未安装 numpy（vision_pip install numpy 后可测）")
+        return
     np = numpy
     arr = np.arange(4 * 5 * 3, dtype="uint8").reshape(4, 5, 3)  # H=4 W=5
     # 越界起点会被钳制到图内，宽高至少 1（不能产生空裁剪）

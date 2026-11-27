@@ -17,6 +17,7 @@
 """
 
 import json
+import os
 import pathlib
 import socket
 import struct
@@ -36,6 +37,10 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+# 会话文件隔离：gbcode 关窗会把「工作区 / 标签 / 展开目录」写回
+# `{ST_HOME}/.shuangtian/gbcode/session.json`。e2e 用 `--workspace` 起的是临时
+# 目录，写回就会**覆盖真实用户会话**（下次打开工程全变了）。指到本次产物目录即可。
+os.environ["ST_HOME"] = str(ROOT / "build" / "artifacts" / "gbcode_special_tab_close-home")
 BIN = ROOT / "build" / "dev" / "bin" / ("gbcode.exe" if __import__("os").name == "nt" else "gbcode")
 SHOTS = ROOT / "tmp" / "gbcode-special-tab-shots"
 

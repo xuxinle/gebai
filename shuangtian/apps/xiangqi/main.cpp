@@ -76,7 +76,7 @@
 
 #include "battery/embed.hpp"
 
-#include "../app_icon.hpp"   // 品牌标记：SVG（标题栏）
+#include "st/app/icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
 #include "st/codec/png.hpp"

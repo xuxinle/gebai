@@ -76,7 +76,7 @@ inline void ensure_all_components_imported() { st::ui::import_all_components(); 
 ST_TEST(contract_every_type_builds_and_answers_basics) {
   ensure_all_components_imported();
   const auto names = registered_element_types();
-  ST_CHECK(names.size() >= 49U);  // 组件库规模下界（防"清单被误删"；49 = 48 + ThemePicker）
+  ST_CHECK(names.size() >= 53U);  // 组件库规模下界（防"清单被误删"；53 = 49 + 日期时间四件）
   for (const std::string& name : names) {
     auto element = make_element(name);
     ST_REQUIRE(element != nullptr);

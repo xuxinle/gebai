@@ -1287,6 +1287,7 @@ class GpuCanvas final : public Surface {
       if (entry.view != nullptr) entry.view->Release();
     }
     release_shadow_cache();
+    release_color_targets();
     release_readback();
     release_resources();
     // 与构造函数对称：AddRef/Release 的都是**立即上下文**（`context_`）——
@@ -1335,6 +1336,7 @@ class GpuCanvas final : public Surface {
       target_ = nullptr;
     }
     release_shadow_cache();
+    release_color_targets();
     release_readback();
     readback_.clear();
     physical_width_ = width;
@@ -3021,7 +3023,35 @@ class GpuCanvas final : public Surface {
   /// **只有 R 通道**。阴影遮罩是灰度覆盖率，单通道正好；而毛玻璃模糊的是彩色图像，
   /// 渲染进 R8 目标会把 G/B 直接丢掉（无论着色器算得多对）。
   /// 实测症状：暗色弹窗右侧一条“红绿色块”竖带（R 波动、G/B 几乎不变）。
+  ///
+  /// ## 为什么必须**跨调用复用**（2026-11-27 实测）
+  ///
+  /// 这个函数每次都会 `CreateTexture2D` 两张全 RGBA 目标。旧版在
+  /// `blur_region` / `refract_region` 里每次调用都新建一对、**且从不释放**：
+  /// 每帧每块玻璃滲漏两张纹理（尺寸 = 区域物理像素，侧栏档就是 560×1656×4 B × 2 ≈ 7 MB/帧）。
+  /// 代价在耗时上也现形（单次调用最好成绩，1473×828 画布）：
+  ///
+  /// | 区域 | 面积 | 旧耗时 | 复用后 |
+  /// |---|---|---|---|
+  /// | 全窗 1473×828 | 1.22 M | 2.4 ms | 2.4 ms |
+  /// | 侧栏 280×828 | 0.23 M | **7.7 ms** | 见回归数据 |
+  /// | 弹层 600×400 | 0.24 M | **7.6 ms** | 见回归数据 |
+  ///
+  /// 反常的是“面积小的反而慢 3 倍”——因为快的那档恰好撞上驱动内部的分配器
+  /// （大块走专用路径），与面积无关。这正是“成本随面积单调增”这条不变量被撞破的原因。
+  ///
+  /// 复用规则：**只增不减**（一次分配后一直用）。目标总是按调用方给的
+  /// `width × height` 建，复用时不重建——但**采样/视口都按本次 `area` 限定**
+  /// （见 `blur_region` 里的 `submit_to(..., area.width, area.height)` 与
+  /// `copy.uv`），所以大目标配小区域是安全的：像素只在左上角 area 块被读写。
   auto acquire_color_targets(int width, int height, ShadowTargets& targets) -> bool {
+    // 复用已有目标：**只校验它够大**（小目标装不下就重建一对）。
+    if (color_targets_.texture_a != nullptr && color_targets_width_ >= width &&
+        color_targets_height_ >= height) {
+      targets = color_targets_;
+      return true;
+    }
+    release_color_targets();
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = static_cast<UINT>(width);
     desc.Height = static_cast<UINT>(height);
@@ -3038,8 +3068,25 @@ class GpuCanvas final : public Surface {
       if (FAILED(device_->CreateShaderResourceView(*texture, nullptr, srv))) return false;
       return true;
     };
-    if (!build(&targets.texture_a, &targets.rtv_a, &targets.srv_a)) return false;
-    return build(&targets.texture_b, &targets.rtv_b, &targets.srv_b);
+    if (!build(&color_targets_.texture_a, &color_targets_.rtv_a, &color_targets_.srv_a)) {
+      release_color_targets();
+      return false;
+    }
+    if (!build(&color_targets_.texture_b, &color_targets_.rtv_b, &color_targets_.srv_b)) {
+      release_color_targets();
+      return false;
+    }
+    color_targets_width_ = width;
+    color_targets_height_ = height;
+    targets = color_targets_;
+    return true;
+  }
+
+  /// 释放彩色目标（改尺寸 / 销毁画布时）。
+  void release_color_targets() {
+    release_shadow_targets(color_targets_);   // 同一组六个字段，释放逻辑同构
+    color_targets_width_ = 0;
+    color_targets_height_ = 0;
   }
 
   static void release_shadow_targets(ShadowTargets& targets) {
@@ -3249,6 +3296,11 @@ class GpuCanvas final : public Surface {
   static constexpr std::size_t kShadowCacheLimit{48};
   std::vector<PathCacheEntry> path_cache_{};
   std::vector<ShadowCacheEntry> shadow_cache_{};
+  /// 毛玻璃的彩色 ping-pong 目标（**跨调用复用**，见 `acquire_color_targets`）：
+  /// 不复用就会每帧每块玻璃新建两张 RGBA 纹理且不释放。
+  ShadowTargets color_targets_{};
+  int color_targets_width_{0};
+  int color_targets_height_{0};
   /// 未实现的绘制原语**必须出声**：静默画不出东西会让"界面是空的"变成一个谜。
   ///
   /// 每个名字只报一次（用固定数组而不是 `vector<string>`：无分配、无锁竞争面）。

@@ -230,3 +230,96 @@ ST_TEST(damage_steady_state_settles_into_partial_frames) {
   ST_CHECK(!root.tree_layout_dirty());
   ST_CHECK(!root.needs_frame());
 }
+
+/// **移除子树后，腾出的那块必须被重绘**（局部帧与全量逐像素一致）。
+///
+/// 这条钉的是一个“属性面、语义树全对，只有像素能看出来”的缺陷：
+/// `remove_child`/`clear_children` 只调 `mark_layout_dirty()`，而它**刻意不报 damage**
+/// （理由见其实现处：重排会挑动兄弟，窄脏区盖不住）。那条理由对“位置变了”成立，
+/// 但对“这里曾经有东西、现在没了”不成立——**没有任何存活元素**会为腾空区域负责，
+/// 于是旧像素原封不动留在后备缓冲里。
+///
+/// 实测现象（dev-tools 切页签）：`tree` 里已经是新的一页，屏上还是上一页。
+/// 当时的“修法”是给内容区铺一层不透明底色、再显式 `mark_dirty_all()`——
+/// 那只是把缺陷推给“必须有东西盖着”，本用例钉住的是真正的修复。
+///
+/// 判据用**像素**而不是 `dirty_rect`：缺陷的现场就是“局部帧与全量帧不一致”。
+ST_TEST(damage_removed_subtree_is_repainted) {
+  UiRoot root;
+  root.set_viewport({kWidth, kHeight});
+  auto page = std::make_unique<Panel>();
+  // 底色由页面自己铺（与真实场景一致：外壳有一层不透明底），
+  // 这样“旧盒子的像素是否被清回去”能逐像素核对。
+  page->style().background = Color{0x10, 0x14, 0x18, 0xFF};
+  auto page_raw = page.get();
+  auto old_box = std::make_unique<FixedBox>("old", Rect{40, 40, 160, 100},
+                                           Color{0xD0, 0x40, 0x40, 0xFF});
+  page->add_child(std::move(old_box));
+  root.set_content(std::move(page));
+
+  Canvas live(kWidth, kHeight);
+  root.paint_frame(live);   // 首帧整帧
+  root.clear_dirty();
+  // 先确认旧盒子真的画上去了（否则下面“被清掉”无从谈起）。
+  ST_CHECK_EQ(static_cast<int>(live.pixel_at_point(st::math::Point{100.0f, 80.0f}).r),
+              static_cast<int>(0xD0));
+
+  // 移除那个盒子（声明式场景里这是“旧页整棵子树被换掉”的最小形式）。
+  (void)page_raw->remove_child(page_raw->child_at(0));
+
+  Canvas baseline(kWidth, kHeight);
+  copy_pixels(live, baseline);
+  const bool partial = root.paint_frame(live);
+  root.clear_dirty();
+  ST_CHECK(partial);   // 纯移除：应走局部（若能整帧也对，但局部正确才是本用例的诉求）
+
+  // 对照：同一起点 + 强制整帧
+  root.mark_dirty_all();
+  root.paint_frame(baseline);
+  root.clear_dirty();
+
+  // ① 局部帧必须把旧盒子的像素清回页面底色
+  const Color after = live.pixel_at_point(st::math::Point{100.0f, 80.0f});
+  ST_CHECK_EQ(static_cast<int>(after.r), static_cast<int>(0x10));
+  // ② 且与全量重绘逐像素一致（这条是最强判据：任何残留都会在这里现形）
+  expect_same_pixels(live, baseline);
+}
+
+/// `clear_children` 同理（整批移除：列表刷新/切页时最常见的那条路径）。
+ST_TEST(damage_cleared_children_are_repainted) {
+  UiRoot root;
+  root.set_viewport({kWidth, kHeight});
+  auto page = std::make_unique<Panel>();
+  page->style().background = Color{0x10, 0x14, 0x18, 0xFF};
+  auto page_raw = page.get();
+  page->add_child(std::make_unique<FixedBox>("a", Rect{20, 20, 120, 60},
+                                             Color{0xD0, 0x40, 0x40, 0xFF}));
+  page->add_child(std::make_unique<FixedBox>("b", Rect{20, 120, 120, 60},
+                                             Color{0x40, 0xC0, 0x70, 0xFF}));
+  root.set_content(std::move(page));
+
+  Canvas live(kWidth, kHeight);
+  root.paint_frame(live);
+  root.clear_dirty();
+  ST_CHECK_EQ(static_cast<int>(live.pixel_at_point(st::math::Point{60.0f, 40.0f}).r),
+              static_cast<int>(0xD0));
+  ST_CHECK_EQ(static_cast<int>(live.pixel_at_point(st::math::Point{60.0f, 140.0f}).g),
+              static_cast<int>(0xC0));
+
+  page_raw->clear_children();
+
+  Canvas baseline(kWidth, kHeight);
+  copy_pixels(live, baseline);
+  (void)root.paint_frame(live);
+  root.clear_dirty();
+  root.mark_dirty_all();
+  root.paint_frame(baseline);
+  root.clear_dirty();
+
+  // 两块的像素都要回到页面底色
+  ST_CHECK_EQ(static_cast<int>(live.pixel_at_point(st::math::Point{60.0f, 40.0f}).r),
+              static_cast<int>(0x10));
+  ST_CHECK_EQ(static_cast<int>(live.pixel_at_point(st::math::Point{60.0f, 140.0f}).r),
+              static_cast<int>(0x10));
+  expect_same_pixels(live, baseline);
+}

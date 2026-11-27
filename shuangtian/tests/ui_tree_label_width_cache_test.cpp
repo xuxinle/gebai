@@ -175,6 +175,21 @@ ST_TEST(tree_label_width_cache_follows_font_size) {
   ST_CHECK(tree.measured_size().width > small);
 }
 
+/// **行高变了**也要重算：行首标记占位（箭头/图标列宽）是行高的函数，
+/// 不失效就会出现「行高变大、量宽还是旧的」——排版与绘制两个口径分家。
+ST_TEST(tree_label_width_cache_follows_row_height) {
+  Fixture fixture;
+  Tree tree;
+  tree.sync_nodes(rows_with_labels({"label"}));
+  tree.measure(fixture.context(), Constraints{});
+  const float dense = tree.measured_size().width;
+
+  tree.set_row_height(Tree::kRowHeight * 3.0f);   // 行高变 → 标记占位变（夹取上限 19）
+  const std::size_t calls = measure_calls(fixture, tree);
+  ST_CHECK(calls > 0U);                           // 必须重量
+  ST_CHECK(tree.measured_size().width >= dense);   // 且不会反向缩窄
+}
+
 /// 缓存**不改变结果**：命中与否量出的宽度一致。
 ST_TEST(tree_label_width_cache_preserves_result) {
   Fixture fixture;

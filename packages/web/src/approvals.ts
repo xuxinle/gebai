@@ -67,6 +67,23 @@ export function hasPendingInteraction(sessionId: string): boolean {
   return !!approvalsEl.querySelector(`.approval[data-session="${id}"], .interaction-card[data-session="${id}"]`)
 }
 
+/** 审批已在别处了结（另一页面/飞书卡片/接口层作答，或等待超时、任务被取消）：撕掉本页那张卡。
+ *  `event.interaction.settled` 到达时调用——同一会话可能同时开在多个页面，而决策只送达一次；
+ *  不撕则本页留着一张点了才知道失效的死卡，会话列表角标也停在「等你作答」。 */
+export function settleApproval(sessionId: string, toolCallId: string): void {
+  const sid = CSS.escape(sessionId)
+  const tid = CSS.escape(toolCallId)
+  let removed = 0
+  for (const card of approvalsEl.querySelectorAll<HTMLElement>(`.approval[data-session="${sid}"][data-toolcall="${tid}"]`)) {
+    card.remove()
+    removed++
+  }
+  if (removed > 0) {
+    syncLock()
+    notifyPendingChange()
+  }
+}
+
 export function addApproval(sessionId: string, toolCallId: string, tool: string) {
   // 同 toolCallId 重复推送（事件重放、attach 快照与实时事件各来一次）替换旧卡不堆叠——
   // 堆叠会让用户面对两张一模一样、而服务端只等一次决策的卡

@@ -15,6 +15,7 @@
 """
 import argparse
 import json
+import os
 import pathlib
 import socket
 import struct
@@ -30,6 +31,11 @@ AGENT_HANDSHAKE = (
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GBCODE = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
+
+# 会话文件隔离：无参数启动会**恢复上次会话**（工作区/标签/展开目录）。
+# 截图工具要的是可重复的画面（空态或命令行指定的那个文件），所以不能让真实用户
+# 会话掺进来——指到本次产物目录，读的是空态。
+os.environ["ST_HOME"] = str(ROOT / "build" / "artifacts" / "gbcode-shot-home")
 
 
 def read_control(path: pathlib.Path, timeout=20.0):

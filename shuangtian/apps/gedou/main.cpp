@@ -39,7 +39,7 @@
 #include "ai.hpp"
 #include "fight.hpp"
 #include "game_view.hpp"
-#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
+#include "st/app/icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"
 #include "st/core/entry.hpp"

@@ -576,6 +576,151 @@ ST_TEST(file_dialog_single_path_flow_does_not_regress_with_multi_surface) {
   ST_CHECK_EQ(multi_confirms, 0);
 }
 
+ST_TEST(file_dialog_multi_on_still_confirms_single_file) {
+  // 多选常开时，**单文件**的确认路径必须仍是通路（实测缺陷：应用侧打开模式恒开
+  // 多选，于是「点打开没反应、双击文件也不开」，且界面上毫无提示）。
+  //
+  // 三条入口都要验，因为它们是三条**不同的代码路径**，只堵一条另两条仍静默：
+  // ① 属性面 `pending_path` 选路后点确认（自动化/协议层入口）；
+  // ② 双击文件行（`activate`，人类最常用的入口）；
+  // ③ 文件名行敲完名字后确认（打字入口）。
+  // 判据是**宿主回调收到目标路径**——只看 `confirm` 返回 true 会漏掉「静默无反应」。
+  Sandbox sandbox;
+  Hosted hosted;
+  ST_CHECK(hosted.dialog->set_property("multi_select", "true"));
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  const std::string a = st::fs::join(sandbox.dir, "a.txt");
+  const std::string b = st::fs::join(sandbox.dir, "b.md");
+  std::vector<std::string> single;
+  std::vector<std::string> multiple;
+  hosted.dialog->on_confirm = [&](const std::string& path) { single.push_back(path); };
+  hosted.dialog->on_confirm_multiple = [&](const std::vector<std::string>& paths) {
+    multiple = paths;
+  };
+
+  // ① 属性面选路 → 确认（集合空 → 走 on_confirm）
+  ST_CHECK(hosted.dialog->set_property("pending_path", a));
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK_EQ(single.size(), std::size_t{1});
+  ST_CHECK(single.size() == 1U && single.front() == a);
+  ST_CHECK(multiple.empty());                 // 多选回调未被牵连
+
+  // ② 双击文件行 → 确认（排序后 0=sub 1=zdir 2=a.txt 3=b.md）。
+  single.clear();
+  ST_CHECK(hosted.dialog->invoke_action("activate", "3"));   // 双击 b.md
+  ST_CHECK_EQ(single.size(), std::size_t{1});
+  ST_CHECK(single.size() == 1U && single.front() == b);
+
+  // ③ 文件名行：聚焦输入区敲字符 → 确认。
+  single.clear();
+  const st::ui::RenderContext context = hosted.root.render_context();
+  const st::math::Rect input = hosted.dialog->input_rect();
+  st::ui::Event focus;
+  focus.kind = st::ui::EventKind::Click;
+  focus.position = st::math::Point{input.x + 20.0f, input.y + input.height * 0.5f};
+  (void)hosted.dialog->on_event(context, focus);
+  hosted.dialog->set_filename("typed.txt");   // 等价于敲完名字（输入链路由既有用例覆盖）
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK_EQ(single.size(), std::size_t{1});
+  ST_CHECK(single.size() == 1U && single.front() == st::fs::join(sandbox.dir, "typed.txt"));
+
+  // ④ 回归面：集合**非空**时仍走多选回调（修复不能把多选语义吃掉）。
+  single.clear();
+  multiple.clear();
+  ST_CHECK(hosted.dialog->set_property("pending_paths", a + "|" + b));
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK(single.empty());
+  ST_CHECK_EQ(multiple.size(), std::size_t{2});
+  // ⑤ 空集合 + 空文件名：仍然**什么也不触发**（不能因为回退分支就凭空确认）。
+  // 清集合只有一条公开路径：`multi_select` 关→开（`set_multi_select(false)` 清集合，
+  // 而 `set_pending_paths` 只增不减）——顺带钉住“开关切换清集合”这条既有契约。
+  single.clear();
+  multiple.clear();
+  ST_CHECK(hosted.dialog->set_property("multi_select", "false"));
+  ST_CHECK(hosted.dialog->set_property("multi_select", "true"));
+  ST_CHECK_EQ(hosted.dialog->get_property("selected_paths").value_or("x"), std::string(""));
+  hosted.dialog->set_filename("");
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK(single.empty());
+  ST_CHECK(multiple.empty());
+
+  // ⑥ 单文件意图会**清掉上一次多选集合**（否则用户点的那个文件被静默忽略）：
+  // Ctrl+点 b.md 进集合 → 普通单击 a.txt → 集合清空 → 确认走单路径 = a.txt。
+  single.clear();
+  multiple.clear();
+  ST_CHECK(hosted.dialog->set_property("multi_select", "true"));
+  const st::ui::RenderContext ctx = hosted.root.render_context();
+  const auto click_row = [&](std::size_t index, bool ctrl) {
+    const st::math::Rect row = hosted.dialog->entry_rect(index);
+    st::ui::Event press;
+    press.kind = st::ui::EventKind::Click;
+    press.ctrl = ctrl;
+    press.position = st::math::Point{row.x + 30.0f, row.y + row.height * 0.5f};
+    (void)hosted.dialog->on_event(ctx, press);
+  };
+  click_row(3, /*ctrl=*/true);                       // Ctrl+点 b.md → 进集合
+  ST_CHECK_EQ(hosted.dialog->get_property("selected_paths").value_or(""), b);
+  click_row(2, /*ctrl=*/false);                      // 普通单击 a.txt → 单文件意图
+  ST_CHECK_EQ(hosted.dialog->get_property("selected_paths").value_or("x"), std::string(""));
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK(single.size() == 1U && single.front() == a);
+  ST_CHECK(multiple.empty());
+
+  // ⑦ 双击同样算“打开这一个”：集合里有旧值时也要先把双击的那个文件交出去。
+  single.clear();
+  multiple.clear();
+  ST_CHECK(hosted.dialog->set_property("pending_paths", a + "|" + b));
+  ST_CHECK(hosted.dialog->invoke_action("activate", "2"));   // 双击 a.txt
+  ST_CHECK(single.size() == 1U && single.front() == a);
+  ST_CHECK(multiple.empty());
+}
+
+ST_TEST(file_dialog_real_click_sequence_toggles_multi_once) {
+  // 真实后端一次点击 = `MouseDown → MouseUp → Click` 三个事件
+  //（`control/server.cpp` 的 `input.mouse kind=click` 就是这么派的）。
+  //
+  // 钉两件事（都是只发单 `Click` 时隐形的缺陷）：
+  // ① Ctrl+单击文件行只**翻转一次**集合——旧写法在 MouseDown 与 Click 各翻转
+  //    一次，净变化为零，多选在真机上根本选不中；
+  // ② 单击 `..` 行只上溯**一级**——旧写法一次点击跑两遍，直接上溯两级。
+  Sandbox sandbox;
+  Hosted hosted;
+  ST_CHECK(hosted.dialog->set_property("multi_select", "true"));
+  const std::string sub = st::fs::join(sandbox.dir, "sub");
+  hosted.dialog->set_directory(sub);   // 子目录里才需要 `..`
+  hosted.layout();
+
+  const st::ui::RenderContext context = hosted.root.render_context();
+  const auto click_sequence = [&](st::math::Point at, bool ctrl) {
+    for (const auto kind : {st::ui::EventKind::MouseDown, st::ui::EventKind::MouseUp,
+                            st::ui::EventKind::Click}) {
+      st::ui::Event event;
+      event.kind = kind;
+      event.ctrl = ctrl;
+      event.button = 1;
+      event.position = at;
+      (void)hosted.dialog->on_event(context, event);
+    }
+  };
+
+  // ① Ctrl+单击文件行（sub 里只有一个 c.txt：可见序号 0，`..` 行由 parent_row_rect 表示）
+  const st::math::Rect file_row = hosted.dialog->entry_rect(0);
+  ST_REQUIRE(!file_row.is_empty());
+  const st::math::Point file_point{file_row.x + 30.0f, file_row.y + file_row.height * 0.5f};
+  click_sequence(file_point, /*ctrl=*/true);
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{1});
+  click_sequence(file_point, /*ctrl=*/true);
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{0});
+
+  // ② 单击 `..` 行：只上溯一级（回到 sandbox.dir，而不是 sandbox 的父目录）
+  const st::math::Rect up = hosted.dialog->parent_row_rect();
+  ST_REQUIRE(!up.is_empty());
+  click_sequence(st::math::Point{up.x + 30.0f, up.y + up.height * 0.5f}, /*ctrl=*/false);
+  ST_CHECK_EQ(hosted.dialog->directory(), sandbox.dir);
+}
+
 ST_TEST(file_dialog_directory_mode_ignores_files_and_text_input) {
   // 目录模式的两条边界（都是“用户会误触”的路径）：
   // ① 点一个**文件**不该确认——否则浏览时误点就会把“该文件所在目录”当结果交出去；

@@ -1246,6 +1246,22 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
+  test("审批被作答后发布 event.interaction.settled（别处开着的页面据此撤卡）", async () => {
+    const { home, engine, store, events } = await setup("approval")
+    const session = await store.createSession("default", "t")
+    const settled: Array<Record<string, unknown>> = []
+    events.subscribe((ev) => {
+      if (ev.type === "event.interaction.settled") settled.push(ev.payload)
+    })
+    const run = engine.run(session.id, "default", "run sh")
+    await new Promise((r) => setTimeout(r, 50))
+    expect(settled).toEqual([]) // 等待中：未了结
+    await engine.decideApproval(session.id, "tc-1", true)
+    await run
+    expect(settled).toEqual([{ kind: "approval", id: "tc-1" }])
+    cleanup(home)
+  })
+
   test("attachSnapshot：审批等待中列出待决交互，任务结束后为 null", async () => {
     const { home, engine, store } = await setup("approval")
     const session = await store.createSession("default", "t")

@@ -45,7 +45,7 @@
 #endif
 
 #include "app_icon_element.hpp"
-#include "../app_icon.hpp"     // 图标四链路的一行接入（窗口/标题栏/托盘同源）
+#include "st/app/icon.hpp"     // 图标四链路的一行接入（窗口/标题栏/托盘同源）
 #include "battery/embed.hpp"   // b::embed<...>()：各应用图标与壁纸是编译期嵌入的
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"

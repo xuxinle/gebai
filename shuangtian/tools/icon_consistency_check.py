@@ -35,6 +35,11 @@
     py -3 tools/icon_consistency_check.py           # 全量检查（有违规退出码 1）
     py -3 tools/icon_consistency_check.py xiangqi   # 只查一个
     py -3 tools/icon_consistency_check.py --verbose # 附各应用采样到的色表
+    py -3 tools/icon_consistency_check.py --project D:/code/dev-tools
+                                                    # 校验**外部工程**（可重复给多个）
+
+外部工程默认不被扫到（它不在 `apps/` 下），而它恰恰最容易漏——
+交付时必须显式带上 `--project`。
 """
 from __future__ import annotations
 
@@ -171,8 +176,15 @@ def read_main(app_dir: Path):
     return None
 
 
-def check_app(name: str, verbose: bool):
-    app_dir = ROOT / "apps" / name
+def check_app(name: str, verbose: bool, project: Path | None = None):
+    """`project` 非空时校验**外部工程**（工程根，而不是 `apps/<name>`）。
+
+    为何要支持外部工程：这套四链路与“同一记号”的要求对**任何**用霸天写的应用
+    都成立，而独立工程（如 `D:\\code\\dev-tools`）不在这本仓的 `apps/` 下。
+    只扫 `apps/` 的话，那类工程就完全没有机器校验——
+    而它恰恰是最容易漏的地方（开发者不会自己去查这四个文件）。
+    """
+    app_dir = project if project is not None else ROOT / "apps" / name
     problems: list[str] = []
     notes: list[str] = []
 
@@ -295,7 +307,23 @@ def main() -> int:
         pass
 
     verbose = "--verbose" in sys.argv
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    # `--project <path>`：校验外部工程（工程根），可重复给多个
+    projects: list[Path] = []
+    argv = sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--project" and i + 1 < len(argv):
+            projects.append(Path(argv[i + 1]))
+            i += 2
+            continue
+        i += 1
+    args = [a for a in argv if not a.startswith("--")]
+    # 去掉 `--project` 的**值**（它不是应用名）——按“紧随 `--project` 之后”判，
+    # 不能按“名字在 args 里”判：值常是绝对路径（`D:\\code\\dev-tools`），
+    # 与目录名不同，删不掉就会把它当成应用名再查一遍（实测：输出两行同名）。
+    project_values = {argv[j + 1] for j in range(len(argv) - 1) if argv[j] == "--project"}
+    args = [a for a in args if a not in project_values]
+    args = [a for a in args if not Path(a).is_absolute()]
 
     if args:
         names = args
@@ -308,6 +336,22 @@ def main() -> int:
         problems, notes = check_app(name, verbose)
         status = "OK" if not problems else f"{len(problems)} 项问题"
         print(f"{name:<16}{status}")
+        for p in problems:
+            print(f"    ✗ {p}")
+            total_problems += 1
+        if verbose:
+            for n in notes:
+                print(f"    · {n}")
+
+    # 外部工程：名字取目录名（`D:\\code\\dev-tools` → `dev-tools`）
+    for proj in projects:
+        if not proj.is_dir():
+            print(f"{proj.name:<16}✗ 工程目录不存在：{proj}")
+            total_problems += 1
+            continue
+        problems, notes = check_app(proj.name, verbose, project=proj)
+        status = "OK" if not problems else f"{len(problems)} 项问题"
+        print(f"{proj.name:<16}{status}  (外部工程)")
         for p in problems:
             print(f"    ✗ {p}")
             total_problems += 1

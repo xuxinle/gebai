@@ -35,7 +35,7 @@ import { initFileDisplay } from "./file-display"
 import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, enterSessionView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
-import { appendMsg, appendServerUserMessage, bindMessagesSessions, noteUserMessageEcho, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
+import { appendMsg, appendServerUserMessage, bindMessagesSessions, clearInteractionCards, noteUserMessageEcho, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
 import { createSessionWithDraftModel, initModelPicker } from "./model-picker"
 import { createSubmitQueue } from "./submit-queue"
 import { sendPending } from "./attachments"
@@ -45,7 +45,7 @@ import { lockToBottom, refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { bindMsgNav } from "./msg-nav"
 import { applyQueued, applyQueuedUpdate } from "./queue"
 import { client, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames } from "./state"
-import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
+import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onInteractionSettled, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
 import { consumeTaskStream } from "./stream"
 import { bindTooltips, showNoticeDialog, toast } from "./ui"
 // 副作用导入（勿删）：attach.ts 向 sessions.ts 注册运行中会话附加钩子（setRunningAttach）——
@@ -53,6 +53,7 @@ import { bindTooltips, showNoticeDialog, toast } from "./ui"
 import "./attach"
 // 回前台/定时自检：手机后台冻结时 WS 看着仍 OPEN、事件却攒在浏览器里（详见 attach.ts）
 import { bindConnectionVerify, verifyConnection } from "./attach"
+import { clearApprovals } from "./approvals"
 import { BOOT_REST_TIMEOUT_MS, bindBootRetry, bootStatus, withTimeout } from "./boot-guard"
 
 // 二开前端脚本（custom/web/，产物根 gebai.config.js 与 gebai.custom.js）：配置模块加载即应用——先于任何
@@ -346,6 +347,9 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
       onChoiceRequest({ sessionId: ev.sessionId, prompt: String(ev.payload.prompt ?? ""), options: (Array.isArray(ev.payload.options) ? ev.payload.options : []) as Array<string | Record<string, unknown>>, choiceId: String(ev.payload.choiceId ?? ""), multi: ev.payload.multi === true, plan: ev.payload.plan as { title?: unknown; content?: unknown; path?: unknown } | undefined })
     } else if (ev.type === "event.env.request") {
       onEnvRequest({ sessionId: ev.sessionId, envId: String(ev.payload.envId ?? ""), name: String(ev.payload.name ?? ""), description: String(ev.payload.description ?? ""), secret: ev.payload.secret === true })
+    } else if (ev.type === "event.interaction.settled") {
+      // 交互已在别处了结（另一页面/飞书/接口层作答，或超时、任务取消）：本页那张卡就地撤掉
+      onInteractionSettled({ sessionId: ev.sessionId, kind: String(ev.payload.kind ?? ""), id: String(ev.payload.id ?? "") })
     } else if (ev.type === "event.draw.render") {
       onDrawRender({ sessionId: ev.sessionId, renderId: String(ev.payload.renderId ?? ""), code: String(ev.payload.code ?? ""), format: String(ev.payload.format ?? "") })
     } else if (ev.type === "event.capture.request") {
@@ -441,6 +445,10 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     } else if (ev.type === "event.task.done" || ev.type === "event.task.error") {
       // 任务结束（完成/取消/失败）：列表角标即时收敛，不必等下一次快照
       markSessionRunning(ev.sessionId, false)
+      // 该会话残留的交互卡（审批/选择/填值）随之失效——任务已结束，它们再也不可能被服务端消费。
+      // 只清本会话：其他会话的待决交互与本任务无关
+      clearApprovals(ev.sessionId)
+      clearInteractionCards(ev.sessionId)
     } else if (ev.type === "event.queue.update") {
       // 排队输入变化（入队/出队/编辑/撤回/置顶）：服务端权威，本页只重渲染排队条
       applyQueuedUpdate(ev.sessionId, (ev.payload.items as QueuedPrompt[]) ?? [])

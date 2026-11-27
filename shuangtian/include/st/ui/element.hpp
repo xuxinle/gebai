@@ -413,8 +413,20 @@ class Element {
   virtual auto add_child(std::unique_ptr<Element> child) -> Element*;
   /// 在指定位置插入子元素（同上：少数组件会重写以保持内部件位置）。
   virtual auto insert_child(std::size_t index, std::unique_ptr<Element> child) -> Element*;
-  auto remove_child(Element* child) -> std::unique_ptr<Element>;
-  void clear_children();
+  /// 移除子元素（返回所有权；未找到返回 `nullptr`）。
+///
+/// **会把腾出的区域登记为损坏区**（`record_damage_rect(子树原 bounds)`，在摘除
+/// 之前做——摘下后子树可能被 `retire_subtree` 当场释放）。
+///
+/// 为何必须在这里：`mark_layout_dirty` **刻意不报** damage（它的理由——重排会挑动
+/// 兄弟——对“位置变了”成立），但移除是“**这里曾经有东西、现在没了**”：
+/// 那种情况下**没有任何存活元素**会为腾空区域负责，旧像素原封不动留在后备缓冲里。
+/// 现象是**属性面与 `tree` 全对，只有像素错**（切页后内容区显示上一页）。
+/// 回归：`tests/ui_damage_test.cpp` 的 `damage_removed_subtree_is_repainted`。
+auto remove_child(Element* child) -> std::unique_ptr<Element>;
+/// 清空全部子元素（损坏区上同 `remove_child`：逐个子树各报一次，而不是合并成
+/// 父 bounds——父 bounds 可能远大于实际旧内容，逐块上报才能保持可裁剪的粒度）。
+void clear_children();
   [[nodiscard]] auto child_count() const noexcept -> std::size_t { return children_.size(); }
   [[nodiscard]] auto child_at(std::size_t index) const noexcept -> Element*;
 

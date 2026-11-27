@@ -28,6 +28,7 @@
 #include "st/test/test.hpp"
 #include "st/ui/builtin_themes.hpp"
 #include "st/ui/components/theme_picker.hpp"
+#include "st/ui/theme.hpp"
 
 namespace {
 
@@ -100,4 +101,48 @@ ST_TEST(theme_picker_current_is_present_in_options) {
     ST_CHECK(std::find(shown.begin(), shown.end(), std::string(name)) != shown.end());
     ST_CHECK_EQ(std::string(picker.current()), std::string(name));
   }
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 与真实主题的联动（2026-11-27 修：应用是暗色、选择器勾着亮色）
+// ————————————————————————————————————————————————————————————————————————————
+
+/// **非默认主题必须自己报告自己的名字**。
+///
+/// 这条钉的是一个“显示错、上报也错”的双重缺陷：`Theme::name()` 的文档说它
+/// “作标识与上报用”，而旧实现只有 `theme_io.cpp` 从**主题文件**加载时写过它——
+/// **内置主题一条路径都没写**，于是它恒为默认值 `"light"`。
+///
+/// 两个真实受害者：
+/// 1. 标题栏的 `ThemePicker` 拿不到真实当前值 ⇒ 应用暗色、选择器勾亮色；
+/// 2. 控制通道的 `theme` 命令读 `root.theme().name()` ⇒ 对内建主题恒报 `light`。
+///
+/// 断言用**多个主题**而不是只测 dark：只测一档时，“恰好返回 hardcode 的 light”
+/// 与“真正报告自己”对 dark 都不成立，但换成 light 档就无从区分——
+/// 而 `light` 正是缺陷版本“永远说对的”那一档。
+ST_TEST(builtin_theme_reports_its_own_name) {
+  for (const std::string_view name : st::ui::builtin_theme_names()) {
+    const auto theme = st::ui::builtin_theme(name);
+    ST_REQUIRE(theme.has_value());
+    if (std::string(theme->name()) != std::string(name)) {
+      st::log::out("[theme-name] {} 自报为 {}（与选择器/控制通道看到的不一致）\n", name,
+                   theme->name());
+    }
+    ST_CHECK_EQ(theme->name(), std::string(name));
+  }
+}
+
+/// `set_current` 同值必须**不标脏**（`TitleBar::apply_theme` 每帧会调它一次）。
+///
+/// 为何必须钉：它是那个“每帧同步”方案的**唯一代价点**。
+/// 不逃逸就是每帧把整条祖先链标脏——退化成持续全帧重绘，而
+/// **功能看起来完全正常**（只是 CPU 烧着）。
+ST_TEST(theme_picker_set_current_same_value_does_not_dirty) {
+  st::ui::ThemePicker picker;
+  picker.populate_builtins("dark");
+  picker.clear_dirty();
+  picker.set_current("dark");   // 同值
+  ST_CHECK(!picker.dirty());
+  picker.set_current("light");  // 真变了
+  ST_CHECK(picker.dirty());
 }

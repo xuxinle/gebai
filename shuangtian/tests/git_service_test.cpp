@@ -1253,7 +1253,12 @@ ST_TEST(git_service_commit_detail_single_command_segments) {
 /// 把“合并”与“正确”分开守：分类判据（symref 别名、`refs/remotes/` 前缀、
 /// 注解标签、pushurl 回退）全在合并后的那条解析里，而它们各自都有过**实测缺陷**
 /// （见 `tests/gbcode_branches_test.cpp` 的现场记录）。这里对着真仓库逐一验。
-ST_TEST(git_service_ref_snapshot_matches_individual_reads) {
+///
+/// ⚠ 注册为**慢用例 + 显式超时**：它真建仓库、跑几十个 `git` 子进程，耗时由环境
+/// 决定（本机实测 5.4 s（独立跑）~ 13.6 s（并发分片时）），而默认软超时是 10 s。
+/// 按普通用例注册会在 16 片并行时**随机**报“超过软超时上限”——那是机器忙不忙，
+/// 不是被验证的解析对不对（54 个断言本身全绿）。
+ST_TEST_WITH_TIMEOUT_SLOW(git_service_ref_snapshot_matches_individual_reads, 60000) {
   if (!git_available()) {
     std::cout << "[git] git 未安装，跳过" << '\n';
     return;

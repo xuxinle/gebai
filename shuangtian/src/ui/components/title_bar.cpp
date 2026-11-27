@@ -570,6 +570,23 @@ void TitleBar::apply_theme(const Theme& theme) {
   // 整块条带区分，不靠字重（用户：“除了特别需要突出的 UI 元素都不要用黑体”）。
   style_.font_weight = FontWeight::Regular;
   style_.color = enabled_ ? colors.text : colors.text_faint;
+  // **把生效主题名填给内嵌主题选择器**（它是标题栏的一部分，不能自己去猜）。
+  //
+  // 为何要在这里（2026-11-27 修）：`ThemePicker` 构造时调
+  // `populate_builtins("light")`——那时它只看得到一个写死的默认值。
+  // 若没有人后续告诉它真实主题，就会出现“应用是暗色、选择器勾着亮色”：
+  // 而且**属性面看上去完全正常**（`get value` 返回 `light`，与面板一致），
+  // 错的是两者与真实主题都不一致。
+  //
+  // 为何放在 `apply_theme`：这是主题变更唯一会到达本组件的路径
+  // （`UiRoot::apply_theme_tree` 逐元素派发），比让 `Application`
+  // 逐个去找“哪些组件依赖主题名”要稳——后者漏一个就静默不一致。
+  //
+  // `set_current` 内部对同值做逃逸（只在不一致时才 `mark_dirty`），
+  // 所以每帧调用的代价是一次字符串比较。
+  if (theme_picker_ != nullptr && !theme.name().empty()) {
+    theme_picker_->set_current(theme.name());
+  }
 }
 
 void TitleBar::measure(const RenderContext& context, const Constraints& constraints) {

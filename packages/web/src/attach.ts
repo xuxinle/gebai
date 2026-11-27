@@ -1,5 +1,5 @@
 /** 运行中会话附加恢复（自 main.ts 拆分）：attach 快照应用与待决交互卡重渲染。 */
-import { renderPendingInteraction, renderPendingToolCalls } from "./pending-interactions"
+import { applyPendingSnapshot, pendingCardKeys } from "./pending-interactions"
 import { attachRunningIfNeeded, loadMessages, markSessionRunning, setRunningAttach } from "./sessions"
 import { attaching, client, getCurrentSession, runs, setConn } from "./state"
 import { consumeTaskStream, discardRunBubble } from "./stream"
@@ -20,11 +20,12 @@ async function attachRunningSession(sessionId: string): Promise<void> {
   attaching.add(sessionId)
   let attached = false
   try {
+    // 取快照前先拍页面上已有哪些卡（快照到达后据此判定哪些已在别处了结）
+    const before = pendingCardKeys(sessionId)
     const snap = await client.attachSession(sessionId)
     if (!snap?.running) return // 未运行：无需接管，不算失败
-    for (const it of snap.pending ?? []) renderPendingInteraction(sessionId, it)
-    // 在途工具调用（已发出未出结果）：重建「等待中的工具卡」，结果到达时按 toolCallId 配对填充
-    renderPendingToolCalls(sessionId, snap.tools)
+    // 待决交互与在途工具调用：先按快照收敛（摘掉已在别处了结的卡）再重建在册的
+    applyPendingSnapshot(sessionId, snap, before)
     attached = true
     await consumeTaskStream(sessionId, (run) => client.attachStream(sessionId, { signal: run.abort.signal }), { startedAt: snap.startedAt })
   } catch {

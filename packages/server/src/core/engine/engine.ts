@@ -42,6 +42,7 @@ import {
   decideEnvResult,
   startInteractionAlive,
   markSettled,
+  notifyInteractionSettled,
   type InteractionVerdict,
   waitForCapture,
   waitForChoice,
@@ -3648,11 +3649,15 @@ private activeSchemas(sessionId: string) {
     if (pre !== undefined) {
       task.pendingDecisions.delete(toolCallId)
       markSettled(task, toolCallId)
+      notifyInteractionSettled(this.publishFn, sessionId, "approval", toolCallId)
       return Promise.resolve(pre ? "approved" : "rejected")
     }
     // 取消/超时信号：abort 立即以「timeout」解开等待（否则 await 永久挂起，任务收尾不完成；
-    // 取消路径由消费处 cancelled 标记短路，不落盘）
-    if (signal?.aborted) return Promise.resolve("timeout")
+    // 取消路径由消费处 cancelled 标记短路，不落盘）；卡已发布，同样要告知了结
+    if (signal?.aborted) {
+      notifyInteractionSettled(this.publishFn, sessionId, "approval", toolCallId)
+      return Promise.resolve("timeout")
+    }
     return new Promise<ApprovalVerdict>((resolve) => {
       let timer: ReturnType<typeof setTimeout>
       let onAbort: () => void
@@ -3663,6 +3668,7 @@ private activeSchemas(sessionId: string) {
         signal?.removeEventListener("abort", onAbort)
         task.approvals.delete(toolCallId)
         markSettled(task, toolCallId)
+        notifyInteractionSettled(this.publishFn, sessionId, "approval", toolCallId)
         resolve(v)
       }
       onAbort = () => done("timeout")

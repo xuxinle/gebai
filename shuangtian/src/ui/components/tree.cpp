@@ -22,12 +22,34 @@ namespace {
 
 constexpr float kTextInset{14.0f};  ///< 行文本左边距（与 List 同口径）
 
+/// 一格标记的边长（箭头 / 图标同一尺寸）。
+///
+/// 尺寸跟着**行高**而不是写死：26px 行里 ≈16px 与 16px 字视觉重量相当；
+/// 行高改密（侧栏）或改松（设置面板）时标记自动跟着缩，不会出现
+/// “小行高配大图标把文字挤出去”。
+[[nodiscard]] auto lead_slot_size(float row_height) -> float {
+  return std::clamp(row_height * 0.62f, 13.0f, 19.0f);
+}
+
+/// 行首标记（展开箭头 / 图标）占**几格**。
+///
+/// 格子模型：目录行的箭头占一格；`icon` 非空再占一格。文件行只有 `icon` 一格，
+/// 而**无图标时也留一格空位**——否则同级目录与文件的文字起点会错开（实测偏 19px）。
+/// 最少一格：无论有什么标记，文字都不贴左缘。
+[[nodiscard]] auto lead_slot_count(const TreeNode& node) -> int {
+  const int count = (node.is_dir ? 1 : 0) + (node.icon.empty() ? 0 : 1);
+  return std::max(count, 1);
+}
+
 }  // namespace
 
 void Tree::set_row_height(float height) noexcept {
   if (height <= 0.0f) return;   // 非正值忽略：行高 0 会让命中/视口计算全失效
   if (height == row_height_) return;
   row_height_ = height;
+  // 行高也是**行首标记格**的输入（`lead_slot_size`）——它进了缓存的最大行宽，
+  // 不失效就会出现「行高变了、量宽没变」的不一致（宽/绘两个口径必须同步失效）。
+  invalidate_label_widths();
   mark_layout_dirty();
   mark_dirty();
 }
@@ -235,11 +257,12 @@ void Tree::measure(const RenderContext& context, const Constraints& constraints)
     cached_width_metrics_ = &metrics;
     // 顺手把“最大所需宽”算出来，下一帧就不用再扫（与上面的填充同一趟）。
     cached_max_row_width_ = 0.0F;
+    const float lead = lead_slot_size(row_height_);
     for (std::size_t index = 0; index < rows_.size(); ++index) {
       const TreeNode& node = rows_[index].data;
       const float indent = static_cast<float>(node.depth) * kIndentStep;
-      const float chevron = node.is_dir ? kChevronSize + metrics.space_xs : 0.0f;
-      const float need = indent + chevron + kTextInset + row_label_widths_[index] + kTextInset;
+      const float marks = static_cast<float>(lead_slot_count(node)) * (lead + metrics.space_xs);
+      const float need = indent + marks + kTextInset + row_label_widths_[index] + kTextInset;
       cached_max_row_width_ = std::max(cached_max_row_width_, need);
     }
   }
@@ -285,30 +308,36 @@ void Tree::paint_content(const RenderContext& context, raster::Surface& canvas) 
     }
 
     const float indent = static_cast<float>(node.depth) * kIndentStep;
-    float cursor_x = row.x + indent + kTextInset;
+    const float lead = lead_slot_size(row.height);
+    const float slot_advance = lead + metrics.space_xs;
+    const int slots = lead_slot_count(node);
 
-    // 展开指示（目录行）：收起 chevron-right、展开 chevron-down
+    // 按**格索引**定位，不靠累加：格数由 `lead_slot_count` 决定，
+    // 画什么只决定“这格里有没有东西”——文字起点才能稳定对齐。
+    int slot = 0;
     if (node.is_dir) {
-      const math::Rect chevron{cursor_x, row.y + (row.height - kChevronSize) * 0.5f,
+      // 格 1：展开箭头（收起 chevron-right、展开 chevron-down）。
+      const float slot_x = row.x + indent + kTextInset + static_cast<float>(slot) * slot_advance;
+      const math::Rect chevron{slot_x + (lead - kChevronSize) * 0.5f,
+                               row.y + (row.height - kChevronSize) * 0.5f,
                                kChevronSize, kChevronSize};
       Icon::draw(canvas, node.expanded ? "chevron-down" : "chevron-right", chevron,
                  colors.text_muted);
-      cursor_x += kChevronSize + metrics.space_xs;
+      ++slot;
     }
-
-    // 行首图标（`TreeNode::icon`；空 = 不画）。
-    //
-    // 尺寸跟着**行高**而不是写死：26px 行里 ≈15px 图标与 16px 字视觉重量相当；
-    // 行高改密（侧栏）或改松（设置面板）时图标自动跟着缩，不会出现
-    // “小行高配大图标把文字挤出去”。
     if (!node.icon.empty()) {
-      const float icon_size = std::clamp(row.height * 0.62f, 13.0f, 19.0f);
-      const math::Rect icon_box{cursor_x, row.y + (row.height - icon_size) * 0.5f, icon_size,
-                                icon_size};
-      // 目录用弱化色、文件用更淡一档：一眼能分出“哪些是容器”，这是层级感的来源。
-      Icon::draw(canvas, node.icon, icon_box, node.is_dir ? colors.text_muted : colors.text_faint);
-      cursor_x += icon_size + metrics.space_xs;
+      // 下一格：行首图标（目录行在箭头之后，文件行在首格）。
+      const float slot_x = row.x + indent + kTextInset + static_cast<float>(slot) * slot_advance;
+      const math::Rect icon_box{slot_x, row.y + (row.height - lead) * 0.5f, lead, lead};
+      // 文件图标比目录箭头淡一档：一眼能分出“哪些是容器”，这是层级感的来源。
+      Icon::draw(canvas, node.icon, icon_box,
+                 node.is_dir ? colors.text_muted : colors.text_faint);
+      ++slot;
     }
+    // 文字起点按**格数**推进（不是按“画了几格”）：目录无图标仍占两格、
+    // 无箭头的普通文件行占一格——同级目录与文件的文字列因此对齐。
+    const float cursor_x =
+        row.x + indent + kTextInset + static_cast<float>(slots) * slot_advance;
 
     math::Color label_color = selected ? colors.primary : colors.text;
     // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过选中/常态色：

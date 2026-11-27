@@ -9,9 +9,13 @@
 /// 懒加载：点击目录行（或 → 键展开）只触发 `on_toggle(key, expanded)`，由调用方
 /// `list_dir` 后重新 `sync_nodes` 追加子节点行——大工程首屏不卡。
 ///
-/// 视觉（与 `List` 同规格）：行高 40、`radius_sm`、hover `surface_alt`、选中
-/// `primary_soft` + 左侧 2px `primary` 指示条；目录行前置展开指示（收起
-/// `chevron-right`、展开 `chevron-down`），行内容随 `depth` 缩进（每级 16px）。
+/// 视觉（与 `List` 同规格）：行高 26（默认密度，宿主可用 `set_row_height` 改）、
+/// `radius_sm`、hover `surface_alt`、选中 `primary_soft` + 左侧 2px `primary` 指示条。
+///
+/// 行首是**固定格子列**：目录行第一格放展开指示（收起 `chevron-right`、展开
+/// `chevron-down`），`TreeNode::icon` 非空再占一格；文件行首格放图标。**格子数只
+/// 取决于数据**（有无箭头/图标），与“这格画没画东西”无关——所以同一 `depth` 的
+/// 目录与文件文字列对齐（`lead_slot_count`）。行内容随 `depth` 缩进（每级 14px）。
 ///
 /// 交互：点击目录行 toggle（`on_toggle`）；点击文件行选中（`on_select`）；
 /// 键盘 ↑/↓ 移动选中（可见行间）、Enter 激活（文件=选中、目录=toggle）、

@@ -104,8 +104,13 @@ def main() -> int:
         pass
     Path(ctl).parent.mkdir(parents=True, exist_ok=True)
 
+    # 显式给工作区：不传时 gbcode 不再拿“当前目录”充数（那会把几百 MB 的构建产物
+    # 当成工作区扫一遍），命令面板里也就搜不到 DESIGN.md。
+    # ST_HOME 指到产物目录：本用例会打开文件并关窗，会话写回不该落到真实用户目录。
+    os.environ["ST_HOME"] = str(root / "build" / "artifacts" / "gbcode-open-focus-home")
     proc = subprocess.Popen(
-        [str(root / args.bin), "--control-port", "0", "--control-file", ctl], cwd=str(root)
+        [str(root / args.bin), "--control-port", "0", "--control-file", ctl,
+         "--workspace", str(root)], cwd=str(root)
     )
     port = token = ""
     for _ in range(120):

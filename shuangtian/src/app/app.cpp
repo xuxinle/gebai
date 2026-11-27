@@ -764,6 +764,20 @@ void Application::apply_theme_file() {
     ST_LOG_INFO("主题：已应用内置主题 {}（bg={:08X} surface={:08X}）", options_.theme_name,
                 theme.colors().bg.to_hex(), theme.colors().surface.to_hex());
   }
+  // **把生效主题名写回 `Theme::name()`**。
+  //
+  // 为何必须在这里（2026-11-27 修）：`Theme::name()` 的文档说它“作标识与上报用”，
+  // 而旧的只有 `theme_io.cpp` 从主题文件加载时写过它——**内置主题一条路径都没写**，
+  // 于是它恒为默认值 `"light"`。后果不是显示错，而是**上报错**：
+  // 标题栏的 `ThemePicker` 构造时 `populate_builtins("light")` 拿不到真实当前值
+  // （它当时只能拿一个写死的默认），于是“应用是暗色、选择器勾着亮色”。
+  //
+  // 另一个真实受害者：控制通道的 `theme` 命令读的就是 `root.theme().name()`
+  // （`src/control/server.cpp`），所以它以前对内建主题恒报 `light`。
+  //
+  // 名字取值优先级与主题合成一致：显式内置主题名 > 模式名（`light`/`dark`）。
+  theme.set_name(options_.theme_name.empty() ? std::string(ui::theme_mode_name(mode))
+                                             : options_.theme_name);
   if (impl_->theme_spec.is_object() && !impl_->theme_spec.empty()) {
     Json spec = impl_->theme_spec;
     spec.erase("base");
@@ -1439,6 +1453,36 @@ auto Application::capture_to_file(std::string_view path, math::IntRect region)
 
 auto Application::start() -> Status {
   if (started_) return ok();
+
+  // **单实例守门**：拿不到锁 = 已有实例，叫醒它的窗口然后**以“已满足”返回**。
+  //
+  // 为何放在最前：它要在**任何窗口/后端资源分配之前**就能拦住——
+  // 否则会先建窗再退出（用户会看到一闪而过的窗口，且白花一次 GPU 设备创建）。
+  //
+  // 为何`single_instance` 不作用于自检形态：`--headless` / `--max-frames`
+  // 是“临时跑一下看数”，若也去抢锁就会出现“跑个回归把用户窗口叫到前台”。
+  if (options_.single_instance && !options_.headless && options_.max_frames == 0) {
+    const std::string instance_key = options_.single_instance_key.empty()
+                                         ? name_
+                                         : options_.single_instance_key;
+    auto acquired = platform::SingleInstance::acquire(instance_key);
+    if (!acquired) {
+      if (acquired.error().code == ErrorCode::Busy) {
+        // 先叫醒已有窗口，再以成功退出（**不是错误**：用户的本意是“把它调出来”）。
+        (void)platform::SingleInstance::notify_existing(instance_key);
+        ST_LOG_INFO("已有实例在运行，已请求它激活窗口：{}", instance_key);
+        // `started_` 保持 false，且用专用状态告知调用方“本轮无需进主循环”。
+        return unexpected(ErrorCode::Busy,
+                          std::format("单实例：已有实例在运行（{}）", instance_key));
+      }
+      // 锁本身建不起来（无权限/无该平台能力）：**不阻断启动**。
+      // 拿不到锁就跑不起来会让应用在容器/受限环境里彻底不可用，而单实例
+      // 是\"体验优化\"不是\"正确性依赖\"。
+      ST_LOG_WARN("单实例不可用，继续以多实例启动：{}", acquired.error().message);
+    } else {
+      instance_ = std::move(*acquired);
+    }
+  }
 
   // **启动分解的里程碑**：`ST_PERF_STARTUP=1` 时开启（关时每个 mark 只有一次
   // `enabled()` 读，不读时钟）。它们回答的是“首帧那 200ms 花在哪”——
@@ -2753,6 +2797,19 @@ auto Application::tasks() -> app::Tasks& { return impl_->tasks; }
 
 void Application::tick() {
   if (impl_->backend == nullptr) return;
+  // 单实例：另一个进程刚启动并要求“把已有窗口调出来”。
+  //
+  // 为何在主循环取而不是在等待线程里直接恢复窗口：Win32 的
+  // `SetForegroundWindow` / `ShowWindow` 有**线程亲和性**（窗口属于建它的线程），
+  // 从后台线程调会静默失效。所以后台只负责计数，恢复动作放这里。
+  if (instance_.valid() && instance_.take_activate_requests() > 0) {
+    // 关窗→托盘形态下窗口是隐藏的：`window_restore` 本身就包含“显出来 + 抬到顶层
+    // + 抢前台”（见 `window_control.hpp` 对它的说明：Win32 需 SW_RESTORE + 前台，
+    // 且系统有前台锁限制；X11 走 _NET_ACTIVE_WINDOW）——不需要额外再抬一次。
+    (void)window_restore();
+    impl_->repaint = true;
+    ST_LOG_INFO("单实例：已激活已有窗口");
+  }
   // 窗口系统请求关闭（用户点 X）：走与应用内 request_quit 相同的收尾路径
   if (impl_->backend->close_requested()) impl_->quit = true;
   // 窗口尺寸变化（用户拖拽边框）：视口跟随，否则界面只画在左上角旧尺寸区域
@@ -2842,7 +2899,16 @@ void Application::on_ready(std::function<void()> callback) {
 }
 
 auto Application::run() -> Result<int> {
-  if (auto status = start(); !status) return forward_error(status.error());
+  if (auto status = start(); !status) {
+    // **单实例已被满足**：另一个实例在跑，且已通知它激活窗口。
+    // 对用户而言“我要的那个窗口出来了”就是成功，**不是错误**——
+    // 回到错误码会让启动器/脚本把“双击第二次”当成失败。
+    if (status.error().code == ErrorCode::Busy && options_.single_instance) {
+      ST_LOG_INFO("单实例：已有实例接管本次启动");
+      return 0;
+    }
+    return forward_error(status.error());
+  }
   if (impl_->on_ready) {
     impl_->on_ready();
     impl_->on_ready = nullptr;  // 只跑一次

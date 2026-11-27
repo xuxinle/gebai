@@ -21,10 +21,13 @@
 #include "st/raster/paint.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/breadcrumb.hpp"
+#include "st/ui/components/calendar_panel.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/color_picker.hpp"
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/completion_popup.hpp"
+#include "st/ui/components/date_picker.hpp"
+#include "st/ui/components/date_time_field.hpp"
 #include "st/ui/components/diff_view.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/file_dialog.hpp"
@@ -54,6 +57,7 @@
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
 #include "st/ui/components/terminal.hpp"
+#include "st/ui/components/time_picker.hpp"
 #include "st/ui/components/timeline_view.hpp"
 #include "st/ui/components/mermaid_view.hpp"
 #include "st/ui/components/mind_map_view.hpp"
@@ -79,6 +83,7 @@ using st::ui::Badge;
 using st::ui::Banner;
 using st::ui::Breadcrumb;
 using st::ui::Button;
+using st::ui::CalendarPanel;
 using st::ui::Card;
 using st::ui::Checkbox;
 using st::ui::CodeEditor;
@@ -88,6 +93,9 @@ using st::ui::CompletionItemView;
 using st::ui::CompletionPopup;
 using st::ui::ContextMenu;
 using st::ui::Chip;
+using st::ui::DateTimeField;
+using st::ui::DateTimeValue;
+using st::ui::DatePicker;
 using st::ui::DiffLayout;
 using st::ui::DiffView;
 using st::ui::Divider;
@@ -146,6 +154,7 @@ using st::ui::Terminal;
 using st::ui::Text;
 using st::ui::TextAlign;
 using st::ui::TimelineView;
+using st::ui::TimePicker;
 using st::ui::MermaidView;
 using st::ui::MindMapView;
 using st::ui::Tone;
@@ -1769,6 +1778,69 @@ namespace {
   picker_row->add_child(std::move(picker_swatch));
   color_card->add_child(std::move(picker_row));
   page->add_child(std::move(color_card));
+
+  // —— 日期与时间（CalendarPanel / DatePicker / TimePicker / DateTimeField）——
+  //
+  // 四件拆开展：`DateTimeField` 是组合体，但另外三件各自也能独立用
+  // （日历做日期范围面板、单独一个时间选择器做"每天几点提醒"）。
+  auto datetime_card = make_card("card-datetime", "日期与时间（日历 / 日期 / 时间 / 组合）");
+  datetime_card->add_child(make_caption(
+      "分钟级（不涉秒）；手输合法值直接生效、非法值如实拒绝并保留原值；"
+      "日历点开定位到「今天」、手输仍可绕开步进；DateTimeField 的空态是一等状态（空串 = 无值）"));
+
+  auto datetime_row = make_row(20.0f, /*wrap=*/true);
+
+  // ① 日历面板（直接内联展示，不弹层）——一眼看到网格形态
+  auto cal_demo = std::make_unique<CalendarPanel>(st::ui::calendar::Date{2026, 11, 27});
+  cal_demo->set_id("demo-calendar");
+  cal_demo->set_today(st::ui::calendar::Date{2026, 11, 27});
+  datetime_row->add_child(std::move(cal_demo));
+
+  // ② 三个控件纵排：日期 / 时间 / 组合
+  auto picker_column = std::make_unique<Panel>(FlexDirection::Column);
+  picker_column->style().gap = 10.0f;
+  auto date_demo = std::make_unique<DatePicker>(st::ui::calendar::Date{2026, 11, 27});
+  date_demo->set_id("demo-datepicker");
+  date_demo->set_today(st::ui::calendar::Date{2026, 11, 27});
+  picker_column->add_child(std::move(date_demo));
+
+  auto time_demo = std::make_unique<TimePicker>(st::ui::calendar::Clock{14, 30});
+  time_demo->set_id("demo-timepicker");
+  time_demo->set_minute_step(5);
+  picker_column->add_child(std::move(time_demo));
+
+  auto field_demo = std::make_unique<DateTimeField>();
+  field_demo->set_id("demo-datetime-field");
+  field_demo->set_today(st::ui::calendar::Date{2026, 11, 27});
+  field_demo->set_value(st::ui::DateTimeValue{st::ui::calendar::Date{2026, 11, 27},
+                                              st::ui::calendar::Clock{17, 45}},
+                        /*notify=*/false);
+  auto* field_demo_ptr = field_demo.get();
+  picker_column->add_child(std::move(field_demo));
+
+  // 空态对照：同一个组件的另一种合法状态（"没有值"不等于"值是 1970"）
+  auto field_empty = std::make_unique<DateTimeField>();
+  field_empty->set_id("demo-datetime-empty");
+  field_empty->set_today(st::ui::calendar::Date{2026, 11, 27});
+  picker_column->add_child(std::move(field_empty));
+  datetime_row->add_child(std::move(picker_column));
+
+  auto datetime_state = std::make_unique<Text>("2026-11-27 17:45");
+  datetime_state->set_id("datetime-state");
+  datetime_state->set_tone(Tone::Faint);
+  datetime_state->set_scale(Text::Scale::Xs);
+  auto* datetime_state_ptr = datetime_state.get();
+  field_demo_ptr->on_change = [datetime_state_ptr](std::optional<DateTimeValue> value) {
+    if (!value.has_value()) {
+      datetime_state_ptr->set_content("无值（空态）");
+      return;
+    }
+    datetime_state_ptr->set_content(st::ui::calendar::format_date(value->date) + " " +
+                                    st::ui::calendar::format_clock(value->clock));
+  };
+  datetime_card->add_child(std::move(datetime_row));
+  datetime_card->add_child(std::move(datetime_state));
+  page->add_child(std::move(datetime_card));
 
   // —— 视口（Viewport）：二维缩放/平移，与 ScrollView 的一维滚动分工 ——
   auto viewport_card = make_card("card-viewport", "缩放视口（Viewport）");

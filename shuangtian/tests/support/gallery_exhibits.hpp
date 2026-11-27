@@ -56,7 +56,7 @@ namespace gallery {
 /// 与 apps/gallery/{pages,main}.cpp 的实例化点一一对应。
 /// 「直接实例化」含两种形态：建卡时实例化，以及懒创建组件经按钮触发构造后挂
 /// 叠加层（后者另列 kGalleryLazy；树自检时两类都在场断言里放行）。
-inline constexpr std::array<std::string_view, 74> kGalleryExhibits{
+inline constexpr std::array<std::string_view, 78> kGalleryExhibits{
     "Panel",       "Text",       "Heading",     "Icon",        "Button",
     "Card",        "Divider",    "KeyValueRow", "Input",       "TextArea",
     "Checkbox",    "Radio",      "Switch",      "Slider",      "Select",
@@ -91,6 +91,10 @@ inline constexpr std::array<std::string_view, 74> kGalleryExhibits{
       "MermaidView",
       // 2026-11-24 · 思维导图（查看 / 编辑 / 保存为 FreeMind .mm），展位在「数据」页
       "MindMapView",
+      // 2026-11-27 · 日期与时间四件（展位在「输入」页）。
+      // `CalendarPanel` / `DatePicker` / `TimePicker` 是 `DateTimeField` 的子件，
+      // 但它们各自也可独立使用（如日期范围筛选），所以四个都要单独展。
+      "CalendarPanel", "DatePicker", "TimePicker", "DateTimeField",
   };
 
 /// gallery 懒创建展示集：交互时才构造、挂 UiRoot 叠加层的展示卡组件。

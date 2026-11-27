@@ -161,9 +161,10 @@ describe("sharding and sandbox", () => {
     writeFileSync(join(outside, "secret.txt"), "top secret")
     mkdirSync(join(home, "sub"), { recursive: true })
     try {
-      // Windows 无开发者模式/管理员权限时 symlink 失败：跳过该环境
+      // Windows 建真符号链接需管理员/开发者模式（EPERM）；junction 不需特权且同样经 realpath
+      // 解析到目标——否则这条逃逸检查在 Windows 上永远是空跑
       try {
-        symlinkSync(outside, join(home, "sub", "link"))
+        symlinkSync(outside, join(home, "sub", "link"), process.platform === "win32" ? "junction" : "dir")
       } catch {
         return
       }
@@ -373,8 +374,10 @@ describe("Sandbox exec", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sandbox5-"))
     const sandbox = new Sandbox({ home, enabled: false })
     const session = "0123456789abcdef0123456789abcdef"
-    const abs = sandbox.resolvePath("alice", session, "/tmp/anywhere.txt")
-    expect(abs).toBe(resolve("/tmp/anywhere.txt"))
+    // 绝对路径必须带上本机的根前缀：Windows 下 `/tmp/x` 没有盘符，resolve 会锚到当前盘符，
+    // 与期望值（resolve 同一个字面量）不是一回事——用 tmpdir 派生路径，两平台都是真绝对路径
+    const absPath = join(tmpdir(), "gebai-anywhere", "anywhere.txt")
+    expect(sandbox.resolvePath("alice", session, absPath)).toBe(resolve(absPath))
     // 相对路径仍基于会话 tmp/ 解析（与 sh/py 工作目录一致），允许越界
     const parent = sandbox.resolvePath("alice", session, "../x.txt")
     expect(parent).toBe(resolve(join(sessionPath(home, "alice", session), "tmp"), "../x.txt"))

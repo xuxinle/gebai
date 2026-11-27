@@ -55,6 +55,9 @@ FAMILY: dict[str, str] = {
     "NumberInput": "input", "Slider": "input", "Rating": "input",
     "ColorPicker": "input", "TagInput": "input", "FormRow": "input",
     "SegmentedControl": "input",
+    # 日期与时间（都是“输入一个离散值”，与上面的输入族同性质）
+    "CalendarPanel": "input", "DatePicker": "input", "TimePicker": "input",
+    "DateTimeField": "input",
     # select.hpp
     "Select": "select", "SelectPanel": "select",
     # list.hpp

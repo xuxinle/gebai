@@ -187,10 +187,12 @@ namespace gbcode_ui {
   void CodeEditorPage::build_explorer(Composer& c) {
     build_sidebar_head(c, "资源管理器");
     if (workspace_.empty()) {
+      // 新窗口默认就是这里（不再拿当前目录充数）：两行文案同时给出**真快捷键**
+      // 与菜单入口——用户手里可能有文件夹，也可能只想先开一个文件。
       (void)column(c, {.gap = 6.0f, .padding_x = 12.0f, .padding_y = 10.0f, .id = "explorer-empty"}, [&] {
         (void)text(c, [] { return std::string("未打开文件夹"); },
                    {.weight = FontWeight::Regular, .id = "explorer-empty-title"});
-        (void)text(c, [] { return std::string("文件 → 打开文件夹（Ctrl+K Ctrl+O）"); },
+        (void)text(c, [] { return std::string("Ctrl+Shift+O 打开文件夹"); },
                    {.color = Tone::Muted, .id = "explorer-empty-hint"});
       });
       return;

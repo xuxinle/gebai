@@ -29,7 +29,7 @@
 #include "poster.hpp"
 #include "poster_bridge.hpp"
 #include "battery/embed.hpp"   // 编译期资源嵌入（stpm 生成）
-#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
+#include "st/app/icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"   // 通用参数解析（框架统一入口；本应用只声明特有参数）
 #include "st/codec/png.hpp"

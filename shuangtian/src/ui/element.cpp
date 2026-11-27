@@ -283,6 +283,22 @@ auto Element::insert_child(std::size_t index, std::unique_ptr<Element> child) ->
 auto Element::remove_child(Element* child) -> std::unique_ptr<Element> {
   for (auto iterator = children_.begin(); iterator != children_.end(); ++iterator) {
     if (iterator->get() == child) {
+      // **先把腾出的位置登记成损坏区，再摘**。
+      //
+      // 为何必须在这里（而不是靠 `mark_layout_dirty`）：
+      // `mark_layout_dirty` **刻意不报 damage**（它的注释写了理由：重排会挑动兄弟，
+      // 窄脏区盖不住——那条理由对“位置变了”成立，但对“这里**曾经有东西、现在没了**”
+      // 不成立）。于是移除一整棵子树时，**没有任何存活元素**为腾空的那块区域负责：
+      // 局部重绘只重画“有元素声称变脏”的地方，旧页的像素原封不动留在后备缓冲里。
+      //
+      // 实测（dev-tools 切页签）：`tree` 里已经是新的一页，屏上还是上一页；
+      // 进一步验证——内容区一旦铺了不透明底色就看不见了，因为那块底色由**新页**
+      // 绘制、顺带盖掉了旧像素。“铺个底色盖过去”不是修法，那是把缺陷推到
+      // “必须有东西盖着才正确”。
+      //
+      // 顺序不能反：摘下后 `bounds_` 虽然还在，但子树可能当场被调用方释放
+      // （`retire_subtree`），那时再读就是悬垂。
+      record_damage_rect(iterator->get()->bounds());
       std::unique_ptr<Element> detached = std::move(*iterator);
       detached->parent_ = nullptr;
       children_.erase(iterator);
@@ -302,6 +318,11 @@ auto Element::remove_child(Element* child) -> std::unique_ptr<Element> {
 void Element::clear_children() {
   if (children_.empty()) return;
   for (auto& child : children_) {
+    if (child == nullptr) continue;
+    // 同 `remove_child`：腾出的每一块都要有人负责重绘（否则旧内容留在屏上）。
+    // 逐个子树各报一次而不是合并成父 bounds：父 bounds 可能远大于实际旧内容
+    // （大面积卡片区），逐块上报才能让 damage 保持可裁剪的粒度。
+    record_damage_rect(child->bounds());
     child->parent_ = nullptr;
     // 同 `remove_child`：这些子元素可能被调用方接走再挂到别处。
     // 即使它们随后被销毁，这只是一次树遍历（与 `children_.clear()` 同一量级）。
