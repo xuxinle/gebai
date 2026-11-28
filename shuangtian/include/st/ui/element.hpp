@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <functional>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <span>
@@ -663,6 +664,15 @@ void clear_children();
   /// 为何用**缓存几何**而不是收 `RenderContext`：它会在事件派发里被调
   ///（那时拿不到绘制上下文，与 `CodeEditor::caret_screen_rect` 同一条理由）。
   [[nodiscard]] virtual auto caret_rect() const -> math::Rect { return math::Rect{}; }
+
+  /// 插入点在**文本中的字符偏移**（0 起；默认 0 = 行首/非文本元素）。
+  ///
+  /// 用途：`IMECHARPOSITION::dwCharPos`。输入法用它把“光标”对到真实文本上；
+  /// 恒给 0 而文本非空时，搜狗这类输入法会**只采信 `pt.y`、丢弃 `pt.x`**
+  ///（实测 2026-11-28：候选窗纵向贴对了，横向却退回窗口中心）。
+  ///
+  /// 为何由组件回答：只有它知道光标在 `text_` 里的字节/字符位置。
+  [[nodiscard]] virtual auto caret_char_offset() const -> std::size_t { return 0; }
 
   // —— 交互状态 ——
   /// 悬浮"特效"的声明式开关（组件自己决定怎么用）。

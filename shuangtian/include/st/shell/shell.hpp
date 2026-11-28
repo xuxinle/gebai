@@ -283,7 +283,13 @@ class Backend {
   /// 为何由**宿主**上报而不是让后端读 UI 焦点树：后端不依赖 `ui` 层
   ///（依赖方向是 shell → ui，但反查会把后端的生命周期绑到 UI 树上）。
   /// 只要界面知道“现在光标在哪”，把它当一条**状态**告诉后端就够了。
-  virtual void set_ime_caret(math::Rect logical_rect) { (void)logical_rect; }
+  /// 第二参数是插入点的**字符偏移**（`IMECHARPOSITION::dwCharPos` 的来源）。
+  /// 输入法拿它把“光标”对到真实文本上：恒给 0 而文本非空时，搜狗会
+  /// 只采信 `pt.y` 而丢弃 `pt.x`（实测 2026-11-28：纵向贴对、横向退回窗口中心）。
+  virtual void set_ime_caret(math::Rect logical_rect, std::size_t char_offset = 0) {
+    (void)logical_rect;
+    (void)char_offset;
+  }
   /// 提交一帧（headless 时写入离屏缓冲）。
   virtual void present() = 0;
   /// 取回输入事件（无则空）。headless 恒为空——输入由控制通道直接投递。

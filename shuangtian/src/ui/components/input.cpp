@@ -1209,8 +1209,7 @@ void TextArea::set_scroll_offset(float offset) {
   mark_dirty();
 }
 
-auto TextArea::inner_box(const RenderContext& context) const -> math::Rect {
-  const Metrics& metrics = context.theme.metrics();
+auto TextArea::inner_box(const RenderContext& context) const -> math::Rect {  const Metrics& metrics = context.theme.metrics();
   const math::Insets insets{metrics.space_md, metrics.space_sm, metrics.space_md, metrics.space_sm};
   return bounds_.inset(style_.padding).inset(insets);
 }
@@ -1642,6 +1641,35 @@ void TextArea::notify_change() {
   if (on_change) on_change(text_);
 }
 
+/// `cursor_` 是字节偏移；IME 要的是**字符数**（中文一字符 3 字节）。
+///
+/// 为何不能直接给字节数：`dwCharPos` 的语义是“光标在第几个字符”，
+/// 给字节数会算到错位的字符上（搜狗会据此判断位置不可信、
+/// 从而只保留行基准 `pt.y` 而丢弃 `pt.x`）。
+///
+/// 边界：`cursor_` 可能落在多字节序列中间（理论上不该），此时按“落在该
+/// 字符内”计入它——宁可多算一个，也不要给出越界偏移。
+auto TextArea::caret_char_offset() const -> std::size_t {
+  std::size_t count = 0;
+  for (std::size_t index = 0; index < text_.size();) {
+    const auto byte = static_cast<unsigned char>(text_[index]);
+    std::size_t width = 1;
+    if ((byte & 0x80U) == 0U) {
+      width = 1;
+    } else if ((byte & 0xE0U) == 0xC0U) {
+      width = 2;
+    } else if ((byte & 0xF0U) == 0xE0U) {
+      width = 3;
+    } else if ((byte & 0xF8U) == 0xF0U) {
+      width = 4;
+    }
+    if (index >= cursor_) break;
+    ++count;
+    index += width;
+  }
+  return count;
+}
+
 auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
   if (!enabled()) return false;
   switch (event.kind) {
@@ -1888,7 +1916,6 @@ void TextArea::activate() {
 }
 
 auto TextArea::semantics_text() const -> std::string { return placeholder_; }
-
 auto TextArea::semantics_value() const -> std::string { return text_; }
 
 auto TextArea::semantics_flags() const -> SemanticsFlags {

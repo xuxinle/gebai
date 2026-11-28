@@ -1183,14 +1183,21 @@ void UiRoot::publish_ime_caret() {
   //  但“第一个值就是空”时不能把它当成已发布）。
   if (caret.is_empty()) return;
 
+  // 字符偏移也要一起跟上（输入法的 `dwCharPos`）：它在矩形不变时也会变
+  //（纯在行内左右移动光标，矩形宽/高可能相同而位置微变；反之同行内
+  // 插入中文与英文时 rect 可能一样但字符序号不同）。纳入相等早退的判据。
+  const std::size_t char_offset = focused_->caret_char_offset();
+
   // 首次（`ime_caret_` 还是初值空）必须下发；之后相等则早退。
   if (ime_caret_published_ && caret.x == ime_caret_.x && caret.y == ime_caret_.y &&
-      caret.width == ime_caret_.width && caret.height == ime_caret_.height) {
+      caret.width == ime_caret_.width && caret.height == ime_caret_.height &&
+      char_offset == ime_caret_char_offset_) {
     return;
   }
   ime_caret_published_ = true;
   ime_caret_ = caret;
-  ime_caret_sink(caret);
+  ime_caret_char_offset_ = char_offset;
+  ime_caret_sink(caret, char_offset);
 }
 
 void UiRoot::revalidate_pointer_state() {

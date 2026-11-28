@@ -1131,9 +1131,27 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
     rcDocument=20）——`pt` 偏移碰巧相同，所以**纵向对、横向与行高全错**。
   - 已改为回填真正的 `IMECHARPOSITION`，日志确认五个字段全对：
     `size=36 charPos=0 pt=(210,1956) lineH=30 doc=(153,83,3686,2005)`。
+  - **`pt` 的纵向基准曾搞错**（用户实测：候选窗跑到输入框**下方一整个行高**）：
+    两条接口的 `pt` 语义**不同**——`IMECHARPOSITION.pt` 是“插入点所在**字符**的位置”
+    （行顶，行高由 `cLineHeight` 单独给，输入法自己往下摆），
+    而 `CANDIDATEFORM.current_pos` 是“候选窗**左上角**”（行底）。
+    曾经为了“两条路径一致”把它们统一成行底，结果 `IMECHARPOSITION` 那条让输入法
+    在行底上**再加一次行高**。已拆开：行顶 `1926` 给 `IMECHARPOSITION`，
+    行底 `below_line` 给 `CANDIDATEFORM`。
+  - **`dwCharPos` 恒为 0** 而文本非空。已贯通：`Element::caret_char_offset()`
+    → `UiRoot::publish_ime_caret` → `Backend::set_ime_caret(rect, offset)` →
+    `IMECHARPOSITION::dwCharPos`。`TextArea` 把**字节偏移换成字符数**
+    （中文一字符 3 字节，直接给字节数会算到错位字符）。
+    真窗口日志：输入 `abc你好` 且光标在文末 →
+    `charPos=5 pt=(288,1926) lineH=30`（5 个字符而非 9 字节）。
 
-  **仍存在的缺口**：即使回填完全正确，搜狗仍把候选窗放在窗口中心——**它采信了
-  `pt.y` 但丢弃了 `pt.x`**。实测白色区域屏幕 x = 1929..3617，与期望 210 差 1719。
+  **仍存在的缺口**：即使回填完全正确（`charPos` 已给真实字符偏移、`pt` 已给行顶），
+  **横向仍未在真实输入法下做端到端确认**——自动注入的按键（`vk_` 路径）
+  能触发 `WM_IME_REQUEST` 并使日志显示正确值，但**建立不起真实组合串**
+  （搜狗的 `WM_IME_STARTCOMPOSITION` 不跟，候选窗不弹），因此无法自动读候选窗坐标。
+
+  早期实测（`dwCharPos=0` 时）：候选窗白色区域屏幕 x = 1929..3617，与期望 210 差 1719
+  （退回窗口水平中心）。**这一点在补齐 `dwCharPos` 后需人手动验证**。
 
   **已排除**（都有实验，不要再重试）：
   - ❌ **不是 TSF**：搜狗虽以 TIP 注册（`SogouTSF.ime`，CLSID
@@ -1146,10 +1164,10 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
     对 `ImmSetCandidateWindow` 都返回 1，行为无差。
   - ❌ **不是 `rcDocument` 全零**：改成客户区屏幕矩形后位置无变。
 
-  **方向**：`IMECHARPOSITION::dwCharPos` 是“光标在第几个字符”，我们恒给 0 ——
-  而输入框里已有文本时它应是真实偏移。搜狗很可能拿它去索引真实文本、校验失败后
-  只保留行基准（`pt.y`）而丢弃横向。要真正解决需要给输入法一个**文本模型**
-  （`ITextStoreACP` + `ITfRange` 提供真实字符），而不是补丁。
+  **方向**（若仍不对）：`dwCharPos` 不是全部——彻底解法是给输入法一个
+  **文本模型**（`ITextStoreACP` + `ITfRange` 提供真实字符与范围），
+  让 `ITfContext`/`ITfContextView::GetTextExt` 直接回答位置。
+  MinGW 的 `msctf.h` 里**没有** `ITextStoreACP`，要手写 40+ 个 COM 方法。
 
   **取证材料**：真窗口 `[ime]` 日志（`platform_win32.cpp` 的 `ST_LOG_INFO`，
   含 `IMR_QUERYCHARPOSITION` 完整回填结构）；两份对照探针（两窗口样式 /

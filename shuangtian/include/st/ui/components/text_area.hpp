@@ -121,6 +121,12 @@ class TextArea : public Element {
   /// 盖住“几何尚未就绪”这个真实状态。
   [[nodiscard]] auto caret_rect() const -> math::Rect override { return last_caret_rect_; }
 
+  /// 插入点的**字符**偏移（`IMECHARPOSITION::dwCharPos` 用）。
+  ///
+  /// `cursor_` 是**字节**偏移，而 IME 要的是字符数：中文一个字符占 3 字节，
+  /// 直接给字节数会让输入法算到错误的字符上。
+  [[nodiscard]] auto caret_char_offset() const -> std::size_t override;
+
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;

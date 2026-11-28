@@ -42,11 +42,16 @@ struct Fixture {
   UiRoot root;
   TextArea* area{nullptr};
   std::vector<Rect> reported;
+  /// 每次上报附带的字符偏移（与 `reported` 一一对应）。
+  std::vector<std::size_t> reported_offsets;
 
   Fixture() {
     root.set_theme(st::ui::Theme::light());
     root.set_viewport(Size{400.0F, 300.0F});
-    root.ime_caret_sink = [this](Rect caret) { reported.push_back(caret); };
+    root.ime_caret_sink = [this](Rect caret, std::size_t offset) {
+      reported.push_back(caret);
+      reported_offsets.push_back(offset);
+    };
     auto owned = std::make_unique<TextArea>();
     area = owned.get();
     root.set_content(std::move(owned));
@@ -86,4 +91,32 @@ ST_TEST(ime_caret_publish_no_position_without_focus) {
   // 没有焦点元件时不该凭空下发位置（`focused_ == nullptr` 同样走空矩形分支）。
   Fixture fixture;
   for (const Rect& caret : fixture.reported) ST_CHECK(!caret.is_empty());
+}
+
+ST_TEST(ime_caret_publish_carries_char_offset) {
+  // `IMECHARPOSITION::dwCharPos` 的来源：**字符**偏移（不是字节数）。
+  //
+  // 为何钉住它：恒给 0 而文本非空时，搜狗会只采信 `pt.y`、丢弃 `pt.x`
+  //（实测：候选窗纵向贴对、横向退回窗口中心）。中文一字符占 3 字节，
+  // 直接把字节数当字符数会算到错位的位置。
+  Fixture fixture;
+  fixture.area->set_text("abc中文");   // 3 ASCII + 2 汉字（6 字节）
+  fixture.root.layout(true);
+  ST_CHECK(fixture.root.set_focus(fixture.area));
+
+  // 光标在文末：字符数应是 5（而不是字节数 9）。
+  fixture.area->set_cursor_index(fixture.area->value().size());
+  fixture.root.publish_ime_caret();
+  ST_REQUIRE(!fixture.reported_offsets.empty());
+  ST_CHECK(fixture.reported_offsets.back() == 5);
+
+  // 光标回到文首：0。
+  fixture.area->set_cursor_index(0);
+  fixture.root.publish_ime_caret();
+  ST_CHECK(fixture.reported_offsets.back() == 0);
+
+  // 光标在 "中" 之后 = 字符 4（"abc" + "中" 共 6 字节）。
+  fixture.area->set_cursor_index(6);
+  fixture.root.publish_ime_caret();
+  ST_CHECK(fixture.reported_offsets.back() == 4);
 }

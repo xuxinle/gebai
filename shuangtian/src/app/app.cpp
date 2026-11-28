@@ -1998,8 +1998,8 @@ auto Application::start() -> Status {
   };
   // 输入法插入点：界面只知道“光标在哪”，候选窗开在哪里是后端的事。
   // 与 `cursor_sink` 同一条单向依赖。
-  root_.ime_caret_sink = [this](math::Rect caret) {
-    if (impl_->backend != nullptr) impl_->backend->set_ime_caret(caret);
+  root_.ime_caret_sink = [this](math::Rect caret, std::size_t char_offset) {
+    if (impl_->backend != nullptr) impl_->backend->set_ime_caret(caret, char_offset);
   };
     // 逐 face 记录**路径 / 序号 / 名称**。
     // 只记数量在排查"字变了"这类问题时毫无用处：字形由哪个 face 提供，

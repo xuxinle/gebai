@@ -579,7 +579,8 @@ class UiRoot : public HostFocus {
   ///
   /// 只在**几何真的变了**才调（同 `apply_cursor` 的纪律）：鼠标在编辑器里移动时
   /// 每帧都会走这条路径，无条件上报等于每帧做一次 `ImmSetCandidateWindow`。
-  std::function<void(math::Rect)> ime_caret_sink{};
+  /// 第二参数是插入点的**字符偏移**（`IMECHARPOSITION::dwCharPos` 用；0 = 行首）。
+  std::function<void(math::Rect, std::size_t)> ime_caret_sink{};
  private:
   void assign_ids(Element& element, const std::string& prefix);
   /// 回收"派发或绘制期间摘除的叠加层"（延迟析构的墓场）。
@@ -775,6 +776,11 @@ class UiRoot : public HostFocus {
   MouseCursor cursor_{MouseCursor::Arrow};
   /// 最近一次上报给宿主的输入法插入点（变化才下发，同 `cursor_`）。
   math::Rect ime_caret_{};
+  /// 随插入点一起上报的**字符偏移**（`IMECHARPOSITION::dwCharPos`）。
+  ///
+  /// 为何要单独记住它：矩形不变而字符序号变的情况真实存在（同行内把光标
+  /// 从左移到右，行高不变、x 微变），而输入法需要的是“第几个字符”。
+  std::size_t ime_caret_char_offset_{0};
   /// 是否已经下发过一次插入点。
   ///
   /// 为何需要：`ime_caret_` 初值是空矩形，而“当前没有插入点”的**首次**上报值

@@ -1437,8 +1437,9 @@ class Win32Backend final : public Backend {
   /// 只存不立即定位：真正的 `ImmSet*Window` 在 `apply_ime_forms()` 里，
   /// 由**组合开始/更新**时调用——光标每走一步就调一次跨进程 IME API 是浪费，
   /// 而 IME 只在组合期间才需要这个坐标。
-  void set_ime_caret(math::Rect logical_rect) override {
+  void set_ime_caret(math::Rect logical_rect, std::size_t char_offset = 0) override {
     last_ime_caret_ = logical_rect;
+    ime_char_offset_ = char_offset;
     if (composing_) apply_ime_forms();
   }
   [[nodiscard]] auto supports_window_icon() const noexcept -> bool override {
@@ -3857,33 +3858,43 @@ class Win32Backend final : public Backend {
         // 也就是窗口左上角（实测截图：候选窗压在标题栏上，而光标在底部输入框）。
         if (!last_ime_caret_.has_value()) break;
         const math::Rect caret = *last_ime_caret_;
-        // 与 `apply_ime_forms` 同一口径（含下移一个行高）。
-        // 两条路径的位置必须完全一致：一个给“行顶”一个给“行底”，
-        // 输入法按最后一次拿到的值定位，交替收到就会跳。
         const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
         const float line_h = caret.height > 0.0f ? caret.height : 20.0f;
-        POINT origin{static_cast<LONG>(caret.x * safe_scale),
-                     static_cast<LONG>((caret.y + line_h) * safe_scale)};
-        if (::ClientToScreen(window, &origin) == 0) break;
+
+        // ## 两条分支的 `pt` 语义**不同**（2026-11-28 实测：统一就多下移一整个行高）
+        //
+        // | 接口 | `pt` 是什么 | 要不要自己加行高 |
+        // |---|---|---|
+        // | `IMECHARPOSITION`（`IMR_QUERYCHARPOSITION`） | **插入点所在字符的位置** | **不加**：行高由 `cLineHeight` 单独给，输入法自己往下摆 |
+        // | `CANDIDATEFORM`（`IMR_CANDIDATEWINDOW`） | 候选窗**左上角** | **要加**：否则候选窗盖住正在输入的那一行 |
+        //
+        // 曾经把两者“统一成行底”，结果 `IMECHARPOSITION` 那条让输入法
+        // 在“行底”上再加一次行高，候选窗跑到输入框**下方很远**
+        //（用户实测截图：`ni'hao` 的候选窗浮在输入框下面一整个行高处）。
+        POINT caret_origin{static_cast<LONG>(caret.x * safe_scale),
+                           static_cast<LONG>(caret.y * safe_scale)};
+        if (::ClientToScreen(window, &caret_origin) == 0) break;
         const auto line_height = static_cast<UINT>(line_h * safe_scale);
+        // 候选窗左上角 = 字符位置的**下一行**（行底）。
+        POINT below_line{caret_origin.x, caret_origin.y + static_cast<LONG>(line_height)};
 
         // —— `IMR_QUERYCHARPOSITION`：现代输入法问“光标字符在哪”——
         //
         // 回填 `IMECHARPOSITION`（**不是** `CANDIDATEFORM`）。
-        // 两者字段布局完全不同（前者 40 字节：dwSize/dwCharPos/pt/cLineHeight/
-        // rcDocument；后者 28 字节：dwIndex/dwStyle/ptCurrentPos/rcArea），
+        // 两者字段布局完全不同（前者 36 字节：dwSize/dwCharPos/pt/cLineHeight/
+        // rcDocument；后者 32 字节：dwIndex/dwStyle/ptCurrentPos/rcArea），
         // 写错会“成功返回、但输入法读到垃圾后自己推算”。
         if (wparam == kImrQueryCharPosition) {
           auto* info = reinterpret_cast<IMECHARPOSITION*>(lparam);
           if (info == nullptr) return FALSE;
           info->dwSize = sizeof(IMECHARPOSITION);
-          info->dwCharPos = 0;   // 插入点在行首（我们不暴露文本偏移）
-          info->pt = origin;
+          // 真实字符偏移：恒给 0 而文本非空时，搜狗会只采信 `pt.y`、
+          // 丢弃 `pt.x`（候选窗退回窗口水平中心）。
+          info->dwCharPos = static_cast<DWORD>(ime_char_offset_);
+          // **行顶**，不是行底（见上面那段说明）。
+          info->pt = caret_origin;
           info->cLineHeight = line_height;
-          // **`rcDocument` 必须给客户区矩形**（不能全零）。
-          //
-          // 实测（2026-11-28，搜狗拼音）：零矩形时输入法把组合窗放在
-          // **窗口横向中心**（屏幕 x≈1920 = 窗口客户区水平中线）。
+          // `rcDocument` 给客户区屏幕矩形（零矩形时输入法会把它当“无有效文档”）。
           RECT client{};
           ::GetClientRect(window, &client);
           POINT doc_tl{client.left, client.top};
@@ -3891,6 +3902,12 @@ class Win32Backend final : public Backend {
           ::ClientToScreen(window, &doc_tl);
           ::ClientToScreen(window, &doc_br);
           info->rcDocument = RECT{doc_tl.x, doc_tl.y, doc_br.x, doc_br.y};
+          // 纵向位置关键（本次修复的判据）：`pt` 必须是**行顶**，
+          // 行高由 `cLineHeight` 单独给。留一行日志便于真窗口核验。
+          ST_LOG_INFO("[ime] IMR_QUERYCHARPOSITION charPos={} pt=({},{}) lineH={}",
+                      static_cast<unsigned long>(info->dwCharPos),
+                      static_cast<long>(info->pt.x), static_cast<long>(info->pt.y),
+                      static_cast<unsigned long>(info->cLineHeight));
           return TRUE;
         }
         // —— `IMR_CANDIDATEWINDOW`：老式输入法问“候选窗该放哪”——
@@ -3902,7 +3919,8 @@ class Win32Backend final : public Backend {
           // 退回它自己的推算。
           form->style = kCfsCandidatePos;
           form->index = 0;
-          form->current_pos = origin;
+          // 这里是**候选窗左上角**，所以给行底（与 `IMECHARPOSITION` 反着来）。
+          form->current_pos = below_line;
           // **`area` 全零**：真正“不给排除区”的写法是零矩形，而不是一条零宽线。
           form->area = RECT{0, 0, 0, 0};
           return TRUE;
@@ -4137,6 +4155,8 @@ class Win32Backend final : public Backend {
   std::wstring preedit_{};
   /// 最近一次从 UI 上报的**文本插入点**（逻辑像素，客户区坐标）。
   std::optional<math::Rect> last_ime_caret_{};
+  /// 插入点的**字符偏移**（`IMECHARPOSITION::dwCharPos` 的来源）。
+  std::size_t ime_char_offset_{0};
   /// 绘制面：软件或 GPU（由 `--renderer` / `auto` 决定）。
   /// 之前这里是具体 `Canvas` 且完全忽略 `options.renderer`——真实窗口下**永远走软件**，
   /// `--renderer gpu` 静默失效（实测绘制耗时 22.95ms vs 无头 GPU 的 1.31ms 才发现）。
