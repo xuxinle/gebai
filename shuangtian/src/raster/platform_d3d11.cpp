@@ -569,13 +569,47 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
     // “红绿色块”竖带（R 在 44~62 波动、G 恒为 30、B 恒为 38），
     // 就是色通道被丢弃后与底色混合的结果。
     const int radius = (int)g_axis_extra.x;
-    const float2 step = g_axis.xy / g_viewport.xy;
+    // ## 采样映射要**按纹理子矩形**算（2026-11-28 实测定位）
+    //
+    // 离屏目标可能比本次区域大：`acquire_color_targets` 复用一对纹理且**只增不减**
+    //（消除“每帧每块玻璃新建两张 RGBA 且不释放”的泄漏）。于是内容只写进纹理的
+    // **左上 area 块**（viewport = area），而纹理尺寸 ≥ area。
+    //
+    // 旧实现把 `local01`（四边形内 0..1）直接当纹理 uv、把 `g_axis.xy / g_viewport`
+    // 当纹素步长 ⇒ 采样范围被当成**整张纹理**：采到未写区域、内容被拉伸。
+    // 实测症状（xiaobai 的 user 气泡，GPU 腿）：气泡左侧 45px 恒为 #474747 的死色
+    // 竖带，右侧正常；同一场景走软件腿完全正常。
+    //
+    // 现在：`g_uv` 是 area 在纹理里的子矩形（`{u0, v0, w, h}`），`g_rect.zw` 是 area
+    // 的物理尺寸——两者相除就是“1 物理像素对应多少纹理 uv”。纹理与 area 同尺寸时
+    // `g_uv = {0,0,1,1}`，本式退化为原来的 `1/area`，逐位等价。
+    const float2 sub = g_uv.zw > float2(0.0, 0.0) ? g_uv.zw : float2(1.0, 1.0);
+    // `g_axis.xy` 是**方向**（水平遍/垂直遍），所以步长要乘进方向：
+    // 1 物理像素 = `sub / area 物理尺寸` 这么多个纹理 uv。
+    const float2 texel_uv = sub / max(g_rect.zw, float2(1.0, 1.0));
+    const float2 step = g_axis.xy * texel_uv;
+    // ## 采样本必须**夹在子矩形内**（2026-11-28 实测定位，与上面同类缺陷的第二段）
+    //
+    // 上面把“基准与步长”映射到子矩形就完了，但模糊核会把采样点**推出 area**：
+    // `base + step * i` 在边缘一圈（半径范围）自然落到子矩形之外。
+    // 而那片区域里存的是**上一次更大区域遗留的旧像素**（目标纹理复用、只增不减），
+    // 不是本次内容。于是玻璃边缘一圈会把旧内容平均进来——
+    // 实测症状：gbcode 先开大菜单（文件）再开小菜单（编辑），编辑面板的
+    // **右边与下边各约 15px 内沿发暗**（面板内 248 → 234，面板外仍是 255；
+    // 首开时同一处是 250 干净）。这就是用户报的“右和下怎么有阴影”。
+    //
+    // 夹到子矩形边界 = 复用大目标时的语义等价物：旧实现（目标恰好等于区域）
+    // 在边界外由采样器 clamp 到纹理边缘，这里 clamp 到**子矩形**边缘。
+    const float2 lo = g_uv.xy + texel_uv * 0.5;
+    const float2 hi = g_uv.xy + sub - texel_uv * 0.5;
+    const float2 base = g_uv.xy + local01 * sub;
     const bool full_color = g_mode.w > 0.5;
     float4 sum = float4(0.0, 0.0, 0.0, 0.0);
     float count = 0.0;
     for (int i = -64; i <= 64; ++i) {
       if (i < -radius || i > radius) continue;
-      sum += g_texture.SampleLevel(g_sampler, local01 + step * (float)i, 0);
+      const float2 tap = base + step * (float)i;
+      sum += g_texture.SampleLevel(g_sampler, clamp(tap, lo, hi), 0);
       count += 1.0;
     }
     if (count <= 0.0) return float4(0.0, 0.0, 0.0, full_color ? 0.0 : 1.0);
@@ -614,10 +648,16 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
     const float strength = g_axis_extra.y;
     const float dispersion = g_axis_extra.z;
     const float edge_band = max(g_axis_extra.w, 1.0);
-    // 模糊步进：1 步 = 1 物理像素。`g_axis.xy` 由调用方直接填「1/ext 尺寸」
-    //（外扩纹理的 uv 步长）——外扩拷贝后纹理尺寸 ≠ 区域尺寸，着色器内
-    // 自算会错（实测：中心模糊失效，高频未被抹平）。
-    const float2 step = g_axis.xy;
+    // 模糊步进：1 步 = 1 物理像素。`g_axis.xy` 由调用方填「1 物理像素对应的**纹理 uv**」
+    //（= 区域在纹理里的占比 ÷ 区域物理尺寸）——纹理可能比区域大（离屏目标复用），
+    // 着色器内拿 `g_rect.zw` 自算会错（那是区域尺寸，不是纹理尺寸）。
+    const float2 texel_uv = g_axis.xy;
+    const float2 step = texel_uv;
+    // 内容在纹理里的有效范围（**左上 ext 块**，见 `refract_region` 的 `sub_w/sub_h`）：
+    // 核越界采样与法线位移都会跑出它，而外侧是**上一次更大区域遗留的旧像素**。
+    // 实测症状：gbcode 先开大菜单再开小菜单，小菜单**右边与下边各约 15px 发暗**。
+    const float2 ext_hi = float2(max(g_axis.z, 0.0), max(g_axis.w, 0.0));
+    const float2 ext_lo = step * 0.5;
     // SDF 与法线：局部坐标以区域中心为原点（local_px 是相对左上，先移到中心）。
     const float2 half2 = half_size;
     const float sdf = rounded_sdf(local_px, half2, g_radii);
@@ -630,9 +670,10 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
     // 边缘衰减：SDF 越接近边界（值越接近 0），折射越强；中心（深度负值）无折射。
     const float edge_t = 1.0 - saturate(-sdf / edge_band);
     // 位移量：法线方向、向**外**推（采样到更外侧的背景 → 视觉上背景被吸向边缘）。
-    // 单位是**物理像素**：strength 已换算到物理，再除以外扩纹理尺寸得 uv 位移。
-    const float2 ext_size = g_uv.zw > 0.0 ? float2(1.0, 1.0) / (g_uv.zw / max(g_rect.zw, float2(1.0, 1.0))) : g_rect.zw;
-    const float2 push_uv = normal * (strength * edge_t) / max(ext_size, float2(1.0, 1.0));
+    // `g_axis_extra.y` 已是**物理像素**；乘 `texel_uv` 换成纹理 uv 位移。
+    //（旧写法用 `1/(g_uv.zw/g_rect.zw)` 反推 ext 尺寸——目标复用后那两个量的含义变了，
+    //  会算成**纹理**尺寸，位移量偏小，实测小块内与首帧结果差 Δ37。）
+    const float2 push_uv = normal * (strength * edge_t) * texel_uv;
     const float2 disp_r = push_uv * (1.0 + dispersion);
     const float2 disp_b = push_uv * (1.0 - dispersion);
 
@@ -643,9 +684,9 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
       // 玻璃区 0..1 坐标先映射进外扩纹理的子矩形（g_uv），再叠加位移/步进
       //（它们同样已换算到外扩纹理的 uv 尺度）。
       const float2 base = g_uv.xy + local01 * g_uv.zw + push_uv + step * (float)i;
-      const float r_c = g_texture.SampleLevel(g_sampler, base + disp_r - push_uv, 0).r;
-      const float g_c = g_texture.SampleLevel(g_sampler, base, 0).g;
-      const float b_c = g_texture.SampleLevel(g_sampler, base + disp_b - push_uv, 0).b;
+      const float r_c = g_texture.SampleLevel(g_sampler, clamp(base + disp_r - push_uv, ext_lo, ext_hi), 0).r;
+      const float g_c = g_texture.SampleLevel(g_sampler, clamp(base, ext_lo, ext_hi), 0).g;
+      const float b_c = g_texture.SampleLevel(g_sampler, clamp(base + disp_b - push_uv, ext_lo, ext_hi), 0).b;
       sum_rgb += float3(r_c, g_c, b_c);
       count += 1.0;
     }
@@ -1593,6 +1634,12 @@ class GpuCanvas final : public Surface {
     // 无论着色器算得多对。那是“红绿色块”缺陷的第一层成因。
     ShadowTargets targets;
     if (!acquire_color_targets(area.width, area.height, targets)) return false;
+    // **目标可能比 area 大**（复用“只增不减”）：内容只写进纹理的**左上 area 块**，
+    // 所以后面每一趟的采样/贴回都要按这个子矩形算 uv（`target_w/h` 是纹理尺寸）。
+    const int target_w = color_targets_width_;
+    const int target_h = color_targets_height_;
+    const float sub_w = static_cast<float>(area.width) / static_cast<float>(std::max(1, target_w));
+    const float sub_h = static_cast<float>(area.height) / static_cast<float>(std::max(1, target_h));
     // **alpha 清成 1**（不是 0）：模糊会沿区域边界采样，
     // 若目标 alpha 是 0，模糊会把边界外的不透明像素与这里的 0 平均，
     // 结果 alpha < 1，贴回时就变成半透明——与软件端 `over` 混合结果不一致，
@@ -1648,6 +1695,11 @@ class GpuCanvas final : public Surface {
         blur_params.axis[0] = along_x ? 1.0f : 0.0f;
         blur_params.axis[1] = along_x ? 0.0f : 1.0f;
         blur_params.axis_extra[0] = static_cast<float>(box_radius);
+        // 内容子矩形（纹理可能比 area 大，见 `sub_w/sub_h` 处）。
+        blur_params.uv[0] = 0.0f;
+        blur_params.uv[1] = 0.0f;
+        blur_params.uv[2] = sub_w;
+        blur_params.uv[3] = sub_h;
         // **全色模糊**：`g_mode.w = 1` 让着色器模糊 RGBA 四个通道。
         // 缺省 0 是阴影遮罩的"只模糊 R 通道"模式——毛玻璃直接用它会把
         // G/B 写成 0、A 写成 1，贴回后整块只剩红色分量。
@@ -1676,14 +1728,14 @@ class GpuCanvas final : public Surface {
         {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
     // `g_uv` 语义是 `{u0, v0, w, h}`（**宽高**，不是 u1/v1）——
     // `sample_subrect` 里是 `rect_uv.xy + uv01 * rect_uv.zw`。
-    // RT 与 area 同尺寸（1:1），所以直接取整张纹理即可；
+    // 纹理可能比 area 大（复用），内容在左上 area 块：uv 上限就是 `sub_w/sub_h`。
     // UV 内缩半个纹素以让采样中心对齐像素中心（否则边缘一列会偏）。
-    const float half_u = 0.5f / static_cast<float>(std::max(1, area.width));
-    const float half_v = 0.5f / static_cast<float>(std::max(1, area.height));
+    const float half_u = 0.5f / static_cast<float>(std::max(1, target_w));
+    const float half_v = 0.5f / static_cast<float>(std::max(1, target_h));
     paste.uv[0] = half_u;
     paste.uv[1] = half_v;
-    paste.uv[2] = 1.0f - 2.0f * half_u;
-    paste.uv[3] = 1.0f - 2.0f * half_v;
+    paste.uv[2] = sub_w - 2.0f * half_u;
+    paste.uv[3] = sub_h - 2.0f * half_v;
     // **贴回时收紧剪裁矩形**：`vs_main` 会把四边形外扩 1 像素，
     // 而贴回采样结果不需要外扩——外扩会把区域边界外侧写成边缘采样值。
     // 实测：`region={20,40,260,160}` 时右边界 x=280 在软端仍是原始颜色，
@@ -1741,6 +1793,11 @@ class GpuCanvas final : public Surface {
 
     ShadowTargets targets;
     if (!acquire_color_targets(ext.width, ext.height, targets)) return false;
+    // **目标可能比 ext 大**（复用“只增不减”）：内容在纹理左上 `ext` 块。
+    const int target_w = color_targets_width_;
+    const int target_h = color_targets_height_;
+    const float sub_w = static_cast<float>(ext.width) / static_cast<float>(std::max(1, target_w));
+    const float sub_h = static_cast<float>(ext.height) / static_cast<float>(std::max(1, target_h));
     const float clear_rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     {
       const DrawScope gfx = draw_scope();
@@ -1768,9 +1825,16 @@ class GpuCanvas final : public Surface {
         DrawMode::RefractionBlur,
         math::Rect{0.0f, 0.0f, static_cast<float>(area.width), static_cast<float>(area.height)},
         {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
-    refract.axis[0] = 1.0f / static_cast<float>(std::max(1, ext.width));
-    refract.axis[1] = 1.0f / static_cast<float>(std::max(1, ext.height));
-    //（语义：每步 1 物理像素的外扩纹理 uv 步长；mode6 内直接当 step 用）
+    refract.axis[0] = sub_w / static_cast<float>(std::max(1, ext.width));
+    refract.axis[1] = sub_h / static_cast<float>(std::max(1, ext.height));
+    //（语义：每步 1 **物理像素**对应的**纹理 uv** 步长——纹理可能比 ext 大，
+    //  所以要乘上 ext 在纹理里的占比 `sub_w/sub_h`；同尺寸时它就是 1/ext）
+    //
+    // `axis.z/w` = ext 内容区在纹理里的 uv **上界**（核越界采样必须夹在这里面）。
+    // 不夹就会采到纹理里**上一次更大区域遗留的旧像素**——实测：大菜单→小菜单时，
+    // 小菜单右边与下边各约 15px 发暗（内沿 248→234，而面板外仍是 255）。
+    refract.axis[2] = sub_w;
+    refract.axis[3] = sub_h;
     refract.axis_extra[0] = static_cast<float>(box_radius);
     refract.axis_extra[1] = strength * scale_;
     refract.axis_extra[2] = dispersion;
@@ -1779,10 +1843,11 @@ class GpuCanvas final : public Surface {
     // 采样映射：RT_a 是**外扩拷贝**（ext），玻璃区在其中的 uv 子矩形——
     // mode6 的着色器靠 g_uv 把玻璃区 0..1 坐标映射进外扩纹理（位移/步进
     // 也按同一尺度换算），外侧背景才能被吸进来。
-    refract.uv[0] = static_cast<float>(area.x - ext.x) / static_cast<float>(ext.width);
-    refract.uv[1] = static_cast<float>(area.y - ext.y) / static_cast<float>(ext.height);
-    refract.uv[2] = static_cast<float>(area.width) / static_cast<float>(ext.width);
-    refract.uv[3] = static_cast<float>(area.height) / static_cast<float>(ext.height);
+    // 纹理可能比 ext 大（复用），所以先算 ext 在纹理里的比例 `sub_w/sub_h`。
+    refract.uv[0] = static_cast<float>(area.x - ext.x) / static_cast<float>(ext.width) * sub_w;
+    refract.uv[1] = static_cast<float>(area.y - ext.y) / static_cast<float>(ext.height) * sub_h;
+    refract.uv[2] = static_cast<float>(area.width) / static_cast<float>(ext.width) * sub_w;
+    refract.uv[3] = static_cast<float>(area.height) / static_cast<float>(ext.height) * sub_h;
     // SDF 的圆角用区域的**物理**圆角（与元素逻辑圆角同比例）。
     refract.radii[0] = refract.radii[1] = refract.radii[2] = refract.radii[3] =
         corner * scale_;
@@ -1802,12 +1867,12 @@ class GpuCanvas final : public Surface {
         math::Rect{static_cast<float>(area.x), static_cast<float>(area.y),
                    static_cast<float>(area.width), static_cast<float>(area.height)},
         {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
-    const float half_u = 0.5f / static_cast<float>(std::max(1, ext.width));
-    const float half_v = 0.5f / static_cast<float>(std::max(1, ext.height));
+    const float half_u = 0.5f / static_cast<float>(std::max(1, target_w));
+    const float half_v = 0.5f / static_cast<float>(std::max(1, target_h));
     paste.uv[0] = half_u;
     paste.uv[1] = half_v;
-    paste.uv[2] = static_cast<float>(area.width) / static_cast<float>(ext.width) - 2.0f * half_u;
-    paste.uv[3] = static_cast<float>(area.height) / static_cast<float>(ext.height) - 2.0f * half_v;
+    paste.uv[2] = static_cast<float>(area.width) / static_cast<float>(ext.width) * sub_w - 2.0f * half_u;
+    paste.uv[3] = static_cast<float>(area.height) / static_cast<float>(ext.height) * sub_h - 2.0f * half_v;
     // **贴回必须套圆角裁剪**（`mode[2] = 2` 走 SDF 圆角覆盖率）。
     //
     // 实测 2026-11-19（用户标图：“这不是还有吗”，指向气泡顶边一条暗线）：
@@ -3041,9 +3106,15 @@ class GpuCanvas final : public Surface {
   /// （大块走专用路径），与面积无关。这正是“成本随面积单调增”这条不变量被撞破的原因。
   ///
   /// 复用规则：**只增不减**（一次分配后一直用）。目标总是按调用方给的
-  /// `width × height` 建，复用时不重建——但**采样/视口都按本次 `area` 限定**
-  /// （见 `blur_region` 里的 `submit_to(..., area.width, area.height)` 与
-  /// `copy.uv`），所以大目标配小区域是安全的：像素只在左上角 area 块被读写。
+  /// `width × height` 建，复用时不重建。
+  ///
+  /// ⚠ **大目标配小区域不是“安全的”**（2026-11-28 实测纠正本段旧文）：
+  /// 视口确实限定在左上 `area` 块，但**采样与贴回的 uv 必须显式按子矩形算**——
+  /// 纹理尺寸 ≠ area 尺寸时，“1 物理像素 = 1/area 纹理 uv”这条假设就不成立。
+  /// 旧写法按整张纹理解释，于是内容被拉伸、采到未写区域。
+  /// 实测症状：xiaobai 的 user 气泡左侧 45px 恒为 `#474747` 的死色竖带；
+  /// gbcode 菜单切换后整块发灰（同一个根因）。回归：
+  /// `tests/gpu_blur_target_reuse_test.cpp`（两条用例都经逆向验证）。
   auto acquire_color_targets(int width, int height, ShadowTargets& targets) -> bool {
     // 复用已有目标：**只校验它够大**（小目标装不下就重建一对）。
     if (color_targets_.texture_a != nullptr && color_targets_width_ >= width &&
