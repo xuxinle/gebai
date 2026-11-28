@@ -410,7 +410,16 @@ ST_TEST(text_subpixel_edges_carry_color_and_core_stays_neutral) {
             "深墨心 {} 个（带色 {}，最大通道差 {:.3f}）\n",
             edge_pixels, colored_edges, edge_spread, core_pixels, tinted_cores, core_spread_max);
   ST_CHECK(edge_pixels > 20);
-  ST_CHECK(core_pixels > 20);
+  // 深墨心：**不要求必须有**（改用 Noto Sans SC 后实测 0 个）。
+  //
+  // 判据是“3×3 邻域全 ≥ 0.98”，即需要 ≥ 3 像素宽的实心区域。
+  // Noto 在 22px 下的笔画约 1.5~2px（比微软雅黑细），永远凑不出 3×3 全满——
+  // 所以深墨心为 0 是**字体的正确表现**，不是亚像素失效（同一批数据里
+  // 边缘 4047 个、带色 2244 个、平均通道差 0.129，亚像素显然在正常工作）。
+  // 保留 `tinted_cores == 0` 那条（它才有意义：**若有**深墨心就不能上色）。
+  // ��� 仍要求“亚像素真的产生了彩边”：用边缘像素数作代理。
+  // 仍要求“亚像素真的产生了彩边”：用**带色边缘**作代理（深墨心没有也能说明）。
+  ST_CHECK(colored_edges > 20);
   // 边缘必须有明显的通道差（这就是“1/3 像素定位”留下的彩边）
   ST_CHECK(edge_spread > 0.02);
   // 深墨心必须干净：亚像素不该给实心区域上色（滤波在边缘附近有细微着色，那是它的定义）

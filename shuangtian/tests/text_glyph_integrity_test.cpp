@@ -49,10 +49,15 @@ struct FontFixture {
   }
 };
 
+/// 画布尺寸（宽 × 高）。**高位测试自己建画布时必须用同一个常量**，
+/// 否则两张画布像素数不等、`count_differing` 直接报“全部不同”。
+constexpr int kCanvasWidth = 900;
+constexpr int kCanvasHeight = 64;
+
 /// 把一段文本画到画布上，返回像素（用于逐像素比较）。
 [[nodiscard]] auto render_text(const FontStack& stack, std::string_view text, float size)
     -> std::vector<std::uint32_t> {
-  Canvas canvas{900, 64};
+  Canvas canvas{kCanvasWidth, kCanvasHeight};
   canvas.clear(Color{0, 0, 0, 0});
   TextRenderer renderer(stack, 1.0f);
   renderer.draw(canvas, text, Point{4.0f, 40.0f}, size, Color{0xFF, 0xFF, 0xFF, 0xFF});
@@ -91,7 +96,7 @@ ST_TEST(text_cache_does_not_change_glyphs) {
   const std::vector<std::uint32_t> fresh = render_text(*fixture.stack, kUiText, 15.0f);
   // 同一个渲染器再来一次（这次全部命中缓存）：必须与首次**逐像素一致**
   TextRenderer renderer(*fixture.stack, 1.0f);
-  Canvas canvas{900, 64};
+  Canvas canvas{kCanvasWidth, kCanvasHeight};
   canvas.clear(Color{0, 0, 0, 0});
   renderer.draw(canvas, kUiText, Point{4.0f, 40.0f}, 15.0f, Color{0xFF, 0xFF, 0xFF, 0xFF});
   const std::vector<std::uint32_t> cached(canvas.pixels().begin(), canvas.pixels().end());
@@ -115,7 +120,7 @@ ST_TEST(text_cache_survives_eviction_without_substituting_glyphs) {
                   Color{0xFF, 0xFF, 0xFF, 0xFF});
   }
 
-  Canvas canvas{900, 64};
+  Canvas canvas{kCanvasWidth, kCanvasHeight};
   canvas.clear(Color{0, 0, 0, 0});
   renderer.draw(canvas, kUiText, Point{4.0f, 40.0f}, 15.0f, Color{0xFF, 0xFF, 0xFF, 0xFF});
   const std::vector<std::uint32_t> after(canvas.pixels().begin(), canvas.pixels().end());
@@ -134,7 +139,7 @@ ST_TEST(text_glyphs_at_different_sizes_do_not_collide) {
   for (const float size : sizes) {
     reference.push_back(render_text(*fixture.stack, kUiText, size));
   }
-  Canvas canvas{900, 64};
+  Canvas canvas{kCanvasWidth, kCanvasHeight};
   for (std::size_t index = 0; index < sizes.size(); ++index) {
     // 交叉渲染（不同的字号交替），让缓存同时持有多个字号的同批字形
     canvas.clear(Color{0, 0, 0, 0});

@@ -65,6 +65,51 @@ void append(std::vector<FontPreference>& out, std::vector<FontPreference> more) 
 
 // —— 回退层：拉丁 → CJK → 符号 ——
 
+/// Noto Sans CJK 候选（**汉字首选**）。
+///
+/// 为何把 Noto 排在平台主力字体（雅黑/苹方）之**前**：它不是某个操作系统的
+/// “自带配置”，而是一套**跨平台同一设计**的中文字族——同一份界面在三个平台上
+/// 汉字长得一样。而它的字形比例与内置的 Inter 最接近，中英混排时两者像同一套字。
+///
+/// 路径按平台给主流位置；**探测不到就自然跳过**（`existing()` 已做存在性检查），
+/// 所以没装 Noto 的机器仍能工作（回退层里的平台主力字体接住）。
+[[nodiscard]] auto noto_sans_candidates() -> std::vector<FontPreference> {
+#if defined(_WIN32)
+  // Windows 不自带 Noto CJK；用户装了才会在这些位置（商店/手工安装）。
+  return existing({{"C:/Windows/Fonts/NotoSansCJK-Regular.ttc", true},
+                   {"C:/Windows/Fonts/NotoSansCJKsc-Regular.otf", true},
+                   {"C:/Windows/Fonts/NotoSansSC-VF.ttf", true},
+                   {"C:/Windows/Fonts/NotoSansCJKsc-VF.otf", true}});
+#elif defined(__APPLE__)
+  return existing({{"/System/Library/Fonts/NotoSansCJK-Regular.ttc", true},
+                   {"/Library/Fonts/NotoSansCJK-Regular.ttc", true},
+                   {"/Library/Fonts/NotoSansSC-Regular.otf", true}});
+#else
+  return existing({{"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", true},
+                   {"/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf", true},
+                   {"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", true},
+                   {"/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf", true}});
+#endif
+}
+
+/// Noto Sans CJK 粗体（与 `noto_sans_candidates()` **逐位同序**）。
+[[nodiscard]] auto noto_sans_candidates_bold() -> std::vector<FontPreference> {
+#if defined(_WIN32)
+  return existing({{"C:/Windows/Fonts/NotoSansCJK-Bold.ttc", true},
+                   {"C:/Windows/Fonts/NotoSansCJKsc-Bold.otf", true},
+                   {"C:/Windows/Fonts/NotoSansSC-VF.ttf", true}});
+#elif defined(__APPLE__)
+  return existing({{"/System/Library/Fonts/NotoSansCJK-Bold.ttc", true},
+                   {"/Library/Fonts/NotoSansCJK-Bold.ttc", true},
+                   {"/Library/Fonts/NotoSansSC-Bold.otf", true}});
+#else
+  return existing({{"/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", true},
+                   {"/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf", true},
+                   {"/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc", true},
+                   {"/usr/share/fonts/truetype/noto/NotoSansSC-Bold.otf", true}});
+#endif
+}
+
 [[nodiscard]] auto latin_faces() -> std::vector<FontPreference> {
 #if defined(_WIN32)
   return existing({{"C:/Windows/Fonts/segoeui.ttf", false},
@@ -179,7 +224,11 @@ void append(std::vector<FontPreference>& out, std::vector<FontPreference> more) 
 }  // namespace
 
 auto preferred_text_fonts() -> std::vector<FontPreference> {
-  std::vector<FontPreference> out = primary_text_faces();
+  // 汉字首选 Noto：它比各平台自带的中文字更中立、与内置 Inter 的比例最接近。
+  // **必须在 `primary_text_faces()` 之前**——否则雅黑会先接管汉字（而雅黑也覆盖 ASCII，
+  // 于是拉丁也轮不到内置 Inter，因为它排在整条系统链之前——正确）。
+  std::vector<FontPreference> out = noto_sans_candidates();
+  append(out, primary_text_faces());
   append(out, latin_faces());
   append(out, cjk_faces());
   // emoji 在符号之前（符号字体也覆盖 emoji 码点，见 `emoji_faces` 的实测记录）
@@ -190,7 +239,8 @@ auto preferred_text_fonts() -> std::vector<FontPreference> {
 
 auto preferred_text_fonts_bold() -> std::vector<FontPreference> {
   // **与常规链逐位同序**：`find_face(..., bold)` 按下标配档。
-  std::vector<FontPreference> out = primary_text_faces_bold();
+  std::vector<FontPreference> out = noto_sans_candidates_bold();
+  append(out, primary_text_faces_bold());
   append(out, latin_faces_bold());
   append(out, cjk_faces_bold());
   // 粗体链**必须与常规链逐位同序**（`find_face(..., bold)` 按下标配档）。

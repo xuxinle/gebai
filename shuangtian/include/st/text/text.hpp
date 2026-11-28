@@ -99,7 +99,7 @@ class FontStack {
   explicit FontStack(std::vector<FontFace> faces, std::vector<FontFace> mono_faces = {},
                      std::vector<FontFace> bold_faces = {});
 
-  /// 系统默认回退链（拉丁 + CJK；探测系统字体目录）。
+  /// 系统默认回退链（内置 Inter + 汉字首选 Noto → 平台回退）。
   /// @return 失败：`NotFound` 未找到任何可用字体。
   [[nodiscard]] static auto system_default() -> Result<FontStack>;
   /// 显式指定字体文件（按给出顺序即回退优先级）。

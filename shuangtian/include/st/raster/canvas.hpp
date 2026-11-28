@@ -449,7 +449,16 @@ class Canvas final : public Surface {
   /// 缓存槽：单槽足够（同一段文字内颜色不变；变了就重建，仍然划）。
   /// `mutable` 是因为它在 `const` 的绘制路径上被惰性填充。
   mutable AlphaTable alpha_table_{};
-  mutable std::uint32_t alpha_table_premul_{0xFFFFFFFFU};
+  /// 表当前对应的预乘颜色。
+  ///
+  /// ⚠ **不能用 `0xFFFFFFFF` 当“未建表”哨兵**：那恰好是**不透明白**的预乘值，
+  /// 于是第一次用不透明白绘字时 `alpha_table_premul_ == premul` 成立、直接返回
+  /// **全 0 的空表**——覆盖率 < 0.999 的像素全被写成 0（只剩满格像素能画）。
+  /// 实测症状：`Canvas` 上手贴一个 4×32 全 0.5 的覆盖率图，**一个像素都不出**；
+  /// 而覆盖率 1.0 正常。汉字（细笔画、几乎无满格像素）因此整字不显示，
+  /// 只有「一」「口」这类含满格的少量字形能看出墨。
+  /// 现用 `0`（预乘值 alpha 位为 0，任何真实颜色都不会是它）作哨兵。
+  mutable std::uint32_t alpha_table_premul_{0U};
 
   /// `clear()` 刚把整张画布变成 `cleared_color_`、且尚未被任何绘制碰过。
   ///

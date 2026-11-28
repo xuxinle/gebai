@@ -1,18 +1,17 @@
-/// 平台默认字体取向的契约测试。
+/// 默认字体取向的契约测试。
 ///
-/// 需求来源（用户）：**界面默认中英文用微软雅黑（Windows），等宽用 Consolas**。
+/// 需求来源（用户）：**UI 字体内置 Inter、中文首选系统 Noto Sans（没有则回退平台主力字体）、
+/// 代码用内置 Fira Code**。
 ///
-/// 这条约定的关键在于「中英文**同一族**」：雅黑自带拉丁字形，因此它必须排在
-/// 拉丁回退层（Segoe UI / Arial）**之前**——放在后面时 `find_face` 会先把 ASCII
-/// 交给 Segoe UI，界面就成了"中文雅黑、英文 Segoe"的两族混排。
+/// 这条约定是**分层**的，每层各管一件事：
+/// ① 拉丁 → 内置 Inter（全平台同一字形；标签/按钮/数字是界面里占比最大的字）；
+/// ② 汉字 → 系统 Noto Sans（首选）→ 平台主力字体（雅黑/苹方，回退）；
+/// ③ 等宽 → 内置 Fira Code（字形比 Consolas 更开，同字号下不那么“小”）；
+/// ④ 粗体链与常规链**逐位同族**（下标配对，否则拉丁粗体会接管中文字）。
 ///
-/// 判据（都只看"谁接管了这个码点"这一客观事实，不看渲染观感）：
-/// ① ASCII 与汉字由**同一个 face** 提供（中英文同体）；
-/// ② 该 face 就是平台首选（Windows 上是 `msyh.ttc`）；
-/// ③ 等宽链首位是平台首选等宽（Windows 上是 `consola.ttf`）；
-/// ④ 粗体链与常规链**逐位同族**（中英文粗体都落在首选粗体面）。
-///
-/// 非 Windows 平台跳过①③（那里的首选是"只用通用回退层"，没有特定取向）。
+/// 为何中英文**不再**强求“同一个字族”（旧契约是雅黑）：同时覆盖两者的字族必然
+/// 在某一侧妥协，而 `find_face` 本来就被码点逐字查找——分层不需要任何额外排版逻辑。
+/// 真正必须成立的替代约束是“汉字标点与汉字同族”（见 `layers_latin_and_han`）。
 
 #include "st/core/fs.hpp"
 #include "st/core/font_platform.hpp"
@@ -45,38 +44,6 @@ struct Fixture {
     }
   }
 };
-
-/// 路径是否以给定文件名结尾（跨平台大小写/分隔符差异的宽松比对）。
-[[nodiscard]] auto ends_with_file(const std::string& path, const char* file) -> bool {
-  const std::string suffix(file);
-  if (path.size() < suffix.size()) return false;
-  return path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-/// 平台首选正文档的文件名（空 = 该平台不指定特定取向）。
-[[nodiscard]] auto primary_text_file() -> const char* {
-#if defined(_WIN32)
-  return "msyh.ttc";
-#else
-  return "";
-#endif
-}
-
-[[nodiscard]] auto primary_text_bold_file() -> const char* {
-#if defined(_WIN32)
-  return "msyhbd.ttc";
-#else
-  return "";
-#endif
-}
-
-[[nodiscard]] auto primary_mono_file() -> const char* {
-#if defined(_WIN32)
-  return "consola.ttf";
-#else
-  return "";
-#endif
-}
 
 /// emoji 字体面的文件名（空 = 该平台没有可用的 emoji 字体）。
 [[nodiscard]] auto emoji_face_file() -> const char* {
@@ -211,19 +178,18 @@ ST_TEST(font_platform_bold_chain_mirrors_text_chain_by_position) {
   }
 }
 
-ST_TEST(font_default_text_uses_one_family_for_latin_and_han) {
-  // ⚠ **仅 Windows 适用**：契约是"界面默认中英文用微软雅黑"——雅黑自带拉丁字形，
-  // 因此它排在拉丁回退层之前时，`find_face('A')` 与 `find_face('霜')` 落到**同一个 face**。
+ST_TEST(font_default_text_layers_latin_and_han) {
+  // **分层契约**：拉丁 → 内置 Inter，汉字 → 系统 CJK（首选 Noto）——**两个面**。
   //
-  // 非 Windows 没有这种"同时覆盖拉丁与汉字"的首选族（文件头已声明"非 Windows 跳过①③"），
-  // 系统链里拉丁走 DejaVu/Segoe 类、汉字走 Noto CJK 类，**本就是两个面**——
-  // 那不是缺陷，而是该平台的正常取向。旧写法漏了这条守卫，于是只在 Windows 上成立，
-  // 在 Linux/macOS 上恒红（实测：本容器 A → DejaVuSans、霜 → NotoSansCJK）。
+  // 这条取代了早先的“中英文必须同一族（雅黑）”契约。换成分层是**有意的**：
+  // 同时覆盖拉丁与汉字的字族（如雅黑）必然在某一侧妥协（它的拉丁面偏窄偏竖，
+  // 小字号下不如 Inter 均匀）。而混排不需要额外逻辑——`find_face` 本来就是按
+  // **码点**逐字查的，所以“拉丁走 A 面、汉字走 B 面”天然成立。
   //
-  // 要验的是"平台取向是否被正确实现"，而不是"所有平台都得只有一族"。
-#if !defined(_WIN32)
-  return;
-#else
+  // 但混排要**看得过去**，所以真正要钉的是两件事：
+  // ① 两类字符各自落到该落的那一层（拉丁=内置；汉字=非内置）；
+  // ② 汉字标点与汉字**同族**——这条容易破而后果明显（「。」走拉丁面会变成
+  //    全宽/半宽错位的逗号，排版上看得出来）。
   Fixture fixture;
   if (!fixture.ok) {
     ST_SKIP("系统无可用字体（Fixture 未装配）");
@@ -231,71 +197,130 @@ ST_TEST(font_default_text_uses_one_family_for_latin_and_han) {
   }
   const auto* ascii = fixture.stack->find_face(U'A', FontRole::Proportional);
   const auto* han = fixture.stack->find_face(U'霜', FontRole::Proportional);
-  ST_CHECK(ascii != nullptr);
-  ST_CHECK(han != nullptr);
-  // 中英文同体：同一个 face（这是"中英文都用微软雅黑"的**直接判据**）
-  ST_CHECK(ascii->path() == han->path());
-  ST_CHECK(ascii->face_index() == han->face_index());
-#endif
-}
-
-ST_TEST(font_default_text_is_the_platform_primary) {
-  Fixture fixture;
-  if (!fixture.ok) {
-    ST_SKIP("系统无可用字体（Fixture 未装配）");
-    return;
-  }
-  const char* want = primary_text_file();
-  if (*want == '\0') return;   // 非 Windows：无特定取向
-  const auto* ascii = fixture.stack->find_face(U'A', FontRole::Proportional);
-  const auto* han = fixture.stack->find_face(U'霜', FontRole::Proportional);
-  ST_CHECK(ascii != nullptr);
-  ST_CHECK(han != nullptr);
-  ST_CHECK(ends_with_file(ascii->path(), want));
-  ST_CHECK(ends_with_file(han->path(), want));
-  // 汉字标点也必须同族（否则「。」会走另一族，排版上看得出来）
+  ST_REQUIRE(ascii != nullptr);
+  ST_REQUIRE(han != nullptr);
+  // ① 拉丁层与汉字层分开（分层而非同族）。
+  ST_CHECK(ascii->is_embedded());
+  ST_CHECK(!han->is_embedded());
+  // ② 汉字标点与汉字同族。
   const auto* punct = fixture.stack->find_face(U'。', FontRole::Proportional);
-  ST_CHECK(punct != nullptr);
-  ST_CHECK(ends_with_file(punct->path(), want));
+  ST_REQUIRE(punct != nullptr);
+  ST_CHECK_EQ(punct->path(), han->path());
 }
 
-ST_TEST(font_default_mono_is_the_platform_primary) {
+ST_TEST(font_default_text_latin_is_the_embedded_inter) {
+  // 拉丁字形由**内置 Inter** 接管（全平台统一）。
+  //
+  // 为何必须内置而不是“用系统拉丁”：标签/按钮/菜单/数字是界面里占比最大的字，
+  // 而各平台默认拉丁（雅黑/SF/DejaVu）的字宽与 x 高相差很远——同一套界面会
+  // 在三个平台上“长得不一样”。
+  Fixture fixture;
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（Fixture 未装配）");
+    return;
+  }
+  const auto* ascii = fixture.stack->find_face(U'A', FontRole::Proportional);
+  ST_REQUIRE(ascii != nullptr);
+  ST_CHECK(ascii->is_embedded());
+  ST_CHECK_EQ(ascii->path(), std::string("<embedded:Inter-Regular>"));
+}
+
+ST_TEST(font_default_text_han_prefers_noto_sans) {
+  // 汉字**首选系统 Noto Sans**（不是平台主力字体）。
+  //
+  // 为何：Noto 是跨平台同一设计的中文字族，字形比例与内置 Inter 最接近，
+  // 中英混排时两者像同一套字；而雅黑的拉丁面偏窄偏竖，能看出两族。
+  // 没装 Noto 的机器**必须仍能工作**（回退到平台主力字体），所以本用例分两路断言。
+  Fixture fixture;
+  if (!fixture.ok) {
+    ST_SKIP("系统无可用字体（Fixture 未装配）");
+    return;
+  }
+  const auto* han = fixture.stack->find_face(U'霜', FontRole::Proportional);
+  ST_REQUIRE(han != nullptr);
+  // 汉字**绝不能**落在内置 Inter 上：它的 cmap 没有汉字，落下就是链装配错了。
+  ST_CHECK(!han->is_embedded());
+  // 汉字标点必须与汉字同族（否则「。」会走另一族，排版上看得出来）。
+  const auto* punct = fixture.stack->find_face(U'。', FontRole::Proportional);
+  ST_REQUIRE(punct != nullptr);
+  ST_CHECK_EQ(punct->path(), han->path());
+  // 两类机器都要能通过：装了 Noto 就落在 Noto 上，没装就是平台主力字体——
+  // 两者共同的要求是“**不能是拉丁回退层**”（如 Segoe UI：它没有汉字轮廓）。
+  const std::string path = han->path();
+  ST_CHECK(path.find("Noto") != std::string::npos || path.find("msyh") != std::string::npos ||
+           path.find("PingFang") != std::string::npos ||
+           path.find("NotoSansCJK") != std::string::npos ||
+           path.find("simhei") != std::string::npos);
+}
+
+ST_TEST(font_default_text_chain_prefers_noto_over_platform_primary) {
+  // 链的**顺序**本身是契约：Noto 必须在平台主力字体之前。
+  //
+  // 只看“汉字最后落在哪”不够：没装 Noto 的机器上两者的结果一样（都落在雅黑），
+  // 顺序错了也不会红。而顺序错了的后果是在**装了 Noto 的机器上**静默失效。
+  const auto chain = st::platform::preferred_text_fonts();
+  ST_REQUIRE(!chain.empty());
+  const auto first_platform_primary =
+      std::ranges::find_if(chain, [](const st::platform::FontPreference& entry) {
+        return entry.path.find("msyh") != std::string::npos ||
+               entry.path.find("PingFang") != std::string::npos;
+      });
+  const auto first_noto = std::ranges::find_if(chain, [](const st::platform::FontPreference& entry) {
+    return entry.path.find("Noto") != std::string::npos;
+  });
+  // 本机没装 Noto 时这条顺序断言无意义（链里根本没有它）。
+  if (first_noto == chain.end()) return;
+  if (first_platform_primary != chain.end()) {
+    ST_CHECK(first_noto < first_platform_primary);
+  }
+}
+
+ST_TEST(font_default_mono_is_the_embedded_fira_code) {
+  // 等宽链**首位是内置 Fira Code**（用户定位：Consolas 看着小）。
+  //
+  // 为何换字体而不是调字号：实测同字号下 Fira Code 字面明显更开
+  // （15px：advance 9.0 / x 高 8 / 自然行高 19，而 Consolas 是 8.0 / 7 / 16）——
+  // 用户看到的是“字太小”而真因是“字形偏紧”。
   Fixture fixture;
   if (!fixture.ok) {
     ST_SKIP("系统无可用字体（Fixture 未装配）");
     return;
   }
   if (!fixture.stack->has_monospace()) return;   // 没探到等宽库：本用例无意义
-  const char* want = primary_mono_file();
-  if (*want == '\0') return;
-  // 等宽链**首位**必须是平台首选（不是"链里有没有"——顺序错了等于没生效）
   const auto faces = fixture.stack->monospace_faces();
-  ST_CHECK(!faces.empty());
-  ST_CHECK(ends_with_file(std::string(faces.front().path()), want));
+  ST_REQUIRE(!faces.empty());
+  // 顺序错了等于没生效——必须是**首位**，不是“链里有没有”。
+  ST_CHECK(faces.front().is_embedded());
+  ST_CHECK_EQ(faces.front().path(), std::string("<embedded:FiraCode-Regular>"));
   // ASCII 的归属与链首一致
   const auto* ascii = fixture.stack->find_face(U'i', FontRole::Monospace);
-  ST_CHECK(ascii != nullptr);
-  ST_CHECK(ends_with_file(ascii->path(), want));
+  ST_REQUIRE(ascii != nullptr);
+  ST_CHECK(ascii->is_embedded());
   // 汉字不在等宽字体里 → 回退正文档（代码注释里的中文仍可读）
   const auto* han = fixture.stack->find_face(U'霜', FontRole::Monospace);
-  ST_CHECK(han != nullptr);
-  ST_CHECK(!ends_with_file(han->path(), want));
+  ST_REQUIRE(han != nullptr);
+  ST_CHECK(!han->is_embedded());
 }
 
-ST_TEST(font_default_bold_resolves_to_the_primary_bold_face) {
+ST_TEST(font_default_bold_latin_is_the_embedded_inter_bold) {
+  // 粗体链与常规链**逐位同族**：拉丁粗体必须落在内置 Inter-Bold 上。
+  //
+  // 为何必须配对（实测踩到，2026-10-04）：`find_face(..., bold)` 按下标配档，
+  // 两条链顺序不一致时，拉丁粗体（segoeuib）会**接管中文字**——它没有汉字轮廓，
+  // 整串中文渲染成豆腐块。
   Fixture fixture;
   if (!fixture.ok) {
     ST_SKIP("系统无可用字体（Fixture 未装配）");
     return;
   }
-  const char* want = primary_text_bold_file();
-  if (*want == '\0') return;
-  // 中英文粗体都必须落在首选粗体面（否则两条链的下标没对齐）
-  for (const char32_t codepoint : {U'A', U'霜'}) {
-    const auto* face = fixture.stack->find_face(codepoint, FontRole::Proportional, /*bold=*/true);
-    ST_CHECK(face != nullptr);
-    ST_CHECK(ends_with_file(face->path(), want));
-  }
+  const auto* latin = fixture.stack->find_face(U'A', FontRole::Proportional, /*bold=*/true);
+  ST_REQUIRE(latin != nullptr);
+  ST_CHECK(latin->is_embedded());
+  ST_CHECK_EQ(latin->path(), std::string("<embedded:Inter-Bold>"));
+  // 汉字粗体**不能**落在那份拉丁粗体上（它没有汉字字形）。
+  const auto* han = fixture.stack->find_face(U'霜', FontRole::Proportional, /*bold=*/true);
+  ST_REQUIRE(han != nullptr);
+  ST_CHECK(!han->is_embedded());
 }
 
 ST_TEST(font_default_symbols_still_fall_back) {

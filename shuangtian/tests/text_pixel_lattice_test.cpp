@@ -180,7 +180,10 @@ ST_TEST(text_bold_uses_a_distinct_face) {
   ST_REQUIRE(regular != nullptr);
   ST_REQUIRE(bold != nullptr);
   // 粗体面必须**不是**常规面（否则“真粗体”从未生效）。
-  ST_CHECK(regular->path() != bold->path());
+  //
+  // 判据不能比 `path()`：汉字链在不同主题下会落到同一个 Noto 文件，
+  // 常规/粗体只是同一文件的**不同字重面**（同一路径）。比指针才是本意（“取到了两个面”）。
+  ST_CHECK(regular != bold);
 
   // 同一串文本，bold / regular 的整形宽度可以不同（真粗体是另一套字形），
   // 但两者都必须可渲染且**不相等**（相等就说明选了同一面）。
@@ -216,7 +219,8 @@ ST_TEST(text_bold_and_regular_do_not_share_cache_entries) {
     const auto* bold = fixture.stack->find_face(U'霜', st::text::FontRole::Proportional, true);
     ST_REQUIRE(regular != nullptr);
     ST_REQUIRE(bold != nullptr);
-    ST_CHECK(regular->path() != bold->path());
+    // 同 ①：比面对象而不是 `path()`（汉字链的常规/粗体可能同属一个 Noto 文件）。
+    ST_CHECK(regular != bold);
     // 反复取回同一份（缓存稳定，不因重复调用而漂移）
     ST_CHECK(renderer.glyph_bitmap_of(U'霜', 20.25f) ==
              renderer.glyph_bitmap_of(U'霜', 20.25f));

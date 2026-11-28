@@ -516,6 +516,8 @@ auto grid_fit(const math::Path& path, const GridFitOptions& options) -> GridFitR
     // **hint 笔画数在这里才定**：上面那两处统计把"被宽度/护栏滤掉的 hint"也算进去了。
     result.hint_stems = static_cast<int>(
         std::count_if(stems.begin(), stems.end(), [](const Stem& s) { return s.from_font; }));
+    // 薄笔画（< 半格）冻结标记：按**点**记，保证共享角点一致不动（见下方护栏注释）。
+    std::vector<char> frozen(points.size(), 0);
     for (const auto& group : groups) {
       // **宽度量化 + 单边锚定**（而不是整条笔画平移，也不是两侧各自吸整数）：
       // 只平移的话另一侧仍在分数相位上（只解决一半）；两侧各自独立吸整数又会
@@ -580,6 +582,40 @@ auto grid_fit(const math::Path& path, const GridFitOptions& options) -> GridFitR
           }
         }
         const float budget = quantize ? max_shift + grid * 0.5f : max_shift;
+        // **不得把笔画吸成零宽（会让字消失），也不得把亚像素细线推成黑条**。
+        //
+        // 实测（2026-11-28，Noto Sans SC）：
+        // ① 「二」@13.0px：第一笔只有 **0.38px** 厚，两条边各自离最近格点 ≤ 0.38，
+        //   于是被同时吸到 0.00——宽度变 0，整字渲染成**空白**（墨量 41.7 → 0）。
+        // ② 「器」@13.5px 的 y=9 那一横只有 0.24px，吸到整格后变成满黑 99，
+        //   而同字本该对称的 y=1 也被吸满、旁边笔画却被吸成 0（`46 42 24 24` →`34 4 0 0`）。
+        //
+        // 两种修法都不能用，各踩过一次：
+        // · **跳过这条笔画**（不提交它的位移）：相邻笔画**共享角点**，跳过 A 而 B 照常动，
+        //   共享点只被推了一半，**轮廓被撕开**。实测 @22px 中文墨量 **+24.75%**
+        //   （rejected 1~6，连 `rej=0` 的字也涨）；不拦时是 +1.67%。
+        // · **把远边推开到一格**：0.24px 拉成 1px 就是 **4 倍宽**，墨量暴涨（同一个 +24.75%）。
+        //
+        // 正确做法：**宽于等于一格的笔画才能吸附；薄于一格的全部点集冻结**。
+        // 冻结统一作用在**点**上，共享点一致不动——轮廓不会撕裂（这是上面两个方案
+        // 都缺的那一步）。
+        if (stem.edge_hi - stem.edge_lo < grid * 0.5f) {
+          
+          for (const std::size_t point : stem.lo_points) frozen[point] = 1;
+          for (const std::size_t point : stem.hi_points) frozen[point] = 1;
+          ++result.rejected_stems;
+          continue;
+        }
+        const bool frozen_here =
+            std::any_of(stem.lo_points.begin(), stem.lo_points.end(),
+                        [&](std::size_t point) { return frozen[point] != 0; }) ||
+            std::any_of(stem.hi_points.begin(), stem.hi_points.end(),
+                        [&](std::size_t point) { return frozen[point] != 0; });
+        if (frozen_here) {
+          // 共享点已被冻结：这条笔画也不动（否则就是“共享点只推一半”的撕裂）。
+          ++result.rejected_stems;
+          continue;
+        }
         // 两侧要么**一起动**、要么都不动。
         //
         // 为什么不能“各自独立判定”：宽度量化必然让两侧的位移不等。若近边通过、

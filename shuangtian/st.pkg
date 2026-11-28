@@ -69,8 +69,12 @@
     "src/python/bpy_ops.py",
     "src/python/bpy_ops_ns.py",
     "src/python/extract.py",
-    "src/python/bpy_module.py"
+    "src/python/bpy_module.py",
+    "assets/fonts/FiraCode-Regular.ttf",
+    "assets/fonts/Inter-Regular.ttf",
+    "assets/fonts/Inter-Bold.ttf"
   ],
+  "//embed_font": "内置字体：\n\n等宽 Fira Code（289 KB）——全平台统一的代码字体（选它的理由见 text.cpp 的 `embedded_mono_bytes`）。\n正文 Inter Regular/Bold（各 ~410 KB）——拉丁字形全平台统一；汉字**不内置**（一个 CJK 字族十几 MB，且会与系统已装的那份重复），\n汉字首选系统 Noto Sans（见 font_platform.cpp 的 `noto_sans_candidates`），没装则回退平台主力字体。\n\n两套都是**可选能力**：`src/text/*` 里的 `b::embed<>` 被 `ST_NO_EMBEDDED_MONO` / `ST_NO_EMBEDDED_UI_FONT` 宏包住，\n宏由构建器从目标源反向推导（见 build.cpp）——不用代码字体的应用不会带那 289 KB。\n许可证：assets/fonts/OFL.txt（Fira Code）、assets/fonts/Inter-LICENSE.txt（Inter），两者都是 SIL OFL 1.1，要求随字体一同分发。",
   "third_party_sources": [
     "third_party/quickjs/*.c",
     "third_party/sqlite/*.c",

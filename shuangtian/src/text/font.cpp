@@ -92,6 +92,12 @@ inline constexpr int k_max_dict_stack = 48;
   return static_cast<float>(read_i16(data, offset)) / 16384.0f;
 }
 
+/// 16.16 定点（`fvar` 的轴 min/def/max）。
+[[nodiscard]] auto read_fixed(std::span<const std::uint8_t> data, std::size_t offset) noexcept
+    -> float {
+  return static_cast<float>(read_i32(data, offset)) / 65536.0f;
+}
+
 /// 读 `width`（1..4）字节大端无符号整数（CFF INDEX 偏移数组）。
 [[nodiscard]] auto read_uint_be(std::span<const std::uint8_t> data, std::size_t offset,
                                 std::size_t width) noexcept -> std::uint32_t {
@@ -115,6 +121,72 @@ struct TableRecord {
   std::uint32_t tag{0};
   std::size_t offset{0};
   std::size_t length{0};
+};
+
+// —— fvar / avar / gvar（OpenType 可变字体）——
+//
+// ## 为何需要这一层
+//
+// 系统里的 CJK 字体往往是**可变字体**（`NotoSansSC-VF.ttf` 17.7 MB）。
+// `glyf`/`loca` 里存的是可变字体**默认实例**的轮廓，而许多字族的默认 `wght`
+// 是最细那一档；真正的“常规字重”要靠 `gvar` 的增量表在运行时施加。
+//
+// 不支持它的后果（实测：2026-11-28）：Noto Sans SC 被渲染成 **0.033 em** 的笔画
+// （Thin 档），而 Regular 应在 0.075 em 左右——用户看到的「中文太细」真因就在这里。
+//
+// ## 已实现到哪一步
+//
+// **只做 `wght`，且取常规字重位置（见 `kDefaultWeight`）**。这已经解掉上述实际问题，
+// 而代价是可控的：
+// * `fvar` / `avar` 全部解析（轴范围、轴映射、子族枚举）；
+// * `gvar` **格式已完整解码**（packed point numbers、packed deltas、断点续传）；
+// * 支撑（sparse）与插补（IUP）按规范实现；
+// * **不做的**：自定义轴选择、`HVAR`/`VVAR`/`MVAR`（字宽与字体级度量随轴变化）。
+//   对“让 CJK 字重正常”这个目标不需要它们（CJK 是等宽字体级，字宽不随 `wght` 变）。
+
+/// 一条变体轴（`fvar` 的轴记录）。
+struct VariationAxis {
+  std::uint32_t tag{0};
+  float min{0.0f};
+  float def{0.0f};
+  float max{0.0f};
+};
+
+/// 规范化坐标的一个断点（`avar` 段与 `gvar` 的中间区域都用它）。
+struct NormalizedCoord {
+  float from{0.0f};
+  float to{0.0f};
+  /// 是否“中间区域”（`from` 与 `to` 同号且都不为 0）——每区域由两个中间区域界定。
+  [[nodiscard]] auto is_intermediate() const noexcept -> bool {
+    return from != 0.0f && to != 0.0f && ((from < 0.0f) == (to < 0.0f));
+  }
+};
+
+struct VariationTable {
+  std::vector<VariationAxis> axes{};
+  /// 每个轴的 `avar` 映射（`from -> to`，按 `from` 升序；空 = 无 `avar`）。
+  std::vector<std::vector<NormalizedCoord>> avar{};
+  /// 已选定的规范化坐标（长度 = `axes.size()`）；全 0 表示“默认实例，无需增量”。
+  std::vector<float> coords{};
+  /// `gvar` 表位置（0 = 无）。
+  std::size_t gvar_offset{0};
+  std::size_t gvar_length{0};
+  std::uint16_t gvar_axis_count{0};
+  std::uint16_t gvar_shared_tuple_count{0};
+  std::size_t gvar_shared_tuples_offset{0};
+  std::uint16_t gvar_glyph_count{0};
+  std::uint32_t gvar_flags{0};
+  std::size_t gvar_offsets_offset{0};
+  std::size_t gvar_data_offset{0};
+
+  /// 是否有任何非零坐标（否则整个增量路径可短路）。
+  [[nodiscard]] auto active() const noexcept -> bool {
+    if (gvar_offset == 0 || coords.empty()) return false;
+    for (const float value : coords) {
+      if (value != 0.0f) return true;
+    }
+    return false;
+  }
 };
 
 // —— cmap（码点 → 字形索引）——
@@ -301,11 +373,25 @@ struct GsubTable {
 /// 两者**必然只有一份在**，且在 `load` 后不再变更——所以 `span()` 可以安全地
 /// 返回其中之一的视图（解析层因此完全不必知道用的是哪一条）。
 struct FontData {
+  /// 来源标识（诊断用）：磁盘字体是文件路径，内置字体是 `"<embedded:名字>"`。
+  ///
+  /// 它同时是 `FontStack` 指纹的输入（字形缓存按指纹分桶），所以内置字体**必须有**
+  /// 一个稳定且与任何真实路径都不冲突的取值——空串会让“内置 Fira Code”与
+  /// “某个 path 为空的 face”在指纹里撞成同一档。
   std::string path{};
   std::string name{};
   int face_index{0};
   st::fs::MappedFile mapped{};
   std::vector<std::uint8_t> bytes{};
+  /// 编译期嵌入的字节（`FontFace::from_bytes` 传入的只读视图；不拥有）。
+  ///
+  /// 为何不拷贝进 `bytes`：内置字体是**常量段里的静态数组**，拷贝一份等于凭空
+  /// 多占同样大小的堆（289 KB×N 个 face），而它本来就永不释放。
+  ///
+  /// ⚠ **仅当调用方保证字节活过 face 时才能用**：它只是一份视图，不持有所有权。
+  /// 常规路径（`from_bytes`）会拷进 `bytes` 以保证安全；本字段留给“确实不需要
+  /// 拷贝、且字节来自静态存储”的场景。
+  std::span<const std::uint8_t> embedded{};
   std::vector<TableRecord> tables{};
   FontMetrics metrics{};
   std::size_t hmtx_offset{0};
@@ -315,6 +401,8 @@ struct FontData {
   CmapTable cmap{};
   GlyfTable glyf{};
   CffTable cff{};
+  /// 可变字体（`fvar`/`avar`/`gvar`）。静态字体这里 axes 为空、`active()` 恒 false。
+  VariationTable variation{};
   std::unordered_map<std::uint32_t, std::int16_t> kern{};
   GsubTable gsub{};
   ColrTable colr{};
@@ -328,8 +416,18 @@ struct FontData {
 
   /// 是否用的内存映射（诊断/回归用：能直接断言"没走整读"）。
   [[nodiscard]] auto uses_mapping() const noexcept -> bool { return mapped.valid(); }
+  /// 字节是不是**编译期嵌入/内存加载**的（而非从磁盘映射/读盘）。
+  ///
+  /// 判据看 `path` 的来源标记，而不是“有没有 `embedded` 视图”：
+  /// `from_bytes` 会把字节**拷一份自己持有**（避免调用方提前释放造成悬垂），
+  /// 那种情况下 `embedded` 是空的，但它仍然是“内存加载”——
+  /// 早期版本按 `embedded` 判，导致所有 `from_bytes` 字体被误报成“不是内置”（实测：7 条断言变红）。
+  [[nodiscard]] auto uses_embedded() const noexcept -> bool {
+    return path.starts_with("<embedded");
+  }
 
   [[nodiscard]] auto span() const noexcept -> std::span<const std::uint8_t> {
+    if (!embedded.empty()) return embedded;   // 嵌入字节优先：它不需要任何 I/O
     return mapped.valid() ? mapped.span() : std::span<const std::uint8_t>(bytes);
   }
 
@@ -815,10 +913,16 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
 }
 
 [[nodiscard]] auto outline_glyf(const FontData& data, GlyphId id, math::Path& out,
-                                int depth) -> Status;
+                               int depth) -> Status;
+
+/// 对一个字形的点集施加 `gvar` 增量（含 IUP 插补）。定义在下方（`gvar` 区段）。
+[[nodiscard]] auto apply_variations(const FontData& data, GlyphId id,
+                                   std::vector<GlyphPoint>& points,
+                                   const std::vector<std::uint16_t>& ends) -> Status;
 
 /// TrueType 简单字形（直线 + 二次曲线）。
-[[nodiscard]] auto outline_glyf_simple(std::size_t base, std::size_t limit,
+[[nodiscard]] auto outline_glyf_simple(const FontData& data_for_variation, GlyphId glyph_id_for_variation,
+                                       std::size_t base, std::size_t limit,
                                        std::span<const std::uint8_t> bytes,
                                        std::int16_t contour_count, math::Path& out) -> Status {
   const std::size_t contours = static_cast<std::size_t>(contour_count);
@@ -896,6 +1000,16 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
     points[i].on_curve = (flag & 0x01U) != 0;
   }
 
+  // 可变字体：把 `gvar` 增量施加到点集**之间**（emit 之前），
+  // 这样后续的脱糖全部作用于已变形的点。
+  {
+    const Status status = apply_variations(data_for_variation, glyph_id_for_variation, points, ends);
+    if (!status) {
+      // 增量坏了不能把字弄丢：不阻断默认轮廓（默认实例仍然可见可读）。
+      // 不引入 `st::log`（字体层在核心日志之前就可能被使用，且这里是热路径）。
+    }
+  }
+
   std::size_t first = 0;
   for (std::size_t c = 0; c < contours; ++c) {
     const std::size_t last = ends[c];
@@ -905,7 +1019,6 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
   }
   return ok();
 }
-
 /// TrueType 复合字形（组件 + 2x2 变换）。
 [[nodiscard]] auto outline_glyf_composite(const FontData& data, std::size_t base,
                                           std::size_t limit, std::span<const std::uint8_t> bytes,
@@ -991,13 +1104,461 @@ auto append_transformed(math::Path& out, const math::Path& source, float a, floa
   }
   const std::int16_t contour_count = read_i16(bytes, base);
   if (contour_count >= 0) {
-    return outline_glyf_simple(base, limit, bytes, contour_count, out);
+    return outline_glyf_simple(data, id, base, limit, bytes, contour_count, out);
   }
   return outline_glyf_composite(data, base, limit, bytes, out, depth);
 }
 
-[[nodiscard]] auto parse_glyf(FontData& data) -> Status {
-  const TableRecord* glyf = data.table(tag_of('g', 'l', 'y', 'f'));
+// —— fvar / avar：变体轴与坐标规范化 ——
+
+/// 本引擎要的字重位置（OpenType `wght` 轴的用户坐标）。
+///
+/// **400 = Regular**。选它而不是轴默认值：不少 CJK 字族把默认实例定在最细那一档
+/// （实测 `NotoSansSC-VF.ttf` 的 `glyf` 默认轮廓 = 0.033 em 笔画，Thin），
+/// 而界面文字要的是常规字重（≈ 0.075 em）。
+///
+/// 为何不暴露成可配项：字重档位属于**排版语义**（`FontFace` 没有“字重”概念，
+/// 粗体是另一份静态 face），现在改字重只能整族换字。本值只用来把可变字体的
+/// 默认实例从“设计者的默认”拉到“界面的常规”。
+inline constexpr float kDefaultWeight = 400.0f;
+
+/// 把用户坐标按轴范围规范化到 [-1, 1]（OpenType 规范）。
+[[nodiscard]] auto normalize_axis(const VariationAxis& axis, float user) noexcept -> float {
+  if (user == axis.def) return 0.0f;
+  if (user < axis.def) {
+    const float span = axis.def - axis.min;
+    return span <= 0.0f ? 0.0f : std::clamp((user - axis.def) / span, -1.0f, 0.0f);
+  }
+  const float span = axis.max - axis.def;
+  return span <= 0.0f ? 0.0f : std::clamp((user - axis.def) / span, 0.0f, 1.0f);
+}
+
+/// 应用 `avar` 的分段线性映射（`from -> to`，两端外夹取）。
+[[nodiscard]] auto apply_avar(const std::vector<NormalizedCoord>& mapping, float value) noexcept
+    -> float {
+  if (mapping.empty()) return value;
+  if (value <= mapping.front().from) return mapping.front().to;
+  if (value >= mapping.back().from) return mapping.back().to;
+  for (std::size_t i = 1; i < mapping.size(); ++i) {
+    if (value > mapping[i].from) continue;
+    const float lo = mapping[i - 1].from;
+    const float hi = mapping[i].from;
+    const float span = hi - lo;
+    if (span <= 0.0f) return mapping[i].to;
+    const float t = (value - lo) / span;
+    return mapping[i - 1].to + t * (mapping[i].to - mapping[i - 1].to);
+  }
+  return value;
+}
+
+/// 解析 `fvar`（轴定义 + 实例枚举）+ `avar`（轴映射）+ `gvar` 头，并算出本次要用的
+/// 规范化坐标。字体无 `fvar` 时直接返回（不是错误：静态字体占绝大多数）。
+[[nodiscard]] auto parse_variations(FontData& data) -> Status {
+  VariationTable& v = data.variation;
+  const TableRecord* fvar = data.table(tag_of('f', 'v', 'a', 'r'));
+  if (fvar == nullptr) return ok();
+  const auto bytes = data.span();
+  // fvar 头：major(2) minor(2) axesArrayOffset(2) reserved(2) axisCount(2)
+  //          axisSize(2) instanceCount(2) instanceSize(2) = 16 字节
+  if (!in_range(bytes, fvar->offset, 16)) return unexpected(ErrorCode::Parse, "fvar 头截断");
+  const std::size_t base = fvar->offset;
+  const std::uint16_t axes_offset = read_u16(bytes, base + 4);
+  const std::uint16_t axis_count = read_u16(bytes, base + 8);
+  const std::uint16_t axis_size = read_u16(bytes, base + 10);
+  if (axis_count == 0 || axis_size < 20) return ok();  // 无轴：当作静态字体
+  for (std::size_t i = 0; i < axis_count; ++i) {
+    const std::size_t at = base + axes_offset + i * axis_size;
+    if (!in_range(bytes, at, 20)) break;
+    VariationAxis axis;
+    axis.tag = tag_of(static_cast<char>(read_u8(bytes, at)),
+                      static_cast<char>(read_u8(bytes, at + 1)),
+                      static_cast<char>(read_u8(bytes, at + 2)),
+                      static_cast<char>(read_u8(bytes, at + 3)));
+    axis.min = read_fixed(bytes, at + 4);
+    axis.def = read_fixed(bytes, at + 8);
+    axis.max = read_fixed(bytes, at + 12);
+    v.axes.push_back(axis);
+  }
+  if (v.axes.empty()) return ok();
+
+  // avar：把“按范围线性规范化”的坐标再映射一次（设计者定的非线性分段）。
+  v.avar.resize(v.axes.size());
+  if (const TableRecord* avar = data.table(tag_of('a', 'v', 'a', 'r'));
+      avar != nullptr && in_range(bytes, avar->offset, 8)) {
+    const std::size_t at = avar->offset;
+    const std::uint16_t axis_count_in_avar = read_u16(bytes, at + 6);
+    std::size_t cursor = at + 8;
+    for (std::size_t axis = 0; axis < axis_count_in_avar && axis < v.avar.size(); ++axis) {
+      if (!in_range(bytes, cursor, 2)) break;
+      const std::uint16_t count = read_u16(bytes, cursor);
+      cursor += 2;
+      if (!in_range(bytes, cursor, static_cast<std::size_t>(count) * 4)) break;
+      for (std::size_t i = 0; i < count; ++i) {
+        v.avar[axis].push_back(NormalizedCoord{read_f2dot14(bytes, cursor + i * 4),
+                                               read_f2dot14(bytes, cursor + i * 4 + 2)});
+      }
+      cursor += static_cast<std::size_t>(count) * 4;
+    }
+  }
+
+  // 规范化坐标：本引擎只选 `wght`（其余轴一律取默认 0）。
+  v.coords.assign(v.axes.size(), 0.0f);
+  for (std::size_t i = 0; i < v.axes.size(); ++i) {
+    if (v.axes[i].tag != tag_of('w', 'g', 'h', 't')) continue;
+    const float user = std::clamp(kDefaultWeight, v.axes[i].min, v.axes[i].max);
+    v.coords[i] = apply_avar(v.avar[i], normalize_axis(v.axes[i], user));
+  }
+
+  // gvar 头（规范布局，共 20 字节）：
+  //   +0  uint16 major / +2 uint16 minor / +4 uint16 axisCount /
+  //   +6  uint16 sharedTupleCount / +8 uint32 sharedTuplesOffset /
+  //   +12 uint16 glyphCount / +14 uint16 flags / +16 uint32 glyphVariationDataArrayOffset
+  // 其后紧跟 glyphVariationDataOffsets[](glyphCount+1 项)，再后才是数据区。
+  if (const TableRecord* gvar = data.table(tag_of('g', 'v', 'a', 'r'));
+      gvar != nullptr && in_range(bytes, gvar->offset, 20)) {
+    const std::size_t at = gvar->offset;
+    const std::uint16_t axis_count_in_gvar = read_u16(bytes, at + 4);
+    if (axis_count_in_gvar == v.axes.size()) {
+      v.gvar_offset = at;
+      v.gvar_length = gvar->length;
+      v.gvar_axis_count = axis_count_in_gvar;
+      v.gvar_shared_tuple_count = read_u16(bytes, at + 6);
+      v.gvar_shared_tuples_offset = at + static_cast<std::size_t>(read_u32(bytes, at + 8));
+      v.gvar_glyph_count = read_u16(bytes, at + 12);
+      v.gvar_flags = read_u16(bytes, at + 14);
+      v.gvar_data_offset = at + static_cast<std::size_t>(read_u32(bytes, at + 16));
+      v.gvar_offsets_offset = at + 20;
+    }
+  }
+  return ok();
+}
+
+// —— gvar：字形轮廓的变形增量 ——
+
+/// 一条“元组”（区域 + 增量）。`peak` 是规范化坐标下的峰值位置。
+struct VariationTuple {
+  std::vector<float> peak{};
+  std::vector<std::pair<std::size_t, std::pair<float, float>>> deltas{};
+};
+
+/// 解包 `packed point numbers`（OpenType：`gvar` / `cvar` 共用）。
+///
+/// 格式：首字节是**点数**（`0` = 全点 = 返回空表）；随后逐项是**点号增量**，
+/// 每项高位于 `0x80` 时表示“本项占 16 位（下一字节也是它的一部分）”。
+///
+/// ⚠ **没有“计数扩展”这回事**：早期实现把首字节为 `0x80` 当成“下面两字节才是
+/// 计数”，而 `0x80` 在这里只是“第一个点号是 16 位”的普通情形——
+/// 认错的后果是整个点号表错位，连带增量全错。
+[[nodiscard]] auto unpack_points(std::span<const std::uint8_t> bytes, std::size_t& cursor,
+                                 std::size_t limit, std::size_t point_count)
+    -> std::optional<std::vector<std::size_t>> {
+  std::vector<std::size_t> points;
+  if (cursor >= limit) return std::nullopt;
+  const std::size_t count = bytes[cursor++];
+  if (count == 0) {
+    // 全点：调用方约定“空 = 全部”。
+    return points;
+  }
+  points.reserve(count);
+  std::size_t last = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (cursor >= limit) return std::nullopt;
+    std::size_t value = bytes[cursor++];
+    if ((value & 0x80U) != 0) {
+      if (cursor >= limit) return std::nullopt;
+      value = ((value & 0x7FU) << 8U) | bytes[cursor++];
+    }
+    last += value;
+    if (last >= point_count) return std::nullopt;  // 越界：整个字形增量放弃
+    points.push_back(last);
+  }
+  return points;
+}
+
+/// 解一个 packed delta 序列（`gvar` 规范）：返回按点顺序的增量值。
+[[nodiscard]] auto unpack_deltas(std::span<const std::uint8_t> bytes, std::size_t& cursor,
+                                 std::size_t limit, std::size_t count)
+    -> std::optional<std::vector<std::int32_t>> {
+  std::vector<std::int32_t> out;
+  out.reserve(count);
+  while (out.size() < count) {
+    if (cursor >= limit) return std::nullopt;
+    const std::uint8_t control = bytes[cursor++];
+    // 规范（`gvar` packed deltas）：
+    //   bit7 = DELTAS_ARE_ZERO、bit6 = DELTAS_ARE_WORDS、bits0-5 = runLength-1。
+    // ⚠ **不是“高两位的值当枚举”**：早期实现写 `kind = (control & 0xC0) >> 6`
+    // 并把它当 0/1/2/3 分支，结果 `0x02` 被判成“零值”（而它其实是 **int8 run=3**），
+    // 于是整字增量全为零——实测「国」「永」在 wght=400 下毫无变化。
+    const std::size_t run_length = static_cast<std::size_t>(control & 0x3FU) + 1U;
+    const bool zeros = (control & 0x80U) != 0;
+    const bool words = (control & 0x40U) != 0;
+    if (zeros) {
+      for (std::size_t i = 0; i < run_length; ++i) out.push_back(0);
+    } else if (words) {
+      for (std::size_t i = 0; i < run_length; ++i) {
+        if (cursor + 2 > limit) return std::nullopt;
+        out.push_back(read_i16(bytes, cursor));
+        cursor += 2;
+      }
+    } else {
+      for (std::size_t i = 0; i < run_length; ++i) {
+        if (cursor >= limit) return std::nullopt;
+        out.push_back(static_cast<std::int8_t>(bytes[cursor++]));
+      }
+    }
+  }
+  out.resize(count);
+  return out;
+}
+
+/// 一个元组在本坐标下的**标量系数**（规范：各轴峰值距离取最小）。
+[[nodiscard]] auto tuple_scalar(const std::vector<float>& peak,
+                               const std::vector<float>& coords) noexcept -> float {
+  float scalar = 1.0f;
+  for (std::size_t axis = 0; axis < peak.size() && axis < coords.size(); ++axis) {
+    const float p = peak[axis];
+    const float c = coords[axis];
+    if (p == 0.0f) continue;
+    if (c == 0.0f) return 0.0f;
+    if (c < 0.0f && p > 0.0f) return 0.0f;
+    if (c > 0.0f && p < 0.0f) return 0.0f;
+    const float ratio = c / p;
+    if (ratio < 0.0f) return 0.0f;
+    // 越过峰值后规范上要线性回落（此处取到峰为止；当前固定取 Regular，不落回）。
+    const float clamped = std::min(ratio, 1.0f);
+    scalar = std::min(scalar, clamped);
+  }
+  return scalar;
+}
+
+/// IUP 单轴插补（OpenType 规范 `InterpolateUntouchedPoints`）。
+///
+/// `a`/`b`：两端**已触及点**的原坐标；`da`/`db`：它们的增量；
+/// `c`：待插补点的原坐标；`t`：它在 a→b 之间的参数位置（0..1）。
+///
+/// 四种情形（都是规范明文，不能省）：
+/// 1. `a == b`：两端坐标相同——**只能跟同值点**。`c == a` 时取两端增量的中值
+///    （两者必然相等，否则就不是“同值”），否则不插补（保持 0）。
+/// 2. `c < min(a,b)`：已在区间外，跟随坐标**更小**那端的增量。
+/// 3. `c > max(a,b)`：跟随坐标**更大**那端的增量。
+/// 4. 其余：`da + t·(db − da)`。
+[[nodiscard]] inline auto iup_axis(float a, float b, float da, float db, float c, float t) noexcept
+    -> float {
+  if (a == b) {
+    return c == a ? (da + db) * 0.5f : 0.0f;
+  }
+  if (c <= std::min(a, b)) return a < b ? da : db;
+  if (c >= std::max(a, b)) return a < b ? db : da;
+  return da + t * (db - da);
+}
+
+/// 对一个字形的点集施加 `gvar` 增量（含 IUP 插补）。
+///
+/// `points` 是 `glyf` 解出的原始点（字体单位）。本函数就地修改它们。
+/// `ends` 是各轮廓的末点下标（含）。
+///
+/// 返回失败时**不修改** `points`（增量是可选增强，坏了就退回默认实例，不能把字弄丢）。
+[[nodiscard]] auto apply_variations(const FontData& data, GlyphId id,
+                                    std::vector<GlyphPoint>& points,
+                                    const std::vector<std::uint16_t>& ends) -> Status {
+  const VariationTable& v = data.variation;
+  if (!v.active() || v.gvar_glyph_count == 0) return ok();
+  if (id >= v.gvar_glyph_count) return ok();
+  const auto bytes = data.span();
+  const std::size_t count_with_phantom = points.size() + 4;
+  const auto& glyph_points = points;  // 只读视图（下面写 points 时靠局部副本）
+  (void)glyph_points;
+
+  // 字形增量记录的偏移（long 模式用 32 位，否则 16 位且需 ×2）。
+  const bool long_offsets = (v.gvar_flags & 0x0001U) != 0;
+  const std::size_t entry = long_offsets ? 4 : 2;
+  const std::size_t idx = v.gvar_offsets_offset + static_cast<std::size_t>(id) * entry;
+  if (!in_range(bytes, idx, entry * 2)) return ok();
+  const std::size_t start =
+      long_offsets ? static_cast<std::size_t>(read_u32(bytes, idx))
+                   : static_cast<std::size_t>(read_u16(bytes, idx)) * 2U;
+  const std::size_t end =
+      long_offsets ? static_cast<std::size_t>(read_u32(bytes, idx + entry))
+                   : static_cast<std::size_t>(read_u16(bytes, idx + entry)) * 2U;
+  if (end <= start) return ok();  // 无该字形的增量
+  const std::size_t base = v.gvar_data_offset + start;
+  const std::size_t limit = v.gvar_data_offset + end;
+  if (limit > bytes.size() || base >= limit) return ok();
+
+  std::size_t cursor = base;
+  if (!in_range(bytes, cursor, 4)) return ok();
+  const std::uint16_t tuple_count_raw = read_u16(bytes, cursor);
+  const std::uint16_t tuple_count = static_cast<std::uint16_t>(tuple_count_raw & 0x0FFFU);
+  // ⚠ **`0x8000` 在 tupleVariationCount 里表示 `SHARED_POINT_NUMBERS`**
+  // （数据区开头有一份所有元组共用的点号表），不是“内嵌 peak”。
+  // 内嵌 peak 在**每个元组头的第二个字段**（tupleIndex）的 `0x8000` 位。
+  // 这两个位搞混的后果：所有带共享点号表的字形直接算错。
+  const bool has_shared_points = (tuple_count_raw & 0x8000U) != 0;
+  const std::uint16_t data_offset_raw = read_u16(bytes, cursor + 2);
+  cursor += 4;
+  if (tuple_count == 0) return ok();
+
+  // 读一遍元组头：先算出每个头的实际长度（flags 变长），并记下 peak 位置。
+  //
+  // ⚠ **头长度不能一律算成 `4 + axisCount*2`**：`EMBEDDED_PEAK_TUPLE`（0x8000）时
+  // 头部自带 peak 坐标、`INTERMEDIATE_REGION`（0x4000）时还会多两组坐标——
+  // 按错长度遍历后续头全部错位，解出的增量会把字形炸成几十万单位（实测）。
+  struct TupleHeader {
+    std::vector<float> peak{};
+    std::uint16_t data_size{0};
+    bool private_points{false};
+  };
+  std::vector<TupleHeader> headers;
+  headers.reserve(tuple_count);
+  std::size_t header_cursor = cursor;
+  for (std::size_t t = 0; t < tuple_count; ++t) {
+    if (!in_range(bytes, header_cursor, 4)) return ok();
+    TupleHeader h;
+    h.data_size = read_u16(bytes, header_cursor);
+    const std::uint16_t index = read_u16(bytes, header_cursor + 2);
+    header_cursor += 4;
+    // 0x8000 = EMBEDDED_PEAK_TUPLE，0x4000 = INTERMEDIATE_REGION，
+    // 0x2000 = PRIVATE_POINT_NUMBERS，0x0FFF = 共享元组下标。
+    h.private_points = (index & 0x2000U) != 0;
+    h.peak.assign(v.gvar_axis_count, 0.0f);
+    if ((index & 0x8000U) != 0) {
+      if (!in_range(bytes, header_cursor, static_cast<std::size_t>(v.gvar_axis_count) * 2)) {
+        return ok();
+      }
+      for (std::size_t axis = 0; axis < v.gvar_axis_count; ++axis) {
+        h.peak[axis] = read_f2dot14(bytes, header_cursor + axis * 2);
+      }
+      header_cursor += static_cast<std::size_t>(v.gvar_axis_count) * 2;
+    } else if (v.gvar_shared_tuples_offset != 0 && (index & 0x0FFFU) < v.gvar_shared_tuple_count) {
+      const std::size_t at = v.gvar_shared_tuples_offset +
+                             static_cast<std::size_t>(index & 0x0FFFU) *
+                                 static_cast<std::size_t>(v.gvar_axis_count) * 2;
+      if (!in_range(bytes, at, static_cast<std::size_t>(v.gvar_axis_count) * 2)) return ok();
+      for (std::size_t axis = 0; axis < v.gvar_axis_count; ++axis) {
+        h.peak[axis] = read_f2dot14(bytes, at + axis * 2);
+      }
+    }
+    if ((index & 0x4000U) != 0) {
+      // 中间区域：两组坐标（起始/结束），本引擎只取峰值的标量系数，按规范跳过。
+      const std::size_t skip = static_cast<std::size_t>(v.gvar_axis_count) * 4;
+      if (!in_range(bytes, header_cursor, skip)) return ok();
+      header_cursor += skip;
+    }
+    headers.push_back(std::move(h));
+  }
+  if (header_cursor > limit) return ok();
+
+  // 数据区起点：规范上 `dataOffset` 相对**本字形记录的起点**（即 `base`）。
+  std::size_t read_cursor = base + data_offset_raw;
+  if (read_cursor < header_cursor || read_cursor >= limit) read_cursor = header_cursor;
+
+  // 共享点号表（`SHARED_POINT_NUMBERS`）：在数据区最前面，只读一次。
+  std::vector<std::size_t> shared_points{};
+  bool shared_ready = !has_shared_points;
+  if (has_shared_points) {
+    const auto pts = unpack_points(bytes, read_cursor, limit, count_with_phantom);
+    if (!pts) return ok();
+    shared_points = *pts;
+    shared_ready = true;
+  }
+
+  std::vector<float> dx(points.size(), 0.0f);
+  std::vector<float> dy(points.size(), 0.0f);
+  std::vector<bool> touched(points.size(), false);
+
+  for (std::size_t t = 0; t < tuple_count; ++t) {
+    const TupleHeader& h = headers[t];
+    const float scalar = tuple_scalar(h.peak, v.coords);
+
+    // 点号表优先级：元组自带（PRIVATE_POINT_NUMBERS）> 记录级共享表。
+    if (h.private_points || !shared_ready) {
+      const auto pts = unpack_points(bytes, read_cursor, limit, count_with_phantom);
+      if (!pts) break;
+      shared_points = *pts;
+      shared_ready = true;
+    }
+
+    const std::size_t delta_count =
+        shared_points.empty() ? count_with_phantom : shared_points.size();
+    const auto xd = unpack_deltas(bytes, read_cursor, limit, delta_count);
+    if (!xd) break;
+    const auto yd = unpack_deltas(bytes, read_cursor, limit, delta_count);
+    if (!yd) break;
+    if (scalar == 0.0f) continue;
+
+    if (shared_points.empty()) {
+      // 全点（含 4 个幻影点，只取真实点那部分）。
+      for (std::size_t i = 0; i < points.size() && i < xd->size(); ++i) {
+        dx[i] += static_cast<float>((*xd)[i]) * scalar;
+        dy[i] += static_cast<float>((*yd)[i]) * scalar;
+        touched[i] = true;
+      }
+    } else {
+      for (std::size_t k = 0; k < shared_points.size(); ++k) {
+        const std::size_t i = shared_points[k];
+        if (i >= points.size()) continue;  // 幻影点：跳过
+        if (k >= xd->size() || k >= yd->size()) break;
+        dx[i] += static_cast<float>((*xd)[k]) * scalar;
+        dy[i] += static_cast<float>((*yd)[k]) * scalar;
+        touched[i] = true;
+      }
+    }
+  }
+
+  // —— IUP：未触及的点按同轮廓内**相邻两个已触及点**线性插补（OpenType 规范算法） ——
+  std::size_t first = 0;
+  for (const std::uint16_t last : ends) {
+    if (last < first || last >= points.size()) break;
+    const std::size_t count = static_cast<std::size_t>(last) - first + 1;
+    std::size_t touched_count = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (touched[first + i]) ++touched_count;
+    }
+    // 全没碰 → 不变（规范上应整轮廓平移，此处宁可不变形）；全碰 → 无需插补。
+    if (touched_count > 0 && touched_count < count) {
+      // 找到第一个已触及点，从它开始绕一圈。
+      std::size_t begin = 0;
+      for (std::size_t i = 0; i < count; ++i) {
+        if (touched[first + i]) {
+          begin = i;
+          break;
+        }
+      }
+      std::size_t prev = begin;
+      for (std::size_t step = 1; step <= count; ++step) {
+        const std::size_t cur = (begin + step) % count;
+        if (!touched[first + cur]) continue;
+        // (prev, cur) 之间（不含两端）都是未触及点，按坐标线性插补。
+        const std::size_t gap = (cur + count - prev) % count;
+        if (gap > 1) {
+          const GlyphPoint& a = glyph_points[first + prev];
+          const GlyphPoint& b = glyph_points[first + cur];
+          const float da_x = dx[first + prev];
+          const float db_x = dx[first + cur];
+          const float da_y = dy[first + prev];
+          const float db_y = dy[first + cur];
+          for (std::size_t k = 1; k < gap; ++k) {
+            const std::size_t at = (prev + k) % count;
+            const float t = static_cast<float>(k) / static_cast<float>(gap);
+            const GlyphPoint& p = glyph_points[first + at];
+            dx[first + at] = iup_axis(a.x, b.x, da_x, db_x, p.x, t);
+            dy[first + at] = iup_axis(a.y, b.y, da_y, db_y, p.y, t);
+          }
+        }
+        prev = cur;
+      }
+    }
+    first = static_cast<std::size_t>(last) + 1;
+  }
+
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    points[i].x += dx[i];
+    points[i].y += dy[i];
+  }
+  return ok();
+}
+
+[[nodiscard]] auto parse_glyf(FontData& data) -> Status {  const TableRecord* glyf = data.table(tag_of('g', 'l', 'y', 'f'));
   const TableRecord* loca = data.table(tag_of('l', 'o', 'c', 'a'));
   if (glyf == nullptr || loca == nullptr) {
     if (data.table(tag_of('C', 'F', 'F', ' ')) != nullptr) return ok();  // CFF 字体无 glyf/loca
@@ -2298,36 +2859,18 @@ auto font_cache_stats() noexcept -> FontCacheStats {
   return count;
 }
 
-auto FontFace::load(std::string_view path, int face_index) -> Result<FontFace> {
-  note_face_load();   // 计数：真正的读盘 + 解析（见 font.hpp）
-  if (face_index < 0) return unexpected(ErrorCode::Invalid, "face_index 不能为负");
-  auto holder = std::make_shared<Data>();
-  FontData& data = holder->value;
-  data.path = std::string(path);
-  data.face_index = face_index;
-  // **映射优先、整读回退**（2026-10-14 内存评估 P0）：
-  //
-  // 为何映射优先：字体的整文件字节**永不释放**（轮廓已是惰性解析，但原始文件一直留着）。
-  // 不用映射时那是 ~86MB 的私有堆常驻（Windows 常规/粗体/等宽三链 15 个 face）；
-  // 用映射后那部分是文件页的共享副本，内存压力下系统可直接回收。
-  //
-  // 为何保留回退：映射在部分文件系统/网络盘上不可用；"能跑但多占内存"远优于"字体加载不了"。
-  // 两者都失败才报错（错误信息取回退那条，它给的诊断更直接）。
-  if (auto mapped = st::fs::MappedFile::open(path); mapped.has_value()) {
-    data.mapped = std::move(*mapped);
-    note_face_mapped();
-  } else {
-    auto content = st::fs::read_bytes(path);
-    if (!content) return st::forward_error(content.error());
-    data.bytes = std::move(*content);
-    note_face_read_fallback();
-  }
+namespace {
+
+/// 解析已就绪的字节（`load` 与 `from_bytes` 的共同后半）：校验 face 目录 + 全部表。
+///
+/// 抽出来的理由：两条入口（磁盘 / 编译期嵌入）**只差字节从哪来**，
+/// 之后的校验与解析必须逐字一致——各写一份 inevitably 会漏掉某个表。
+[[nodiscard]] auto parse_face_bytes(FontData& data, int face_index) -> Status {
   const auto span = data.span();
-  if (span.empty()) return unexpected(ErrorCode::Parse, "字体文件为空");
+  if (span.empty()) return unexpected(ErrorCode::Parse, "字体字节为空");
   if (span.size() > k_max_font_bytes) {
     return unexpected(ErrorCode::Invalid, "字体文件过大（>256MB）");
   }
-
   const auto bytes = data.span();
   if (bytes.size() < 12) return unexpected(ErrorCode::Parse, "字体文件过短");
   std::size_t face_offset = 0;
@@ -2358,6 +2901,10 @@ auto FontFace::load(std::string_view path, int face_index) -> Result<FontFace> {
   if (!status) return st::forward_error(status.error());
   status = parse_glyf(data);
   if (!status) return st::forward_error(status.error());
+  // 变体轴（可变字体）：必须在 `glyf` 之后——`gvar` 的增量是叠加在 `glyf` 默认轮廓上的，
+  // 且字形数要与 `num_glyphs` 对得上。
+  status = parse_variations(data);
+  if (!status) return st::forward_error(status.error());
   status = parse_kern(data);
   if (!status) return st::forward_error(status.error());
   status = parse_gsub(data);
@@ -2365,6 +2912,64 @@ auto FontFace::load(std::string_view path, int face_index) -> Result<FontFace> {
   status = parse_cpal(data);
   if (!status) return st::forward_error(status.error());
   status = parse_colr(data);
+  if (!status) return st::forward_error(status.error());
+  return ok();
+}
+
+}  // namespace
+
+auto FontFace::load(std::string_view path, int face_index) -> Result<FontFace> {
+  note_face_load();   // 计数：真正的读盘 + 解析（见 font.hpp）
+  if (face_index < 0) return unexpected(ErrorCode::Invalid, "face_index 不能为负");
+  auto holder = std::make_shared<Data>();
+  FontData& data = holder->value;
+  data.path = std::string(path);
+  data.face_index = face_index;
+  // **映射优先、整读回退**（2026-10-14 内存评估 P0）：
+  //
+  // 为何映射优先：字体的整文件字节**永不释放**（轮廓已是惰性解析，但原始文件一直留着）。
+  // 不用映射时那是 ~86MB 的私有堆常驻（Windows 常规/粗体/等宽三链 15 个 face）；
+  // 用映射后那部分是文件页的共享副本，内存压力下系统可直接回收。
+  //
+  // 为何保留回退：映射在部分文件系统/网络盘上不可用；"能跑但多占内存"远优于"字体加载不了"。
+  // 两者都失败才报错（错误信息取回退那条，它给的诊断更直接）。
+  if (auto mapped = st::fs::MappedFile::open(path); mapped.has_value()) {
+    data.mapped = std::move(*mapped);
+    note_face_mapped();
+  } else {
+    auto content = st::fs::read_bytes(path);
+    if (!content) return st::forward_error(content.error());
+    data.bytes = std::move(*content);
+    note_face_read_fallback();
+  }
+  Status status = parse_face_bytes(data, face_index);
+  if (!status) return st::forward_error(status.error());
+
+  FontFace face{};
+  face.data_ = std::move(holder);
+  return face;
+}
+
+auto FontFace::from_bytes(std::span<const std::uint8_t> bytes, std::string_view label,
+                          int face_index) -> Result<FontFace> {
+  if (face_index < 0) return unexpected(ErrorCode::Invalid, "face_index 不能为负");
+  if (bytes.empty()) return unexpected(ErrorCode::Parse, "字体字节为空");
+  auto holder = std::make_shared<Data>();
+  FontData& data = holder->value;
+  // 来源标识：与真实路径区分开（指纹/诊断都靠它辨“这是内置字体”）。
+  data.path = label.empty() ? std::string("<embedded>") : std::format("<embedded:{}>", label);
+  data.face_index = face_index;
+  // **字节视图 + 自有副本**：视图只对“生命周期由调用方保证”的字节成立
+  // （编译期嵌入的常量段就是这种），而其它来源（如把文件读进临时 `vector`）
+  // 一旦调用方先释放，视图就成了悬垂引用。
+  //
+  // 实测代价（2026-11-28）：“手读字体文件 → from_bytes → 栈里还有系统字体”的
+  // 组合在取字形时直接 SEGV，而单独任一侧都正常——悬垂引用不是每次都能“刚好还活着”。
+  // 对策不是“要求调用方永远不释放”（那无法从接口上约束），而是先拷一份：
+  // 字体文件只有百 KB 量级，而**正确性优先于省这一次拷贝**。
+  // 嵌入路径不受影响：它的调用方持有常量段字节，真需要零拷贝时可直接用 `bytes` 字段。
+  data.bytes.assign(bytes.begin(), bytes.end());
+  Status status = parse_face_bytes(data, face_index);
   if (!status) return st::forward_error(status.error());
 
   FontFace face{};
@@ -2422,6 +3027,10 @@ auto FontFace::name() const -> const std::string& {
 auto FontFace::path() const -> const std::string& {
   if (data_ == nullptr) return empty_text();
   return data_->value.path;
+}
+
+auto FontFace::is_embedded() const noexcept -> bool {
+  return data_ != nullptr && data_->value.uses_embedded();
 }
 
 auto FontFace::is_cff() const noexcept -> bool {

@@ -2476,6 +2476,47 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   });
 }
 
+/// 目标自己的源里是否用到**等宽（代码）字体**（见 `build()` 的 `ST_NO_EMBEDDED_MONO` 段）。
+///
+/// 内置 Fira Code（289 KB）只有“界面里真会出代码/等宽文字”时才值得带：
+/// 判据就是“目标源里出现了那些**会按 `FontRole::Monospace` 绘制**的组件”。
+///
+/// 这份名单对应框架里全部等宽消费方：`CodeEditor`（正文/行号）、`Terminal`（等宽是它
+/// 一切对齐的基底）、`DiffView`/`MergeView`（两侧都是编辑器）、`MarkdownView`（代码块）、
+/// `HtmlView`（`<code>` 段）。另加两条直接写等宽角色的写法（自绘代码区的应用会这么用）。
+///
+/// ⚠ 退化方向与 `ST_NO_THREE` 相反：**漏判不会报错**，只会退化成系统等宽字体
+/// （外观不统一，但仍可读可编辑）。所以本判据可以**宽松**——宁可多编 289 KB。
+[[nodiscard]] auto target_uses_mono_font(const Manifest& manifest, const BuildOptions& options)
+    -> bool {
+  return target_matches_source(manifest, options, [](std::string_view text) {
+    return mentions_identifier(text, "CodeEditor") || mentions_identifier(text, "Terminal") ||
+           mentions_identifier(text, "DiffView") || mentions_identifier(text, "MergeView") ||
+           mentions_identifier(text, "MarkdownView") || mentions_identifier(text, "HtmlView") ||
+           text.find("FontRole::Monospace") != std::string_view::npos ||
+           text.find("font_mono") != std::string_view::npos;
+  });
+}
+
+/// 目标自己的源里是否用到**正文（比例）字体**（见 `build()` 的 `ST_NO_EMBEDDED_UI_FONT` 段）。
+///
+/// 内置 Inter Regular+Bold（共 ~830 KB）在**几乎任何**带文字的界面上都值得带——
+/// 所以这里的判据故意宽松到“只要会用 `Text`/`Button`/`Label` 这类文字组件就算用”。
+///
+/// 为什么不像三维那样精确：Inter 没有“用不到”的场景，只有“完全不画字”的程序（服务器/錤标）；
+/// 而那类程序本来就不会链接 `st/ui`，`src_text_text.cpp.o` 也进不了产物。
+/// 留这条判据的意义在于**给出显式开关**：若某个应用确实想回到纯系统字体，
+/// 可以在自己的目标上写 `ST_NO_EMBEDDED_UI_FONT`（契约测试钉着这一行为）。
+[[nodiscard]] auto target_uses_text_ui(const Manifest& manifest, const BuildOptions& options)
+    -> bool {
+  return target_matches_source(manifest, options, [](std::string_view text) {
+    return mentions_identifier(text, "Text") || mentions_identifier(text, "Button") ||
+           mentions_identifier(text, "Label") || mentions_identifier(text, "dsl") ||
+           mentions_identifier(text, "Component") || mentions_identifier(text, "Application") ||
+           mentions_identifier(text, "WindowFrame") || mentions_identifier(text, "UiRoot");
+  });
+}
+
 /// 按包图**自动裁剪**库级框架单元（按需编译）——对应 Go 的“没 import 的包不编”。
 ///
 /// ## 它做什么
@@ -3488,6 +3529,25 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // 而不是只看 `three_runtime`（后者可能只是被间接引用）。
   if (!target_uses_three(manifest, options)) {
     capability_defines.push_back("ST_NO_THREE=1");
+  }
+  // 内置等宽字体（Fira Code，289 KB）：第四项，判据与前三项同套路。
+  //
+  // 为何需要它（而不是“既然内置了就总是带”）：这 289 KB 进的是 `.rdata`，
+  // 而不用代码字体的应用（相期、桌面壳、纯表单类工具）完全用不到它——
+  // 与 `ST_NO_THREE` 是同一种浪费。
+  //
+  // ⚠ 退化方向是安全的：宏定义后 `embedded_mono_bytes()` 恒为空，
+  // 等宽链只剩系统字体（代码仍可读、仍对齐），**不会**出现“功能缺失”报错。
+  if (!target_uses_mono_font(manifest, options)) {
+    capability_defines.push_back("ST_NO_EMBEDDED_MONO=1");
+  }
+  // 内置正文 Inter（Regular+Bold，~830 KB）：第五项。
+  //
+  // 与前三项不同：Inter 覆盖的是**每个带文字的界面**都会用的拉丁字形，
+  // 所以判据故意宽松（会用 `Text`/`Button`/`Component` 之类就算）——它的裁剪
+  // 主要是为了“完全不画字的程序”与显式退用系统字体的场景。
+  if (!target_uses_text_ui(manifest, options)) {
+    capability_defines.push_back("ST_NO_EMBEDDED_UI_FONT=1");
   }
   if (framework.has_value()) {
     const auto append = [](std::vector<std::string>& target, const std::vector<std::string>& extra) {

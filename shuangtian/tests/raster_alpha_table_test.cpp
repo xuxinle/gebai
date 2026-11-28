@@ -15,6 +15,8 @@
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
+#include <vector>
+
 #include "st/test/test.hpp"
 
 namespace {
@@ -97,5 +99,54 @@ ST_TEST(alpha_table_matches_per_pixel_scaling) {
     const auto [differing, worst] = diff_of(with_table, per_pixel);
     st::log::out("[alpha-table] {}：差异 {} px（Δ≤{}）\n", item.name, differing, worst);
     ST_CHECK(differing == 0);
+  }
+}
+
+/// 覆盖率 < 1 必须**真的画出墨**（而不只是“开表与关表一致”）。
+///
+/// 为何必须有这一条：上面那条只比“开表 / 关表”，两者走的是**同一个缺陷**时
+/// 依旧全绿——实测就因此漏掉一个极重的缺陷：
+/// `alpha_table_premul_` 的“未建表”哨兵原来是 `0xFFFFFFFF`，而那恰好是
+/// **不透明白**的预乘值，于是第一次用不透明白绘字时 `premul` 与哨兵相等、
+/// 直接返回**全 0 的空表**——所有覆盖率 < 0.999 的像素被写成 0。
+///
+/// 现象：手贴一张 4×32、覆盖率全 0.5 的图，**画布上一个非零像素都没有**；
+/// 而覆盖率 1.0 正常（它走 SIMD 快路径，不查表）。
+/// 落到真实界面就是：**没有满格像素的字形（绝大多数汉字、细笔画拉丁字）整字不显示**，
+/// 只剩「一」「口」这类含满格的字能看出墨。
+ST_TEST(coverage_below_full_actually_paints) {
+  // 白色不透明是触发那个哨兵冲突的颜色（预乘值恰为 0xFFFFFFFF）。
+  const Color colors[] = {
+      Color{0xFF, 0xFF, 0xFF, 0xFF},   // 预乘 = 0xFFFFFFFF（原哨兵）
+      Color{40, 44, 52, 255},           // 普通深色
+  };
+  for (const Color color : colors) {
+    for (const float coverage : {0.05f, 0.25f, 0.5f, 0.75f, 0.999f}) {
+      Canvas canvas = make_canvas();
+      const std::vector<float> one{coverage};
+      canvas.blend_coverage_bitmap(20, 20, one, 1, 1, Paint::solid(color), 1.0f,
+                                   st::raster::BlendMode::SrcOver, 0,
+                                   st::raster::CoverageFormat::Grayscale);
+      const Color before = Color::rgb(0xF7, 0xF8, 0xFA);
+      const Color after = canvas.pixel_at(20, 20);
+      const int delta = std::abs(static_cast<int>(after.r) - static_cast<int>(before.r)) +
+                        std::abs(static_cast<int>(after.g) - static_cast<int>(before.g)) +
+                        std::abs(static_cast<int>(after.b) - static_cast<int>(before.b));
+      st::log::out("[coverage] color=({},{},{}) cov={}：像素 ({},{},{})\n",
+                   static_cast<int>(color.r), static_cast<int>(color.g),
+                   static_cast<int>(color.b), static_cast<double>(coverage),
+                   static_cast<int>(after.r), static_cast<int>(after.g),
+                   static_cast<int>(after.b));
+      // 反例（缺陷态）：像素**一点没变**（delta=0）——那是“表空、根本没写”。
+      //
+      // ⚠ 不能要求每个覆盖率都变：白字 × 0.05 覆盖率叠在 0xF7 浅底上，
+      // 理论值就差 0.4 LSB，量化后仍是原值——**那是正确行为**（实测：
+      //   白字 cov=0.05 → (247,248,250) 与底色相同）。
+      // 所以只对“理应看出差异”的组合断言：深色任意覆盖率、白字覆盖率 ≥ 0.5。
+      const bool visible = color.r == 0xFF && color.g == 0xFF && color.b == 0xFF
+                               ? coverage >= 0.5f
+                               : true;
+      if (visible) ST_CHECK(delta > 0);
+    }
   }
 }

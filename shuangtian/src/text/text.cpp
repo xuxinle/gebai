@@ -12,11 +12,26 @@
 #include "st/core/fs.hpp"
 #include "st/core/font_platform.hpp"
 #include "st/core/hash.hpp"
+#include "st/core/log.hpp"
 #include "st/core/memory_budget.hpp"
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/paint.hpp"
+
+// 内置字体（Fira Code / Inter）的字节：按能力宏裁剪。
+//
+// **为何包含是被宏包住的**：`b::embed<"…">()` 是编译期模板——它一旦被编进某个
+// 翻译单元，那些字节就会跟着该单元的 `.o` 一起被归档。而“用不用这些字体”
+// 是**应用级**的事实（由构建器从目标源推导，见 build.cpp），所以整个 include
+// 都放在宏里：不需要的目标连头都不开。
+//
+// ⚠ 条件是「**任一个**字体需要」而不是「两个都要」：等宽与正文是两个独立的
+// 能力开关，只开其中一个的目标（如不带代码编辑器的应用）也必须能 include——
+// 写成 `!defined(ST_NO_EMBEDDED_MONO)` 时，那类目标会报 `'b' has not been declared`。
+#if !defined(ST_NO_EMBEDDED_MONO) || !defined(ST_NO_EMBEDDED_UI_FONT)
+#include "battery/embed.hpp"
+#endif
 
 namespace st::text {
 namespace {
@@ -125,6 +140,67 @@ struct FontCandidate {
   for (const auto& entry : platform::preferred_mono_fonts()) push(entry);
   return candidates;
 }
+
+/// 嵌入资源 → `uint8_t` 字节视图。
+///
+/// 为何不用 `reinterpret_cast` 之外的写法：`b::embed<>()` 的元素类型是 `char`，
+/// 而字体层要的是 `uint8_t`——这**是语义标注而不是位重解释**（两侧都是 8 位字节）。
+/// `std::span` 没有跨元素类型的构造函数（`char*` 不能隐式转 `uint8_t*`），
+/// 所以这处转换不可避；集中到**一个**模板函数里，让它将来的审计只有一处。
+/// 与 `st::app::icon::attach_png` 同一手法（那里因为要拷贝进 vector 才能走 `assign`）。
+template <typename Asset>
+[[nodiscard]] auto asset_bytes(const Asset& asset) -> std::span<const std::uint8_t> {
+  // `std::span` 没有跨元素类型的转换，而 `embed` 的字节元素类型是 `char`：
+  // 转成 `uint8_t` 是**语义标注**而非位重解释（两侧都是 8 位字节）。
+  // 集中在本函数，只此一处。
+  // lint-allow: L6 嵌入资源的 char → uint8_t 是语义标注（不是位重解释）
+  return std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(asset.data()), asset.length());
+}
+
+/// 内置等宽字体（Fira Code Regular）的字节；未编入时返回空视图。
+///
+/// **为何内置等宽**：系统等宽字体在不同平台上不是一回事（Windows 是 Consolas、
+/// macOS 是 Menlo、Linux 视发行版而定），而代码的**字面大小与列宽**直接决定
+/// “看着大不大”与“一行能放多少字符”——同一份代码在三个平台上排成三个样子，
+/// 是产品层的不一致。选 Fira Code 而非各平台自带字体：它**同字号下字面更开**
+/// （实测 15px：advance 9.0 / x 高 8 / 自然行高 19，而 Consolas 是 8.0 / 7 / 16）——
+/// 用户反馈的“Consolas 看着小”正是这个原因；换字体比调字号更对症。
+///
+/// `ST_NO_EMBEDDED_MONO` 未定义时才有内容：那 289 KB 只在**用得到等宽的应用**里。
+#if !defined(ST_NO_EMBEDDED_MONO)
+[[nodiscard]] auto embedded_mono_bytes() -> std::span<const std::uint8_t> {
+  const auto file = b::embed<"assets/fonts/FiraCode-Regular.ttf">();
+  return asset_bytes(file);
+}
+#else
+[[nodiscard]] auto embedded_mono_bytes() -> std::span<const std::uint8_t> { return {}; }
+#endif
+
+/// 内置 UI 正文字体（Inter Regular / Bold）的字节；未编入时返回空视图。
+///
+/// **为何内置正文**：拉丁字形是界面里数量最多的字（标签、按钮、菜单、状态栏），
+/// 而平台默认拉丁字体（Windows 的微软雅黑 / macOS 的 SF / Linux 的 DejaVu）在
+/// **字宽、x 高、字形风格**上差得很远——同一套界面在三个平台上“长得不一样”。
+/// 内置 Inter 后，拉丁部分由同一份字形决定（Inter 是专为屏幕界面设计的字族，
+/// 小字号下 x 高与字重层次都比雅黑的拉丁面强）。
+///
+/// 汉字**不内置**（一个 CJK 字族动辄十几 MB，且会与系统已装的那份重复），
+/// 走 `noto_sans_candidates()`——系统有 Noto Sans 就用它，没有则回退平台主力字体。
+///
+/// `ST_NO_EMBEDDED_UI_FONT` 未定义时才有内容（裁剪口径同等宽）。
+#if !defined(ST_NO_EMBEDDED_UI_FONT)
+[[nodiscard]] auto embedded_ui_bytes() -> std::span<const std::uint8_t> {
+  const auto file = b::embed<"assets/fonts/Inter-Regular.ttf">();
+  return asset_bytes(file);
+}
+[[nodiscard]] auto embedded_ui_bold_bytes() -> std::span<const std::uint8_t> {
+  const auto file = b::embed<"assets/fonts/Inter-Bold.ttf">();
+  return asset_bytes(file);
+}
+#else
+[[nodiscard]] auto embedded_ui_bytes() -> std::span<const std::uint8_t> { return {}; }
+[[nodiscard]] auto embedded_ui_bold_bytes() -> std::span<const std::uint8_t> { return {}; }
+#endif
 
 
 /// 载入字体：CJK 集合字体挑出真正覆盖汉字的 face（NotoSansCJK OTC 的 SC face 常非 0 号）。
@@ -269,6 +345,97 @@ struct FontCandidate {
     if (first_covering.has_value()) return *first_covering;
   }
   return load_face_cached(candidate.path, 0);
+}
+
+/// 正文字体链的**完整装配**：内置 Inter → Noto Sans（中文首选）→ 平台候选。
+///
+/// 顺序即优先级，而每一项都是为了解决一个具体问题：
+///
+/// - **内置 Inter 在最前**：拉丁字形（标签/按钮/菜单/数字）全平台统一。Inter 的
+///   `cmap` 里**没有汉字**，所以中文会自动落到后面的 CJK 档——不需要额外开关。
+/// - **Noto Sans 紧跟其后**：汉字首选。它的中文字形比例与 Inter 最接近（两者都是
+///   低对比度无衬线），混排时“中英文像同一套字”；且它是**跨平台可获取**的（
+///   Windows 10+ 可装/自带、Linux 各发行版主力、macOS 可装），比各平台默认中文字体
+///   （雅黑/苹方）更中立。
+/// - **平台主力字体最后**：Noto 缺席时回退（Windows 雅黑、macOS 苹方、Linux 各系）。
+///   这条保证“没有 Noto 的机器也一定能显示中文”，而不是叠成豆腐块。
+///
+/// 为何 Latin 与 CJK 分两档而不是“一个能涵盖两者的字族”：涵盖两者的字族（如雅黑）
+/// 必然在某一侧有妥协（雅黑的拉丁面偏窄偏竖，小字号下不如 Inter 均匀）；而分档后
+/// 中文回退是按**码点**发生的，所以混排不需要任何额外的排版逻辑。
+///
+/// 粗体链**必须与常规链逐位同族**（见 `find_face(..., bold)` 按下标配对的说明），
+/// 所以这里一并给出。
+[[nodiscard]] auto proportional_face_chain() -> std::vector<FontFace> {
+  std::vector<FontFace> chain;
+  const bool user_override = fs::read_env("ST_FONT_LATIN").has_value() ||
+                             fs::read_env("ST_FONT_CJK").has_value();
+  // 显式环境变量覆盖时**不插内置字体**：那两个变量的语义是“我要换字体”，
+  // 而内置 Inter 排在最前会让 `ST_FONT_LATIN` 看上去没生效（它确实只能接管
+  // Inter 没覆盖的码点）。与 `ST_FONT_MONO` 同一姿态：用户明确指定优先于产品默认。
+  const auto ui_bytes = user_override ? std::span<const std::uint8_t>{} : embedded_ui_bytes();
+  if (!ui_bytes.empty()) {
+    if (auto face = FontFace::from_bytes(ui_bytes, "Inter-Regular"); face.has_value()) {
+      chain.push_back(std::move(*face));
+    }
+  }
+  // Noto Sans（中文首选）+ 平台主力回退 —— 这正是 `font_candidates()` 的顺序，
+  // 只是 `primary_text_faces()` 的雅黑排到了 Noto 之后（见它的注释）。
+  for (const auto& candidate : font_candidates()) {
+    if (auto face = load_face(candidate); face.has_value()) {
+      chain.push_back(std::move(*face));
+    }
+  }
+  return chain;
+}
+
+/// 粗体链：与 `proportional_face_chain()` **逐位同序**。
+[[nodiscard]] auto proportional_bold_face_chain() -> std::vector<FontFace> {
+  std::vector<FontFace> chain;
+  const bool user_override = fs::read_env("ST_FONT_LATIN_BOLD").has_value() ||
+                             fs::read_env("ST_FONT_CJK_BOLD").has_value();
+  const auto ui_bytes = user_override ? std::span<const std::uint8_t>{} : embedded_ui_bold_bytes();
+  if (!ui_bytes.empty()) {
+    if (auto face = FontFace::from_bytes(ui_bytes, "Inter-Bold"); face.has_value()) {
+      chain.push_back(std::move(*face));
+    }
+  }
+  for (const auto& candidate : bold_font_candidates()) {
+    if (auto face = load_face(candidate); face.has_value()) {
+      chain.push_back(std::move(*face));
+    }
+  }
+  return chain;
+}
+
+/// 等宽字体链的**完整装配**（内置优先 + 系统回退）。
+///
+/// 顺序：`ST_FONT_MONO`（环境变量显式指定）→ 内置 Fira Code → 平台候选链。
+///
+/// 为何 `ST_FONT_MONO` 仍排在内置之前：它是**用户显式指定**的字体，
+/// “我就要这个”应当赢过产品默认（与 `--ui-font-scale` 听用户的口径一致）。
+/// 它原本也排在内置之前，保留原有优先级，不让新功能静默推翻已有用法。
+///
+/// 为何内置排在系统候选之前：内置字体才是“全平台统一”的那个——
+/// 系统字体只在它**加载失败**时兵底（嵌入字节损坏/裁剪后为空）。
+/// 中文仍按既有规则回退正文档（Fira Code 不含汉字），那个逻辑不在这里。
+[[nodiscard]] auto mono_face_chain() -> std::vector<FontFace> {
+  std::vector<FontFace> chain;
+  // 内置字体：通过 `from_bytes` 加载（不读盘）。失败不报错——
+  // 等宽字体整体缺席只意味着“代码块回退正文字体仍可读”，不该拖垮字体栈。
+  const auto bytes = embedded_mono_bytes();
+  if (!bytes.empty()) {
+    if (auto face = FontFace::from_bytes(bytes, "FiraCode-Regular"); face.has_value()) {
+      chain.push_back(std::move(*face));
+    }
+  }
+  // 系统候选：`ST_FONT_MONO` 已在候选表首位（若设了），所以直接接在后面。
+  for (const auto& candidate : mono_font_candidates()) {
+    if (auto face = load_face(candidate); face.has_value()) {
+      chain.push_back(std::move(*face));
+    }
+  }
+  return chain;
 }
 
 [[nodiscard]] auto size_key(float size) noexcept -> std::uint32_t {
@@ -431,35 +598,23 @@ FontStack::FontStack(std::vector<FontFace> faces, std::vector<FontFace> mono_fac
 }
 
 auto FontStack::system_default() -> Result<FontStack> {
-  std::vector<FontFace> faces;
-  std::string last_error;
-  for (const auto& candidate : font_candidates()) {
-    auto face = load_face(candidate);
-    if (!face) {
-      last_error = std::format("{}: {}", candidate.path, face.error().message);
-      continue;
-    }
-    faces.push_back(std::move(*face));
-  }
+  // 正文档 = 内置 Inter + Noto Sans（中文首选）+ 平台回退（见 `proportional_face_chain`）。
+  std::vector<FontFace> faces = proportional_face_chain();
+  std::string last_error = faces.empty() ? std::string("未找到可用系统字体") : std::string{};
   if (faces.empty()) {
+    // 诊断信息仍要能指向“系统字体到底出了什么错”：逐档试一次只为取错误文本。
+    for (const auto& candidate : font_candidates()) {
+      auto face = load_face(candidate);
+      if (!face) last_error = std::format("{}: {}", candidate.path, face.error().message);
+    }
     return unexpected(ErrorCode::NotFound,
                       std::format("未找到可用系统字体（最后错误：{}）", last_error));
   }
   // 等宽库单独探测：失败只是"没有等宽"（代码块退化成正文字体仍可读），
   // 不该让整个字体栈失败——完全没字体才是什么都渲染不出来。
-  std::vector<FontFace> mono_faces;
-  for (const auto& candidate : mono_font_candidates()) {
-    if (auto face = load_face(candidate); face.has_value()) {
-      mono_faces.push_back(std::move(*face));
-    }
-  }
+  std::vector<FontFace> mono_faces = mono_face_chain();
   // 粗体面单独探测：探不到也不算失败——此时粗体回退常规面，调用方可再用合成加粗补足。
-  std::vector<FontFace> bold_faces;
-  for (const auto& candidate : bold_font_candidates()) {
-    if (auto face = load_face(candidate); face.has_value()) {
-      bold_faces.push_back(std::move(*face));
-    }
-  }
+  std::vector<FontFace> bold_faces = proportional_bold_face_chain();
   return FontStack(std::move(faces), std::move(mono_faces), std::move(bold_faces));
 }
 
@@ -472,19 +627,9 @@ auto FontStack::from_files(const std::vector<std::string>& paths) -> Result<Font
     faces.push_back(std::move(*face));
   }
   if (faces.empty()) return unexpected(ErrorCode::Invalid, "字体列表为空");
-  std::vector<FontFace> mono_faces;
-  for (const auto& candidate : mono_font_candidates()) {
-    if (auto face = load_face(candidate); face.has_value()) {
-      mono_faces.push_back(std::move(*face));
-    }
-  }
+  std::vector<FontFace> mono_faces = mono_face_chain();
   // 粗体面单独探测：探不到也不算失败——此时粗体回退常规面，调用方可再用合成加粗补足。
-  std::vector<FontFace> bold_faces;
-  for (const auto& candidate : bold_font_candidates()) {
-    if (auto face = load_face(candidate); face.has_value()) {
-      bold_faces.push_back(std::move(*face));
-    }
-  }
+  std::vector<FontFace> bold_faces = proportional_bold_face_chain();
   return FontStack(std::move(faces), std::move(mono_faces), std::move(bold_faces));
 }
 

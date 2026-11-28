@@ -96,6 +96,22 @@ class FontFace {
   /// @return 失败：`Io` 读文件失败、`Parse` 非字体/结构损坏/截断、`NotFound` face 序号越界。
   [[nodiscard]] static auto load(std::string_view path, int face_index = 0) -> Result<FontFace>;
 
+  /// 从**内存里的字节**加载（不当文件读）。
+  ///
+  /// 用途：编译期嵌入的字体（`b::embed<"…">()` 给的常量段字节）——内置字体因此
+  /// 不需要在用户机器上有任何字体文件，也不产生 I/O。
+  ///
+  /// @param bytes 字体字节（TTF/OTF/TTC/OTC）。**会拷一份自己持有**——调用方不必
+  ///              保证它活过本 face。代价是百 KB 量级的拷贝，换的是“不会悬垂”：
+  ///              实测（2026-11-28）传临时 buffer 时，face 活过 buffer 会直接 SEGV。
+  /// @param label 来源标签，进 `path()` 成为 `"<embedded:label>"`——它与真实路径
+  ///              区分开，既供诊断辨认，也参与 `FontStack` 指纹（字形缓存分桶）。
+  /// @param face_index 集合字体的 face 序号。
+  /// @return 失败：`Parse` 字节为空/非字体/结构损坏，`NotFound` face 序号越界。
+  [[nodiscard]] static auto from_bytes(std::span<const std::uint8_t> bytes,
+                                       std::string_view label = {},
+                                       int face_index = 0) -> Result<FontFace>;
+
   /// 码点 → 字形索引（经 `cmap` 格式 4/6/12/0）。
   /// @return 失败：`NotFound` 字体不含该码点。
   [[nodiscard]] auto glyph_index(char32_t codepoint) const -> Result<GlyphId>;
@@ -116,8 +132,14 @@ class FontFace {
   /// 字体名（`name` 表的 full name / family name；缺表时为空串）。
   [[nodiscard]] auto name() const -> const std::string&;
 
-  /// 加载时使用的字体文件路径。
+  /// 加载时使用的字体文件路径（内置字体为 `"<embedded:名字>"`）。
   [[nodiscard]] auto path() const -> const std::string&;
+
+  /// 字节是否来自**编译期嵌入**（而非磁盘文件）。
+  ///
+  /// 为何需要它：内置字体与系统字体在同一条链里，而“它到底是从哪来的”
+  /// 决定了产物里有没有那 289 KB——诊断与回归都靠它断言。
+  [[nodiscard]] auto is_embedded() const noexcept -> bool;
 
   /// 是否是 **CFF（OTF）轮廓**字体（`glyf` 缺席且有 `CFF ` 表）。
   ///

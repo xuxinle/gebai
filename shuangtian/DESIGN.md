@@ -2842,17 +2842,73 @@ class TextRenderer {                               // 字形 → 位图缓存（
 - 回退链默认由 **平台层**给出（`st/core/font_platform.hpp`）：路径与「首选哪一族」
   都是平台知识，按平台集中一处（Windows / Linux / macOS 各一张表），
   环境变量 `ST_FONT_LATIN` / `ST_FONT_CJK` / `ST_FONT_MONO`（及 `*_BOLD`）
-  仍是最高的逐档覆盖。
+  仍是最高的逐档覆盖（设了它们就不插内置字体）。
 
-  链形：**平台首选 → 通用拉丁 → 通用 CJK → emoji → 符号回退**。
-  | 平台 | 正文档首选 | 等宽首选 | emoji |
+  ### 内置字体（全平台统一字形）
+
+  两条链的首位都是**编译期嵌入**的字体（`assets/fonts/`，`b::embed<>` 进 `.rdata`）：
+
+  | 角色 | 内置字体 | 为何 |
+  |---|---|---|
+  | 正文拉丁 | **Inter Regular / Bold** | 标签/按钮/菜单/数字是界面里占比最大的字；各平台默认拉丁（雅黑/SF/DejaVu）的字宽与 x 高差别很大，同一套界面会长得不一样 |
+  | 等宽（代码） | **Fira Code Regular** | 同字号下字面比 Consolas **明显更开**（15px：advance 9.0 / x 高 8 / 自然行高 19，而 Consolas 是 8.0 / 7 / 16）——“看着小”的真因是字形偏紧，不是字号 |
+
+  **汉字不内置**：一个 CJK 字族动辄十几 MB，且会与系统已装的那份重复。
+  汉字链形：**系统 Noto Sans（首选）→ 平台主力字体（雅黑/苹方，回退）→ 通用回退层**。
+  Noto 排前的理由：它是**跨平台同一设计**的中文字族（同一份界面三个平台汉字一样），
+  且字形比例与 Inter 最接近，混排时两者像同一套字。
+
+  于是正文档是**分层**的（拉丁 = 内置 Inter，汉字 = 系统 CJK）：`find_face` 按**码点**
+  逐字查找，分层不需要任何额外排版逻辑。必须成立的替代约束是
+  **汉字标点与汉字同族**（「。」走拉丁面会全宽/半宽错位）。
+
+  **按需裁剪**：两套字体各由一个能力宏控制（`ST_NO_EMBEDDED_MONO` /
+  `ST_NO_EMBEDDED_UI_FONT`），由构建器从**目标自己的源**反向推导（与 `ST_NO_THREE`
+  同一套路，见 `build.cpp` 的 `target_uses_mono_font` / `target_uses_text_ui`）。
+  实测（dev 档）：`gbcode` 8.74 MB（两者都含）/ `xiangqi` 8.17 MB（无 Fira Code）/
+  `crash_probe` 2.57 MB（两者都无）。
+
+  > 退化方向是**安全**的：宏定义后 `embedded_*_bytes()` 恒为空，等宽链只剩系统字体、
+  > 正文档从系统拉丁开始——代码仍可读、仍对齐，只是不再跨平台统一。
+
+  **可变字体（`fvar`/`avar`/`gvar`）必须支持，否则 CJK 会渲染成最细字重**。
+
+  系统里的 CJK 字体普遍是**可变字体**（Windows 的 `NotoSansSC-VF.ttf` 就是），而它的
+  `glyf` 里存的是**默认实例**的轮廓。很多字族把默认 `wght` 定在最细那一档——
+  实测 `NotoSansSC-VF.ttf` 的 `min = def = 100`（Thin），笔画只有 **0.033 em**，
+  而界面要的 Regular 是 **0.075 em** 量级。真因不是“字体选错了”而是“没读变形表”。
+
+  引擎的支持范围（`parse_variations` / `apply_variations`）：
+
+  | 表 | 用途 | 状态 |
+  |---|---|---|
+  | `fvar` | 轴定义（tag/min/def/max）与子族枚举 | 全解 |
+  | `avar` | 归一化坐标的非线性映射 | 全解 |
+  | `gvar` | 字形轮廓的变形增量 + IUP 插补 | 全解 |
+  | `HVAR` / `VVAR` / `MVAR` | 字宽 / 竖直度量 / 字体级度量随轴变化 | **未做**（CJK 是等宽，字宽不随 `wght` 变） |
+
+  当前固定取 **`wght = 400`（Regular，`kDefaultWeight`）**，其余轴一律默认。
+  效果：`NotoSansSC-VF.ttf` 的「一」笔画 0.033 → **0.082 em**，与微软雅黑的 0.086 em 同级。
+
+  两个**解码细节极容易写错**（都实测踩过，且后果是“静默不生效”而不是崩溃）：
+
+  1. **`tupleVariationCount` 的 `0x8000` 位是 `SHARED_POINT_NUMBERS`**，不是“内嵌 peak”。
+     内嵌 peak 在**每个元组头的 `tupleIndex`** 的 `0x8000` 位。
+  2. **packed delta 的控制字节不是“高两位枚举”**：`bit7 = 全零`、`bit6 = 16 位`、
+     都不置位 = `int8`，`bits0-5 = runLength-1`。把 `0xC0 >> 6` 当枚举会让 `0x02`
+     被读成“全零 run”——实测后果是所有汉字增量归零、字形毫无变化。
+  3. **run 必须完整消费字节**：规范允许一个 run 跨过剩余点数，游标要跳完它。
+     按“凑够 count 就停”实现会让 x/y 两段增量错位。
+
+  链形（正文档）：**内置 Inter → Noto Sans → 平台首选 → 通用拉丁 → 通用 CJK → emoji → 符号**。
+  | 平台 | 汉字首选 | 汉字回退（主力） | emoji |
   |---|---|---|---|
-  | Windows | 微软雅黑（`msyh.ttc`）——**中英文同族**（它自带拉丁字形） | Consolas（`consola.ttf`） | `seguiemj.ttf` |
-  | Linux | 不指定取向（只用通用回退层） | 不指定取向 | `NotoColorEmoji.ttf` → `NotoEmoji-Regular.ttf` |
-  | macOS | 不指定取向 | 不指定取向 | `Apple Color Emoji.ttc` |
+  | Windows | `NotoSansSC-VF.ttf` / `NotoSansCJK-Regular.ttc`（装了才有） | 微软雅黑（`msyh.ttc`） | `seguiemj.ttf` |
+  | Linux | `NotoSansCJK-Regular.ttc` / `NotoSansCJKsc-Regular.otf` | 各发行版主力 | `NotoColorEmoji.ttf` → `NotoEmoji-Regular.ttf` |
+  | macOS | `/System/Library/Fonts/NotoSansCJK-Regular.ttc`（装了才有） | 苹方（`PingFang.ttc`） | `Apple Color Emoji.ttc` |
 
   首选档必须在拉丁回退层**之前**：`find_face` 返回首个覆盖该码点的面，
-  排在后面就会被 Segoe UI 接管英文，界面成了“中文雅黑、英文 Segoe”的两族混排。
+  排在后面就会被 Segoe UI 接管英文。
   粗体链与常规链**逐位同序**（`find_face(..., bold)` 按下标配同族粗体面），
   否则拉丁粗体会接管中文字（它没有汉字轮廓 → 整串豆腐块）。
   等宽链里没有汉字，`find_face(role=Monospace)` 按“等宽库 → 正文档”回退补足，
