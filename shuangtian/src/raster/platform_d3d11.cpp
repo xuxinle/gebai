@@ -592,11 +592,12 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
     //
     // 上面把“基准与步长”映射到子矩形就完了，但模糊核会把采样点**推出 area**：
     // `base + step * i` 在边缘一圈（半径范围）自然落到子矩形之外。
-    // 而那片区域里存的是**上一次更大区域遗留的旧像素**（目标纹理复用、只增不减），
-    // 不是本次内容。于是玻璃边缘一圈会把旧内容平均进来——
+    // 那片区域是**本次没被拷贝覆盖**的——里面是 `ClearRenderTargetView` 的清屏色
+    //（黑色），不是本次内容。于是玻璃边缘一圈会把黑平均进来。
     // 实测症状：gbcode 先开大菜单（文件）再开小菜单（编辑），编辑面板的
     // **右边与下边各约 15px 内沿发暗**（面板内 248 → 234，面板外仍是 255；
     // 首开时同一处是 250 干净）。这就是用户报的“右和下怎么有阴影”。
+    // 反证：把清屏色改成红 → 内沿真的出现 `#F3C3C3` 的偏红（发区就是核越界处）。
     //
     // 夹到子矩形边界 = 复用大目标时的语义等价物：旧实现（目标恰好等于区域）
     // 在边界外由采样器 clamp 到纹理边缘，这里 clamp 到**子矩形**边缘。
@@ -654,8 +655,9 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
     const float2 texel_uv = g_axis.xy;
     const float2 step = texel_uv;
     // 内容在纹理里的有效范围（**左上 ext 块**，见 `refract_region` 的 `sub_w/sub_h`）：
-    // 核越界采样与法线位移都会跑出它，而外侧是**上一次更大区域遗留的旧像素**。
-    // 实测症状：gbcode 先开大菜单再开小菜单，小菜单**右边与下边各约 15px 发暗**。
+    // 核越界采样与法线位移都会跑出它，而外侧是本次没写过的清屏色（不是内容）。
+    // 不夹就会把清屏色平均进边缘一圈。实测症状：gbcode 先开大菜单再开小菜单，
+    // 小菜单**右边与下边各约 15px 发暗**。
     const float2 ext_hi = float2(max(g_axis.z, 0.0), max(g_axis.w, 0.0));
     const float2 ext_lo = step * 0.5;
     // SDF 与法线：局部坐标以区域中心为原点（local_px 是相对左上，先移到中心）。
@@ -1644,6 +1646,11 @@ class GpuCanvas final : public Surface {
     // 若目标 alpha 是 0，模糊会把边界外的不透明像素与这里的 0 平均，
     // 结果 alpha < 1，贴回时就变成半透明——与软件端 `over` 混合结果不一致，
     // 表现为整体偏暗（实测弹层区域均值 GPU 210 vs 软件 225）。
+    //
+    // ⚠ 颜色清成 **0** 也是个隐患（2026-11-28 实测）：目标比区域大时，子矩形外
+    // 没被拷贝覆盖，留的是**这个清屏的黑色**；核越界采样会把黑平均进边缘一圈
+    //（实验：清屏改红→内沿真的出现 `#F3C3C3` 的偏红）。着色器那边已把采样夹
+    // 在子矩形内，所以现在清什么色都不影响结果；保持黑色以避免改既有行为。
     const float clear_rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     const DrawScope gfx = draw_scope();
     gfx->ClearRenderTargetView(targets.rtv_a, clear_rgba);

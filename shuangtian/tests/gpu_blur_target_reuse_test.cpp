@@ -114,18 +114,21 @@ ST_TEST(gpu_blur_after_larger_blur_matches_itself) {
   ST_CHECK(delta == 0);
 }
 
-ST_TEST(gpu_blur_edge_does_not_pull_stale_content_from_bigger_target) {
+ST_TEST(gpu_blur_edge_does_not_pull_outside_content_from_bigger_target) {
   // ## 这条钉的是“复用的**另一半**”
   //
   // 上面两条钉的是“基准与步长要映射进子矩形”。但那只保证**中心**采对；
-  // 模糊核会把采样点**推出 area**（`base + step * i`），而子矩形外存的是
-  // **上一次更大区域遗留的旧像素**。
+  // 模糊核会把采样点**推出 area**（`base + step * i`），而子矩形外是
+  // **本次没被拷贝覆盖的清屏色**（`ClearRenderTargetView` 的黑）。
   //
   // 实测症状（用户报「右和下怎么有阴影」）：gbcode 先开大菜单再开小菜单，
   // 小菜单的**右边与下边各约 15px 内沿发暗**（面板内 248→234，面板外仍 255）。
   //
-  // 判据：把大片**深色**目标撑开、再在小区域做模糊，小区域**靠近边缘的内沿**
-  // 不得被旧内容染色。只量内沿一圈（不含中心）——中心本来就采不到外侧。
+  // 判据：把目标撑大、再在小区域做模糊，小区域**靠近边缘的内沿**不得被染色。
+  // 只量内沿一圈（不含中心）——中心本来就采不到外侧。
+  //
+  // ⚠ **几何必须保证真的复用**：`acquire_color_targets` 只在两维都够大时复用，
+  // 任一维不够就重建（重建后子矩形外仍是清的，但测的就不是复用路径了）。
   if (!gpu_ready()) return;
   constexpr int kWidth = 400;
   constexpr int kHeight = 300;
@@ -145,11 +148,9 @@ ST_TEST(gpu_blur_edge_does_not_pull_stale_content_from_bigger_target) {
   paint_flat(**fresh);
   paint_flat(**reused);
 
-  // 先把**大块**填充成深色并模糊（把目标撑大、且旧内容留在纹理里）。
-  (*reused)->fill_rect(big, st::raster::Paint::solid(Color{0x10, 0x10, 0x10, 0xFF}));
+  // 先把**大块**模糊一次（把离屏目标撑大；子矩形外从此是清屏色）。
   ST_REQUIRE((*reused)->blur_region(big, 1.0f));
-  // 再把大块涂回浅色（画布上已经是浅的了），只对小块模糊。
-  (*reused)->fill_rect(big, st::raster::Paint::solid(Color{0xF0, 0xF0, 0xF0, 0xFF}));
+  // 再对小块模糊：它的采样不得越过自己的子矩形。
   ST_REQUIRE((*reused)->blur_region(small, 1.0f));
 
   // 对照组：同尺寸目标（没有“更大目标”这回事）。
@@ -174,7 +175,8 @@ ST_TEST(gpu_blur_edge_does_not_pull_stale_content_from_bigger_target) {
     }
   }
   st::log::out("[blur-edge] 内沿最大 Δ{}\n", worst);
-  // 匀色区域：采到旧内容（#101010）会被拉暗几十级；采对时两路逐位相同。
+  // 匀色区域：核越界去采**子矩形外**（本次没被拷贝覆盖的**清屏色**）会把内沿
+  // 拉暗几十级；采对时两路逐位相同。
   ST_CHECK(worst == 0);
 }
 
