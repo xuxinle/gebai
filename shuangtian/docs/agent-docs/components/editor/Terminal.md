@@ -19,7 +19,7 @@ auto w = std::make_unique<st::ui::Terminal>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`sessions` · `active_session` · `session_title` · `working_directory` · `busy` · `output` · `screen` · `cursor` · `cursor_rect` · `pty` · `alt_screen` · `scroll` · `user_scrolled` · `cursor_shape` · `screen_cursor_shape` · `monospace` · `tabs_visible` · `add_button` · `font_scale` · `scrollbar` · `running` · `running_name` · `idle_ms` · `command_issued`
+**可读写**：`sessions` · `active_session` · `session_title` · `working_directory` · `busy` · `output` · `screen` · `cursor` · `cursor_rect` · `pty` · `alt_screen` · `scroll` · `user_scrolled` · `cursor_shape` · `screen_cursor_shape` · `monospace` · `tabs_visible` · `tabs_inset` · `add_button` · `font_scale` · `scrollbar` · `running` · `running_name` · `idle_ms` · `command_issued`
 
 **只读**（能 `get`，`set` 不生效）：`selection`
 

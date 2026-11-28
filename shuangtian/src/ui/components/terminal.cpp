@@ -1157,6 +1157,14 @@ void Terminal::set_font_scale(float scale) {
   mark_layout_dirty();
 }
 
+void Terminal::set_tabs_inset_x(float inset) noexcept {
+  const float next = inset > 0.0f ? inset : 0.0f;
+  if (next == tabs_inset_x_) return;
+  tabs_inset_x_ = next;
+  mark_layout_dirty();
+  mark_dirty();
+}
+
 void Terminal::set_add_button_visible(bool value) noexcept {
   add_button_visible_ = value;
   if (tabs_ != nullptr) tabs_->set_show_add_button(value);
@@ -1416,7 +1424,11 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
   // 之前是 `control_height - 6`（28）——终端标签比编辑器标签矮一截，
   // 两者上下相邻时高度不齐（用户 2026-10-21：“tab 的大小也参照编辑器”）。
   const float tabs_h = tabs_visible_ ? metrics.control_height : 0.0f;
-  tabs_rect_ = math::Rect{rect.x, rect.y, rect.width, tabs_h};
+  // 标签栏左右避让（`tabs_inset_x_`）：宿主卡片是圆角 + `clip_children` 时，
+  // 卡片弧线会把胶囊两端与尾部钮切掉；让出去即可（输出区不让，跑贴边）。
+  const float inset_x = std::min(tabs_inset_x_, std::max(0.0f, rect.width * 0.25f));
+  tabs_rect_ = math::Rect{rect.x + inset_x, rect.y,
+                          std::max(0.0f, rect.width - inset_x * 2.0f), tabs_h};
   output_rect_ = math::Rect{rect.x, rect.y + tabs_h, rect.width,
                             std::max(0.0f, rect.height - tabs_h)};
   if (tabs_ != nullptr && !tabs_rect_.is_empty()) {
@@ -2113,7 +2125,7 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
               {"sessions", "active_session", "session_title", "working_directory", "busy",
                "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
                "user_scrolled", "cursor_shape", "screen_cursor_shape", "monospace",
-               "tabs_visible", "add_button", "font_scale", "scrollbar",
+                                                 "tabs_visible", "tabs_inset", "add_button", "font_scale", "scrollbar",
                // 命令忙闲面（供侧栏「运行」面板/自动化断言）：
                // `running` = shell 进程是否活着（旧 busy 语义，仍可读）；
                // `running_name` = 正在跑的命令名（忙时非空）；
@@ -2132,6 +2144,12 @@ auto Terminal::property_schema() const -> std::span<const PropertyDesc> {
        .summary = "活动会话下标"},
       {.name = "session_title", .type = PropertyType::Text, .summary = "活动会话的标签名"},
       {.name = "tabs_visible", .type = PropertyType::Boolean, .summary = "是否显示标签栏"},
+      {.name = "tabs_inset",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 40.0f,
+       .step = 1.0f,
+       .summary = "标签栏左右避让（宿主卡片圆角用；默认 0）"},
       {.name = "add_button", .type = PropertyType::Boolean, .summary = "标签栏是否带“+”"},
       {.name = "font_scale",
        .type = PropertyType::Number,
@@ -2233,6 +2251,7 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
   }
   if (name == "monospace") return monospace_ ? "true" : "false";
   if (name == "tabs_visible") return tabs_visible_ ? "true" : "false";
+  if (name == "tabs_inset") return std::format("{:.0f}", tabs_inset_x_);
   if (name == "add_button") return add_button_visible_ ? "true" : "false";
   if (name == "scrollbar") {
     // 回看滚动条几何（`内容高:视口高:偏移`；不可见时为空）——供自动化断言
@@ -2265,6 +2284,12 @@ auto Terminal::set_property(std::string_view name, std::string_view value) -> bo
   if (name == "tabs_visible") {
     set_tabs_visible(value == "true" || value == "1");
     mark_layout_dirty();
+    return true;
+  }
+  if (name == "tabs_inset") {
+    const auto parsed = parse_f64(value);
+    if (!parsed.has_value()) return false;
+    set_tabs_inset_x(static_cast<float>(*parsed));
     return true;
   }
   if (name == "add_button") {

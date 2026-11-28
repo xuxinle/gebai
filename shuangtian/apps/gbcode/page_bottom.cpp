@@ -90,6 +90,14 @@ namespace gbcode_ui {
       view.set_id("terminal");
       // 默认目录跟着工作区（`switch_workspace` 会同步它）。
       view.set_working_directory(workspace_);
+      // 标签栏左右避让：本面板（`editor-lower`）是**圆角 14 + `clip_children`** 的卡片，
+      // 而 `Terminal` 把标签栏铺满自己的整个宽度——卡片自身的圆角弧线会把胶囊两端
+      // 与右侧动作钮切掉一块（实测 45 行里前 18 行受影响，右上角动作钮切 18×18）。
+      // 让 `kCardCornerInset` 后实测裁切归零。
+      // ⚠ 必须放在下面那个 early return **之前**：收起面板时本函数仍每帧跑，
+      // 而避让量是布局参数，不能“收起时漏设、展开时保持上一次的值”
+      //（改默认值/换主题时才看得出那种残留）。
+      view.set_tabs_inset_x(kCardCornerInset);
       // **真终端**：起一条真 shell（伪终端 + ANSI 屏幕 + 字节级输入）。
       // 组件自己去重：已有一条就不重复开。
       //

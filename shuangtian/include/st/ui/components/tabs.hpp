@@ -6,8 +6,15 @@
 /// `context.theme` 的 token（`apply_theme` 时落进 `style_`），组件内不硬编码颜色。
 /// 标签项由本组件自绘（不产生子 Element），命中区与指示条锚点经 `tab_rect` 对外暴露。
 ///
-/// 视觉：选中项 `text` 色 + 下方 2px `primary` 指示条（按 `metrics.motion_normal` 滑动），
-/// 未选中 `text_muted`，hover 背景 `surface_alt`，disabled 统一降到 `text_faint`。
+/// **紧凑度可调量**（观感参数，不进常量）：一个标签项的宽度 =
+/// `max(文字宽, 最小标签宽) + tab_padding * 2 + 附加宽`（可关闭项加关闭区宽、
+/// 有修改点再加圆点宽）；项间距 = `tab_gap`；活动胶囊的圆角 = `tab_radius`。
+/// 三者缺省跟主题 token 走，调用方可用 `set_tab_padding` / `set_tab_gap` /
+/// `set_tab_radius` 或属性面同名项单独调——调一档不必改代码重编。
+///
+/// 视觉：选中项 = `primary_soft` 圆角胶囊底 + `primary` 主色文字（2026-10-21 去掉
+/// 底部指示条，见 `DESIGN.md` §4.2.17a）；未选中 `text_muted`，hover 背景 `surface_alt`，
+/// disabled 统一降到 `text_faint`。
 /// 可关闭项 hover 时在右侧绘制 ×（canvas 线条自绘），修改项标签旁绘制小圆点（`text_muted`）。
 ///
 /// **尾部动作区（trailing）**：右缘固定一排宿主动作钮（不随标签滚动）——内置「+」
@@ -102,6 +109,23 @@ class Tabs : public Element {
   /// ≤ 0 = 不限制。小于最小宽度时按最小宽度生效。
   void set_max_tab_width(float width) noexcept;
   [[nodiscard]] auto max_tab_width() const noexcept -> float { return max_tab_width_; }
+
+  // —— 紧凑度（观感可调量：调一档不重编）——
+  ///
+  /// 缺省由 `apply_theme` 从主题 token 落位（内边距/间距 = `metrics.space_md` /
+  /// `metrics.space_xs`，圆角 = `metrics.radius_sm`）；显式设过之后主题不再覆盖
+  /// （与文本显式覆盖同一条惯例）。三项都影响布局，改后会重算宽度缓存。
+  ///
+  /// 标签项宽度 = `max(文字宽, 最小宽) + tab_padding * 2 + 附加宽`；
+  /// 项间距 = `tab_gap`；活动胶囊圆角 = `tab_radius`。
+  void set_tab_padding(float padding);
+  [[nodiscard]] auto tab_padding() const noexcept -> float { return tab_padding_; }
+  /// 标签项之间的间距（不包含标签左右内边距）。
+  void set_tab_gap(float gap);
+  [[nodiscard]] auto tab_gap() const noexcept -> float { return gap_; }
+  /// 活动胶囊（与 hover 底块）的圆角半径。
+  void set_tab_radius(float radius);
+  [[nodiscard]] auto tab_radius() const noexcept -> float { return tab_radius_; }
 
   /// 标签项矩形（命中/指示条锚定/测试用；未布局或越界时为空矩形）。
   [[nodiscard]] auto tab_rect(std::size_t index) const -> math::Rect;
@@ -238,7 +262,18 @@ class Tabs : public Element {
   mutable std::vector<float> offsets_{};
   mutable float total_width_{0.0f};      ///< 标签条总宽（含项间距）
   std::size_t active_{0};
-  float gap_{0.0f};         ///< 标签项间距（`metrics.space_xs`）
+  float gap_{0.0f};         ///< 标签项间距（`metrics.space_xs`；可调：`tab_gap`）
+  float tab_padding_{0.0f}; ///< 标签项左右内边距（可调：`tab_padding`）
+  /// 活动胶囊（与 hover 底块）的圆角（可调：`tab_radius`）。
+  ///
+  /// 为何独立于 `style_.radius`：那一个量的是“组件本体”的圆角（透明背景，看不见），
+  /// 而用户看到的圆角是**每个标签项底块**的——旧实现直接借 `metrics.radius_md`（10），
+  /// 在 26~34px 高的胶囊上已经是“圆润的胶囊”，与旁边方正的标签不一致。
+  float tab_radius_{0.0f};
+  /// 是否由调用方**显式设过**紧凑度（设过之后 `apply_theme` 不再用主题 token 覆盖）。
+  bool tab_padding_explicit_{false};
+  bool tab_gap_explicit_{false};
+  bool tab_radius_explicit_{false};
   int hover_index_{-1};     ///< 指针悬停项（-1 无）
   bool hover_add_{false};   ///< 「+」悬停（高亮它）
   int hover_trailing_{-1};  ///< 尾部动作钮悬停（-1 无）

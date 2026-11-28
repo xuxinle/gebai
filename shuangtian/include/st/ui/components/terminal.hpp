@@ -335,6 +335,15 @@ class Terminal : public Element {
   /// 标签栏可见（单会话场景可关；默认 true）。
   void set_tabs_visible(bool value) noexcept { tabs_visible_ = value; }
   [[nodiscard]] auto tabs_visible() const noexcept -> bool { return tabs_visible_; }
+  /// 标签栏**左右避让**（默认 0）。
+  ///
+  /// 为何需要它：`Terminal` 把标签栏铺满自己的整个宽度，当它被放进一个
+  /// **圆角 + `clip_children`** 的卡片（如 gbcode 的面板卡片）时，卡片自身的
+  /// 圆角弧线会把胶囊两端与尾部动作钮切掉一块（实测 45 行里前 18 行受影响，
+  /// 右上角动作钮切 18×18）。宿主把卡片半径对应的避让量传进来即可。
+  /// 只影响标签栏（输出区不避：打字区的边线本就该贴边）。
+  void set_tabs_inset_x(float inset) noexcept;
+  [[nodiscard]] auto tabs_inset_x() const noexcept -> float { return tabs_inset_x_; }
   /// 标签栏「+」（复用 `Tabs` 的能力；默认 true）。装了 `on_session_add`
   /// 才有点击效果。
   void set_add_button_visible(bool value) noexcept;
@@ -481,6 +490,8 @@ class Terminal : public Element {
   std::string cwd_default_{};
   bool monospace_{true};
   bool tabs_visible_{true};
+  /// 标签栏左右避让（宿主卡片圆角用；见 `set_tabs_inset_x`）。
+  float tabs_inset_x_{0.0f};
   bool add_button_visible_{true};
   float font_scale_{1.0f};
   /// 主题基准字号（`apply_theme` 存下，渲染时 × `font_scale_`）。

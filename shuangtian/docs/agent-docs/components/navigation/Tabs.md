@@ -19,7 +19,7 @@ auto w = std::make_unique<st::ui::Tabs>();
 
 ## 属性面（控制通道 `get` / `set`）
 
-**可读写**：`active` · `label` · `options` · `scroll` · `show_add` · `max_tab_width` · `trailing`
+**可读写**：`active` · `label` · `options` · `scroll` · `show_add` · `max_tab_width` · `tab_padding` · `tab_gap` · `tab_radius` · `trailing`
 
 > 只列组件自己声明的属性；`id` / `visible` / `x` / `width` / `background` 这类**通用属性**由 `Element` 统一提供，任何组件都能读写（见 `overview/properties.md`）。
 
@@ -31,7 +31,7 @@ auto w = std::make_unique<st::ui::Tabs>();
 
 ## 设计章节
 
-`DESIGN.md` §4.5
+`DESIGN.md` §4.5 · `DESIGN.md` §4.2.17
 
 > 章节号是稳定接口（源码注释按号寻址），按号 grep 不要按内容找。
 

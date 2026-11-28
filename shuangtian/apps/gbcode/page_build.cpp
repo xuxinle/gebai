@@ -873,8 +873,13 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
       //
       // 为何高度 34 → 35：34 是标签条本体，多的 1px 是那条线。
       // 不把线画在 `Tabs` 内部（它同时还服务终端标签，而那里不需要外框线）。
-      (void)row(c, {.gap = 0.0f, .height = 34.0f, .surface = Element::Surface::Content,
-                    .id = "tabbar"}, [&] {
+      //
+      // ⚠ `padding_x = kCardCornerInset` 不是装饰：外层编辑器卡片是**圆角 14 +
+      // `clip_children`**，标签条贴到卡片顶边时，卡片自身的圆角弧线会把胶囊两端
+      // 与右侧尾部钮切掉一块（实测最大 2.7 逻辑 px，右上角尾部钮切 18×18）。
+      // 让 4px 后实测裁切归零（同位置圆角 14 与 0 逐像素无差异）。
+      (void)row(c, {.gap = 0.0f, .padding_x = kCardCornerInset, .height = 34.0f,
+                    .surface = Element::Surface::Content, .id = "tabbar"}, [&] {
         Element& tabs_element = dsl::tabs(
             c, tabs, active_index, [this](std::size_t index) { switch_tab(index); },
             [this](const std::string& key) { request_close(key); },

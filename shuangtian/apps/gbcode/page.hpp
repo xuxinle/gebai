@@ -85,6 +85,20 @@ using namespace st::ui::dsl;
 inline constexpr float kPanelRadius = 14.0f;
 inline constexpr float kPanelGap = 4.0f;
 
+/// 卡片**圆角内容避让**（逻辑 px）：卡片开 `clip_children` 后，子元素会被圆角弧线裁掉，
+/// 而弧线在角上占用的最大横向距离恰好等于半径——所以顶到边的条带（标签栏、状态行）
+/// 必须左右各让出这么多才能完整显示。
+///
+/// 为何不是让满一个半径（14）：左右各让 14 会让标签栏少 28px（实测标签可用宽
+/// 902 → 874），而**弧线的横向侵占只发生在上/下各 r 行内**，标签条自己 34 高、
+/// 贴着卡片顶边走时，胶囊两端只被切掉最多 2.7 逻辑 px（实测 r14 / 1.5x DPI：
+/// 45 行里前 18 行受影响，最大 4 物理 px）。让 4 已让实测裁切归零（`qa` 截图比对
+/// 圆角 14 与 0 无差异像素），且保留卡片的圆角身份。
+///
+/// 让位由 `padding_x` 承担（不是给 `Tabs` 加内边距）：这样尾部动作钮（预览/清屏/
+/// 收起/「+」）同样避开弧线——它们也在同一条带里，实测右上角被切 18×18。
+inline constexpr float kCardCornerInset = 4.0f;
+
 struct CodeEditorPage : Component {
  public:
   CodeEditorPage(std::string workspace, std::string tool_root,

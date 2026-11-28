@@ -905,3 +905,91 @@ ST_TEST(ui_tabs_trailing_sync_rebuilds_to_target) {
   // 回调仍可用（复用槽的 callback 被更新过）。
   (void)clicks;
 }
+
+/// 紧凑度三量（`tab_padding` / `tab_gap` / `tab_radius`）必须真的改变几何。
+///
+/// 为何要这条：这三个参数都是“看着不对就调一档”的观感量，而它们同时参与
+/// **布局**（标签项宽/项间距）与**绘制**（胶囊圆角）。若只接进了 `get`/`set`
+/// 而没接进 `rebuild_widths`/`paint_content`，症状就是“`get` 回读变了、画面没动”——
+/// 比“参数不存在”更难查（与 §4.2.6 的 `request_theme_refresh` 同一类静默）。
+///
+/// 三条断言各是一个正交量：内边距管**单项宽**、间距管**项间距**、圆角管**像素**。
+ST_TEST(ui_tabs_compactness_controls_change_geometry) {
+  // ① 内边距：+8 ⇒ 单项宽 +16（左右各一）。
+  {
+    TabsFixture fixture({"AAAA", "BBBB"});
+    auto* tabs = fixture.tabs;
+    ST_REQUIRE(tabs != nullptr);
+    fixture.harness.root.layout(true);
+    const float base_pad = tabs->tab_padding();
+    const float base_width = tabs->tab_rect(0).width;
+
+    tabs->set_tab_padding(base_pad + 8.0f);
+    fixture.harness.root.layout(true);
+    ST_CHECK_NEAR(tabs->tab_rect(0).width - base_width, 16.0f, 0.51f);
+
+    // 显式值不被主题回写（`apply_theme` 每帧跑，`layout` 会再跑一次）。
+    fixture.harness.root.layout(true);
+    ST_CHECK_NEAR(tabs->tab_padding(), base_pad + 8.0f, 0.01f);
+  }
+
+  // ② 间距：+6 ⇒ 第二项左缘右移 6（单项宽不变）。
+  {
+    TabsFixture fixture({"AAAA", "BBBB"});
+    auto* tabs = fixture.tabs;
+    ST_REQUIRE(tabs != nullptr);
+    fixture.harness.root.layout(true);
+    const float base_gap = tabs->tab_gap();
+    const Rect first_before = tabs->tab_rect(0);
+    const Rect second_before = tabs->tab_rect(1);
+
+    tabs->set_tab_gap(base_gap + 6.0f);
+    fixture.harness.root.layout(true);
+    ST_CHECK_NEAR(tabs->tab_rect(1).x - tabs->tab_rect(0).x,
+                  second_before.x - first_before.x + 6.0f, 0.51f);
+    ST_CHECK_NEAR(tabs->tab_rect(0).width, first_before.width, 0.01f);
+  }
+
+  // ③ 圆角：真正影响像素——活动胶囊的底色**面积**随半径变大而减少（四角被削）。
+  //
+  // 为何不能量“中线列高度”：圆角只切四角，竖直中线那一列高度**不随半径变**（实测恒等）。
+  // 面积是这里唯一能分开“方形/圆角”的量：半径 r 切掉的面积 = (4-π)r²，
+  // r=10 时约 86 个逻辑像素，远超抗锯齿噪声。
+  {
+    TabsFixture fixture({"AAAA", "BBBB"});
+    auto& root = fixture.harness.root;
+    auto* tabs = fixture.tabs;
+    ST_REQUIRE(tabs != nullptr);
+    ST_CHECK(tabs->set_property("active", "0"));
+
+    const auto capsule_area = [&]() -> int {
+      root.layout(true);
+      st::raster::Canvas canvas(static_cast<int>(root.viewport().width),
+                                static_cast<int>(root.viewport().height));
+      canvas.clear(root.theme().colors().bg);
+      root.paint(canvas);
+      const auto capsule = root.theme().colors().primary_soft;
+      // 取样区避开文字：只数活动标签**左侧内边距带**（胶囊左缘起 0~10px）
+      // ——圆角就在这一带把四个角切掉，而文字离左缘至少 `tab_padding`。
+      const Rect tab = tabs->tab_rect(0);
+      int count = 0;
+      for (int y = static_cast<int>(tab.y); y < static_cast<int>(tab.bottom()); ++y) {
+        for (int x = static_cast<int>(tab.x);
+             x < static_cast<int>(tab.x + 12.0f); ++x) {
+          const auto pixel = canvas.pixel_at_point(Point{static_cast<float>(x) + 0.5f,
+                                                         static_cast<float>(y) + 0.5f});
+          if (pixel.r == capsule.r && pixel.g == capsule.g && pixel.b == capsule.b) ++count;
+        }
+      }
+      return count;
+    };
+
+    tabs->set_tab_radius(0.0f);
+    const int square = capsule_area();
+    tabs->set_tab_radius(10.0f);
+    const int rounded = capsule_area();
+    ST_CHECK(square > 0);
+    ST_CHECK(rounded > 0);
+    ST_CHECK(rounded < square);   // 圆角越大，四角被切越多
+  }
+}

@@ -391,3 +391,62 @@ ST_TEST(terminal_indicator_follows_active_session) {
   // （resolve_indicator 是私有——用像素验证走 paint；这里以状态断言为主，
   //   像素验证交给 e2e。至少：再次 layout + paint 后指示条不回退。）
 }
+
+ST_TEST(terminal_tabs_inset_keeps_tabs_off_card_corners) {
+  // 回归：面板卡片是圆角 + `clip_children` 时，卡片自身的圆角弧线会把标签栏两端的
+  // 胶囊与尾部动作钮切掉一块（实测：45 行里前 18 行受影响，右上角动作钮切 18×18）。
+  // `set_tabs_inset_x` 让标签栏从卡片边缘内缩，从而完整避开弧线。
+  //
+  // 两条正交断言：
+  //   ① 标签栏矩形随 inset 内缩（几何事实，不依赖字体）；
+  //   ② inset 不会把标签栏挤成负宽（夹取上限 25%）。
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{900.0f, 500.0f});
+  auto owned = std::make_unique<Terminal>();
+  Terminal* terminal = owned.get();
+  root.set_content(std::move(owned));
+  root.layout(true);
+
+  const st::math::Rect base_tabs = terminal->tabs_rect();
+  ST_REQUIRE(!base_tabs.is_empty());
+  ST_CHECK_EQ(terminal->tabs_inset_x(), 0.0f);
+
+  terminal->set_tabs_inset_x(4.0f);
+  root.layout(true);
+  const st::math::Rect inset_tabs = terminal->tabs_rect();
+  ST_CHECK_NEAR(inset_tabs.x - base_tabs.x, 4.0f, 0.01f);
+  ST_CHECK_NEAR(base_tabs.right() - inset_tabs.right(), 4.0f, 0.01f);
+
+  // 属性面：可读可写（自动化直接设，不必重编）：
+  ST_CHECK_EQ(terminal->get_property("tabs_inset").value_or(""), std::string{"4"});
+  ST_CHECK(terminal->set_property("tabs_inset", "6"));
+  ST_CHECK_EQ(terminal->tabs_inset_x(), 6.0f);
+
+  // 极端值：夹到 25% 宽，不把标签栏挤成负宽。
+  terminal->set_tabs_inset_x(10000.0f);
+  root.layout(true);
+  ST_CHECK(terminal->tabs_rect().width >= 0.0f);
+  ST_CHECK(terminal->tabs_rect().width > base_tabs.width * 0.4f);
+
+  // 负值归零（不作为“反向内缩”的隐藏语义）。
+  terminal->set_tabs_inset_x(-5.0f);
+  ST_CHECK_EQ(terminal->tabs_inset_x(), 0.0f);
+}
+
+ST_TEST(terminal_output_area_is_not_inset) {
+  // 反向护栏：避让**只作用于标签栏**——输出区（打字/读输出的地方）必须仍贴边，
+  // 否则文字整体右移 4px，与光标/选区/命中的口径一起错。
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{900.0f, 500.0f});
+  auto owned = std::make_unique<Terminal>();
+  Terminal* terminal = owned.get();
+  root.set_content(std::move(owned));
+  root.layout(true);
+  const st::math::Rect out_base = terminal->output_rect();
+
+  terminal->set_tabs_inset_x(4.0f);
+  root.layout(true);
+  const st::math::Rect out_inset = terminal->output_rect();
+  ST_CHECK_NEAR(out_inset.x, out_base.x, 0.01f);
+  ST_CHECK_NEAR(out_inset.width, out_base.width, 0.01f);
+}

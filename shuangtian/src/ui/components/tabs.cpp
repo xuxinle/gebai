@@ -26,15 +26,22 @@ namespace {
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token）——
 constexpr float k_min_tab_width = 36.0f;    // 标签项最小宽度（避免空标签塌陷）
 
-/// 标签**文字左右内边距**（逻辑 px）。
+/// 标签**文字左右内边距**的缺省值（逻辑 px）。
 ///
-/// `metrics.space_md`（12）偏小：实测标签文字距左缘只有 12px、与关闭钮只隔 8px，
-/// 密集排列时读起来像“连成一片”（VSCode 是 12 + 左侧 16 的不对称额余）。
-/// 16 与 IDE 的一档对齐，且正好等于 `space_lg`，让“标签内边距 = 内容内边距”
-/// 成为一条可陈述的规则。
-constexpr float k_tab_pad = 16.0f;
+/// 内边距是**观感可调量**：`set_tab_padding` / 属性面 `tab_padding`。
+/// `apply_theme` 每帧把“主题 token 或调用方显式值”落进 `tab_padding_`，
+/// 所以这里的常量只在主题缺 token 时兜底。
+///
+/// 12（`space_md`）：旧值是 16，实测标签内两侧留白过多、一排标签占宽偏大；
+/// 12 与控件内边距同档，“标签内边距 = 内容内边距”成一条可陈述的规则。
+constexpr float k_default_tab_pad = 12.0f;
+/// 活动胶囊/ hover 底块的**上下**余白（左右已由项间距 `tab_gap` 留出）。
+///
+/// 4 → 2：胶囊上下各让 4px 时只剩 26px 高（标签条 34），视觉上像一条**细横条**
+/// 浮在中间；2 让胶囊更贴近整条高度，行内阅读更紧凑。
+constexpr float k_capsule_v_inset = 2.0f;
 /// 关闭钮命中区边长（大于视觉 × 本体，好点）。
-constexpr float k_close_zone = 22.0f;
+constexpr float k_close_zone = 20.0f;
 constexpr float k_close_glyph = 9.0f;       // × 视觉尺寸（8 在 1.5x DPI 下偏细）
 constexpr float k_modified_dot = 6.0f;      // 修改点直径
 constexpr float k_arrow_zone = 18.0f;       // 溢出箭头命中区宽
@@ -254,6 +261,36 @@ void Tabs::set_max_tab_width(float width) noexcept {
   mark_dirty();
 }
 
+void Tabs::set_tab_padding(float padding) {
+  const float next = std::max(0.0f, padding);
+  tab_padding_explicit_ = true;
+  if (next == tab_padding_) return;
+  tab_padding_ = next;
+  widths_.clear();
+  total_width_ = 0.0f;
+  mark_layout_dirty();
+  mark_dirty();
+}
+
+void Tabs::set_tab_gap(float gap) {
+  const float next = std::max(0.0f, gap);
+  tab_gap_explicit_ = true;
+  if (next == gap_) return;
+  gap_ = next;
+  widths_.clear();
+  total_width_ = 0.0f;
+  mark_layout_dirty();
+  mark_dirty();
+}
+
+void Tabs::set_tab_radius(float radius) {
+  const float next = std::max(0.0f, radius);
+  tab_radius_explicit_ = true;
+  if (next == tab_radius_) return;
+  tab_radius_ = next;
+  mark_dirty();
+}
+
 void Tabs::set_active(std::size_t index, bool notify) {
   if (labels_.empty()) return;
   const std::size_t clamped = std::min(index, labels_.size() - 1);
@@ -302,7 +339,7 @@ auto Tabs::close_rect(std::size_t index) const -> math::Rect {
   if (tab.is_empty()) return math::Rect{};
   // × 固定在标签右侧（留 padding 内缩），命中区稍大。
   const float y = tab.y + (tab.height - k_close_zone) * 0.5f;
-  return math::Rect{tab.right() - k_close_zone - style_.padding.horizontal() * 0.5f, y,
+  return math::Rect{tab.right() - k_close_zone - tab_padding_ * 0.5f, y,
                     k_close_zone, k_close_zone};
 }
 
@@ -477,7 +514,7 @@ auto Tabs::tab_index_at(math::Point point) const -> std::optional<std::size_t> {
 
 void Tabs::rebuild_widths(const RenderContext& context) const {
   const TextPort& port = text_port_of(context);
-  const float pad = k_tab_pad;
+  const float pad = tab_padding_;
   widths_.clear();
   widths_.reserve(labels_.size());
   float total = 0.0f;
@@ -528,7 +565,19 @@ void Tabs::apply_theme(const Theme& theme) {
   style_.text_align = TextAlign::Center;
   style_.direction = FlexDirection::Row;
   style_.align_items = Align::Center;
-  gap_ = metrics.space_xs;
+  // 紧凑度三量：缺省跟主题 token（内边距 12 = `space_md`、项间距 4 = `space_xs`、
+  // 胶囊圆角 6 = `radius_sm`）；调用方显式设过就不覆盖（与文本显式覆盖同一条惯例）。
+  //
+  // 为何胶囊圆角不再是 `radius_md`（10）：那是 26~34px 高胶囊的“半圆”值，
+  // 圆角吃掉了标签两侧一大截视觉宽，与紧邻的方正控件不在一个语言里。
+  // 6（`radius_sm`）与大号按钮的圆角同档，“标签 = 矮一档的圆角按钮”读起来才不散。
+  if (!tab_padding_explicit_) tab_padding_ = metrics.space_md;
+  if (!tab_gap_explicit_) gap_ = metrics.space_xs;
+  if (!tab_radius_explicit_) tab_radius_ = metrics.radius_sm;
+  // 未显式设过且主题也没给（`space_md` 为 0 的极端主题）时用兜底值。
+  // ⚠ 只在**非显式**时兜底：否则 `set tab_padding=0`（真的想贴边）会被每帧抹回 12，
+  // 症状是“`get` 读完是 12、设 0 也没报错、就是不变”。
+  if (!tab_padding_explicit_ && tab_padding_ <= 0.0f) tab_padding_ = k_default_tab_pad;
   // 显式排版覆盖最后回放（与 Text/Button 同口径）：字号覆盖直接改写 style_，
   // 颜色覆盖存起来供 paint_content 的文本取色用（三态色在绘制时才解析）。
   apply_text_overrides();
@@ -610,6 +659,12 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
   const Metrics& metrics = context.theme.metrics();
   const TextPort& port = text_port_of(context);
   const float radius = style_.radius > 0.0f ? style_.radius : metrics.radius_sm;
+  // 标签项底块（活动胶囊 / hover）的圆角走独立可调量：它是**用户看到的那个圆角**，
+  // 与组件本体的 `style_.radius`（透明背景，看不见）不是一回事。
+  //
+  // ⚠ 判“没设过”不能用 `> 0`：`tab_radius = 0`（直角）是**合法值**，
+  // 当成未设会静默退回圆角（症状：`set tab_radius=0` 回读 0、画面没变化）。
+  const float tab_radius = tab_radius_explicit_ ? tab_radius_ : metrics.radius_sm;
   const float line = port.line_height(style_.font_size);
   const bool clipped = max_scroll() > 0.0f;
   if (clipped) canvas.push_clip_rect(bounds_);
@@ -649,30 +704,32 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     const bool is_active = index == active_;
     const bool is_hovered = static_cast<int>(index) == hover_index_;
 
-    // **活动标签的胶囊底块**（选中态的主要表达）。
+        // **活动标签的胶囊底块**（选中态的主要表达）。
     //
     // 历史沿革：
     //   · 最早：底部 2px `primary` 指示条（用户 2026-10-21 要求去掉下划线）；
     //   · 中间：用 `surface`（比标签条底亮一档）——但现在标签条已与编辑器**同色**
-    //   （`Surface::Content`），`surface` 与它几乎无差别，选中态等于看不见；
-    //   · 现在：`primary_soft` 浅色底 + `primary` 主色文字（与菜单栏展开项同一套语言），
-    //     圆角用 `radius_md`（更圆润，胶囊感更强）。
+    //     （`Surface::Content`），`surface` 与它几乎无差别，选中态等于看不见；
+    //   · 现在：`primary_soft` 浅色底 + `primary` 主色文字（与菜单栏展开项同一套语言）。
     //
-    // 四周留 `space_xs` 的缝：不留缝的相邻胶囊会粘成一条。
+    // 圆角与上下余白都是**可调观感量**（`tab_radius` / `k_capsule_v_inset`）：
+    // 旧值（`radius_md` 10 + 上下各 4）在 34 高的标签条上让胶囊只有 26 高、
+    // 且两端半圆占到宽度的近一成，整个标签条看着“散而矮”。
     if (is_active && enabled_) {
       const math::Rect backdrop = tab.inset(
-          math::Insets{0.0f, metrics.space_xs, 0.0f, metrics.space_xs});
+          math::Insets{0.0f, k_capsule_v_inset, 0.0f, k_capsule_v_inset});
       if (!backdrop.is_empty()) {
-        canvas.fill_rect(backdrop, raster::Paint::solid(colors.primary_soft), metrics.radius_md);
+        canvas.fill_rect(backdrop, raster::Paint::solid(colors.primary_soft), tab_radius);
       }
     }
 
     if (is_hovered && !is_active && enabled_) {
-      // hover 背景：比胶囊更淡（`surface_alt`），同样是圆角块。
+      // hover 背景：比胶囊更淡（`surface_alt`），同一个圆角块（否则 hover 与选中
+      // 两侧圆角不一致，鼠标划过时能看出“形状在变”）。
       const math::Rect backdrop = tab.inset(
-          math::Insets{0.0f, metrics.space_xs, 0.0f, metrics.space_xs});
+          math::Insets{0.0f, k_capsule_v_inset, 0.0f, k_capsule_v_inset});
       if (!backdrop.is_empty()) {
-        canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface_alt), radius);
+        canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface_alt), tab_radius);
       }
     }
 
@@ -965,6 +1022,9 @@ auto Tabs::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "scroll") return std::format("{}", scroll_offset_);
   if (name == "show_add") return show_add_ ? std::string("true") : std::string("false");
   if (name == "max_tab_width") return std::format("{:.0f}", max_tab_width_);
+  if (name == "tab_padding") return std::format("{:.0f}", tab_padding_);
+  if (name == "tab_gap") return std::format("{:.0f}", gap_);
+  if (name == "tab_radius") return std::format("{:.0f}", tab_radius_);
   // 尾部钮的**可观测面**：`图标:激活:可用`，逗号分隔。
   //
   // 为何要暴露：“预览钮在激活时高亮”是**像素级**产物（高亮色截图上不好断言），
@@ -1003,6 +1063,18 @@ auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
       return true;
     }
     return false;
+  }
+  if (name == "tab_padding" || name == "tab_gap" || name == "tab_radius") {
+    const auto parsed = parse_f64(value);
+    if (!parsed.has_value()) return false;
+    if (name == "tab_padding") {
+      set_tab_padding(static_cast<float>(*parsed));
+    } else if (name == "tab_gap") {
+      set_tab_gap(static_cast<float>(*parsed));
+    } else {
+      set_tab_radius(static_cast<float>(*parsed));
+    }
+    return true;
   }
   if (name == "active") {
     if (const auto index = parse_u64(value); index.has_value()) {
@@ -1044,7 +1116,9 @@ auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
 }
 
 auto Tabs::property_names() const -> std::vector<std::string_view> {
-  return Element::with_universal({"active", "label", "options", "scroll", "show_add", "max_tab_width", "trailing"});
+  return Element::with_universal({"active", "label", "options", "scroll", "show_add",
+                                  "max_tab_width", "tab_padding", "tab_gap", "tab_radius",
+                                  "trailing"});
 }
 
 auto Tabs::property_schema() const -> std::span<const PropertyDesc> {
@@ -1062,6 +1136,24 @@ auto Tabs::property_schema() const -> std::span<const PropertyDesc> {
        .max_value = 600.0f,
        .step = 4.0f,
        .summary = "单个页签的最大宽度（超出则省略）"},
+      {.name = "tab_padding",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 32.0f,
+       .step = 1.0f,
+       .summary = "页签文字左右内边距（缺省 12，跟主题 space_md）"},
+      {.name = "tab_gap",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 24.0f,
+       .step = 1.0f,
+       .summary = "页签之间的间距（缺省 4，跟主题 space_xs）"},
+      {.name = "tab_radius",
+       .type = PropertyType::Number,
+       .min_value = 0.0f,
+       .max_value = 20.0f,
+       .step = 1.0f,
+       .summary = "活动页签胶囊底的圆角（缺省 6，跟主题 radius_sm）"},
   };
   return kDescs;
 }
