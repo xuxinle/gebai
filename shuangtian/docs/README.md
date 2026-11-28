@@ -81,6 +81,7 @@
 | 写声明式界面 | `declarative.md`（**§5.5「调用方必须知道的三件事」是硬契约**） | 详读·接口 |
 | 用 XML + JS 写应用 | `xml-ui.md`（`apps/xiangqi` 通路） | 详读 |
 | 改文件即生效（不重编不重启） | `hot-reload.md`（`st::ui::HotReload`；`../DESIGN.md` §4.2.28） | 速查 |
+| **写网络代码**（TCP/HTTP/WS/TLS，客户端与服务端） | **`NETWORK.md`**（三十秒选型 + 可跑示例 + 六条纪律；`../DESIGN.md` §4.10） | 速查 |
 | 写测试 | `../CONVENTIONS.md` §7；"假绿测试"的教训在 `../DESIGN.md` §8.3.2 | —— |
 | 用真按键验界面交互（输入/快捷键/回显） | `../CONVENTIONS.md` §7.7.1（三条注入通道怎么选）+ §7.7.2 | —— |
 | 判断一条结论可不可信（判据自己会不会错） | `../CONVENTIONS.md` §7.8（判据先在已知样本上自验） | —— |
@@ -147,6 +148,7 @@
 | [`APPS_E2E.md`](APPS_E2E.md) | 应用 e2e 驱动入口表 | 速查 | 活 |
 | [`STRUCTURE.md`](STRUCTURE.md) | 模块分层与已知违规 | 速查 | 活 |
 | [`AS_LIBRARY.md`](AS_LIBRARY.md) | 把霜天当通用 C++ 库用 | 详读 | 活 |
+| [`NETWORK.md`](NETWORK.md) | **网络层速查**：TCP/HTTP/WS/TLS 客户端与服务端的选型、示例、六条纪律 | 速查 | 活 |
 | [`independent_project.md`](independent_project.md) | 怎么用本框架建**自己的**应用工程 | 详读 | 活 |
 | [`hot-reload.md`](hot-reload.md) | 改文件即生效（原子替换、指纹判变、清场语义） | 速查 | 活 |
 | [`script_design.md`](script_design.md) | **剧本设计模板**（裁云/镂月通用六部分） | 详读 | 活 |

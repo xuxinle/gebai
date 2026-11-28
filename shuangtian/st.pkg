@@ -326,11 +326,11 @@
         "src/pkg/*"
       ]
     },
-    "library_usage_check": {
-      "//note": "验证 `docs/AS_LIBRARY.md` 的示例：只链 `st_core` 库（不带任何 UI/raster 单元）就能编出一个能跑的程序。它同时是「库是否真的自包含」的回归——若某个通用模块偷偷依赖了界面层，这里会链接失败。",
+    "tls_probe": {
+      "//note": "TLS/HTTPS/WSS 真实链路探针。",
       "kind": "executable",
       "sources": [
-        "tools/library_usage_check.cpp"
+        "tools/tls_https_probe.cpp"
       ],
       "libraries": [
         "st_core"

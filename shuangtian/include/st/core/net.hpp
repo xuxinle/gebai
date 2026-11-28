@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -79,6 +80,14 @@ class TcpListener {
   [[nodiscard]] auto host() const -> std::string { return host_; }
 
   [[nodiscard]] auto accept() -> Result<TcpStream>;
+  /// 带超时的接受：`timeout_ms` 内没有连接进来返回 `std::nullopt`（**不是错误**）。
+  ///
+  /// 为何需要它：`accept()` 是死阻塞的（内部 would-block 时 500 ms 一轮死循环），
+  /// 服务端主循环里一旦没有连接就把整个线程按在那里，连「该退出了」都看不见。
+  /// 有了本方法，服务端循环可以写成
+  /// `while (!stop) if (auto s = listener.accept_for(200)) serve(*s);` ——
+  /// 每 200 ms 回到调用方一次，停止标志/别的活都能做。
+  [[nodiscard]] auto accept_for(int timeout_ms) -> Result<std::optional<TcpStream>>;
   [[nodiscard]] auto wait_readable(int timeout_ms) -> Result<bool>;
   void set_nonblocking(bool enabled);
   /// 平台等待句柄：参考 `TcpStream::native_handle`（主循环统一事件等待用）。

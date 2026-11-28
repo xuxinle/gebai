@@ -368,6 +368,23 @@ auto TcpListener::accept() -> Result<TcpStream> {
   }
 }
 
+auto TcpListener::accept_for(int timeout_ms) -> Result<std::optional<TcpStream>> {
+  if (handle_ < 0) return unexpected(ErrorCode::Invalid, "监听器已关闭");
+  // 用 poll 等一次：只等这么久，不等就返回 nullopt
+  auto ready = wait_handle(to_handle(handle_), true, timeout_ms);
+  if (!ready) return forward_error(ready.error());
+  if (!*ready) return std::optional<TcpStream>{};   // 超时：没有连接，不是错
+  // 可读了：accept 一次（此时应当立即成功；失败分类照旧）
+  const NativeHandle client = ::accept(to_handle(handle_), nullptr, nullptr);
+  if (!is_valid_handle(client)) {
+    if (would_block(get_socket_error())) return std::optional<TcpStream>{};   // 竞争：对端又走了
+    return unexpected(ErrorCode::Io, std::string("accept 失败: ").append(last_error_text()));
+  }
+  TcpStream stream(from_handle(client));
+  stream.set_no_delay(true);
+  return std::optional<TcpStream>{std::move(stream)};
+}
+
 auto TcpListener::wait_readable(int timeout_ms) -> Result<bool> {
   if (handle_ < 0) return unexpected(ErrorCode::Invalid, "监听器已关闭");
   return wait_handle(to_handle(handle_), true, timeout_ms);

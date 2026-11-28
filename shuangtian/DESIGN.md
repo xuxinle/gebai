@@ -6696,6 +6696,124 @@ class Compositor {                                  // UI 图层 → GPU 合成
 ### 4.9 pkg（stpm）
 见 §7。
 
+### 4.10 net（TCP / HTTP / WS / TLS）
+
+网络层是一组**零第三方依赖的自研实现**，分层清晰、客户端与服务端对称：
+
+| 层次 | 头文件 | 客户端 | 服务端 |
+|---|---|---|---|
+| TCP | `st/core/net.hpp` | `connect_tcp` | `TcpListener::bind` / `accept` / `accept_for` |
+| TLS | `st/net/tls.hpp` | `TlsStream::connect` | ——（只做出站，见下） |
+| HTTP | `st/net/http.hpp` / `http_server.hpp` | `HttpClient` | `HttpServer` + `HttpRequestParser` |
+| WebSocket | `st/net/ws.hpp` / `ws_server.hpp` | `WsSession(client=true)` | `accept_handshake` → `ServerSession` |
+
+#### 4.10.1 平台 TLS 是「运行时可选」，不是编译期依赖
+
+- **Windows**：Schannel（系统自带，零依赖）
+- **POSIX**：运行时 `dlopen` OpenSSL——不链接、找不到时 `connect` 明确报错并给替代方案
+
+这条口径来自 CONVENTIONS §1「系统能力一律运行时 dlopen」：目标机常常有运行库而无 `-dev` 头文件，
+编译期依赖会让「连无头都编不出来」。
+
+#### 4.10.2 服务端为什么是「一连接一请求一响应」（2026-11-28 落地）
+
+补服务端时有意**只做最小面**：`HttpServer` 不做线程池、路由表、中间件、keep-alive 连接池、HTTP/2。
+
+理由：这三样东西方向都是「框架」，而库应当只提供**可组合的积木**：
+
+| 想要 | 本层的给法 | 而不是 |
+|---|---|---|
+| 并发 | 调用方起线程，每线程一个 listener/连接 | 内建线程池（锁策略、背压、关停顺序全得替用户决定）|
+| 路由 | handler 里按 `request.path` 自己分 | 路由表 DSL（表达力永远不够，还得学）|
+| 长连接 | 不做（响应固定 `Connection: close`）| 连接池 + 超时淘汰 + 分片状态机（HTTP/1.1 复用是一整章坑）|
+
+**`accept_for` 是服务端循环的唯一必需品**：原 `accept()` 在内部 would-block 时死等 500 ms 一轮，
+没有连接时把线程按在那里、连「该退出了」都看不见。有了带超时的接受，循环可以写成
+`while (!stop) if (auto s = listener.accept_for(200)) serve(*s);` ——每 200 ms 回手一次。
+
+#### 4.10.3 请求解析器与响应解析器「同构」
+
+`HttpRequestParser` / `HttpResponseParser` 是同一套状态机的两个方向，差别只有两处：
+
+- 首行：`METHOD path HTTP/1.x` vs `HTTP/1.x status reason`；
+- **体定界**：响应对「无 Content-Length 且非 chunked」是**读到连接关闭**；
+  请求方向则**必须是「无体」**——否则服务端会把连接挂到对端超时（RFC 7230 §3.3.3）。
+
+后者是同类实现最常翻的一条，用例 `net_http_request_parser_rejects_garbage` 钉住。
+
+复用带来的好处不止于省代码：WS 服务端握手就是一段 HTTP Upgrade 请求，`accept_handshake`
+直接吃 `HttpRequestParser`，白得一份经过测试的解析器。
+
+#### 4.10.4 WS 握手后「多读到的字节」绝不能丢
+
+客户端可能把 **Upgrade 与首帧一起**发来（HTTP 与 WS 共用一条 TCP 连接，内核不保证按
+调用方的 write 边界交付）。握手读走整段时，`\r\n\r\n` 之后剩下的字节是**帧流的第一段**——
+丢掉它解码器就从帧中间开始，长度字段/掩码全错位，从此再也解不出任何消息。
+
+实测症状极具欺骗性（`apps/xiangqi` 踩过）：连接显示正常、可读计数在涨、处理条数永远是 0。
+
+落地：`TcpStreamAdapter::preload()` 把剩余字节预置给会话，`accept_handshake` 负责传。
+
+#### 4.10.5 流适配器：错误模型不能向下对齐
+
+`WsSession::Stream` 的读面用 `int`（-1 = 读不到/出错），而 `TcpStream::read_some` 返回
+`Result<size_t>`（错误可携带原因）。
+
+选择是**在适配器里做转换**而不是改协议层的签名：把「可携带原因的错误」压成 -1 是**倒退**
+（丢了归因能力），而协议层不该被传输层错误模型牵连。适配器也就是 `TcpStreamAdapter`，
+客户端与服务端共用（原先是 `apps/xiangqi/main.cpp` 的私有类，现已收编进框架）。
+
+配套一个必须分开的量：`read_some` 返 -1 有**两种**语义——「这次没数据」（慢客户端、非阻塞空读）
+与「已经断了」。适配器用 `eof()` 显式区分，主循环才能决定「继续等」还是「收尾关连接」。
+
+#### 4.10.6 TLS 客户端：一次「从没验证过」的补测与六个真缺陷（2026-11-28）
+
+**触发点**：用户问「https 客户端验证过吗」。当时的诚实回答是**没有**——
+`tests/net_*_test.cpp` 全部走本机明文回环（这是对的：CONVENTIONS §7 不许用例依赖外网），
+而它**证明不了 TLS 那条腿**。于是写了 `tools/tls_https_probe.cpp`（要外网，故不入 `tests/`）。
+
+第一次跑：**`platform_available()` 返回 true，但所有握手全部失败**。逐层追下去，
+挖出六个独立缺陷——每一个都能单独让 HTTPS 不可用，而且**都不会被本机回环测试暴露**。
+
+| # | 缺陷 | 症状 | 根因 |
+|---|---|---|---|
+| 1 | 握手循环开局先读 | 挂死 92 s / “握手期间连接断开” | `need_read` 初值 `true`，第一回合就去 `read_some`，而 **ClientHello 还没发** |
+| 2 | `pfContextAttr` 传 `nullptr` | 函数一进去就 `0xC0000005` | MSDN 说可选，**Schannel 实现无条件写回** |
+| 3 | `SECBUFFER_EXTRA.pvBuffer` 当非空用 | 随机崩（堆栈指向库内部） | 库可能给**空指针**而 `cbBuffer` 非零；`base + n` 是空指针算术（UB） |
+| 4 | `SEC_I_CONTINUE_NEEDED` 后不清/不读 | 服务端 RST（winsock 10054） | `keep >= input.size()` 时既没清空也没读新数据 → 下一轮**重发同一份**握手字节 |
+| 5 | `ISC_REQ_ALLOCATE_MEMORY` + 自备缓冲 | 崩溃/泄漏二选一 | 该标志要求用 `FreeContextBuffer` 释放库分配的内存；改用调用方缓冲就不该带它 |
+| 6 | 明文/密文队列混用 | 小响应（≤1000 B）全绿、16 KB 就解密失败 | 响应方向可解出**多条**记录（明文要排队）而短尾又是**密文**（要拼接）；两者塞同一个 `vector` |
+
+**为什么这六条能同时存在**：`platform_available()` 只看「凭据能不能建」——它能建成功的
+情况下，握手代码写得再错也报“可用”。而本机回环用例压根不碰 TLS，于是**没有一条用例
+能失败**。这是一个典型的「测试覆盖≠能力覆盖」：测了协议解析、测了帧编解码、测了 WS 会话，
+却没测**把这三样接在真 TLS 上的那一刻**。
+
+**修复后的验证口径**（可复跑）：
+
+```
+st build tls_probe --profile dev
+./build/dev/bin/tls_probe.exe      # 13 项：裸握手/协议版本/证书/HTTP over TLS/https GET/
+                                    #       大响应 16 KB/WSS 回环
+```
+
+实测：连跑 10 次 0 失败（含 16000 字节二进制响应，逼出多记录与半记录两条路径）。
+
+**顺带纠正一处“假正确”**：`negotiated_protocol()` 原来只看 `SP_PROT_TLS1_3_SERVER`，
+而 **MinGW 的 `schannel.h` 没有这个宏**——于是 TLS 1.3 连接报成笼统的 `"TLS"`。
+现在按 `dwProtocol` 位掩码先判高版本，且补上 1.3 的位值。
+
+**教训（写进代码注释与本节，不依赖记忆）**：
+
+- 第三方安全 API 的「可选参数」不能信 MSDN 的字面——传空指针前先想「它会不会无条件写回」。
+- 与 SSPI/Schannel 交互时，**缓冲区与长度都必须是调用方的**，并且**边界自检**
+  （库回写超长就是越界读）。
+- 「随机崩、崩点漂移、堆栈指不进自己代码」几乎总是指向**空指针算术**或**自赋值迭代器**，
+  而不是某个业务逻辑写错；本次两条都命中了。
+- 本机回环能测协议，测不了**传输层正确性**；凡“我声称支持 TLS”的能力，就得有一条
+  真连外网的探针，哪怕它不能进 `tests/`。
+
+
 ## 5. 设计系统（token）
 
 **品牌意象**：**亚克力黑白**（与歌白同名主题同源）——近中性而略偏冷的层叠表面，
