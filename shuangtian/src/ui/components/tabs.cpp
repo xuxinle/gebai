@@ -270,6 +270,12 @@ void Tabs::set_tab_padding(float padding) {
   total_width_ = 0.0f;
   mark_layout_dirty();
   mark_dirty();
+  // 主题重算的**显式声明**：`apply_theme` 会读 `tab_padding_`（缺省时用它），
+  // 而 `UiRoot` 只在「主题换过」或「本元素请求了重算」时才跑 `apply_theme`
+  // （见 `src/ui/ui_root.cpp` 的 `apply_theme_tree`）。少了这一行，本 setter
+  // 就是「设了参数、`get` 回读对、画面不动」——契约扫描
+  // `theme_style_input_setters_declare_refresh` 抓到的正是它。
+  request_theme_refresh();
 }
 
 void Tabs::set_tab_gap(float gap) {
@@ -281,6 +287,7 @@ void Tabs::set_tab_gap(float gap) {
   total_width_ = 0.0f;
   mark_layout_dirty();
   mark_dirty();
+  request_theme_refresh();   // 理由同 `set_tab_padding`
 }
 
 void Tabs::set_tab_radius(float radius) {
@@ -289,6 +296,7 @@ void Tabs::set_tab_radius(float radius) {
   if (next == tab_radius_) return;
   tab_radius_ = next;
   mark_dirty();
+  request_theme_refresh();   // 理由同 `set_tab_padding`
 }
 
 void Tabs::set_active(std::size_t index, bool notify) {
@@ -653,6 +661,19 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
   // 空表仍要画「+」（新建入口不能随最后一个标签消失——终端/编辑器的常态
   // 就是“关到零再点 + 重开”）；标签本体为空则跳过主体循环。
   if (bounds_.is_empty()) return;
+  // ## 宽度缓存的失效判定（2026-11-28 修正）
+  //
+  // 旧写法是 `if (widths_.size() != labels_.size()) rebuild_widths(context);` ——
+  // 它只挡得住“标签**个数**变了”。而 `set_tab_padding` / `set_tab_gap` / `set_tab_max_tab_width`
+  // 改的是**每项的宽与项间距**，个数一点没变：它们把 `widths_` 清空后，下一帧重建
+  // 出来的元素个数与之前**完全相同**，于是这个判据恒假 —— 缓存永远不重建。
+  //
+  // 实测症状（`tabs_compactness_setters_reach_pixels`）：`set tab_padding=28` 改了 6294 个
+  // 像素（`apply_theme` 真的跑了），而 `set tab_gap=18` **一个像素都没变**——
+  // 因为 `offsets_`（前缀和）还是旧 gap 算的，而 `paint_content` 从不重算它。
+  //
+  // 判据改成“缓存已失效”而不是“尺寸对不上”：`widths_.clear()` 就是那三个 setter
+  // 共同的失效动作（它们已经把 `widths_` 清空了，此处只需认这个事实）。
   if (widths_.size() != labels_.size()) rebuild_widths(context);
 
   const Palette& colors = context.theme.colors();

@@ -169,15 +169,58 @@ void assign_shards_by_tu() {
               return *lhs.first < *rhs.first;   // 同权重时按成员序号列表字典序（强序，非指针序）
             });
   // ④ 贪心装箱：大组优先，每次放入当前负载最少的桶。
+  // ④ 贪心装箱：大组优先，每次放入当前负载最少的桶。
+  //
+  // ## 为何“最少的桶”不能只看 `loads`（2026-11-28 修空片）
+  //
+  // 旧实现只比 `loads[bucket]`。可一个桶的负载为 0 有两种完全不同的成因：
+  //   a) **空桶**：还没接任何组；     b) **只有 tiny 组**：接了若干 0 ms 的 TU，负载仍是 0。
+  // 两者混淆时，贪心会**反复选同一个** b 型桶（`0 < 0` 为假，但并列时永远选序号最小的
+  // 那个），其余空桶就一个组也拿不到。
+  //
+  // 实测后果（16 片全量）：**1 个空片**（0 例）而最重片 13.3 s——空片白占一个核，
+  // 而它本可以分担几秒。先按负载、再按“是否还空着”排序即可：空桶永远优先填。
+  //
+  // 这与“TU 原子性”无关：分组不变，只改落桶顺序。
+  // ## 空片的真正根因（2026-11-28，逐片取证）
+  //
+  // 现象：16 片全量、不开 `--slow` 时，**#2 是 0 例**，而 #1 卡着 13.3 s（整个 git_service TU）。
+  //
+  // 取证：#1 的 30 例**全部**是 `git_service_*`；从源码枚举全仓 slow 用例后看到有四个
+  // TU **整个都是 slow**（`raster_bench_test.cpp` 6 条、`ui_viewport_scale_gate_test.cpp` 10 条、
+  // `app_frame_budget_test.cpp` 6 条、`lsp_client_test.cpp` 4 条）。不开 `--slow` 时它们
+  // **一条也不跑**——而那 10 条恰恰是权重最大的 TU 之一（帧耗时门禁），于是它排在最前面
+  // 拿一个桶、装完什么都不跑，桶就空着。
+  //
+  // 旧代码不是“选错桶”，而是**根本不知道 slow 会被过滤**：权重统计的是全量。
+  //
+  // ## 修法（不动 TU 原子性、不动 slow 语义）
+  //
+  // 装箱时把“本轮不会跑的 slow 用例”的权重扣掉：若一组扣完权重为 0，它就不该占桶——
+  // 它的成员除了不发任何东西。这与 `include_slow()` 同一判据，保证“装箱看到的”
+  // 就是“子进程真跑的”。
   g_shard_assign.assign(cases.size(), 0);
   std::vector<double> loads(g_shard_count, 0.0);
+  std::vector<std::size_t> counts(g_shard_count, 0);   // 已接组数（区分空桶与 tiny 桶）
   for (const auto& [members, weight] : ordered) {
+    // 该组里**本轮会真跑**的用例数。为 0 ⇒ 整组跳过，不占桶。
+    std::size_t runnable = 0;
+    for (const std::size_t member : *members) {
+      if (!case_list[member].slow || include_slow()) ++runnable;
+    }
+    if (runnable == 0) continue;
     std::size_t target = 0;
     for (std::size_t bucket = 1; bucket < g_shard_count; ++bucket) {
-      if (loads[bucket] < loads[target]) target = bucket;
+      const bool better_load = loads[bucket] < loads[target];
+      const bool same_load = loads[bucket] == loads[target];
+      // 并列时：**还空着的**优先（`counts == 0`），否则取序号最小的（确定性）。
+      const bool bucket_empty = counts[bucket] == 0;
+      const bool target_empty = counts[target] == 0;
+      if (better_load || (same_load && bucket_empty && !target_empty)) target = bucket;
     }
     for (const std::size_t member : *members) g_shard_assign[member] = target;
     loads[target] += weight;
+    counts[target] += 1;
   }
 }
 

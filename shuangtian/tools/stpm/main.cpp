@@ -267,6 +267,36 @@ void print_usage() {
 [[nodiscard]] auto self_stamp_path(const std::string& exe) -> std::string;
 auto write_self_stamp(const std::string& exe) -> void;
 
+/// **回收一次自重建留在 staging 旁边的所有副产品**。
+///
+/// ## 为何需要它（2026-11-28 实测：一个仓库里积了 15 GB）
+///
+/// 自重建把产物链到 `st.exe.new-<pid>`，而一把构建会在它旁边写下**四个**文件：
+///
+/// ```
+/// st.exe.new-<pid>            ← 产物（会被 rename 成 st.exe，自然消失）
+/// st.exe.new-<pid>.debug      ← 分离的调试信息（65 MB / 次）
+/// st.exe.new-<pid>.link       ← 链接指纹侧车
+/// st.exe.new-<pid>.srcs       ← 测试源快照侧车
+/// ```
+///
+/// 旧代码只 `remove_file(staging)` 了**产物本体**，三个侧车从未被删——而它们已经
+/// **rename 走了/没用**，于是每次自举留三份垃圾。实测：`build/bin` 下 795 个 pid ×
+/// 3 个侧车 = **2393 个文件 / 15.0 GB**（`.debug` 一份 15~65 MB）。
+///
+/// 失败路径（编译失败/替换失败）同理：那时产物本体也还在，一起回收。
+///
+/// 注意：**不能**按目录扫描删所有 `*.new-*`——同一台机器可能同时跑着另一个 `st`
+/// （并行构建/两个终端），它自己的 staging 正在用。所以只回收**本次进程的 pid**
+/// 对应的那组文件名。
+auto discard_staging_set(const std::string& staging) -> void {
+  (void)st::fs::remove_file(staging);
+  (void)st::fs::remove_file(staging + ".debug");
+  (void)st::fs::remove_file(staging + ".link");
+  (void)st::fs::remove_file(staging + ".srcs");
+  (void)st::fs::remove_file(staging + ".rsp");
+}
+
 /// `st rebuild`：手工触发重建（与自动重建**同一份实现**）。
 ///
 /// 与自动路径的差别只有一点：手工重建**不重跑命令**（人只是想更新工具），
@@ -309,12 +339,13 @@ auto command_rebuild(const Arguments& arguments) -> int {
   auto stats = st::pkg::build(*manifest, options);
   if (!stats) {
     std::fprintf(stderr, "%s\n", stats.error().message.c_str());
-    (void)st::fs::remove_file(staging);
+    discard_staging_set(staging);   // 产物 + .debug/.link/.srcs 一起回收（见函数注释）
     return 1;
   }
   const std::string built = stats->artifact.empty() ? staging : stats->artifact;
   if (!st::fs::is_regular_file(built)) {
     std::fprintf(stderr, "重建失败：产物不存在（%s）\n", built.c_str());
+    discard_staging_set(staging);
     return 1;
   }
   const std::string elapsed = st::time::format_duration_ns(st::time::now_ns() - start);
@@ -1816,7 +1847,7 @@ auto write_self_stamp(const std::string& exe) -> void {
   if (!stats) {
     std::fprintf(stderr, "自动重建失败：%s\n  请修好后重试，或加 --no-self-rebuild 跳过。\n",
                  stats.error().message.c_str());
-    (void)st::fs::remove_file(staging);
+    discard_staging_set(staging);   // 产物 + .debug/.link/.srcs 一起回收（见函数注释）
     return 1;
   }
   const std::string built = stats->artifact.empty() ? staging : stats->artifact;
@@ -1841,6 +1872,10 @@ auto write_self_stamp(const std::string& exe) -> void {
   // 新生效的 `st` 需要一份出生快照来支撑下一次自检（否则下轮无从比对）。
   write_self_stamp(self);
   st::log::out("已重建（{}），用新工具重跑本次命令…\n", elapsed);
+  // 产物本体已 rename 成 `st.exe`，但**它旁边三个侧车还在**（`.debug`/`.link`/`.srcs`）——
+  // 那是本次 staging 专属的名字，不会再被任何东西用到，必须回收（见 `discard_staging_set`）。
+  // 注意：这里不能只删 staging（它已经不在了），得删整组。
+  discard_staging_set(staging);
 
   // ## 可信增量校验（`ST_VERIFY_SELF_REBUILD=1` 时开）
   //
@@ -1862,9 +1897,9 @@ auto write_self_stamp(const std::string& exe) -> void {
     // 用 `ST_VERIFY_TOKEN` 显式给出（例如刚加的一条文案）。
     const auto token = st::fs::read_env("ST_VERIFY_TOKEN");
     if (token.has_value() && !token->empty()) {
-      const auto bytes = st::fs::read_bytes(staging);
+      const auto bytes = st::fs::read_bytes(self);   // 产物已 rename 成 self，staging 已不存在
       if (!bytes.has_value()) {
-        std::fprintf(stderr, "可信增量校验失败：读不了新产物 %s\n", staging.c_str());
+        std::fprintf(stderr, "可信增量校验失败：读不了新产物 %s\n", self.c_str());
         return 1;
       }
       const std::string haystack(reinterpret_cast<const char*>(bytes->data()),  // lint-allow: L6 字节视图（uint8_t→char，只做子串搜索）
@@ -1876,7 +1911,7 @@ auto write_self_stamp(const std::string& exe) -> void {
                      "  排查：① 查对应 `.o.meta` 第三列是否等于当前源文件的内容哈希；\n"
                      "        ② 临时用 `st rebuild --force` 看是否就好（能好则是增量判据的问题）。\n",
                      token->c_str());
-        (void)st::fs::remove_file(staging);
+        discard_staging_set(staging);
         return 1;
       }
       st::log::out("可信增量校验通过（产物含 {}）\n", *token);

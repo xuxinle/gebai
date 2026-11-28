@@ -4462,6 +4462,70 @@ namespace {
     failed_total += exit_codes[index];
     if (exit_codes[index] != 0) failed_shard_logs.push_back(shard_logs[index]);
   }
+  // ## 分片均衡的**可观测性**（2026-11-28 新增）
+  //
+  // 为何要把它打出来：均衡退化是**静默**的。实测过的两次都不是“变慢一点”，而是
+  // “一个片 0 例、另一个片 13.3 s”（整整一个核白转，而总耗时只多了几秒，没人会注意到）。
+  // 而诊断它需要跨 16 个分片日志累加逐用例耗时——那是一次手工脚本活（本轮就这么干的）。
+  //
+  // 所以每次分片跑完主动报三行：**每片耗时分布 / 理想值 / 空片名单**。
+  // 耗时来源：子进程自己写的 `times-N.txt` 侧车（就是装箱用的那份，已有就不另外量）。
+  // 读不到就退化成“只报例数”——宁可少报，不能让观测影响结果。
+  if (shards > 1) {
+    std::vector<double> shard_ms(shards, 0.0);
+    std::vector<std::size_t> shard_cases(shards, 0);
+    for (std::size_t index = 0; index < shards; ++index) {
+      const auto text = fs::read_text(shard_times[index]);
+      if (!text.has_value()) continue;
+      for (const std::string_view line : st::split(*text, '\n')) {
+        const auto tab = line.find('\t');
+        if (tab == std::string_view::npos) continue;
+        const auto value = st::parse_f64(std::string(line.substr(tab + 1)));
+        if (!value.has_value() || *value < 0.0) continue;
+        shard_ms[index] += *value;
+        shard_cases[index] += 1;
+      }
+    }
+    double total_ms = 0.0;
+    double heaviest = 0.0;
+    double lightest = -1.0;
+    std::size_t empty_shards = 0;
+    for (std::size_t index = 0; index < shards; ++index) {
+      total_ms += shard_ms[index];
+      heaviest = std::max(heaviest, shard_ms[index]);
+      if (shard_cases[index] == 0) {
+        ++empty_shards;
+      } else if (lightest < 0.0 || shard_ms[index] < lightest) {
+        lightest = shard_ms[index];
+      }
+    }
+    const double ideal = total_ms / static_cast<double>(shards);
+    // 用 `st::print`（纯文本入口）而不是 `ST_LOG_INFO`：`st` 默认日志级别是 **Warn**
+    // （见 `run_app` 的 `set_level(Level::Warn)`），INFO 会被静默吞掉——而这行是给人看的
+    // 进度，不是事件日志。与「运行测试 [dev] 16 片并行」同一通道才落在同一处
+    //（控制台 + `.st/logs` 镜像），也正是“事后 grep 一条命令”的前提。
+    st::print("分片均衡：片内耗时和 {:.1f}s · 理想每片 {:.0f}ms · 最重 {:.0f}ms · 最轻 {:.0f}ms · 空片 {}\n",
+              total_ms / 1000.0, ideal, heaviest, lightest < 0.0 ? 0.0 : lightest,
+              empty_shards);
+    // 空片单独点名：它是“白占一个核”的直接证据，必须能一眼看到而不是从 16 个日志里数。
+    if (empty_shards > 0) {
+      std::string names;
+      for (std::size_t index = 0; index < shards; ++index) {
+        if (shard_cases[index] != 0) continue;
+        if (!names.empty()) names += ", ";
+        names += std::format("#{}", index + 1);
+      }
+      ST_LOG_WARN("空片：{} —— 这些片一个用例都没跑（白占核）。"
+                  "常见成因：某个 TU 整组都是 slow/环境敏感用例，而本轮未开 --slow（见 "
+                  "`assign_shards_by_tu` 的注释）。", names);
+    }
+    // 最重片超过理想值 1.5× 时提醒：那是“某个 TU 本身就很长、拆不开”的已知形态，
+    // 但若持续恶化就值得看一眼（拆 TU 是反面做法，要拿跨进程竞争去换）。
+    if (ideal > 0.0 && heaviest > ideal * 1.5) {
+      ST_LOG_WARN("最重片是最理想的 {:.2f}×（> 1.5）—— 通常是单个大 TU 下不了限",
+                  heaviest / ideal);
+    }
+  }
   if (!failed_shard_logs.empty()) {
     ST_LOG_INFO("失败分片的完整输出（逐用例结果 + 断言消息）：");
     for (const auto& path : failed_shard_logs) ST_LOG_INFO("  {}", path);

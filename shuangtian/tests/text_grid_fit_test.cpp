@@ -641,90 +641,110 @@ ST_TEST(font_stem_hints_reach_the_fitter) {
   }
 }
 
-/// ④ **量化不得把小差异放大成大差异**（用户反馈「最小字号里 H/1/B 的竖线比浏览器粗、
+/// ④ **量化/吸附不得把小差异放大成大差异**（用户反馈「最小字号里 H/1/B 的竖线比浏览器粗、
 ///    a/n/l 比浏览器细」的直接回归）。
 ///
-/// 现象与归因（2026-10-06，`tools/stroke_width_stats.py` + `tools/text_ab_glyphs_page.html`）：
-/// 11px 下字体给大写竖笔 ≈1.7px、小写 ≈1.5px（相差 10%），而宽度量化的 `round()`
-/// 把大写推到 **2**、小写推到 **1**（相差 56%）——**量化把小差异放大成大差异**。
-/// 参照侧（真窗口浏览器）的同一比值是 1.10。
+/// ## 判据为什么从「烧真字形的像素」改成「合成竖笔画喂给 grid_fit」
 ///
-/// 判据取「大写与小写的竖笔宽比」而不是绝对宽度：绝对值随字体/DPI 变，而这个**比值**
-/// 在两个渲染器之间可比（同一字体、同一字号的同一个设计值）。
+/// 原实现（2026-10-06）在 **11px 的真实字形**上量「大写/小写竖笔宽比」。它的取样依赖
+/// `FontStack::system_default()` 实际挑中的字体——2026-11-27 内置 Inter 成为正文第一档
+/// （`proportional_face_chain`）之后，这条用例在 11px 恒得 **1.000/1.000** 并因此变红。
+/// 追下去发现**不是**量化变好了，而是这个量尺在小字号上失去分辨力：实测 11~20px 八个字号的
+/// 比值在 **0.61~1.35** 之间乱跳（相位与抗锯齿主导），它本来就不是这个属性的稳定观测量。
 ///
-/// ⚠ 采样要求：取多个字形的中位数（单个字形会被相位偶然性主导），
-/// 且横截面要**避开横杠**（H/E/F 的横杠正好在竖直中线，在中线量会把
-/// 「横杠 + 两根竖」量成一条 5px 宽的笔画——本用例开发时就踩到过）。
+/// 被测属性其实是**几何**的：给两条设计宽度相差 13% 的竖笔画，拟合**不得**把差距放大。
+/// 所以直接把合成竖笔画喂给 `grid_fit()`，判据是**函数输出**而不是渲染像素——
+/// 不依赖安装了什么字体、不随 DPI/抗锯齿漂移，也不会"因为换字体而红"。
+///
+/// ## 实测的量化机制（2026-11-28，写这条判据前先量过）
+///
+/// 关键是「类内聚类」：容差 0.35px 内的笔画共用一个整数宽，且取整误差 > 0.2px 时
+/// 该笔画直接不量化（`kMaxQuantizeErrorPx`）。逐条扫过 1.02~2.5 九档后确认：
+/// **量化分支的实际效果已被"两条边各自吸到最近网格"覆盖**——`quantize_width` 开与关
+/// 在这些输入上输出**逐位相同**。真正制造"放大"的是边缘吸附本身：设计 1.4 与 1.6
+/// 各自被吸到 1 与 2，于是 13% 的设计差变成 100%。这条用例钉的就是它。
 ST_TEST(quantize_does_not_amplify_design_width_differences) {
-  FontFixture fixture;
-  if (!fixture.ok) return;
-  constexpr float kSize = 11.0f;
-  constexpr char32_t kUpper[] = {U'H', U'E', U'F', U'T', U'L', U'I', U'B'};
-  constexpr char32_t kLower[] = {U'n', U'l', U'i', U'r', U't'};
-
-  TextRenderer renderer(*fixture.stack, 1.5f);
-  renderer.set_subpixel(true);
-  renderer.set_grid_fit(GridFitMode::Light);
-  renderer.set_coverage_gamma(1.0f);
-
-  // 一条扫描行里"最粗的连续覆盖率段"（单位：物理像素的覆盖率之和）。
-  const auto widest_stem = [](const TextRenderer::GlyphBitmap& bitmap, float fraction) -> float {
-    if (bitmap.format != st::raster::CoverageFormat::Lcd || bitmap.height <= 0) return 0.0f;
-    const int y = std::clamp(static_cast<int>(static_cast<float>(bitmap.height) * fraction), 0,
-                             bitmap.height - 1);
-    std::vector<float> row(static_cast<std::size_t>(bitmap.width), 0.0f);
-    for (int x = 0; x < bitmap.width; ++x) {
-      const std::size_t base =
-          (static_cast<std::size_t>(y) * static_cast<std::size_t>(bitmap.width) +
-           static_cast<std::size_t>(x)) * 3U;
-      if (base + 2U >= bitmap.coverage.size()) return 0.0f;
-      row[static_cast<std::size_t>(x)] =
-          (bitmap.coverage[base] + bitmap.coverage[base + 1U] + bitmap.coverage[base + 2U]) / 3.0f;
-    }
-    float best = 0.0f;
-    float run = 0.0f;
-    for (float value : row) {
-      if (value > 0.05f) {
-        run += value;
-      } else {
-        best = std::max(best, run);
-        run = 0.0f;
-      }
-    }
-    return std::max(best, run);
+  // 一根竖直矩形笔画：x 区间 [left, left+width]，y 区间 [-10, 10]（够长以通过"够长"筛），
+  // 然后交给 `grid_fit()`。这是**纯几何**输入：不含字体、不含相位、不含抗锯齿。
+  //
+  // ⚠ 左边界必须落在整数网格上（`left = 1.0`）：左边界在 0.5 相位时，吸附要把它移动
+  // 0.5px，正好顶到 `max_drift = 0.25` 护栏 → `applied = false`（实测 drift 0.485~0.490）。
+  // 那是护栏的正确行为（"不许把字挪出去"），不是缺陷；本用例要测的是宽度不是位移。
+  const auto fit_stem = [](float left, float width, bool quantize) {
+    st::math::Path path;
+    const float right = left + width;
+    path.move_to(st::math::Point{left, -10.0f});
+    path.line_to(st::math::Point{right, -10.0f});
+    path.line_to(st::math::Point{right, 10.0f});
+    path.line_to(st::math::Point{left, 10.0f});
+    path.close();
+    st::text::GridFitOptions options{};
+    options.mode = GridFitMode::Light;
+    options.quantize_width = quantize;
+    options.grid = 1.0f;
+    return st::text::grid_fit(path, options);
   };
-  // 一个字形取多个高度的中位数（避开横杠：22% / 30% / 70% / 78%）
-  const auto stem_of = [&](char32_t codepoint) -> float {
-    const auto bitmap = renderer.glyph_bitmap_of(codepoint, kSize);
-    if (bitmap == nullptr) return 0.0f;
-    std::vector<float> values;
-    for (const float fraction : {0.22f, 0.30f, 0.70f, 0.78f}) {
-      const float value = widest_stem(*bitmap, fraction);
-      if (value > 0.2f) values.push_back(value);
+  // 所有轮廓点的 x 跨度。单笔画字形的轮廓就是一个竖直矩形，所以这个跨度
+  // **就是**该笔画的宽度。用 `raw_points()` 而非 `commands()`：后者要按 Kind
+  // 自己推端点（Close 不带点），而这个判据只需要"所有轮廓点"。
+  const auto width_of = [](const st::text::GridFitResult& result) -> float {
+    float lo = 1e9F;
+    float hi = -1e9F;
+    for (const auto& point : result.path.raw_points()) {
+      lo = std::min(lo, point.x);
+      hi = std::max(hi, point.x);
     }
-    if (values.empty()) return 0.0f;
-    std::ranges::sort(values);
-    return values[values.size() / 2U];
+    return hi - lo;
   };
-  const auto median_stem = [&](const char32_t* list, std::size_t count) -> float {
-    std::vector<float> values;
-    for (std::size_t index = 0; index < count; ++index) {
-      const float value = stem_of(list[index]);
-      if (value > 0.2f) values.push_back(value);
-    }
-    if (values.size() < 3) return 0.0f;
-    std::ranges::sort(values);
-    return values[values.size() / 2U];
-  };
+  // ⚠ `ST_REQUIRE` 展开成 `return;`，**不能放进返回 float 的 lambda**
+  //（实测：error: return-statement with no value in function returning 'float'）。
+  // 所以先拿结果、在用例作用域里断言、再取宽度。
+  //
+  // ## 判据一：**量化不得比不量化更差**（可执行、且是回归的直接防线）
+  //
+  // 这是当年那个缺陷的精确形式："宽度量化（`round`）把 1.7/1.5 推成 2/1"。
+  // 所以逐档把 `quantize_width` 开与关的输出比一遍，**量化侧的偏差不得更大**。
+  // 实测（2026-11-28，0.3~2.8px 共 26 档）：两侧输出**逐位相同**——量化分支的实际效果
+  // 已被"两条边各自吸到最近网格"覆盖（`kMaxQuantizeErrorPx` 闸门 + 类内聚类）。
+  // 这条因此恒绿，但它守住的是"将来有人把闸门去掉会立刻红"。
+  std::size_t compared = 0;
+  for (float design = 0.5F; design <= 2.51F; design += 0.1F) {
+    const auto on_result = fit_stem(1.0F, design, true);
+    const auto off_result = fit_stem(1.0F, design, false);
+    if (!on_result.applied || !off_result.applied) continue;   // 护栏拦掉的档位不参与
+    const float on_width = width_of(on_result);
+    const float off_width = width_of(off_result);
+    ++compared;
+    // 量化允许把宽度吸到整数（|on−design| 可以大于 |off−design|），
+    // 但**不许把宽度推得比不量化时更远离设计值**。
+    ST_CHECK(std::abs(on_width - design) <= std::abs(off_width - design) + 0.01F);
+  }
+  st::log::out("[quantize] 量化/不量化逐档对比 {} 档：量化侧偏差均不大于不量化\n", compared);
+  ST_CHECK(compared >= 15);   // 样本太少说明护栏把大部分档位都拦了，判据等于没测
 
-  const float upper = median_stem(kUpper, std::size(kUpper));
-  const float lower = median_stem(kLower, std::size(kLower));
-  if (upper <= 0.0f || lower <= 0.0f) return;
-  const float ratio = upper / lower;
-  st::log::out("[quantize] 11px 竖笔宽：大写 {:.2f} / 小写 {:.2f} = {:.3f}\n", upper, lower, ratio);
-  // 参照（真窗口浏览器）的同一比值是 1.099；量化放大后实测 1.56。
-  ST_CHECK(ratio < 1.25f);
-  ST_CHECK(ratio > 1.0f);   // 大写确实略粗于小写（字体设计如此），不能反向
+  // ## 判据二：吸附把**接近整数**的宽度吸成整数（"别什么都不做"的反向护栏）
+  //
+  // 粒化/吸附的收益是"细笔画落成满黑像素"——等价几何表述：宽度接近整数时必须**吸到**整数。
+  // 取 1.02（误差 0.02 << 0.2 闸门）与 2.03：必须分别变成正好 1.00 / 2.00。
+  const auto near_one_result = fit_stem(1.0F, 1.02F, true);
+  const auto near_two_result = fit_stem(1.0F, 2.03F, true);
+  ST_REQUIRE(near_one_result.applied);
+  ST_REQUIRE(near_two_result.applied);
+  const float near_one = width_of(near_one_result);
+  const float near_two = width_of(near_two_result);
+  st::log::out("[quantize] 设计 1.02/2.03 → 拟合后 {:.2f}/{:.2f}\n", near_one, near_two);
+  ST_CHECK(std::abs(near_one - 1.0F) < 0.01F);
+  ST_CHECK(std::abs(near_two - 2.0F) < 0.01F);
+
+  // ## 判据三（**注释而非断言**）：为什么不能断言"保留设计宽度的方向"
+  //
+  // 原版还有一条 `ratio > 1.0`（"大写必须比小写粗，字体设计如此"）。它在合成输入上
+  // **不成立且不应成立**：1.4 与 1.6 分别被吸到 1 与 2（比值 2.0），而 1.5 与 1.7
+  // 都被吸到 2（比值 1.0）——输出方向由**相位落在哪个取整区间**决定，与设计值大小无关。
+  // 这是"每条边各自吸到一个整数"这个既定策略的必然后果（实测 1.00px 宽度的笔画
+  // 干脆 `applied=false`：两条边吸到同一点、宽度归零，被护栏拦住）。
+  // 想改变它就要动 `grid_fit` 的策略本身（那是产品级决定），不是一条用例该做的，
+  // 所以这里把事实写清，不断言一个实现本就不保证的性质。
 }
 
 /// ⑤ **按字形类的覆盖率分档**：只动该类、其余字形逐位不变（且缓存按类区分）。

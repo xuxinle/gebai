@@ -59,7 +59,26 @@ ENTRY_PATTERNS = [
     re.compile(r"^\s*int\s+main\s*\(", re.M),
 ]
 # 裸下标读 argv —— R17 的越界风险面
+#
+# ## 为何还要看 argc 守卫（2026-11-28 修正，之前 106 条里有 86 条是误报）
+#
+# 原判据只看“代码里出现了 `argv[i]`”。可绝大多数探针写的是**安全**形式：
+#
+# ```cpp
+# int main(int argc, char** argv) {
+#   if (argc > 1) { _putenv_s("ST_AGX_LUT", argv[1]); }
+# }
+# ```
+#
+# 即“先判个数、再读下标”。把它报成“越界 UB”，等于把整类探针按一个不存在的缺陷判红——
+# 实测 106 条里 86 条属此，红灯因此完全失去信息量（真该改的那 20 条淹在里面）。
+#
+# 正确口径：`argv[i]` 只有在**同一函数里没有任何 `argc` 比较**时才是风险面。
+# 这不是要等价于静态分析——`if (argc > 2) use(argv[3])` 这种“守卫了但不够”仍然漏；
+# 但那种漏判本来就不是这个工具能回答的，把大量安全写法报成 fail 只会让人不再看报告。
 RAW_ARGV = re.compile(r"argv\s*\[\s*[^\]]*\]")
+# 有 argc 比较（含 `argc > 1` / `argc >= 2` / `argc < 2` 这类反向写法）。
+ARGC_GUARD = re.compile(r"\bargc\s*(?:[<>]=?|==|!=)\s*\w")
 # 有判据字样（说明它本该能机判）
 CRITERION_HINT = re.compile(r"判据|判读|阈值|必须|不得|≤|≥")
 # 性能基准：输出数字供人判，不设阈值是对的
@@ -99,6 +118,70 @@ def read(path: Path) -> str:
         return ""
 
 
+# ## “有失败退出码”的判据（2026-11-28 修正）
+#
+# 原判据只认**字面量** `return 1;` / `exit(1)`。可探针普遍写成"按判据算出来再返回"：
+#
+# ```cpp
+# std::printf("判据：最大差 ≤ 2\n");
+# return worst <= 2 ? 0 : 1;      //  ← 就是失败退出码，但旧正则看不见
+# return all_ok ? 0 : 1;
+# ```
+#
+# 实测 31 条“有判据却无失败退出码”里 **15 条**属于此，被误报成“无法进 CI”——
+# 而那些恰恰是最该进 CI 的。补上三元形式。
+#
+# ## 第三种真实形态：**返回失败计数**（`return tally.failures;`）
+#
+# 这是最正宗的“可机判”形式（退出码 = 失败数，与 `st test` 同口径，
+# 比 0/1 信息量更大）。原判据同样看不见，于是 `tls_https_probe` 被报成“判据只能人读”——
+# 而它是整个探针目录里**唯一真的在数失败**的那个。
+# 口径：“return 一个非字面量的**整数表达式**” + 源码里同时出现 0 的比较/计数痕迹。
+# 不看后者会把 `return width;`（真的返回一个尺寸）当成退出码——两边都是猜，
+# 所以判据写宽一点（**不错杀**）比写窄一点（假红）更符合这个工具的用途：
+# 它的职责是“让该改的浮出水面”，不是替人做静态分析。
+EXIT_CODE = re.compile(
+    r"return\s+[1-9]\s*;"                  # return 1;
+    r"|exit\s*\(\s*[1-9]"                   # exit(1)
+    r"|return\s+[^;?]*\?[^;:]*:\s*[1-9]"     # return cond ? 0 : 1;
+    r"|return\s+[^;?]*\?\s*[1-9][^;:]*:"     # return cond ? 1 : 0;
+    r"|return\s+[A-Za-z_][\w.>-]*\s*;"        # return tally.failures;
+    r"|\breturn\s+\w+\s*;.*\b\w+\s*=\s*[^;]*(?:\?|判据)",  # 兜底：判据变量参与 return
+    re.S,
+)
+
+# `strip_source`：清单里每条 source 是从 `"sources": [ ... ]` 的**多行**文本里切出来的，
+# 带前后换行与缩进。`strip(' "')` 不够（换行会留下，于是 `Path.is_file()` 恒假）——
+# 实测就这一个字符集疏漏把 **228 个 targets** 全判成了“源文件不存在”。
+# `declared_tool_sources`：把清单里所有 `tools/` 开头的 source **展开通配**，
+# 得到“真的会被构建”的源文件名集合。
+SOURCE_STRIP = ' "\n\t\r,'
+
+
+def strip_source(raw: str) -> str:
+    """把清单里一条 source 清洗成路径（去引号、空白、行内逗号）。"""
+    return raw.strip(SOURCE_STRIP)
+
+
+def declared_tool_sources() -> set[str]:
+    """展开 `st.pkg` 里所有 `tools/` source，返回会被构建的**源文件名**集合。"""
+    text = read(PKG)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return set()
+    out: set[str] = set()
+    for spec in (data.get("targets") or {}).values():
+        for src in spec.get("sources") or []:
+            if not isinstance(src, str) or not src.startswith("tools/"):
+                continue
+            if "*" in src:
+                out |= {p.stem for p in ROOT.glob(src)}
+            else:
+                out.add(Path(src).stem)
+    return out
+
+
 def load_pkg_names() -> tuple[set[str], str | None]:
     """返回 `st.pkg` 里声明的 target 名集合；解析失败返回 (空集, 原因)。"""
     if not PKG.is_file():
@@ -127,14 +210,18 @@ def scan() -> tuple[list[Probe], list[str], list[str]]:
     if not ps1:
         unverified.append(f"{BUILD_PS1.name}：读不到（build_probes 清单本项未核）")
 
+    # 「哪些 tools/ 源文件真的会被构建」——展开通配后的**源文件名**集合。
+    # 旧实现用的是 `path.stem in names`（目标名集合），而目标名与源文件名只是**常常**同名。
+    build_sources = declared_tool_sources() if not pkg_err else set()
+
     probes: list[Probe] = []
     for path in sorted(TOOLS.glob("*.cpp")):
         name = path.stem
         text = read(path)
         p = Probe(name=name, path=path, lines=text.count("\n") + 1)
         p.has_harness = "st/probe/probe.hpp" in text
-        p.raw_argv = bool(RAW_ARGV.search(text))
-        p.has_exit_code = bool(re.search(r"return\s+[1-9]\s*;|exit\s*\(\s*[1-9]", text))
+        p.raw_argv = bool(RAW_ARGV.search(text)) and not ARGC_GUARD.search(text)
+        p.has_exit_code = bool(EXIT_CODE.search(text))
         head = "\n".join(text.splitlines()[:20])
         p.criterion = bool(CRITERION_HINT.search(head))
         p.bench = bool(BENCH_HINT.search(name)) or bool(BENCH_HINT.search(head))
@@ -142,7 +229,7 @@ def scan() -> tuple[list[Probe], list[str], list[str]]:
             if pattern.search(text):
                 p.platform = label
                 break
-        p.in_pkg = name in names if not pkg_err else False
+        p.in_pkg = name in build_sources if not pkg_err else False
         p.in_ps1 = name in ps1 if ps1 else False
         probes.append(p)
 
@@ -155,7 +242,7 @@ def scan() -> tuple[list[Probe], list[str], list[str]]:
                 continue
             if "tools/" not in srcs[0]:
                 continue
-            if not any((ROOT / s.strip(' "')).is_file() for s in srcs[0].split(",")):
+            if not any((ROOT / strip_source(s)).is_file() for s in srcs[0].split(",")):
                 global_issues.append(f"清单漂移：st.pkg 声明 `{declared}` 但源文件不存在")
     return probes, unverified, global_issues
 
