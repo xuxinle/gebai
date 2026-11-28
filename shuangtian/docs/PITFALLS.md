@@ -877,6 +877,9 @@ st::app::icon::apply_brand(frame->title_bar(), "x-logo");   // 首帧前
 | **两道机制做同一件事 ⇒ 回归测试失去判别力**〔取证〕 | 给“空态开在今天”写的用例，**逐条回退修复都不变红**——看起来像“测试没用” | 当时同时留了两条路径：`initial` 按 today 选 + 再补一句 `show_month(today)`。回退任一条，另一条把它补上，所以恒绿。**删掉冗余那条**后回退立刻变红。判据：能用一条路径表达的就不要两条 | `src/ui/components/date_picker.cpp`（已删掉冗余 `show_month`） |
 | **`set_value` 的同值早退吞掉“首次设值”**〔同步〕 | 空态控件上调用 `set_value(1970-01-01)`（正好等于零值），返回后仍是“没值”状态 | 早退判据 `clamped == value_` 在空态下成立，而那次调用恰恰是“用户真的选了它”。**标志位要早于早退置位**，否则“选了零值”与“没选”永久混为一谈 | `DatePicker::set_value`：`has_explicit_value_ = true` 提到早退之前 |
 | **“逐条回退都绿”时先数一遍有几道机制**〔取证〕 | 逆向验证全绿，第一反应是“测试写错了” | 更常见的原因是**实现里有冗余路径**（每道都能独立满足断言）。先 grep 一遍实现里有没有第二处做同一件事，再判断测试 | 同上（本轮实测） |
+| **声明式回放把存档改掉，而合成器没人叫醒**〔同步·主题〕 | 同一份 `kBubbleStyle` 的两个气泡，一条顶边是主题蓝 `rgb(160,192,254)`、另一条是白 `rgb(253,251,248)`；用户原话「**页面变动后会恢复蓝色边框**」 | `highlight 0.85` 只定强度，`apply_declaration` 写的是**白色占位**，真色由 `apply_theme_glass` 合成；而合成器只在「主题版本变了 / 本元素申请刷新」时跑，声明式每帧回放却**每帧把占位写回去** ⇒ 按 key 复用的元素版本已同步、合成再不跑，白色直接上屏。“页面变动就好”正是因为那次变动申请了刷新。修法：写存档的入口（`set_top_highlight_override` / `set_backdrop_tint_declared`）**必须 `request_theme_refresh()`** | `include/st/ui/element.hpp` 的 `set_top_highlight_override`；`DESIGN.md` §4.2.20.1；`tests/ui_glass_highlight_theme_synthesis_test.cpp` |
+| **用例每帧 `set_theme` ⇒ 缺陷永远测不到**〔取证〕 | 上一条写的回归用例，删掉修复仍然 PASS | 每帧 `set_theme` 让**主题版本号递增**，`apply_theme_tree` 的条件①恒真、每次都重算——正是缺陷绕过的那条路径被强行修好了。正确写法：**只下发一次主题 + 先 `layout` 两遍把版本落稳**，再单独回放样式串、再走一帧。判据：复现里出现的条件必须与你声称的缺陷路径一致 | 同上（`glass_highlight_survives_style_replay_after_theme_applied`） |
+| **`set_property("style", …)` 传裸串静默返回 `false`**〔取证〕 | 用例里回放样式串那一步看似执行了，断言却量到 `alpha=0` | 属性面那条要求参数是 **JSON 值**，传裸串拿不到字符串、直接 `false`（且用例里 `(void)` 掉了返回值）。**用例里的“执行了一步”必须验证那一步真的成功**（`ST_REQUIRE(applied == 1U)`），否则测的是“没回放时的状态” | 同上 |
 
 
 ## 场景 34：判“某个像素块被裁了”时，拿什么量

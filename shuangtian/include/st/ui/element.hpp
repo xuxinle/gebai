@@ -972,6 +972,21 @@ void clear_children();
       color = math::Color{255, 255, 255, color.a};
     }
     extras().declared_paint.top_highlight = color;
+    // **写入存档必须申请重新下发主题**。
+    //
+    // 为什么：存档里的 r/g/b 对“只给强度”的写法（`highlight 0.85`）是**白色占位**，
+    // 真正的颜色由 `apply_theme_glass` 拿主题的 `glass_highlight` 合成。而
+    // `apply_theme_glass` 只在「主题版本变了 / 本元素申请了刷新」时才跑——
+    // 样式串是声明式每帧回放的（`BoxProps::style`），它把 `style_.top_highlight`
+    // 重写成白色占位后，**若元素这一帧不需重算主题，合成就不会再跑**，
+    // 于是白色占位直接上了屏。
+    //
+    // 实测代价（2026-11-28）：同一份 `kBubbleStyle` 的两个气泡，一个顶边是
+    // 亮蓝（合成了主题色）、一个顶边是白色（占位没合成）；而且**页面变动后
+    // 会自行恢复蓝色**——因为那次变动申请了主题刷新。元素级缓存
+    // （`applied_theme_version_`）让这个缺陷只在“同 key 复用且本帧未申请刷新”
+    // 的路径上出现，所以看起来像“有时有蓝边框、有时没有”。
+    request_theme_refresh();
   }
   [[nodiscard]] auto top_highlight_override() const noexcept -> std::optional<math::Color> {
     if (extras_ == nullptr) return std::nullopt;

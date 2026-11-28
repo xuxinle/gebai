@@ -2303,6 +2303,28 @@ void refresh_theme(const Theme& theme) {      // 非虚：唯一调度入口
 
 **顺序也变了**：`apply_theme_glass` 从“声明回放之前”移到**之后**——它必须让步于显式声明。
 
+**存档被声明重写后必须申请主题刷新**（2026-11-28）：
+
+`set_top_highlight_override` / `set_backdrop_tint_declared` 这类“写声明存档”的入口，
+写完后**必须调 `request_theme_refresh()`**。
+
+没有这一步时，声明式界面会出现一个只在**特定路径**才现形的缺陷：
+
+1. 样式串里只给强度（`highlight 0.85`）——`apply_declaration` 往 `Style::top_highlight`
+   写**白色占位** `{255,255,255,a}`，真色由 `apply_theme_glass` 拿主题 `glass_highlight` 合成；
+2. 声明式每帧回放样式串，于是占位色被**每帧重写一次**；
+3. 而 `apply_theme_tree` 只在「主题版本变了 / 本元素申请了刷新」时调 `refresh_theme`。
+   元素按 key 复用后版本已同步 —— 合成就**再也不会跑**，白色占位直接上屏。
+
+实测现象（用户报「气泡样式不一致」）：同一份 `kBubbleStyle` 的两个气泡，一个顶边是
+主题蓝 `rgb(160,192,254)`、另一个是白 `rgb(253,251,248)`；且**页面一变动就自己恢复**
+（那次变动申请了刷新）。元素级缓存让缺陷只在“同 key 复用且本帧未申请刷新”的路径上
+出现，所以看起来像“有时有蓝边框、有时没有”。
+
+回归：`tests/ui_glass_highlight_theme_synthesis_test.cpp`（三条，均已逆向验证）。
+中间那条必须**先让主题落稳、再单独回放样式串**——每帧 `set_theme` 会让版本号递增、
+条件①恒真、缺陷永远测不到（实测过：那样写恒绿）。
+
 **玻璃配置的字符串形式**：`glass="blur:8,tint:0.22,refraction:20"`（XML / 控制通道 /
 `BoxProps::glass` 三处共用 `apply_glass_shorthand` 一个解析器）。为何不逐字段：
 漏写一个就静默半开（只给 blur 忘了 tint → “模糊但实心”），而一条声明天然原子。

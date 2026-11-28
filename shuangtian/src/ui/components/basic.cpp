@@ -1065,7 +1065,19 @@ void Button::measure(const RenderContext& context, const Constraints& constraint
   // （图标盒 16→20 时偏差从 0.5 涨到 1.5px）。按墨迹排版后两个量是同一个事实。
   float icon_extent = 0.0f;
   if (!icon_.empty() && Icon::has(icon_)) {
-    icon_extent = icon_ink_size().width;
+    // **纯图标按钮的宽度要落整像素**（自检台 `布局整像素` 会因此报 FAIL）：
+    //
+    // 墨迹宽是矢量路径的浮点量（实测 refresh 47.16 / settings 46.06 /
+    // search|edit|send 47.58 / trash 46.02）——直接当宽度会让每个图标按钮的
+    // 外框落在半像素上，1px 描边被掰成两行各 50%、相邻按钮间距也不等。
+    //
+    // 为何只对**纯图标**取整：带文字时宽度由 `measure_width` 的字体 advance 合计
+    // 主导（它本来就带小数，且那是对的：强取整会拉宽/压窄字距）；而纯图标按钮
+    // 是**方形控件**，它的宽没有文字度量参与，不该继承墨迹的亚像素。
+    //
+    // 为何是 `ceil` 而不是 `round`：墨迹按盒居中绘制，盒只能变大不能变小——
+    // 取小会把墨迹按比例缩一点点（`Icon::path` 是等比缩放到盒内）。
+    icon_extent = label_.empty() ? std::ceil(icon_ink_size().width) : icon_ink_size().width;
     if (!label_.empty()) icon_extent += metrics.space_sm;
   }
   float width = port.measure_width(label_, style_.font_size) + horizontal_padding * 2.0f;
@@ -1163,7 +1175,13 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   // **按墨迹宽的排版占位**：盒里有透明留白（描边式图标约 30%），而绘制时
   // 墨迹是**居中**在盒里的——占位与墨迹同宽，内容才真的居中。
   // （与 `measure` 用的是同一个量；见那里的推导与实测数据。）
-  const float icon_ink = draws_icon ? icon_ink_size().width : 0.0f;
+  //
+  // ⚠ 纯图标按钮的取整**必须与 `measure` 同步**：一处取整、另一处不取，
+  // 就会“量的宽度”与“画的宽度”差半个像素——图标看起来偏 0.5px，
+  // 而这种偏移在居中的圆形图标上很难归因。
+  const float icon_ink = draws_icon ? (label_.empty() ? std::ceil(icon_ink_size().width)
+                                                      : icon_ink_size().width)
+                                    : 0.0f;
   const float icon_extent = draws_icon ? icon_ink + gap : 0.0f;
   const float center_y = bounds_.center().y;
 
