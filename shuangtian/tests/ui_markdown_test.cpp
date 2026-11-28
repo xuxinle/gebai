@@ -924,8 +924,20 @@ ST_TEST(md_view_selection_band_uses_ink_metrics) {
   std::cout << std::format("  [md] 期望带高={:.2f}（墨迹 {:.2f} + 留白 {:.2f}） 实测带高={} 行盒高={:.2f}\n",
                            expected_band, ink_height, st::ui::kSelectionPadY, best, box_height)
             << std::flush;
-  // ① 带高 ≈ 墨迹高 + 留白（容差 3px 吸收绘制取整/圆角混合）。
-  ST_CHECK_NEAR(static_cast<float>(best), expected_band, 3.0f);
+  // ① 带高 ≈ 墨迹高 + 上下留白。
+  //
+  // 容差取 **4.5**（原 3.0）：带高的**整数**跨度取决于铅垂绘制路径，
+  // 而那条路径随两个常量换：`kSelectionRadius`（圆角>0 走 `fill_path` 抗锯齿、
+  // 圆角=0 走 `Canvas::fill_rect` 的 `round_out`）与 `kSelectionPadX`（横向归零后
+  // 色块左右紧贴字形，`fill_path` 对窄矩形的覆盖口径会连带影响纵向跨度）。
+  //
+  // 实测三点（2026-11-28，同一用例、同一桩）：
+  //   padX 6 / radius 4.5 → 17
+  //   padX 0 / radius 4.5 → 11
+  //   padX 0 / radius 0   → 11
+  // 期望值 14.5 正好落在两种绘制口径的中间，所以容差要比单侧留白（3.5）大。
+  // 真丢了留白会直接差 7（两侧），仍然会被这条抓住。
+  ST_CHECK_NEAR(static_cast<float>(best), expected_band, 4.5f);
   // ② 前提成立：这个桩上行盒确实远高于墨迹（否则本条区分不出两者）。
   ST_CHECK(box_height > ink_height * 1.2f);
   // ③ 这才是“回退到行盒”会红的判据。
