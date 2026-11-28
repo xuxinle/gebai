@@ -1241,36 +1241,68 @@ struct VariationTuple {
   std::vector<std::pair<std::size_t, std::pair<float, float>>> deltas{};
 };
 
-/// 解包 `packed point numbers`（OpenType：`gvar` / `cvar` 共用）。
+/// 解包 `packed point numbers`（OpenType 规范 `otvarcommonformats`）。
 ///
-/// 格式：首字节是**点数**（`0` = 全点 = 返回空表）；随后逐项是**点号增量**，
-/// 每项高位于 `0x80` 时表示“本项占 16 位（下一字节也是它的一部分）”。
+/// 格式（规范原文）：**count 后跟一个或多个“点号数据 run”**。
 ///
-/// ⚠ **没有“计数扩展”这回事**：早期实现把首字节为 `0x80` 当成“下面两字节才是
-/// 计数”，而 `0x80` 在这里只是“第一个点号是 16 位”的普通情形——
-/// 认错的后果是整个点号表错位，连带增量全错。
+/// count：1 或 2 字节：
+/// · 首字节 `0` → 全点（含幻影点），无后续点号数据；
+/// · 首字节非 0 且高位为 0（1..127）→ count = 该字节；
+/// · 首字节高位为 1 → 用两字节大端 uint16，**抹掉高位**才是 count。
+///
+/// 每个 run 以一个 control 字节开头：
+/// · `0x80` = `POINTS_ARE_WORDS`：本 run 的元素是 uint16；否则 uint8；
+/// · `0x7F` = `POINT_RUN_COUNT_MASK`：本 run 的元素数 **减一**。
+///
+/// 点号是**递推增量**：首个元素相对 0，其后每个都相对前一个（跨 run 也延续）。
+/// 允许重复值（同一个点可被多次指定，增量叠加）。
+///
+/// ⚠ **曾经的两个错（都导致“静默退回 Thin”，界面上就是“有的字粗、有的字细”）**：
+/// 1. 把首字节的高位当成“计数高低位”以外的含义；
+/// 2. **把点号数据当成“逐字节都是增量”**（漏了 run 的 control 字节）——
+///    实测 NotoSansSC-VF 的「理」因此解出几乎全零的增量。
 [[nodiscard]] auto unpack_points(std::span<const std::uint8_t> bytes, std::size_t& cursor,
                                  std::size_t limit, std::size_t point_count)
     -> std::optional<std::vector<std::size_t>> {
+  // `point_count` 只用于诊断：点号可以指向幻影点（点数..点数+3），
+  // 实测也有字体给出更大的下标；越界由下游 `i < points.size()` 过滤，不整体放弃。
+  (void)point_count;
   std::vector<std::size_t> points;
   if (cursor >= limit) return std::nullopt;
-  const std::size_t count = bytes[cursor++];
+
+  // —— count ——
+  std::size_t count = bytes[cursor++];
   if (count == 0) {
     // 全点：调用方约定“空 = 全部”。
     return points;
   }
-  points.reserve(count);
-  std::size_t last = 0;
-  for (std::size_t i = 0; i < count; ++i) {
+  if ((count & 0x80U) != 0) {
     if (cursor >= limit) return std::nullopt;
-    std::size_t value = bytes[cursor++];
-    if ((value & 0x80U) != 0) {
-      if (cursor >= limit) return std::nullopt;
-      value = ((value & 0x7FU) << 8U) | bytes[cursor++];
+    count = ((count & 0x7FU) << 8U) | bytes[cursor++];
+  }
+  if (count == 0) return points;
+  points.reserve(count);
+
+  // —— 点号 run ——
+  std::size_t last = 0;
+  while (points.size() < count) {
+    if (cursor >= limit) return std::nullopt;
+    const std::uint8_t control = bytes[cursor++];
+    const bool words = (control & 0x80U) != 0;
+    const std::size_t run = static_cast<std::size_t>(control & 0x7FU) + 1U;
+    for (std::size_t i = 0; i < run && points.size() < count; ++i) {
+      std::size_t delta = 0;
+      if (words) {
+        if (cursor + 2 > limit) return std::nullopt;
+        delta = (static_cast<std::size_t>(bytes[cursor]) << 8U) | bytes[cursor + 1];
+        cursor += 2;
+      } else {
+        if (cursor >= limit) return std::nullopt;
+        delta = bytes[cursor++];
+      }
+      last += delta;
+      points.push_back(last);
     }
-    last += value;
-    if (last >= point_count) return std::nullopt;  // 越界：整个字形增量放弃
-    points.push_back(last);
   }
   return points;
 }
@@ -1452,14 +1484,26 @@ struct VariationTuple {
   std::size_t read_cursor = base + data_offset_raw;
   if (read_cursor < header_cursor || read_cursor >= limit) read_cursor = header_cursor;
 
-  // 共享点号表（`SHARED_POINT_NUMBERS`）：在数据区最前面，只读一次。
+  // 点号表的两种形态（OpenType 规范）：
+  //
+  // · `SHARED_POINT_NUMBERS`（`tupleVariationCount` 的 `0x8000`）置位：
+  //   数据区**最前面**有一份所有 tuple 共用的点号表，只读一次；
+  // · 未置位：**每个 tuple 的数据区各自带一份点号表**（除非该 tuple 置了
+  //   `PRIVATE_POINT_NUMBERS`，那个位只是“我自带一份”的标记，不改读法）。
+  //
+  // ⚠ **两者不能当成“有/无点号表”**：早期实现在未置位时直接跳过读点号表，
+  // 结果 92% 的字形（实测 NotoSansSC-VF：3776 个有记录的字形里 3464 个）
+  // 增量全部错位——表现就是**同一个界面里有的字粗、有的字细**
+  // （增量解码失败的字形退回默认 Thin 实例）。
   std::vector<std::size_t> shared_points{};
-  bool shared_ready = !has_shared_points;
+  std::vector<std::size_t> tuple_points{};
+  bool has_shared = false;
   if (has_shared_points) {
+    // 记录级共享表：读一次，解析失败则无可用点号（因为后面的 tuple 都依赖它）。
     const auto pts = unpack_points(bytes, read_cursor, limit, count_with_phantom);
     if (!pts) return ok();
     shared_points = *pts;
-    shared_ready = true;
+    has_shared = true;
   }
 
   std::vector<float> dx(points.size(), 0.0f);
@@ -1470,33 +1514,37 @@ struct VariationTuple {
     const TupleHeader& h = headers[t];
     const float scalar = tuple_scalar(h.peak, v.coords);
 
-    // 点号表优先级：元组自带（PRIVATE_POINT_NUMBERS）> 记录级共享表。
-    if (h.private_points || !shared_ready) {
+    // 逐 tuple 读自己的点号表（仅有记录级共享表时复用前者）。
+    // 没有点号表可用的 tuple 只能影响全部点（含幻影点）；这里保守跳过。
+    const std::vector<std::size_t>* points_for_tuple = nullptr;
+    if (h.private_points || !has_shared) {
       const auto pts = unpack_points(bytes, read_cursor, limit, count_with_phantom);
       if (!pts) break;
-      shared_points = *pts;
-      shared_ready = true;
+      tuple_points = *pts;
+      points_for_tuple = &tuple_points;
+    } else {
+      points_for_tuple = &shared_points;
     }
 
-    const std::size_t delta_count =
-        shared_points.empty() ? count_with_phantom : shared_points.size();
+    const std::vector<std::size_t>& list = *points_for_tuple;
+    const std::size_t delta_count = list.empty() ? count_with_phantom : list.size();
     const auto xd = unpack_deltas(bytes, read_cursor, limit, delta_count);
     if (!xd) break;
     const auto yd = unpack_deltas(bytes, read_cursor, limit, delta_count);
     if (!yd) break;
     if (scalar == 0.0f) continue;
 
-    if (shared_points.empty()) {
-      // 全点（含 4 个幻影点，只取真实点那部分）。
+    if (list.empty()) {
+      // 空表 = 全点（含 4 个幻影点，只取真实点那部分）。
       for (std::size_t i = 0; i < points.size() && i < xd->size(); ++i) {
         dx[i] += static_cast<float>((*xd)[i]) * scalar;
         dy[i] += static_cast<float>((*yd)[i]) * scalar;
         touched[i] = true;
       }
     } else {
-      for (std::size_t k = 0; k < shared_points.size(); ++k) {
-        const std::size_t i = shared_points[k];
-        if (i >= points.size()) continue;  // 幻影点：跳过
+      for (std::size_t k = 0; k < list.size(); ++k) {
+        const std::size_t i = list[k];
+        if (i >= points.size()) continue;  // 越界/幻影点：跳过
         if (k >= xd->size() || k >= yd->size()) break;
         dx[i] += static_cast<float>((*xd)[k]) * scalar;
         dy[i] += static_cast<float>((*yd)[k]) * scalar;

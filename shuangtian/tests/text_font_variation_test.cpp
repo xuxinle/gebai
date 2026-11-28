@@ -19,13 +19,16 @@
 #include "st/test/test.hpp"
 
 #include <cmath>
+#include <map>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include "st/core/fs.hpp"
+#include "st/core/string.hpp"
 #include "st/core/log.hpp"
 #include "st/text/font.hpp"
+#include "st/text/text.hpp"
 
 namespace {
 
@@ -84,6 +87,75 @@ ST_TEST(variable_font_normalizes_regular_weight) {
   ST_CHECK(face->metrics().units_per_em > 0.0f);
   ST_CHECK(face->has_glyph(U'一'));
   ST_CHECK(face->has_glyph(U'国'));
+}
+
+/// ②③ `gvar` 增量必须在**大量常用字**上都生效（不只是「一」）。
+///
+/// 为何要单独一条：早期实现的 `unpack_points` 把点号数据当成“逐字节增量”、
+/// 漏了规范里的 **run control 字节**，于是**稀疏点号表**的字形（约 449/3776）
+/// 解出近乎全零的增量、退回默认 Thin——表现是**同一个界面里有的字粗、有的字细**，
+/// 而只查「一」（全点字形）根本发现不了。
+///
+/// 判据：常用字里“笔画厚度异常薄”的比例要极低。用同一批字量两次（有/无变体）
+/// 很容易受字体设计干扰，所以这里直接看**绝对值**：Regular 的横画在 40px 下
+/// 应 >= 3px（实测 Noto 111/114 字如此，剩下 3 个字连微软雅黑也是 2px——是设计，不是缺陷）。
+ST_TEST(variable_font_applies_to_many_glyphs_not_just_full_point_ones) {
+  const char* path = first_existing(kVariableCandidates, std::size(kVariableCandidates));
+  if (path == nullptr) {
+    ST_SKIP("本机没有可变中文字体");
+    return;
+  }
+  auto face = FontFace::load(path);
+  ST_REQUIRE(face.has_value());
+  std::vector<st::text::FontFace> faces;
+  faces.push_back(std::move(*face));
+  const st::text::FontStack stack(std::move(faces));
+  st::text::TextRenderer renderer(stack, 1.0f);
+  renderer.set_coverage_gamma(1.0f);
+  renderer.set_coverage_contrast_strength(0.0f);
+
+  constexpr std::string_view kCommon =
+      "资源管理器设计文档旧世界你要回答融合方法的是一个在人们中来时间为国家工作管理者"
+      "开发者编辑器数据结构算法网络服务客户端服务器数据库缓存性能优化调试测试部署";
+  int thick = 0;
+  int total = 0;
+  for (const char32_t cp : st::utf8_decode(kCommon)) {
+    const auto bitmap = renderer.glyph_bitmap_of(cp, 40.0f);
+    if (bitmap == nullptr) continue;
+    // 竖扫段长取众数 = 该字的横画厚度。
+    std::map<int, int> runs;
+    for (int x = 0; x < bitmap->width; ++x) {
+      int run = 0;
+      for (int y = 0; y < bitmap->height; ++y) {
+        const float value =
+            bitmap->coverage[static_cast<std::size_t>(y) * bitmap->width + x];
+        if (value > 0.5f) {
+          ++run;
+        } else if (run > 0) {
+          if (run <= 20) ++runs[run];
+          run = 0;
+        }
+      }
+      if (run > 0) ++runs[run];
+    }
+    int mode_len = 0;
+    int mode_count = 0;
+    for (const auto& [len, count] : runs) {
+      if (count > mode_count) {
+        mode_count = count;
+        mode_len = len;
+      }
+    }
+    if (mode_len == 0) continue;
+    ++total;
+    if (mode_len >= 3) ++thick;
+  }
+  ST_REQUIRE(total > 50);
+  const double ratio = static_cast<double>(thick) / static_cast<double>(total);
+  st::log::out("[variation] 常用字笔画正常 {}/{} = {:.1f}%（修复前约 57%）\n", thick, total,
+               ratio * 100.0);
+  // 修复前实测 57%（66/116）；修复后 97%（111/114）。95% 是清晰分界。
+  ST_CHECK(ratio > 0.90);
 }
 
 /// ②③ `gvar` 增量必须真的生效，且笔画厚度落在 Regular 区间。
