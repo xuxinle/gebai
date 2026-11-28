@@ -282,6 +282,30 @@ describe("多人会话（群）端到端", () => {
     expect((await fetch(`${base()}/api/v1/sessions/${sessionId}/files/preview?path=tmp%2Freport.md`, { headers: carol })).status).toBe(404)
   })
 
+  it("建群/入群**不改服务端记忆的当前会话**（刷新恢复不被改写）", async () => {
+    // 回归点：`conn-state.json` 是每用户持久化的「刷新/重连时回到哪个会话」。前端切会话不向服务端
+    // 同步它（既有约定），所以只有群操作去写它会造成：用户已切回普通会话、一刷新却被拽回上次进过的群。
+    // 这里直接读那个文件——它才是刷新恢复的真实数据源，比看 WS 应答更接近现场。
+    const connFile = join(home, "conn-state.json")
+    const readConn = (): Record<string, { currentSessionId?: string }> => {
+      try {
+        return JSON.parse(readFileSync(connFile, "utf8")) as Record<string, { currentSessionId?: string }>
+      } catch {
+        return {}
+      }
+    }
+    const before = readConn().alice?.currentSessionId
+    // bob 建一个新群（带一切会触发“顺便切会话”的入参）
+    const r = await wsCall(bobToken, "group.create", { name: "不得劫持当前会话", memberName: "乙", memberRole: "工程师" })
+    expect(r.ok).toBe(true)
+    // 该群会话被正常创建、且应答里带着它（前端据此自己切会话）
+    const g = (r.payload as { group: { sessionId: string } }).group
+    expect(g.sessionId).toMatch(/^[0-9a-f]{32}$/)
+    // 但服务端持久化的当前会话**一字未变**
+    expect(readConn().alice?.currentSessionId).toBe(before)
+    expect(readConn().bob?.currentSessionId).toBeUndefined()
+  })
+
   it("REST 同名能力：/api/v1/groups 列表、非成员 404、群主改名同步会话标题", async () => {
     const headers = { Authorization: `Bearer ${aliceToken}`, "Content-Type": "application/json" }
     const list = (await (await fetch(`${base()}/api/v1/groups`, { headers })).json()) as Array<{ id: string; name: string; memberCount: number }>

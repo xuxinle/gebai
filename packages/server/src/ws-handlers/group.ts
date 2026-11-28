@@ -3,8 +3,13 @@
  *  设计要点（DESIGN「多人会话（群）」）：
  *  - **不放在任何用户目录下**：群会话正文落在 `{GEBAI_HOME}/groups/{groupId}/`（`core/session/groups.ts`）；
  *  - **名称与角色不与账号绑定**：进群时自设 `name/role`，同一个账号在不同群里可以是不同身份；
- *  - 邀请码是所有成员的进入凭据，**进入口令**（可选）由群主加设，scrypt 加盐哈希落盘；
- *  - 建群/入群成功后自动把连接级当前会话切到该群会话（用户点了「创建/加入」就是要进这个群说话）。
+ *  - 邀请码是所有成员的进入凭据，**进入口令**（可选）由群主加设，scrypt 加盐哈希落盘。
+ *
+ *  **不碰连接级当前会话（`conn.setCurrent`）**：那是每用户持久化的「服务端记得你在哪个会话」
+ *  （`conn-state.json`），用于刷新/重连时容错回到该会话。前端切会话并不向服务端同步它
+ *  （既有约定：`session.create` 同样不改），只有本工具的群操作改它就会变成“用户已切到普通会话，
+ *  一刷新却回到上次进过的群”——建群/入群后由前端自己 `setCurrentSession` 并载入消息，
+ *  服务端这份状态保持不动即可。
  */
 import type { WsHandler } from "./context"
 import { toSessionInfo } from "../core/session/store"
@@ -39,7 +44,7 @@ export const groupHandlers: Record<string, WsHandler> = {
     return reply(true, { groups: d.groups.listViews(user.id) })
   },
 
-  "group.create": async ({ d, user, p, conn, reply }) => {
+  "group.create": async ({ d, user, p, reply }) => {
     if (!d.groups) return noGroups(reply)
     try {
       const g = await d.groups.create(user.id, user.username ?? user.id, {
@@ -48,15 +53,13 @@ export const groupHandlers: Record<string, WsHandler> = {
         memberName: p.memberName,
         memberRole: p.memberRole,
       })
-      // 建群即进入：连接级当前会话切到群会话（前端随后 attach/载入消息）
-      conn.setCurrent(g.sessionId)
       return reply(true, await groupCreateReply(d, g.id, user.id))
     } catch (err) {
       return reply(false, undefined, String((err as Error).message || err))
     }
   },
 
-  "group.join": async ({ d, user, p, conn, reply }) => {
+  "group.join": async ({ d, user, p, reply }) => {
     if (!d.groups) return noGroups(reply)
     try {
       const g = await d.groups.join(user.id, user.username ?? user.id, {
@@ -65,7 +68,6 @@ export const groupHandlers: Record<string, WsHandler> = {
         memberName: p.memberName,
         memberRole: p.memberRole,
       })
-      conn.setCurrent(g.sessionId)
       return reply(true, await groupCreateReply(d, g.id, user.id))
     } catch (err) {
       return reply(false, undefined, String((err as Error).message || err))
