@@ -124,4 +124,56 @@ ST_TEST(geometry_sprite_reuse_matches_fresh_raster) {
   ST_CHECK_EQ(mismatched, 0U);
 }
 
+// ————————————————————————————————————————————————————————————————
+// 半透明圆角填充：**opacity 只能作用一次**
+//
+// 为何要单独一条：上面两条对照全走默认 `opacity = 1`，
+// 而缺陷恰好只在 `opacity < 1` 时出现——它把 opacity 同时乘进了颜色和 alpha，
+// 而后续 `premultiply()` 会再乘一次 alpha，于是透明度被**平方**。
+//
+// 实测（白 0.28 叠在 (229,234,248) 上）：期望 236，贴图缓存路径给出 **185**，
+// 暗 51 级。界面上的表现是“圆角半透明气泡是一片灰块”，而**直角**不触发
+// （直角走 `blend_span` 快路径，压根不进贴图缓存）。
+//
+// 同样关键的一点：**GPU 腿与软件腿必须一致**。同一个 `Style` 在小白的用户气泡上
+// 曾出现软件腿 (182,187,200) vs GPU 腿 (233,239,251) 相差 51 级——本用例不从
+// 像素上判 GPU（本文件只跑软件画布），而是钉死“缓存路径 == 不走缓存路径 == 线性期望”，
+// 三者相等后两条腿就不再可能因这条而分岔。
+ST_TEST(geometry_sprite_semi_transparent_opacity_applied_once) {
+  struct Case {
+    std::uint8_t base;
+    float opacity;
+    float radius;
+  };
+  const Case cases[] = {
+      {229, 0.28F, 14.0F},   // 实测触发值（小白气泡）
+      {229, 0.28F, 1.0F},    // 极小圆角也必须走同一支
+      {229, 0.50F, 14.0F},
+      {229, 0.10F, 14.0F},
+      {64, 0.28F, 14.0F},    // 暗底（验证不是亮度偏置）
+      {229, 1.00F, 14.0F},   // 不透明对照（不应受影响）
+  };
+  for (const auto& item : cases) {
+    const auto render = [&item](bool cache_enabled) -> std::uint32_t {
+      Canvas canvas = Canvas::for_logical_size(kWidth, kHeight, 1.0F);
+      canvas.set_geometry_cache_enabled(cache_enabled);
+      canvas.clear(Color::rgb(item.base, 234, 248));
+      canvas.fill_rect({20.0F, 20.0F, 120.0F, 70.0F},
+                       Paint::solid(Color::rgb(255, 255, 255)), item.radius,
+                       {.opacity = item.opacity});
+      // 取矩形内部一个远离圆角弧的点：只测“半透明叠层”本身，不混 AA 讨论。
+      return canvas.pixel_at_point({80.0F, 55.0F}).r;
+    };
+    const std::uint32_t cached = render(true);
+    const std::uint32_t direct = render(false);
+    const auto expect = static_cast<std::uint32_t>(
+        item.opacity * 255.0F + (1.0F - item.opacity) * static_cast<float>(item.base) + 0.5F);
+    st::log::out("[opacity-once] 底{} op{} r{}：缓存={} 不走缓存={} 期望={}\n", item.base,
+                 item.opacity, item.radius, cached, direct, expect);
+    // 容差 1 LSB（8 位量化），三路必须对齐。
+    ST_CHECK(cached + 1U >= expect && cached <= expect + 1U);
+    ST_CHECK(cached + 1U >= direct && cached <= direct + 1U);
+  }
+}
+
 }  // namespace

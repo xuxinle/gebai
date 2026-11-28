@@ -109,7 +109,16 @@ class TextArea : public Element {
   [[nodiscard]] auto placeholder() const noexcept -> const std::string& { return placeholder_; }
   [[nodiscard]] auto cursor_index() const noexcept -> std::size_t { return cursor_; }
   [[nodiscard]] auto scroll_offset() const noexcept -> float { return scroll_; }
-  /// 输入法插入点（`Element` 契约；由上一帧绘制时缓存）。
+  /// 输入法插入点（`Element` 契约；客户区逻辑坐标）。
+  ///
+  /// 目前实现就是“上一帧算好的那个矩形”，**几何尚未就绪时它可以是空矩形**——
+  /// 这是允许的：空矩形在 `UiRoot::publish_ime_caret` 处的语义是
+  /// “本元素这一刻没有插入点”，不会下发给输入法（见那里的说明）。
+  ///
+  /// 早期曾在这里加过“按 `bounds_` 猜一个首行位置”的兜底，后来实测证明
+  /// 那不是本次缺陷的位置：真窗口日志显示空矩形是**先被当成合法位置下发**了，
+  /// 问题在上报侧而不是取值侧的估算精度。兜底已删——留着它会用一个猜的矩形
+  /// 盖住“几何尚未就绪”这个真实状态。
   [[nodiscard]] auto caret_rect() const -> math::Rect override { return last_caret_rect_; }
 
   void measure(const RenderContext& context, const Constraints& constraints) override;
@@ -117,6 +126,14 @@ class TextArea : public Element {
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
   void activate() override;
+
+  /// 把缓存的插入点矩形清空（**仅给测试/回归用**）。
+  ///
+  /// 存在的理由：真实启动里「插入点缓存尚为空」这个状态由时序造成
+  ///（内容刚挂上、还没排过版/画过就聚焦了），单测无法稳定摆到那一瞬，
+  /// 而它正是“首次输入候选窗没对准”的分支。把这个状态做成显式入口，
+  /// 回归才能稳定命中那条分支，而不是时红时绿。
+  void invalidate_caret_for_test() { last_caret_rect_ = math::Rect{}; }
   [[nodiscard]] auto semantics_text() const -> std::string override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;
@@ -134,6 +151,16 @@ class TextArea : public Element {
 
   /// 内容变化回调（实参为最新文本）。
   std::function<void(std::string_view)> on_change{};
+  /// `Enter` 提交回调（实参为当前全文）。
+  ///
+  /// 默认**不装**：不装时 `Enter` 插入换行（纯多行编辑器语义）。
+  /// 装了 `Enter` 改走它、换行退到 `Shift+Enter` —— 这是聊天/搜索类输入框
+  /// 的通行约定（用户实测反馈：“回车要发送消息，shift+enter 输入换行”）。
+  ///
+  /// 为何是“装了才改语义”而不另加一个开关：`on_submit` 本来就只有“有人要处理
+  /// 回车”时才存在，两者是同一件事；多一个 `submit_on_enter` 就会派出
+  /// “装了回调但不生效”的静默组合。
+  std::function<void(std::string_view)> on_submit{};
 
  private:
   /// 折行结果：可见行的字节区间（`[begin, end)`，不含换行符本身）。

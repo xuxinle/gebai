@@ -1788,6 +1788,20 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
         if (!shift) select_anchor_ = kNoSelection;
       };
       if (key == "Enter") {
+        // 装了 `on_submit` ⇒ 回车提交、`Shift+Enter` 换行（聊天/搜索框的通行约定）；
+        // 没装 ⇒ 纯多行编辑器，回车就是换行。
+        //
+        // 为何把判断放在这里而不是交给宿主：宿主只能收到 `TextInput`，而回车
+        // 在 `TextArea` 内部就被转成 `\n` 落进文本了 —— 宿主根本看不到“用户按了回车”，
+        // 更无法自己把它降级成发送。
+        if (on_submit) {
+          if (shift) {
+            insert_text("\n");
+          } else {
+            on_submit(text_);
+          }
+          return true;
+        }
         insert_text("\n");
         return true;
       }
@@ -1862,6 +1876,14 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
 }
 
 void TextArea::activate() {
+  // 与 `Input::activate` 对齐：装了 `on_submit` 就提交，否则兼容旧语义（走 `on_change`）。
+  //
+  // 为何保留旧分支：已有调用点（声明式重建、部分测试）把 `activate` 当作“内容已改”
+  // 的通知用；突然改成什么都没做会让它们静默失效。
+  if (on_submit) {
+    on_submit(text_);
+    return;
+  }
   if (on_change) on_change(text_);
 }
 

@@ -22,6 +22,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <format>
@@ -277,12 +279,28 @@ constexpr DWORD kGcsCursorPos{0x0080};
 constexpr DWORD kGcsResultStr{0x0800};
 /// `WM_IME_REQUEST` 的子请求（`wParam`）。
 ///
-/// **TSF 系输入法（搜狗/微软拼音/QQ 拼音）靠它问“光标在哪”**，
-/// 而 `ImmSetCandidateWindow` 是 IMM32 老接口——只做后者时现代输入法
-/// 拿不到位置，会把候选窗摆在窗口左上角（实测截图：候选窗压在标题栏上）。
-constexpr WPARAM kImrQueryCharPosition{0x0005};
-constexpr WPARAM kImrCandidatePosition{0x0006};
-constexpr WPARAM kImrCompositionWindow{0x0007};
+/// **现代输入法（搜狗/微软拼音/QQ 拼音）靠它问“光标在哪”**，而
+/// `ImmSetCandidateWindow` 是 IMM32 老接口——只做后者时输入法拿不到位置。
+///
+/// ## 三个值必须与 `imm.h` 逐字一致（2026-11-28 实测修正）
+///
+/// 旧实现写的是 `{0x0005, 0x0006, 0x0007}`，整体**错位一位**。真值是：
+///
+/// | 常量 | 真值 | 旧写的 | 后果 |
+/// |---|---|---|---|
+/// | `IMR_CANDIDATEWINDOW` | **0x0002** | 0x0006 | 输入法问 0x6 时走进了“回填 CANDIDATEFORM”分支 |
+/// | `IMR_QUERYCHARPOSITION` | **0x0006** | 0x0005 | 从未被回答 |
+/// | `IMR_DOCUMENTFEED` | 0x0007 | 0x0007（碰巧对） | — |
+///
+/// 错位的后果不是“完全不工作”，而是**静默错位**：输入法问
+/// `IMR_QUERYCHARPOSITION`（该回填 `IMECHARPOSITION`，40 字节，含 `pt`/
+/// `cLineHeight`/`rcDocument`），而我们按 `CANDIDATEFORM`（28 字节）去写——
+/// 字段偏移全错，输入法读到垃圾后**退回自己的推算**。
+/// 实测现象：组合窗出现在**窗口水平中央**（而非光标下方），纵向反而是对的
+/// （纵向恰好落在两个结构的重叠区）。
+constexpr WPARAM kImrCandidateWindow{0x0002};
+constexpr WPARAM kImrQueryCharPosition{0x0006};
+constexpr WPARAM kImrDocumentFeed{0x0007};
 /// `WM_IME_SETCONTEXT` 的 lParam 位：让系统自己画组合窗。
 constexpr LPARAM kIscShowUiCompositionWindow{0x80000000L};
 
@@ -714,9 +732,9 @@ class Win32Backend final : public Backend {
     }
     // 以**客户区为准**分配：窗口尺寸可能被系统调整过，逻辑尺寸反过来迁就它
     if (auto status = sync_buffers_to_client(scale_); !status) return status;
-    ST_LOG_INFO("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
-              logical_height_, static_cast<double>(scale_), surface_->physical_width(),
-              surface_->physical_height());
+        ST_LOG_INFO("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
+                logical_height_, static_cast<double>(scale_), surface_->physical_width(),
+                surface_->physical_height());
     // 画布物理尺寸必须**等于**客户区，否则 DXGI 会缩放整块纹理（整屏发糊）。
     // 这条不变量在此显式核对一次：文件日志里看得见，比事发后再猜省事。
     if (window_ != nullptr) {
@@ -1423,7 +1441,6 @@ class Win32Backend final : public Backend {
     last_ime_caret_ = logical_rect;
     if (composing_) apply_ime_forms();
   }
-
   [[nodiscard]] auto supports_window_icon() const noexcept -> bool override {
     return window_ != nullptr;
   }
@@ -3291,7 +3308,6 @@ class Win32Backend final : public Backend {
   }
 
   /// 把插入点告诉 IME：组合窗与候选窗都贴在光标所在行。
-  /// 把插入点告诉 IME：组合窗与候选窗都贴在光标所在行。
   ///
   /// 坐标转换两步：UI 给的是客户区**逻辑**坐标，`× scale_` 得**物理**客户区像素
   /// （本进程是 PER_MONITOR_AWARE，系统 API 一律按物理像素），再 `ClientToScreen`
@@ -3328,7 +3344,10 @@ class Win32Backend final : public Backend {
     // 候选窗越会往左/往下躲——看起来就像“被 x 坐标干扰”）。
     candidate.style = kCfsCandidatePos;
     candidate.current_pos = origin;
-    (void)api.set_candidate_window(context, &candidate);
+    const auto cand_ok = api.set_candidate_window(context, &candidate);
+    const auto comp_ok = api.set_composition_window(context, &composition);
+    (void)cand_ok;
+    (void)comp_ok;
     if (api.release_context != nullptr) (void)api.release_context(window_, context);
   }
 
@@ -3846,31 +3865,45 @@ class Win32Backend final : public Backend {
         POINT origin{static_cast<LONG>(caret.x * safe_scale),
                      static_cast<LONG>((caret.y + line_h) * safe_scale)};
         if (::ClientToScreen(window, &origin) == 0) break;
-        const long line_height = static_cast<LONG>(line_h * safe_scale);
+        const auto line_height = static_cast<UINT>(line_h * safe_scale);
+
+        // —— `IMR_QUERYCHARPOSITION`：现代输入法问“光标字符在哪”——
+        //
+        // 回填 `IMECHARPOSITION`（**不是** `CANDIDATEFORM`）。
+        // 两者字段布局完全不同（前者 40 字节：dwSize/dwCharPos/pt/cLineHeight/
+        // rcDocument；后者 28 字节：dwIndex/dwStyle/ptCurrentPos/rcArea），
+        // 写错会“成功返回、但输入法读到垃圾后自己推算”。
         if (wparam == kImrQueryCharPosition) {
-          // 返回插入点所在字符的屏幕矩形（输入法把候选窗挂在这个矩形下方）。
-          auto* info = reinterpret_cast<CandidateForm*>(lparam);
-          if (info == nullptr) break;
-          // 同样要给 `style`：不给等于“没有意见”，输入法退回自己的推算。
-          info->style = kCfsCandidatePos;
-          info->index = 0;
-          info->current_pos = origin;
-          info->area = RECT{origin.x, origin.y, origin.x + 1, origin.y + line_height};
+          auto* info = reinterpret_cast<IMECHARPOSITION*>(lparam);
+          if (info == nullptr) return FALSE;
+          info->dwSize = sizeof(IMECHARPOSITION);
+          info->dwCharPos = 0;   // 插入点在行首（我们不暴露文本偏移）
+          info->pt = origin;
+          info->cLineHeight = line_height;
+          // **`rcDocument` 必须给客户区矩形**（不能全零）。
+          //
+          // 实测（2026-11-28，搜狗拼音）：零矩形时输入法把组合窗放在
+          // **窗口横向中心**（屏幕 x≈1920 = 窗口客户区水平中线）。
+          RECT client{};
+          ::GetClientRect(window, &client);
+          POINT doc_tl{client.left, client.top};
+          POINT doc_br{client.right, client.bottom};
+          ::ClientToScreen(window, &doc_tl);
+          ::ClientToScreen(window, &doc_br);
+          info->rcDocument = RECT{doc_tl.x, doc_tl.y, doc_br.x, doc_br.y};
           return TRUE;
         }
-        if (wparam == kImrCandidatePosition || wparam == kImrCompositionWindow) {
+        // —— `IMR_CANDIDATEWINDOW`：老式输入法问“候选窗该放哪”——
+        if (wparam == kImrCandidateWindow) {
           auto* form = reinterpret_cast<CandidateForm*>(lparam);
-          if (form == nullptr) break;
+          if (form == nullptr) return FALSE;
           // **`style` 必须给**：回填 `CANDIDATEFORM` 时只有 `CFS_CANDIDATEPOS`
           // 才表示“按我给的 `current_pos` 放”。留 0 时输入法视为没有有效位置，
-          // 退回它自己的推算（实测：候选窗纵向偏出输入框一百多像素，
-          // 而 `ImmSetCandidateWindow` 返回成功，看不出任何异常）。
+          // 退回它自己的推算。
           form->style = kCfsCandidatePos;
           form->index = 0;
           form->current_pos = origin;
           // **`area` 全零**：真正“不给排除区”的写法是零矩形，而不是一条零宽线。
-          // 零宽线仍会被当成“有一块区域占着”，输入法据此向下找个空位
-          //（实测：候选窗固定被推到光标下方一百多像素）。
           form->area = RECT{0, 0, 0, 0};
           return TRUE;
         }

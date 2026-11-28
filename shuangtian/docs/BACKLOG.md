@@ -1112,6 +1112,49 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
 
 ## P1
 
+- [ ] **IME 候选窗横向仍偏到窗口中心（纵向已对，横向被丢弃）**（2026-11-28）
+
+  **现象**：`xiaobai` 真实窗口里用搜狗拼音输入，**组合窗/候选窗出现在窗口水平
+  中心**（屏幕 x≈1920 = 窗口客户区中线），而不是插入点处（x≈210）。纵向
+  基本正确（1942 vs 期望 1956，差 14）。
+
+  **本轮已修并对的部分**（都有逆向验证）：
+  - `UiRoot::publish_ime_caret` 会把**空矩形**当合法位置下发给后端。真窗口日志：
+    `set_caret x=0.0 y=0.0 w=0.0 h=0.0` → `apply screen=(153,113)` → 候选窗钉在
+    客户区左上角。已改为空矩形不上报（`tests/ui_ime_caret_publish_test.cpp`）。
+  - `WM_IME_REQUEST` 的**子请求常量整体错一位**：旧写
+    `kImrQueryCharPosition{0x0005}` / `kImrCandidatePosition{0x0006}` /
+    `kImrCompositionWindow{0x0007}`，而 `imm.h` 真值是 `IMR_CANDIDATEWINDOW=0x0002`
+    / `IMR_QUERYCHARPOSITION=0x0006` / `IMR_DOCUMENTFEED=0x0007`。后果是输入法问
+    `IMR_QUERYCHARPOSITION` 时我们回填了一个 `CANDIDATEFORM`（32 B，字段偏移
+    pt=8 / rcArea=16）而它要的是 `IMECHARPOSITION`（36 B，pt=8 / cLineHeight=16 /
+    rcDocument=20）——`pt` 偏移碰巧相同，所以**纵向对、横向与行高全错**。
+  - 已改为回填真正的 `IMECHARPOSITION`，日志确认五个字段全对：
+    `size=36 charPos=0 pt=(210,1956) lineH=30 doc=(153,83,3686,2005)`。
+
+  **仍存在的缺口**：即使回填完全正确，搜狗仍把候选窗放在窗口中心——**它采信了
+  `pt.y` 但丢弃了 `pt.x`**。实测白色区域屏幕 x = 1929..3617，与期望 210 差 1719。
+
+  **已排除**（都有实验，不要再重试）：
+  - ❌ **不是 TSF**：搜狗虽以 TIP 注册（`SogouTSF.ime`，CLSID
+    `{E7EA138E-69F8-11D7-A6EA-00065B844310}`，在 `HKLM\SOFTWARE\Microsoft\CTF\TIP`
+    下），但探针实测 `ImmGetContext` 有句柄、`ImmGetConversionStatus`/
+    `ImmSetCandidateWindow` 全返回 1 —— IMM32 通道是活的。（曾写过完整 TSF
+    `ITfContext`/`ITfContextView` 实现，因 `CreateContext` 需要 `ITextStoreACP`
+    而放弃；MinGW 的 `msctf.h` 里**没有** `ITextStoreACP` 定义，要手写 40+ 个 COM 方法。）
+  - ❌ **不是窗口样式**：`WS_POPUP`（小白自绘窗）与 `WS_OVERLAPPEDWINDOW`（探针标准窗）
+    对 `ImmSetCandidateWindow` 都返回 1，行为无差。
+  - ❌ **不是 `rcDocument` 全零**：改成客户区屏幕矩形后位置无变。
+
+  **方向**：`IMECHARPOSITION::dwCharPos` 是“光标在第几个字符”，我们恒给 0 ——
+  而输入框里已有文本时它应是真实偏移。搜狗很可能拿它去索引真实文本、校验失败后
+  只保留行基准（`pt.y`）而丢弃横向。要真正解决需要给输入法一个**文本模型**
+  （`ITextStoreACP` + `ITfRange` 提供真实字符），而不是补丁。
+
+  **取证材料**：真窗口 `[ime]` 日志（`platform_win32.cpp` 的 `ST_LOG_INFO`，
+  含 `IMR_QUERYCHARPOSITION` 完整回填结构）；两份对照探针（两窗口样式 /
+  IMM32 可用性）。
+
 - [ ] **`margin` 的语义是“向内缩”而不是 CSS 的外边距（布局契约与外部迁移都对不上）**
 
   **现象**（2026-11-23 做 HTML→XML 生成器时量到）：`Element::arrange` 对子元素的落位是

@@ -71,6 +71,8 @@ struct StoredMessage {
   std::string tool_arguments;
   std::string output;
   bool tool_failed{false};
+  /// 这条内容是本地错误提示（不是模型说的话），见应用侧 `Message::local_error`。
+  bool local_error{false};
 };
 
 struct Snapshot {
@@ -117,6 +119,7 @@ struct Snapshot {
     if (!m.tool_arguments.empty()) item["tool_arguments"] = m.tool_arguments;
     if (!m.output.empty()) item["output"] = m.output;
     if (m.tool_failed) item["tool_failed"] = true;
+    if (m.local_error) item["local_error"] = true;
     arr.push_back(std::move(item));
   }
   root["messages"] = std::move(arr);
@@ -173,6 +176,9 @@ struct Snapshot {
       // 用 `json_as_bool` 的 fallback 语义：类型不符就当 false，
       // 不要求显式 `is_bool`（nlohmann 没有这个名字；对布尔求 `is_boolean`）。
       m.tool_failed = st::json_as_bool(*failed, false);
+    }
+    if (const st::Json* local = st::json_find(item, "local_error"); local != nullptr) {
+      m.local_error = st::json_as_bool(*local, false);
     }
     snap.messages.push_back(std::move(m));
   }

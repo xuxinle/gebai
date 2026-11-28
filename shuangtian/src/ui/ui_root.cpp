@@ -1160,12 +1160,30 @@ void UiRoot::apply_cursor(MouseCursor wanted) {
 void UiRoot::publish_ime_caret() {
   if (!ime_caret_sink) return;
   const math::Rect caret = focused_ != nullptr ? focused_->caret_rect() : math::Rect{};
-  // **首次必须下发**（`ime_caret_published_` 为假时）。
+  // —— 空矩形：本元素没有插入点 ⇒ 什么都不发 ——
   //
-  // 为何不能只靠“矩形相等早退”：`ime_caret_` 初值就是 `(0,0,0,0)`，
-  // 于是“当前也没有插入点”的第一次上报会被当成“无变化”静默吞掉；
-  // 随后输入法来问位置时后端 `last_ime_caret_` 仍是 `nullopt`，
-  // 候选窗就落到客户区左上角（实测截图：候选窗压在标题栏上）。
+  // 为何这条是「首次输入候选窗没对准」的直接根因（2026-11-28 真窗口实测日志）：
+  // 首次聚焦发生在首次布局**之后**还可能正好撞上“光标几何尚未就绪”那几帧，
+  // 旧实现把 `(0,0,0,0)` 当成一个位置送了出去：
+  //
+  //   [ime] set_caret x=0.0 y=0.0 w=0.0 h=0.0   ← 空矩形
+  //   [ime] apply screen=(153,113) logical=(0.0,0.0)   ← 候选窗被钉到左上角
+  //   [ime] SETCONTEXT caret=0.0,0.0            ← 输入法就用这个弹窗 = 错位
+  //   ...
+  //   [ime] set_caret x=38.0 y=1228.7           ← 真实值，但已经晚了
+  //
+  // 更阴的一步：`ime_caret_` 被写成空矩形，于是**稍后真正的值一旦也恰好是空**
+  // 就被相等早退吞掉；而 `ime_caret_published_` 又被置真 ⇒ 首个有效值反而要靠
+  // “矩形不同”才能挤出去（实测能出去，但只在缓存填上之后）。
+  // 第二次输入之所以“对”：那时缓存已被首帧绘制填上。
+  //
+  // 语义：**空矩形 = “我这里没有插入点”**，不是“插入点在 (0,0)”。不能上报。
+  // 保留“首次必下发”那条规则的意义：允许**第一个非空**矩形通过
+  //（`ime_caret_` 初值也是空，单靠相等判定会把第一个非空值放过去——那是对的，
+  //  但“第一个值就是空”时不能把它当成已发布）。
+  if (caret.is_empty()) return;
+
+  // 首次（`ime_caret_` 还是初值空）必须下发；之后相等则早退。
   if (ime_caret_published_ && caret.x == ime_caret_.x && caret.y == ime_caret_.y &&
       caret.width == ime_caret_.width && caret.height == ime_caret_.height) {
     return;

@@ -242,7 +242,10 @@ inline constexpr float kGlassRadius = 14.0f;
 //      配任何环境变量，也不会把密钥留在磁盘上。
 //   ② `~/.xiaobai/config.json`（用户在设置窗里填）。
 // 环境变量仍支持（优先级最高）——便于临时切换/调试。
-inline constexpr const char* kDefaultModel = "deepseek-v4.1-flash";
+// 模型名必须是**端点当日真的会接受**的那一个：`api.deepseek.com` 对
+// `deepseek-v4.1-flash` 回 400（"The supported API model names are
+// deepseek-flash, deepseek-v4-pro"），于是预置值看着对、一开口就报错。
+inline constexpr const char* kDefaultModel = "deepseek-flash";
 inline constexpr const char* kDefaultBaseUrl = "https://api.deepseek.com/v1";
 
 // ———————————————————————————————————————————————————————————————
@@ -429,6 +432,13 @@ struct Message {
   std::string output{};
   /// 工具执行是否失败（展示用红色标记）。
   bool tool_failed{false};
+  /// 这条内容是**本地错误提示**（网络断开/端点报错），不是模型说的话。
+  ///
+  /// 它的存在意义只有一个：**别把它当模型历史回传**。
+  /// 旧行为把 `**请求失败**：TLS …` 写成助手 `content`，下一次请求连同旧错误
+  /// 一起发给模型——实测该模型会把它当成自己说过的话，回“上次是我网络出问题”
+  /// 之类无关内容，并且**丢掉了用户真正的问题**。
+  bool local_error{false};
 
   [[nodiscard]] auto operator==(const Message& other) const -> bool = default;
 };
@@ -1076,6 +1086,20 @@ struct AgentPage : st::ui::dsl::Component {
                   ta.set_lines_range(1, kComposerMaxLines);
                   if (ta.value() != draft.value()) ta.update_text(draft.value());
                   ta.on_change = [this](std::string_view v) { draft.set(std::string(v)); };
+                  // `Enter` 发送、`Shift+Enter` 换行（用户诉求）。
+                  //
+                  // 必须在 `TextArea` 侧接管：回车在组件内部就被转成 `\n`
+                  // 落进文本了，宿主只能收到 `TextInput`——看不到“用户按了回车”，
+                  // 也就无法自己把它降级成发送。
+                  //
+                  // 参数取回调给的**最新全文**而不是 `draft`：回车路径不会先走
+                  // `on_change`（它只在 `notify_change` 里，而提交不改内容），
+                  // 读 `draft` 拿到的可能是上一帧的值。`send()` 无参，所以用成员
+                  // 暂存后立刻发送（同一帧内消费掉，不会脏）。
+                  ta.on_submit = [this](std::string_view latest) {
+                    draft.set(std::string(latest));
+                    send();
+                  };
                 },
                 {.grow = true, .key = "msg-input"});
             (void)button(c, busy.value() ? "停止" : "发送",
@@ -1939,6 +1963,9 @@ struct AgentPage : st::ui::dsl::Component {
         continue;
       }
       if (m.role == "assistant") {
+        // 本地错误提示不是模型说的话：不进上下文（否则模型会把它当成自己的
+        // 历史发言去解释，实测会把用户真正的问题挤掉）。
+        if (m.local_error) continue;
         // 完全空的助手消息（正在流式的那条）不进上下文。
         if (m.content.empty() && m.tool_calls.empty()) continue;
         Json entry = Json::object();
@@ -2075,6 +2102,8 @@ struct AgentPage : st::ui::dsl::Component {
     if (!error.empty() && error != "cancelled") {
       if (index.has_value()) {
         list[*index].content = stream_text.empty() ? "**请求失败**：" + error : stream_text;
+        // 一个字都没收到 = 这条是纯本地错误提示，别当模型发言回传。
+        list[*index].local_error = stream_text.empty();
         list[*index].reasoning_streaming = false;
         messages.set(std::move(list));
       }
@@ -2206,6 +2235,7 @@ struct AgentPage : st::ui::dsl::Component {
       out.tool_arguments = m.tool_arguments;
       out.output = m.output;
       out.tool_failed = m.tool_failed;
+      out.local_error = m.local_error;
       snap.messages.push_back(std::move(out));
     }
     return snap;
@@ -2257,6 +2287,7 @@ struct AgentPage : st::ui::dsl::Component {
       out.tool_arguments = m.tool_arguments;
       out.output = m.output;
       out.tool_failed = m.tool_failed;
+      out.local_error = m.local_error;
       restored.push_back(std::move(out));
     }
     messages.set(std::move(restored));

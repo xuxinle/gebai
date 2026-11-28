@@ -2163,14 +2163,19 @@ auto Canvas::blit_geometry_sprite(const GeometrySprite& sprite, math::Point orig
   const int origin_y = static_cast<int>(std::lround(origin.y)) + sprite.y;
   const auto& pixels = *sprite.pixels;
   const auto& spans = *sprite.spans;
-  // 调染色：opacity 烘进 alpha（预乘不变量保持；与旧键口径的 opacity 乘法等价）。
+  // 调染色：opacity **只缩减 alpha，不动颜色**。
+  //
+  // 为何不能像旧写法那样把 opacity 同时乘进 RGB：`premultiply()` 会再乘一次 alpha，
+  // 于是同一份 opacity 被应用了**两次**（被平方）。实测（0.28 白叠在 (229,234,248) 上）：
+  // 期望 236，贴图缓存路径给出 **185**——比不走缓存的路径暗 51 级，
+  // 界面上的表现是“圆角半透明卡是一片灰块”。
+  //
+  // 颜色必须保持直通值：预乘不变式要求 `c ≤ a`，而过度乘 alpha 会把 `c` 压到 a 以下
+  //（“比不透明还暗”的不合法预乘像素）；只缩 alpha 才同时满足不变式与合成语义。
   const float effective = math::clamp01(opacity);
   math::Color tinted = color;
   if (effective < 0.999f) {
-    tinted.r = static_cast<std::uint8_t>((color.r * effective) + 0.5f);
-    tinted.g = static_cast<std::uint8_t>((color.g * effective) + 0.5f);
-    tinted.b = static_cast<std::uint8_t>((color.b * effective) + 0.5f);
-    tinted.a = static_cast<std::uint8_t>((color.a * effective) + 0.5f);
+    tinted.a = static_cast<std::uint8_t>((static_cast<float>(color.a) * effective) + 0.5f);
   }
   const std::uint32_t premul = math::premultiply(tinted);
   for (int row = 0; row < sprite.height; ++row) {
